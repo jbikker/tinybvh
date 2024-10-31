@@ -479,7 +479,11 @@ void BVH::Build( const bvhvec4* vertices, const unsigned int primCount )
 #define ILANE(a,b) a.m128i_i32[b]
 #else
 #define LANE(a,b) a[b]
+#if defined(__GNUC__)
+#define ILANE(a,b) _mm_extract_epi32((a), (b)) // from smmintrin.h
+#else
 #define ILANE(a,b) a[b]
+#endif
 #endif
 inline float halfArea( const __m128 a /* a contains extent of aabb */ )
 {
