@@ -753,9 +753,9 @@ float BVH::IntersectAABB( const Ray& ray, const bvhvec3& aabbMin, const bvhvec3&
 	if (tmax >= tmin && tmin < ray.hit.t && tmax >= 0) return tmin; else return 1e30f;
 }
 
-#endif
-
 } // namespace tinybvh
+
+#endif
 
 #endif
 
