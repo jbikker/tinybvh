@@ -9,6 +9,9 @@ bvhvec4 triangles[259 /* level 3 */ * 6 * 2 * 49 * 3]{};
 int verts = 0;
 BVH bvh;
 
+static int frame_num;
+static uint64_t frame_time_total;
+
 void sphere_flake( float x, float y, float z, float s, int d = 0 )
 {
 	// procedural tesselated sphere flake object
@@ -42,6 +45,7 @@ void Init()
 
 void Tick( uint32_t* buf )
 {
+	uint64_t frame_start_time = fenster_time();
 	// setup camera
 	bvhvec3 eye( -3.5f, -1.5f, -6.5f ), view = normalize( bvhvec3( 3, 1.5f, 5 ) );
 	bvhvec3 right = normalize( cross( bvhvec3( 0, 1, 0 ), view ) );
@@ -78,4 +82,11 @@ void Tick( uint32_t* buf )
 		int c = (int)(15.9f * avg);
 		buf[x + y * SCRWIDTH] = c + (c << 8) + (c << 16);
 	}
+	uint64_t frame_time = fenster_time() - frame_start_time;
+	frame_time_total += frame_time;
+	++frame_num;
+	fprintf(stderr, "Frame %d time: %d ms, avg: %.2f ms\n", frame_num,
+		(int)(frame_time),
+		(float)(frame_time_total / (float)frame_num)
+	);
 }
