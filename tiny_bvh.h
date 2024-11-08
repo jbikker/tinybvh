@@ -91,11 +91,14 @@ THE SOFTWARE.
 #define ALIGNED( x ) __declspec( align( x ) )
 #define ALIGNED_MALLOC( x ) ( ( x ) == 0 ? 0 : _aligned_malloc( ( x ), 64 ) )
 #define ALIGNED_FREE( x ) _aligned_free( x )
+#define OPERATOR_NEW_ALIGN(x)
+#define OPERATOR_DELETE_ALIGN(x)
 #else
 // gcc / clang
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <new> // for std::align_val_t
 #define ALIGNED( x ) __attribute__( ( aligned( x ) ) )
 #if defined(__x86_64__) || defined(_M_X64)
 // https://stackoverflow.com/questions/32612881/why-use-mm-malloc-as-opposed-to-aligned-malloc-alligned-alloc-or-posix-mem
@@ -106,6 +109,8 @@ THE SOFTWARE.
 #define ALIGNED_MALLOC( x ) ( ( x ) == 0 ? 0 : aligned_alloc( 64, ( x ) ) )
 #define ALIGNED_FREE( x ) free( x )
 #endif
+#define OPERATOR_NEW_ALIGN(x) (std::align_val_t(x))
+#define OPERATOR_DELETE_ALIGN(x) ,(std::align_val_t(x))
 #endif
 // generic
 #ifdef BVH_USEAVX
@@ -335,7 +340,7 @@ public:
 	{
 		ALIGNED_FREE( bvhNode );
 		delete[] triIdx;
-		delete[] fragment;
+		operator delete[](fragment OPERATOR_DELETE_ALIGN(32));
 		bvhNode = 0, triIdx = 0, fragment = 0;
 	}
 	float SAHCost( const unsigned int nodeIdx = 0 ) const
@@ -418,7 +423,7 @@ void BVH::Build( const bvhvec4* vertices, const unsigned int primCount )
 		memset( &bvhNode[1], 0, 32 );	// node 1 remains unused, for cache line alignment.
 		triIdx = new unsigned int[triCount];
 		verts = (bvhvec4*)vertices;		// note: we're not copying this data; don't delete.
-		fragment = new Fragment[triCount];
+		fragment = new OPERATOR_NEW_ALIGN(32) Fragment[triCount];
 	}
 	else assert( triCount == primCount ); // don't change triangle count between builds.
 	// reset node pool
@@ -1012,7 +1017,7 @@ void BVH::BuildAVX( const bvhvec4* vertices, const unsigned int primCount )
 		triIdx = new unsigned int[triCount];
 		bvhNode = (BVHNode*)ALIGNED_MALLOC( triCount * 2 * sizeof( BVHNode ) );
 		memset( &bvhNode[1], 0, 32 ); // avoid crash in refit.
-		fragment = new Fragment[triCount];
+		fragment = new OPERATOR_NEW_ALIGN(32) Fragment[triCount];
 		idxCount = triCount;
 	}
 	else assert( triCount == primCount ); // don't change triangle count between builds.
