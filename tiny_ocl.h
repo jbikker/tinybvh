@@ -1007,7 +1007,7 @@ bool Kernel::InitCL()
 			if (strstr( d, "titan x" )) isPascal = true;
 		}
 	}
-	else if (strstr( d, "amd" ) || strstr( d, "ellesmere" ) || strstr( d, "gfx1100" ) || strstr( d, "gfx1031" ) || strstr( d, "AMD" )) // JdW
+	else if (strstr( d, "amd" ) || strstr( d, "ellesmere" ) || strstr( d, "gfx1100" ) || strstr( d, "AMD" )) // JdW
 	{
 		isAMD = true;
 	}
