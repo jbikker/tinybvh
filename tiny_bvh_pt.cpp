@@ -1,6 +1,6 @@
 #define FENSTER_APP_IMPLEMENTATION
-#define SCRWIDTH 800
-#define SCRHEIGHT 600
+#define SCRWIDTH 832
+#define SCRHEIGHT 640
 #include "external/fenster.h" // https://github.com/zserge/fenster
 
 #define TINYBVH_IMPLEMENTATION
@@ -117,12 +117,12 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 	// handle user input and update camera
 	if (frameIdx++ == 0 || UpdateCamera( delta_time_s, f ))
 	{
-		memset( accumulator, 0, 800 * 600 * sizeof( bvhvec3 ) );
+		memset( accumulator, 0, SCRWIDTH * SCRHEIGHT * sizeof( bvhvec3 ) );
 		spp = 1;
 	}
 
 	// render tiles
-	constexpr int TILESIZE = 32;
+	constexpr int TILESIZE = 64;
 	const int xtiles = SCRWIDTH / TILESIZE, ytiles = SCRHEIGHT / TILESIZE, tiles = xtiles * ytiles;
 	const float scale = 1.0f / spp;
 
@@ -131,8 +131,8 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 	for (int tile = 0; tile < tiles; tile++)
 	{
 		const int tx = tile % xtiles, ty = tile / xtiles;
+        __block unsigned seed = (tile + 17) * 171717 + frameIdx * 1023;
 		dispatch_group_async(group, queue, ^() {
-			unsigned seed = (tile + 17) * 171717 + frameIdx * 1023;
 			for (int y = 0; y < TILESIZE; y++) for (int x = 0; x < TILESIZE; x++)
 			{
 				const int pixel_x = tx * TILESIZE + x;
