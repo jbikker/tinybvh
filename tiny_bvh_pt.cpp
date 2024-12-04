@@ -6,6 +6,7 @@
 #define TINYBVH_IMPLEMENTATION
 #include "tiny_bvh.h"
 #include <fstream>
+#include <dispatch/dispatch.h>
 
 using namespace tinybvh;
 
@@ -53,9 +54,9 @@ void Init()
 		c = *(unsigned*)&triangles[i * 3 + 0].w,
 		triColor[i] = bvhvec3( c & 255, (c >> 8) & 255, c >> 16 ) * (1 / 255.0f);
 	// build bvh
-	bvh.BuildAVX( triangles, verts / 3 );
-	bvh.Convert( BVH::WALD_32BYTE, BVH::BASIC_BVH4 );
-	bvh.Convert( BVH::BASIC_BVH4, BVH::BVH4_AFRA );
+	bvh.BuildNEON( triangles, verts / 3 );
+	bvh.Convert( BVH::WALD_32BYTE, BVH::ALT_SOA );
+	// bvh.Convert( BVH::BASIC_BVH4, BVH::BVH4_AFRA );
 	// load camera position / direction from file
 	std::fstream t = std::fstream{ "camera.bin", t.binary | t.in };
 	if (!t.is_open()) return;
@@ -91,7 +92,7 @@ bool UpdateCamera( float delta_time_s, fenster& f )
 bvhvec3 Trace( Ray& ray, unsigned& seed )
 {
 	// find primary intersection
-	bvh.Intersect( ray, BVH::BVH4_AFRA );
+	bvh.Intersect( ray, BVH::ALT_SOA );
 	if (ray.hit.t == 1e30f) return bvhvec3( 0.6f, 0.7f, 2 ); // hit nothing
 	bvhvec3 I = ray.O + ray.hit.t * ray.D;
 	// get normal at intersection point
@@ -103,13 +104,16 @@ bvhvec3 Trace( Ray& ray, unsigned& seed )
 	// shoot AO ray
 	bvhvec3 R = DiffuseReflection( N, seed );
 	Ray aoRay( I + R * 0.001f, R, 10 );
-	bvh.Intersect( aoRay, BVH::BVH4_AFRA );
+	bvh.Intersect( aoRay, BVH::ALT_SOA );
 	return triColor[primIdx] * bvhvec3( aoRay.hit.t / 10 );
 }
+
+dispatch_queue_t queue = dispatch_queue_create( "com.tinybvh", DISPATCH_QUEUE_CONCURRENT );
 
 // Application Tick
 void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 {
+    printf("Tick: %.2f\n", delta_time_s);
 	// handle user input and update camera
 	if (frameIdx++ == 0 || UpdateCamera( delta_time_s, f ))
 	{
@@ -118,32 +122,39 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 	}
 
 	// render tiles
-	const int xtiles = SCRWIDTH / 4, ytiles = SCRHEIGHT / 4, tiles = xtiles * ytiles;
+	constexpr int TILESIZE = 32;
+	const int xtiles = SCRWIDTH / TILESIZE, ytiles = SCRHEIGHT / TILESIZE, tiles = xtiles * ytiles;
 	const float scale = 1.0f / spp;
-#pragma omp parallel for schedule(dynamic)
+
+	dispatch_group_t group = dispatch_group_create();
+
 	for (int tile = 0; tile < tiles; tile++)
 	{
 		const int tx = tile % xtiles, ty = tile / xtiles;
-		unsigned seed = (tile + 17) * 171717 + frameIdx * 1023;
-		for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
-		{
-			const int pixel_x = tx * 4 + x;
-			const int pixel_y = ty * 4 + y;
-			// setup primary ray
-			const float u = (float)pixel_x / SCRWIDTH, v = (float)pixel_y / SCRHEIGHT;
-			const bvhvec3 D = normalize( p1 + u * (p2 - p1) + v * (p3 - p1) - eye );
-			Ray primaryRay( eye, D );
-			// trace
-			const unsigned pixelIdx = pixel_x + pixel_y * SCRWIDTH;
-			accumulator[pixelIdx] += Trace( primaryRay, seed );
-			const bvhvec3 E = accumulator[pixelIdx] * scale;
-			// visualize, with a poor man's gamma correct
-			const int r = (int)tinybvh_min( 255.0f, sqrtf( E.x ) * 255.0f );
-			const int g = (int)tinybvh_min( 255.0f, sqrtf( E.y ) * 255.0f );
-			const int b = (int)tinybvh_min( 255.0f, sqrtf( E.z ) * 255.0f );
-			buf[pixel_x + pixel_y * SCRWIDTH] = b + (g << 8) + (r << 16);
-		}
+		dispatch_group_async(group, queue, ^() {
+			unsigned seed = (tile + 17) * 171717 + frameIdx * 1023;
+			for (int y = 0; y < TILESIZE; y++) for (int x = 0; x < TILESIZE; x++)
+			{
+				const int pixel_x = tx * TILESIZE + x;
+				const int pixel_y = ty * TILESIZE + y;
+				// setup primary ray
+				const float u = (float)pixel_x / SCRWIDTH, v = (float)pixel_y / SCRHEIGHT;
+				const bvhvec3 D = normalize( p1 + u * (p2 - p1) + v * (p3 - p1) - eye );
+				Ray primaryRay( eye, D );
+				// trace
+				const unsigned pixelIdx = pixel_x + pixel_y * SCRWIDTH;
+				accumulator[pixelIdx] += Trace( primaryRay, seed );
+				const bvhvec3 E = accumulator[pixelIdx] * scale;
+				// visualize, with a poor man's gamma correct
+				const int r = (int)tinybvh_min( 255.0f, sqrtf( E.x ) * 255.0f );
+				const int g = (int)tinybvh_min( 255.0f, sqrtf( E.y ) * 255.0f );
+				const int b = (int)tinybvh_min( 255.0f, sqrtf( E.z ) * 255.0f );
+				buf[pixel_x + pixel_y * SCRWIDTH] = b + (g << 8) + (r << 16);
+			}
+		});
 	}
+
+	dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
 	spp++;
 }
 
