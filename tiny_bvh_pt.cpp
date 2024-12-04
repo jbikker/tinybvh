@@ -113,7 +113,7 @@ dispatch_queue_t queue = dispatch_queue_create( "com.tinybvh", DISPATCH_QUEUE_CO
 // Application Tick
 void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 {
-    printf("Tick: %.2f\n", delta_time_s);
+    printf("Tick: %.3f %.3f\n", delta_time_s, 1.0/delta_time_s);
 	// handle user input and update camera
 	if (frameIdx++ == 0 || UpdateCamera( delta_time_s, f ))
 	{
