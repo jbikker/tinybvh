@@ -510,6 +510,7 @@ struct BVHContext
 	void* userdata = nullptr;
 };
 
+class BLASInstance;
 class BVH
 {
 public:
@@ -664,57 +665,11 @@ public:
 		uint32_t clipped = 0;		// Fragment is the result of clipping if > 0.
 		bool validBox() { return bmin.x < BVH_FAR; }
 	};
-	// BLASInstance: A TLAS is built over BLAS instances, where a single BLAS can be
-	// used with multiple transforms, and multiple BLASses can be combined in a complex
-	// scene. The TLAS is built over the world-space AABBs of the BLAS root nodes.
-	class BLASInstance
-	{
-	public:
-		BLASInstance( BVH* bvh ) : blas( bvh ) {}
-		void Update();				// Update the world bounds based on the current transform.
-		BVH* blas = 0;				// Bottom-level acceleration structure.
-		bvhaabb worldBounds;		// World-space AABB over the transformed blas root node.
-		float transform[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }; // identity
-		bvhvec3 TransformPoint( const bvhvec3& v ) const;
-		bvhvec3 TransformVector( const bvhvec3& v ) const;
-	};
 	BVH( BVHContext ctx = {} ) : context( ctx ) {}
-	~BVH()
-	{
-		AlignedFree( bvhNode );
-		AlignedFree( altNode ); // Note: no action if pointer is null
-		AlignedFree( alt2Node );
-		AlignedFree( verbose );
-		AlignedFree( bvh4Node );
-		AlignedFree( bvh4Alt );
-		AlignedFree( bvh8Node );
-		AlignedFree( triIdx );
-		AlignedFree( fragment );
-		bvhNode = 0, triIdx = 0, fragment = 0;
-		allocatedBVHNodes = 0;
-		allocatedAltNodes = 0;
-		allocatedAlt2Nodes = 0;
-		allocatedVerbose = 0;
-		allocatedBVH4Nodes = 0;
-		allocatedAlt4aBlocks = 0;
-		allocatedBVH8Nodes = 0;
-	}
-	float SAHCost( const uint32_t nodeIdx = 0 ) const
-	{
-		// Determine the SAH cost of the tree. This provides an indication
-		// of the quality of the BVH: Lower is better.
-		const BVHNode& n = bvhNode[nodeIdx];
-		if (n.isLeaf()) return C_INT * n.SurfaceArea() * n.triCount;
-		float cost = C_TRAV * n.SurfaceArea() + SAHCost( n.leftFirst ) + SAHCost( n.leftFirst + 1 );
-		return nodeIdx == 0 ? (cost / n.SurfaceArea()) : cost;
-	}
+	~BVH();
+	float SAHCost( const uint32_t nodeIdx = 0 ) const;
 	int32_t NodeCount( const BVHLayout layout ) const;
-	int32_t PrimCount( const uint32_t nodeIdx = 0 ) const
-	{
-		// Determine the total number of primitives / fragments in leaf nodes.
-		const BVHNode& n = bvhNode[nodeIdx];
-		return n.isLeaf() ? n.triCount : (PrimCount( n.leftFirst ) + PrimCount( n.leftFirst + 1 ));
-	}
+	int32_t PrimCount( const uint32_t nodeIdx = 0 ) const;
 	void Compact( const BVHLayout layout /* must be WALD_32BYTE or VERBOSE */ );
 	void BuildQuick( const bvhvec4* vertices, const uint32_t primCount );
 	void BuildQuick( const bvhvec4slice& vertices );
@@ -738,14 +693,6 @@ public:
 	void Optimize( const uint32_t iterations ); // operates on VERBOSE
 	void Refit( const BVHLayout layout = WALD_32BYTE, const uint32_t nodeIdx = 0 );
 	int32_t Intersect( Ray& ray, const BVHLayout layout = WALD_32BYTE ) const;
-	// IntersectTLAS: Interface is under construction. Current plan:
-	// * application constructs one or more BVHs (BLAS) using a layout of choice;
-	// * application instantiates one or more BVHInstances using the blasses;
-	// * application builds a WALD_32BYTE BVH (TLAS) over the array of BVHInstances;
-	// * applicaiton intersects the TLAS using IntersectTLAS;
-	// In the leafs of the TLAS, tiny_bvh finds a BVHInstance index. Using the index,
-	// the BLAS is found, the ray is transformed, and the appropriate Intersect_xxx
-	// method is called.
 	int32_t IntersectTLAS( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray, const BVHLayout layout = WALD_32BYTE ) const;
 	void BatchIntersect( Ray* rayBatch, const uint32_t N,
@@ -771,11 +718,7 @@ private:
 	bool IsOccluded_Afra( const Ray& ray ) const;
 	void IntersectTri( Ray& ray, const uint32_t triIdx ) const;
 	static float IntersectAABB( const Ray& ray, const bvhvec3& aabbMin, const bvhvec3& aabbMax );
-	static float SA( const bvhvec3& aabbMin, const bvhvec3& aabbMax )
-	{
-		bvhvec3 e = aabbMax - aabbMin; // extent of the node
-		return e.x * e.y + e.y * e.z + e.z * e.x;
-	}
+	static float SA( const bvhvec3& aabbMin, const bvhvec3& aabbMax );
 	void PrecomputeTriangle( const bvhvec4slice& vert, uint32_t triIndex, float* T );
 	bool ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, bvhvec3 minDim );
 	void RefitUpVerbose( uint32_t nodeIdx );
@@ -787,14 +730,7 @@ private:
 	// double-precision things
 public:
 	void BuildEx( const bvhdbl3* vertices, const uint32_t primCount );
-	double SAHCostEx( const uint64_t nodeIdx = 0 ) const
-	{
-		// Determine the SAH cost of a double-precision tree.
-		const BVHNodeEx& n = bvhNodeEx[nodeIdx];
-		if (n.isLeaf()) return C_INT * n.SurfaceArea() * n.triCount;
-		double cost = C_TRAV * n.SurfaceArea() + SAHCostEx( n.leftFirst ) + SAHCostEx( n.leftFirst + 1 );
-		return nodeIdx == 0 ? (cost / n.SurfaceArea()) : cost;
-	}
+	double SAHCostEx( const uint64_t nodeIdx = 0 ) const;
 	int32_t IntersectEx( RayEx& ray, const BVHLayout layout = WALD_DOUBLE ) const;
 	int32_t IntersectEx_WaldDouble( RayEx& ray ) const;
 	FragmentEx* fragEx = 0;			// input primitive bounding boxes, double-precision.
@@ -854,6 +790,71 @@ public:
 	uint32_t usedWiVeNodes = 0;
 	uint32_t usedBVH8Nodes = 0;
 	uint32_t usedCWBVHBlocks = 0;
+};
+
+// BLASInstance: A TLAS is built over BLAS instances, where a single BLAS can be
+// used with multiple transforms, and multiple BLASses can be combined in a complex
+// scene. The TLAS is built over the world-space AABBs of the BLAS root nodes.
+class BLASInstance
+{
+public:
+	BLASInstance( BVH* bvh ) : blas( bvh ) {}
+	void Update();				// Update the world bounds based on the current transform.
+	BVH* blas = 0;				// Bottom-level acceleration structure.
+	bvhaabb worldBounds;		// World-space AABB over the transformed blas root node.
+	float transform[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }; // identity
+	bvhvec3 TransformPoint( const bvhvec3& v ) const;
+	bvhvec3 TransformVector( const bvhvec3& v ) const;
+};
+
+class BVH_Double
+{
+public:
+};
+
+class BVH_AilaLaine
+{
+public:
+};
+
+class BVH_SoA
+{
+public:
+};
+
+class BVH_Verbose
+{
+public:
+};
+
+class BVH4
+{
+public:
+};
+
+class BVH8
+{
+public:
+};
+
+class BVH4_GPU
+{
+public:
+};
+
+class BVH4_Afra
+{
+public:
+};
+
+class BVH4_WiVe
+{
+public:
+};
+
+class BVH8_CWBVH
+{
+public:
 };
 
 } // namespace tinybvh
@@ -918,6 +919,43 @@ const bvhvec4& bvhvec4slice::operator[]( size_t i ) const
 	return *reinterpret_cast<const bvhvec4*>(data + stride * i);
 }
 
+BVH::~BVH()
+{
+	AlignedFree( bvhNode );
+	AlignedFree( altNode );
+	AlignedFree( alt2Node );
+	AlignedFree( verbose );
+	AlignedFree( bvh4Node );
+	AlignedFree( bvh4Alt );
+	AlignedFree( bvh8Node );
+	AlignedFree( triIdx );
+	AlignedFree( fragment );
+	allocatedBVHNodes = 0;
+	allocatedAltNodes = 0;
+	allocatedAlt2Nodes = 0;
+	allocatedVerbose = 0;
+	allocatedBVH4Nodes = 0;
+	allocatedAlt4aBlocks = 0;
+	allocatedBVH8Nodes = 0;
+}
+
+float BVH::SAHCost( const uint32_t nodeIdx ) const
+{
+	// Determine the SAH cost of the tree. This provides an indication
+	// of the quality of the BVH: Lower is better.
+	const BVHNode& n = bvhNode[nodeIdx];
+	if (n.isLeaf()) return C_INT * n.SurfaceArea() * n.triCount;
+	float cost = C_TRAV * n.SurfaceArea() + SAHCost( n.leftFirst ) + SAHCost( n.leftFirst + 1 );
+	return nodeIdx == 0 ? (cost / n.SurfaceArea()) : cost;
+}
+
+int32_t BVH::PrimCount( const uint32_t nodeIdx ) const
+{
+	// Determine the total number of primitives / fragments in leaf nodes.
+	const BVHNode& n = bvhNode[nodeIdx];
+	return n.isLeaf() ? n.triCount : (PrimCount( n.leftFirst ) + PrimCount( n.leftFirst + 1 ));
+}
+
 void* BVH::AlignedAlloc( size_t size )
 {
 	return context.malloc ? context.malloc( size, context.userdata ) : nullptr;
@@ -929,7 +967,7 @@ void BVH::AlignedFree( void* ptr )
 		context.free( ptr, context.userdata );
 }
 
-void BVH::BLASInstance::Update()
+void BLASInstance::Update()
 {
 	// transform the eight corners of the root node aabb using the instance
 	// transform and calculate the worldspace aabb over these.
@@ -4938,6 +4976,15 @@ double BVH::BVHNodeEx::SurfaceArea() const
 	return e.x * e.y + e.y * e.z + e.z * e.x;
 }
 
+double BVH::SAHCostEx( const uint64_t nodeIdx ) const
+{
+	// Determine the SAH cost of a double-precision tree.
+	const BVHNodeEx& n = bvhNodeEx[nodeIdx];
+	if (n.isLeaf()) return C_INT * n.SurfaceArea() * n.triCount;
+	double cost = C_TRAV * n.SurfaceArea() + SAHCostEx( n.leftFirst ) + SAHCostEx( n.leftFirst + 1 );
+	return nodeIdx == 0 ? (cost / n.SurfaceArea()) : cost;
+}
+
 int32_t BVH::IntersectEx( RayEx& ray, const BVHLayout layout ) const
 {
 	switch (layout)
@@ -5029,7 +5076,7 @@ double BVH::BVHNodeEx::Intersect( const RayEx& ray ) const
 // ============================================================================
 
 // TransformPoint
-bvhvec3 BVH::BLASInstance::TransformPoint( const bvhvec3& v ) const
+bvhvec3 BLASInstance::TransformPoint( const bvhvec3& v ) const
 {
 	const bvhvec3 res(
 		transform[0] * v.x + transform[1] * v.y + transform[2] * v.z + transform[3],
@@ -5040,11 +5087,18 @@ bvhvec3 BVH::BLASInstance::TransformPoint( const bvhvec3& v ) const
 }
 
 // TransformVector - skips translation. Assumes orthonormal transform, for now.
-bvhvec3 BVH::BLASInstance::TransformVector( const bvhvec3& v ) const
+bvhvec3 BLASInstance::TransformVector( const bvhvec3& v ) const
 {
 	return bvhvec3( transform[0] * v.x + transform[1] * v.y + transform[2] * v.z,
 		transform[4] * v.x + transform[5] * v.y + transform[6] * v.z,
 		transform[8] * v.x + transform[9] * v.y + transform[10] * v.z );
+}
+
+// SA
+float BVH::SA( const bvhvec3& aabbMin, const bvhvec3& aabbMax )
+{
+	bvhvec3 e = aabbMax - aabbMin; // extent of the node
+	return e.x * e.y + e.y * e.z + e.z * e.x;
 }
 
 // IntersectTri
