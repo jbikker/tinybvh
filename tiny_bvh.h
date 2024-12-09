@@ -536,7 +536,7 @@ public:
 	BVHContext context;				// context used to provide user-defined allocation functions
 	// Keep track of allocated buffer size to avoid repeated allocation during layout conversion.
 	uint32_t allocatedNodes = 0;	// number of nodes allocated for the BVH.
-	uint32_t usedBVHNodes = 0;		// number of nodes used for the BVH.
+	uint32_t usedNodes = 0;			// number of nodes used for the BVH.
 	uint32_t triCount = 0;			// number of primitives in the BVH.
 	uint32_t idxCount = 0;			// number of primitive indices; can exceed triCount for SBVH.
 	// Custom memory allocation
@@ -759,6 +759,7 @@ public:
 	BVH4( BVHContext ctx = {} ) { context = ctx; }
 	BVH4( const BVH& original );
 	~BVH4() { AlignedFree( bvh4Node ); }
+	void ConvertFrom( const BVH& original );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// BVH data
@@ -1141,7 +1142,7 @@ void BVH::BuildQuick( const bvhvec4slice& vertices )
 	refittable = true; // not using spatial splits: can refit this BVH
 	frag_min_flipped = false; // did not use AVX for binning
 	may_have_holes = false; // the reference builder produces a continuous list of nodes
-	usedBVHNodes = newNodePtr;
+	usedNodes = newNodePtr;
 }
 
 // Basic single-function binned-SAH-builder.
@@ -1294,7 +1295,7 @@ void BVH::Build( const bvhvec4slice& vertices )
 	frag_min_flipped = false; // did not use AVX for binning
 	may_have_holes = false; // the reference builder produces a continuous list of nodes
 	bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
-	usedBVHNodes = newNodePtr;
+	usedNodes = newNodePtr;
 }
 
 // SBVH builder.
@@ -1542,7 +1543,7 @@ void BVH::BuildHQ( const bvhvec4slice& vertices )
 	refittable = false; // can't refit an SBVH
 	frag_min_flipped = false; // did not use AVX for binning
 	may_have_holes = false; // there may be holes in the index list, but not in the node list
-	usedBVHNodes = newNodePtr;
+	usedNodes = newNodePtr;
 }
 
 // Refitting: For animated meshes, where the topology remains intact. This
@@ -1554,7 +1555,7 @@ void BVH::Refit( const uint32_t nodeIdx )
 	FATAL_ERROR_IF( !refittable, "BVH::Refit( .. ), refitting an SBVH." );
 	FATAL_ERROR_IF( bvhNode == 0, "BVH::Refit( WALD_32BYTE ), bvhNode == 0." );
 	FATAL_ERROR_IF( may_have_holes, "BVH::Refit( WALD_32BYTE ), bvh may have holes." );
-	for (int32_t i = usedBVHNodes - 1; i >= 0; i--)
+	for (int32_t i = usedNodes - 1; i >= 0; i--)
 	{
 		BVHNode& node = bvhNode[i];
 		if (node.isLeaf()) // leaf: adjust to current triangle vertex positions
@@ -1842,7 +1843,7 @@ int32_t BVH::NodeCount() const
 void BVH::Compact()
 {
 	FATAL_ERROR_IF( bvhNode == 0, "BVH::Compact( WALD_32BYTE ), bvhNode == 0." );
-	BVHNode* tmp = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * usedBVHNodes );
+	BVHNode* tmp = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * usedNodes );
 	memcpy( tmp, bvhNode, 2 * sizeof( BVHNode ) );
 	uint32_t newNodePtr = 2, nodeIdx = 0, stack[64], stackPtr = 0;
 	while (1)
@@ -1858,7 +1859,7 @@ void BVH::Compact()
 		if (!stackPtr) break;
 		nodeIdx = stack[--stackPtr];
 	}
-	usedBVHNodes = newNodePtr;
+	usedNodes = newNodePtr;
 	AlignedFree( bvhNode );
 	bvhNode = tmp;
 }
@@ -1911,7 +1912,7 @@ void BVH_Verbose::Refit( const uint32_t nodeIdx )
 void BVH_Verbose::Compact()
 {
 	FATAL_ERROR_IF( bvhNode == 0, "BVH_Verbose::Compact(), bvhNode == 0." );
-	BVHNode* tmp = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * usedBVHNodes );
+	BVHNode* tmp = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * usedNodes );
 	memcpy( tmp, bvhNode, 2 * sizeof( BVHNode ) );
 	uint32_t newNodePtr = 2, nodeIdx = 0, stack[64], stackPtr = 0;
 	while (1)
@@ -1927,7 +1928,7 @@ void BVH_Verbose::Compact()
 		if (!stackPtr) break;
 		nodeIdx = stack[--stackPtr];
 	}
-	usedBVHNodes = newNodePtr;
+	usedNodes = newNodePtr;
 	AlignedFree( bvhNode );
 	bvhNode = tmp;
 }
@@ -1946,7 +1947,7 @@ void BVH_Verbose::Optimize( const uint32_t iterations )
 		{
 			static uint32_t seed = 0x12345678;
 			seed ^= seed << 13, seed ^= seed >> 17, seed ^= seed << 5; // xor32
-			valid = 1, Nid = 2 + seed % (usedBVHNodes - 2);
+			valid = 1, Nid = 2 + seed % (usedNodes - 2);
 			if (bvhNode[Nid].parent == 0 || bvhNode[Nid].isLeaf()) valid = 0;
 			if (valid) if (bvhNode[bvhNode[Nid].parent].parent == 0) valid = 0;
 		} while (valid == 0);
@@ -1981,7 +1982,7 @@ void BVH_Verbose::SplitLeafs( const uint32_t maxPrims )
 			// split this leaf
 			if (node.triCount > maxPrims)
 			{
-				const uint32_t newIdx1 = usedBVHNodes++, newIdx2 = usedBVHNodes++;
+				const uint32_t newIdx1 = usedNodes++, newIdx2 = usedNodes++;
 				BVHNode& new1 = bvhNode[newIdx1], & new2 = bvhNode[newIdx2];
 				new1.firstTri = node.firstTri, new1.triCount = node.triCount / 2;
 				new1.parent = new2.parent = nodeIdx, new1.left = new1.right = 0;
@@ -2011,9 +2012,9 @@ void BVH_Verbose::SplitLeafs( const uint32_t maxPrims )
 void BVH_Verbose::MergeLeafs()
 {
 	// allocate some working space
-	uint32_t* subtreeTriCount = (uint32_t*)AlignedAlloc( usedBVHNodes * 4 );
+	uint32_t* subtreeTriCount = (uint32_t*)AlignedAlloc( usedNodes * 4 );
 	uint32_t* newIdx = (uint32_t*)AlignedAlloc( idxCount * 4 );
-	memset( subtreeTriCount, 0, usedBVHNodes * 4 );
+	memset( subtreeTriCount, 0, usedNodes * 4 );
 	CountSubtreeTris( 0, subtreeTriCount );
 	uint32_t stack[64], stackPtr = 0, nodeIdx = 0, newIdxPtr = 0;
 	while (1)
@@ -2066,7 +2067,7 @@ void BVH_Verbose::MergeLeafs()
 void BVH_AilaLaine::ConvertFrom( const BVH& original )
 {
 	// allocate space
-	const uint32_t spaceNeeded = original.usedBVHNodes;
+	const uint32_t spaceNeeded = original.usedNodes;
 	if (allocatedNodes < spaceNeeded)
 	{
 		AlignedFree( bvhNode );
@@ -2104,7 +2105,7 @@ void BVH_AilaLaine::ConvertFrom( const BVH& original )
 			nodeIdx = orig.leftFirst;
 		}
 	}
-	usedBVHNodes = newNodePtr;
+	usedNodes = newNodePtr;
 }
 
 int32_t BVH_AilaLaine::Intersect( Ray& ray ) const
@@ -2211,6 +2212,68 @@ bool BVH_AilaLaine::IsOccluded( const Ray& ray ) const
 
 // BVH4 implementation
 // ----------------------------------------------------------------------------
+
+void BVH4::ConvertFrom( const BVH& original )
+{
+	// allocate space
+	const uint32_t spaceNeeded = original.usedNodes;
+	if (allocatedNodes < spaceNeeded)
+	{
+		AlignedFree( bvh4Node );
+		bvh4Node = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
+		allocatedNodes = spaceNeeded;
+	}
+	memset( bvh4Node, 0, sizeof( BVHNode ) * spaceNeeded );
+	CopyBasePropertiesFrom( original );
+	this->verts = original.verts;
+	this->triIdx = original.triIdx;
+	// create an mbvh node for each bvh2 node
+	for (uint32_t i = 0; i < original.usedNodes; i++) if (i != 1)
+	{
+		BVH::BVHNode& orig = original.bvhNode[i];
+		BVHNode& node4 = this->bvh4Node[i];
+		node4.aabbMin = orig.aabbMin, node4.aabbMax = orig.aabbMax;
+		if (orig.isLeaf()) node4.triCount = orig.triCount, node4.firstTri = orig.leftFirst;
+		else node4.child[0] = orig.leftFirst, node4.child[1] = orig.leftFirst + 1, node4.childCount = 2;
+	}
+	// collapse
+	uint32_t stack[128], stackPtr = 1, nodeIdx = stack[0] = 0; // i.e., root node
+	while (1)
+	{
+		BVHNode& node = this->bvh4Node[nodeIdx];
+		while (node.childCount < 4)
+		{
+			int32_t bestChild = -1;
+			float bestChildSA = 0;
+			for (uint32_t i = 0; i < node.childCount; i++)
+			{
+				// see if we can adopt child i
+				const BVHNode& child = this->bvh4Node[node.child[i]];
+				if (!child.isLeaf() && node.childCount - 1 + child.childCount <= 4)
+				{
+					const float childSA = SA( child.aabbMin, child.aabbMax );
+					if (childSA > bestChildSA) bestChild = i, bestChildSA = childSA;
+				}
+			}
+			if (bestChild == -1) break; // could not adopt
+			const BVHNode& child = this->bvh4Node[node.child[bestChild]];
+			node.child[bestChild] = child.child[0];
+			for (uint32_t i = 1; i < child.childCount; i++)
+				node.child[node.childCount++] = child.child[i];
+		}
+		// we're done with the node; proceed with the children.
+		for (uint32_t i = 0; i < node.childCount; i++)
+		{
+			const uint32_t childIdx = node.child[i];
+			const BVHNode& child = this->bvh4Node[childIdx];
+			if (!child.isLeaf()) stack[stackPtr++] = childIdx;
+		}
+		if (stackPtr == 0) break;
+		nodeIdx = stack[--stackPtr];
+	}
+	usedNodes = original.usedNodes;
+	this->may_have_holes = true;
+}
 
 int32_t BVH4::Intersect( Ray& ray ) const
 {
@@ -2355,14 +2418,14 @@ void BVH8::SplitBVH8Leaf( const uint32_t nodeIdx, const uint32_t maxPrims )
 	BVHNode& node = bvh8Node[nodeIdx];
 	if (node.triCount <= maxPrims) return; // also catches interior nodes
 	// place all primitives in a new node and make this the first child of 'node'
-	BVHNode& firstChild = bvh8Node[node.child[0] = usedBVHNodes++];
+	BVHNode& firstChild = bvh8Node[node.child[0] = usedNodes++];
 	firstChild.triCount = node.triCount;
 	firstChild.firstTri = node.firstTri;
 	uint32_t nextChild = 1;
 	// share with new sibling nodes
 	while (firstChild.triCount > maxPrims && nextChild < 8)
 	{
-		BVHNode& child = bvh8Node[node.child[nextChild] = usedBVHNodes++];
+		BVHNode& child = bvh8Node[node.child[nextChild] = usedNodes++];
 		firstChild.triCount -= maxPrims, child.triCount = maxPrims;
 		child.firstTri = firstChild.firstTri + firstChild.triCount;
 		nextChild++;
@@ -2617,7 +2680,7 @@ void BVH::BuildAVX( const bvhvec4slice& vertices )
 	refittable = true; // not using spatial splits: can refit this BVH
 	frag_min_flipped = true; // AVX was used for binning; fragment.min flipped
 	may_have_holes = false; // the AVX builder produces a continuous list of nodes
-	usedBVHNodes = newNodePtr;
+	usedNodes = newNodePtr;
 }
 #if defined(_MSC_VER)
 #pragma warning ( pop ) // restore 4701
@@ -4297,7 +4360,7 @@ void BVH_Double::Build( const bvhdbl3* vertices, const uint32_t primCount )
 	frag_min_flipped = false; // did not use AVX for binning
 	may_have_holes = false; // the reference builder produces a continuous list of nodes
 	bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
-	usedBVHNodes = newNodePtr;
+	usedNodes = newNodePtr;
 }
 
 double BVH_Double::BVHNode::SurfaceArea() const
