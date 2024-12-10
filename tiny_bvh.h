@@ -569,8 +569,8 @@ public:
 		float SurfaceArea() const { return BVH::SA( aabbMin, aabbMax ); }
 	};
 	BVH( BVHContext ctx = {} ) { context = ctx; }
-	~BVH() 
-	{ 
+	~BVH()
+	{
 		AlignedFree( bvhNode );
 		AlignedFree( triIdx );
 		AlignedFree( fragment );
@@ -696,8 +696,9 @@ public:
 		bool isLeaf() const { return triCount > 0; }
 	};
 	BVH_SoA( BVHContext ctx = {} ) { context = ctx; }
-	BVH_SoA( const BVH& original );
+	BVH_SoA( const BVH& original ) { ConvertFrom( original ); }
 	~BVH_SoA() { AlignedFree( bvhNode ); }
+	void ConvertFrom( const BVH& original );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// BVH data
@@ -722,6 +723,7 @@ public:
 	BVH_Verbose( BVHContext ctx = {} ) { context = ctx; }
 	BVH_Verbose( const BVH& original );
 	~BVH_Verbose() { AlignedFree( bvhNode ); }
+	void ConvertFrom( const BVH& original );
 	float SAHCost( const uint32_t nodeIdx = 0 ) const;
 	int32_t NodeCount() const;
 	int32_t PrimCount( const uint32_t nodeIdx = 0 ) const;
@@ -2210,6 +2212,58 @@ bool BVH_AilaLaine::IsOccluded( const Ray& ray ) const
 	return false;
 }
 
+// BVH_SoA implementation
+// ----------------------------------------------------------------------------
+
+void BVH_SoA::ConvertFrom( const BVH& original )
+{
+	// allocate space
+	const uint32_t spaceNeeded = original.usedNodes;
+	if (allocatedNodes < spaceNeeded)
+	{
+		AlignedFree( bvhNode );
+		bvhNode = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * spaceNeeded );
+		allocatedNodes = spaceNeeded;
+	}
+	memset( bvhNode, 0, sizeof( BVHNode ) * spaceNeeded );
+	CopyBasePropertiesFrom( original );
+	this->verts = original.verts;
+	this->triIdx = original.triIdx;
+	// recursively convert nodes
+	uint32_t newAlt2Node = 0, nodeIdx = 0, stack[128], stackPtr = 0;
+	while (1)
+	{
+		const BVH::BVHNode& node = original.bvhNode[nodeIdx];
+		const uint32_t idx = newAlt2Node++;
+		if (node.isLeaf())
+		{
+			bvhNode[idx].triCount = node.triCount;
+			bvhNode[idx].firstTri = node.leftFirst;
+			if (!stackPtr) break;
+			nodeIdx = stack[--stackPtr];
+			uint32_t newNodeParent = stack[--stackPtr];
+			bvhNode[newNodeParent].right = newAlt2Node;
+		}
+		else
+		{
+			const BVH::BVHNode& left = original.bvhNode[node.leftFirst];
+			const BVH::BVHNode& right = original.bvhNode[node.leftFirst + 1];
+			// This BVH layout requires BVH_USEAVX/BVH_USENEON for traversal, but at least we
+			// can convert to it without SSE/AVX/NEON support.
+			bvhNode[idx].xxxx = SIMD_SETRVEC( left.aabbMin.x, left.aabbMax.x, right.aabbMin.x, right.aabbMax.x );
+			bvhNode[idx].yyyy = SIMD_SETRVEC( left.aabbMin.y, left.aabbMax.y, right.aabbMin.y, right.aabbMax.y );
+			bvhNode[idx].zzzz = SIMD_SETRVEC( left.aabbMin.z, left.aabbMax.z, right.aabbMin.z, right.aabbMax.z );
+			bvhNode[idx].left = newAlt2Node; // right will be filled when popped
+			stack[stackPtr++] = idx;
+			stack[stackPtr++] = node.leftFirst + 1;
+			nodeIdx = node.leftFirst;
+		}
+	}
+	usedNodes = newAlt2Node;
+}
+
+// BVH_SoA::Intersect can be found in the BVH_USEAVX section later in this file.
+
 // BVH4 implementation
 // ----------------------------------------------------------------------------
 
@@ -2462,11 +2516,11 @@ int32_t BVH8::Intersect( Ray& ray ) const
 			BVHNode* child = bvh8Node + node->child[i];
 			float dist = IntersectAABB( ray, child->aabbMin, child->aabbMax );
 			if (dist < BVH_FAR) stack[stackPtr++] = child;
-		}
-		if (stackPtr == 0) break; else node = stack[--stackPtr];
 	}
-	return steps;
+		if (stackPtr == 0) break; else node = stack[--stackPtr];
 }
+	return steps;
+	}
 
 // ============================================================================
 //
@@ -2914,10 +2968,10 @@ int32_t BVH_SoA::Intersect( Ray& ray ) const
 				const float t = f * dot( edge2, q );
 				if (t < 0 || t > ray.hit.t) continue;
 				ray.hit.t = t, ray.hit.u = u, ray.hit.v = v, ray.hit.prim = tidx;
-			}
+		}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
-		}
+	}
 		__m128 x4 = _mm_mul_ps( _mm_sub_ps( node->xxxx, Ox4 ), rDx4 );
 		__m128 y4 = _mm_mul_ps( _mm_sub_ps( node->yyyy, Oy4 ), rDy4 );
 		__m128 z4 = _mm_mul_ps( _mm_sub_ps( node->zzzz, Oz4 ), rDz4 );
@@ -2968,7 +3022,7 @@ int32_t BVH_SoA::Intersect( Ray& ray ) const
 			node = bvhNode + lidx;
 			if (dist2 != BVH_FAR) stack[stackPtr++] = bvhNode + ridx;
 		}
-	}
+}
 	return steps;
 }
 
@@ -3001,10 +3055,10 @@ bool BVH_SoA::IsOccluded( const Ray& ray ) const
 				if (v < 0 || u + v > 1) continue;
 				const float t = f * dot( edge2, q );
 				if (t >= 0 && t <= ray.hit.t) return true;
-			}
+		}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
-		}
+	}
 		__m128 x4 = _mm_mul_ps( _mm_sub_ps( node->xxxx, Ox4 ), rDx4 );
 		__m128 y4 = _mm_mul_ps( _mm_sub_ps( node->yyyy, Oy4 ), rDy4 );
 		__m128 z4 = _mm_mul_ps( _mm_sub_ps( node->zzzz, Oz4 ), rDz4 );
@@ -3055,7 +3109,7 @@ bool BVH_SoA::IsOccluded( const Ray& ray ) const
 			node = bvhNode + lidx;
 			if (dist2 != BVH_FAR) stack[stackPtr++] = bvhNode + ridx;
 		}
-	}
+}
 	return false;
 }
 
@@ -3521,8 +3575,8 @@ bool BVH4_Afra::IsOccluded( const Ray& ray ) const
 				const uint32_t first = node.childFirst[lane], count = node.triCount[lane];
 				for (uint32_t j = 0; j < count; j++) // TODO: aim for 4 prims per leaf
 					if (OccludedCompactTri( ray, (float*)(bvh4Tris + first + j * 4) )) return true;
+				}
 			}
-		}
 		else /* hits == 4, 2%: rare */
 		{
 			// blend in lane indices
@@ -4163,12 +4217,12 @@ bool BVH_Afra::IsOccluded( const Ray& ray ) const
 					if (nodeIdx) stack[stackPtr++] = nodeIdx;
 					nodeIdx = childIdx;
 					continue;
-				}
+		}
 				const uint32_t first = node.childFirst[lane], count = node.triCount[lane];
 				for (uint32_t j = 0; j < count; j++) // TODO: aim for 4 prims per leaf
 					if (OccludedCompactTri( ray, (float*)(bvh4Tris + first + j * 4) )) return true;
-			}
 		}
+	}
 		else /* hits == 4, 2%: rare */
 		{
 			// blend in lane indices
@@ -4202,7 +4256,7 @@ bool BVH_Afra::IsOccluded( const Ray& ray ) const
 		// get next task
 		if (nodeIdx) continue;
 		if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
-	}
+}
 	return false;
 }
 
@@ -4725,47 +4779,7 @@ void BVH::Convert( const BVHLayout from, const BVHLayout to, const bool /* delet
 	}
 	else if (from == WALD_32BYTE && to == ALT_SOA)
 	{
-		// allocate space
-		const uint32_t spaceNeeded = usedBVHNodes;
-		if (allocatedAlt2Nodes < spaceNeeded)
-		{
-			FATAL_ERROR_IF( bvhNode == 0, "BVH::Convert( WALD_32BYTE, ALT_SOA ), bvhNode == 0." );
-			AlignedFree( alt2Node );
-			alt2Node = (BVHNodeAlt2*)AlignedAlloc( sizeof( BVHNodeAlt2 ) * spaceNeeded );
-			allocatedAlt2Nodes = spaceNeeded;
-		}
-		memset( alt2Node, 0, sizeof( BVHNodeAlt2 ) * spaceNeeded );
-		// recursively convert nodes
-		uint32_t newAlt2Node = 0, nodeIdx = 0, stack[128], stackPtr = 0;
-		while (1)
-		{
-			const BVHNode& node = bvhNode[nodeIdx];
-			const uint32_t idx = newAlt2Node++;
-			if (node.isLeaf())
-			{
-				alt2Node[idx].triCount = node.triCount;
-				alt2Node[idx].firstTri = node.leftFirst;
-				if (!stackPtr) break;
-				nodeIdx = stack[--stackPtr];
-				uint32_t newNodeParent = stack[--stackPtr];
-				alt2Node[newNodeParent].right = newAlt2Node;
-			}
-			else
-			{
-				const BVHNode& left = bvhNode[node.leftFirst];
-				const BVHNode& right = bvhNode[node.leftFirst + 1];
-				// This BVH layout requires BVH_USEAVX/BVH_USENEON for traversal, but at least we
-				// can convert to it without SSE/AVX/NEON support.
-				alt2Node[idx].xxxx = SIMD_SETRVEC( left.aabbMin.x, left.aabbMax.x, right.aabbMin.x, right.aabbMax.x );
-				alt2Node[idx].yyyy = SIMD_SETRVEC( left.aabbMin.y, left.aabbMax.y, right.aabbMin.y, right.aabbMax.y );
-				alt2Node[idx].zzzz = SIMD_SETRVEC( left.aabbMin.z, left.aabbMax.z, right.aabbMin.z, right.aabbMax.z );
-				alt2Node[idx].left = newAlt2Node; // right will be filled when popped
-				stack[stackPtr++] = idx;
-				stack[stackPtr++] = node.leftFirst + 1;
-				nodeIdx = node.leftFirst;
-			}
-		}
-		usedAlt2Nodes = newAlt2Node;
+		..
 	}
 	else if (from == WALD_32BYTE && to == VERBOSE)
 	{
