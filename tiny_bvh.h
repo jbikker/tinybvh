@@ -783,8 +783,9 @@ public:
 		bool isLeaf() const { return triCount > 0; }
 	};
 	BVH8( BVHContext ctx = {} ) { context = ctx; }
-	BVH8( const BVH& original );
+	BVH8( const BVH& original ) { ConvertFrom( original ); }
 	~BVH8() { AlignedFree( bvh8Node ); }
+	void ConvertFrom( const BVH& original );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// Helpers
@@ -1881,6 +1882,9 @@ void BVH_Verbose::ConvertFrom( const BVH& original )
 		allocatedNodes = spaceNeeded;
 	}
 	memset( bvhNode, 0, sizeof( BVHNode ) * spaceNeeded );
+	CopyBasePropertiesFrom( original );
+	this->verts = original.verts;
+	this->triIdx = original.triIdx;
 	bvhNode[0].parent = 0xffffffff; // root sentinel
 	// convert
 	uint32_t nodeIdx = 0, parent = 0xffffffff, stack[128], stackPtr = 0;
@@ -2411,6 +2415,7 @@ void BVH4_GPU::ConvertFrom( const BVH4& original )
 		allocatedBlocks = blocksNeeded;
 	}
 	memset( bvh4Data, 0, 16 * blocksNeeded );
+	CopyBasePropertiesFrom( original );
 	// start conversion
 	uint32_t nodeIdx = 0, newAlt4Ptr = 0, stack[128], stackPtr = 0, retValPos = 0;
 	while (1)
@@ -2622,6 +2627,70 @@ int32_t BVH4_GPU::Intersect( Ray& ray ) const
 
 // BVH8 implementation
 // ----------------------------------------------------------------------------
+
+void BVH8::ConvertFrom( const BVH& original )
+{
+	// allocate space
+	// Note: The safe upper bound here is usedBVHNodes when converting an existing
+	// BVH2, but we need triCount * 2 to be safe in later conversions, e.g. to
+	// CWBVH, which may further split some leaf nodes.
+	const uint32_t spaceNeeded = original.triCount * 2;
+	if (allocatedNodes < spaceNeeded)
+	{
+		AlignedFree( bvh8Node );
+		bvh8Node = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
+		allocatedNodes = spaceNeeded;
+	}
+	memset( bvh8Node, 0, sizeof( BVHNode ) * spaceNeeded );
+	CopyBasePropertiesFrom( original );
+	this->verts = original.verts;
+	this->triIdx = original.triIdx;
+	// create an mbvh node for each bvh2 node
+	for (uint32_t i = 0; i < original.usedNodes; i++) if (i != 1)
+	{
+		BVH::BVHNode& orig = original.bvhNode[i];
+		BVHNode& node8 = bvh8Node[i];
+		node8.aabbMin = orig.aabbMin, node8.aabbMax = orig.aabbMax;
+		if (orig.isLeaf()) node8.triCount = orig.triCount, node8.firstTri = orig.leftFirst;
+		else node8.child[0] = orig.leftFirst, node8.child[1] = orig.leftFirst + 1, node8.childCount = 2;
+	}
+	// collapse
+	uint32_t stack[128], stackPtr = 1, nodeIdx = stack[0] = 0; // i.e., root node
+	while (1)
+	{
+		BVHNode& node = bvh8Node[nodeIdx];
+		while (node.childCount < 8)
+		{
+			int32_t bestChild = -1;
+			float bestChildSA = 0;
+			for (uint32_t i = 0; i < node.childCount; i++)
+			{
+				// see if we can adopt child i
+				const BVHNode& child = bvh8Node[node.child[i]];
+				if ((!child.isLeaf()) && (node.childCount - 1 + child.childCount) <= 8)
+				{
+					const float childSA = SA( child.aabbMin, child.aabbMax );
+					if (childSA > bestChildSA) bestChild = i, bestChildSA = childSA;
+				}
+			}
+			if (bestChild == -1) break; // could not adopt
+			const BVHNode& child = bvh8Node[node.child[bestChild]];
+			node.child[bestChild] = child.child[0];
+			for (uint32_t i = 1; i < child.childCount; i++)
+				node.child[node.childCount++] = child.child[i];
+		}
+		// we're done with the node; proceed with the children
+		for (uint32_t i = 0; i < node.childCount; i++)
+		{
+			const uint32_t childIdx = node.child[i];
+			const BVHNode& child = bvh8Node[childIdx];
+			if (!child.isLeaf()) stack[stackPtr++] = childIdx;
+		}
+		if (stackPtr == 0) break;
+		nodeIdx = stack[--stackPtr];
+	}
+	usedNodes = original.usedNodes; // there will be gaps / unused nodes though.
+}
 
 // SplitBVH8Leaf: CWBVH requires that a leaf has no more than 3 primitives,
 // but regular BVH construction does not guarantee this. So, here we split
@@ -5058,64 +5127,7 @@ void BVH::Convert( const BVHLayout from, const BVHLayout to, const bool /* delet
 	}
 	else if (from == WALD_32BYTE && to == BASIC_BVH8)
 	{
-		// allocate space
-		// Note: The safe upper bound here is usedBVHNodes when converting an existing
-		// BVH2, but we need triCount * 2 to be safe in later conversions, e.g. to
-		// CWBVH, which may further split some leaf nodes.
-		const uint32_t spaceNeeded = triCount * 2;
-		if (allocatedBVH8Nodes < spaceNeeded)
-		{
-			FATAL_ERROR_IF( bvhNode == 0, "BVH::Convert( WALD_32BYTE, BASIC_BVH8 ), bvhNode == 0." );
-			AlignedFree( bvh8Node );
-			bvh8Node = (BVHNode8*)AlignedAlloc( spaceNeeded * sizeof( BVHNode8 ) );
-			allocatedBVH8Nodes = spaceNeeded;
-		}
-		memset( bvh8Node, 0, sizeof( BVHNode8 ) * spaceNeeded );
-		// create an mbvh node for each bvh2 node
-		for (uint32_t i = 0; i < usedBVHNodes; i++) if (i != 1)
-		{
-			BVHNode& orig = bvhNode[i];
-			BVHNode8& node8 = bvh8Node[i];
-			node8.aabbMin = orig.aabbMin, node8.aabbMax = orig.aabbMax;
-			if (orig.isLeaf()) node8.triCount = orig.triCount, node8.firstTri = orig.leftFirst;
-			else node8.child[0] = orig.leftFirst, node8.child[1] = orig.leftFirst + 1, node8.childCount = 2;
-		}
-		// collapse
-		uint32_t stack[128], stackPtr = 1, nodeIdx = stack[0] = 0; // i.e., root node
-		while (1)
-		{
-			BVHNode8& node = bvh8Node[nodeIdx];
-			while (node.childCount < 8)
-			{
-				int32_t bestChild = -1;
-				float bestChildSA = 0;
-				for (uint32_t i = 0; i < node.childCount; i++)
-				{
-					// see if we can adopt child i
-					const BVHNode8& child = bvh8Node[node.child[i]];
-					if ((!child.isLeaf()) && (node.childCount - 1 + child.childCount) <= 8)
-					{
-						const float childSA = SA( child.aabbMin, child.aabbMax );
-						if (childSA > bestChildSA) bestChild = i, bestChildSA = childSA;
-					}
-				}
-				if (bestChild == -1) break; // could not adopt
-				const BVHNode8& child = bvh8Node[node.child[bestChild]];
-				node.child[bestChild] = child.child[0];
-				for (uint32_t i = 1; i < child.childCount; i++)
-					node.child[node.childCount++] = child.child[i];
-			}
-			// we're done with the node; proceed with the children
-			for (uint32_t i = 0; i < node.childCount; i++)
-			{
-				const uint32_t childIdx = node.child[i];
-				const BVHNode8& child = bvh8Node[childIdx];
-				if (!child.isLeaf()) stack[stackPtr++] = childIdx;
-			}
-			if (stackPtr == 0) break;
-			nodeIdx = stack[--stackPtr];
-		}
-		usedBVH8Nodes = usedBVHNodes; // there will be gaps / unused nodes though.
+		..
 	}
 	else if (from == BASIC_BVH8 && to == CWBVH)
 	{
