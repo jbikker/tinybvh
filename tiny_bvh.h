@@ -821,14 +821,15 @@ public:
 		// as chars as well, as in CWBVH.
 	};
 	BVH4_GPU( BVHContext ctx = {} ) { context = ctx; }
-	BVH4_GPU( const BVH4& original );
+	BVH4_GPU( const BVH4& original ) { ConvertFrom( original ); }
 	~BVH4_GPU() { AlignedFree( bvh4Data ); }
+	void ConvertFrom( const BVH4& original );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// BVH data
-	bvhvec4slice verts = {};		// pointer to input primitive array: 3x16 bytes per tri.
-	uint32_t* triIdx = 0;			// primitive index array - pointer copied from original.
 	bvhvec4* bvh4Data = 0;			// 64-byte 4-wide BVH node for efficient GPU rendering.
+	uint32_t allocatedBlocks = 0;	// node data and triangles are stored in 16-byte blocks.
+	uint32_t usedBlocks = 0;		// actually used storage.
 };
 
 class BVH4_Afra : public BVHBase
@@ -1869,6 +1870,45 @@ void BVH::Compact()
 // BVH_Verbose implementation
 // ----------------------------------------------------------------------------
 
+void BVH_Verbose::ConvertFrom( const BVH& original )
+{
+	// allocate space
+	uint32_t spaceNeeded = original.triCount * (refittable ? 2 : 3); // this one needs space to grow to 2N
+	if (allocatedNodes < spaceNeeded)
+	{
+		AlignedFree( bvhNode );
+		bvhNode = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * spaceNeeded );
+		allocatedNodes = spaceNeeded;
+	}
+	memset( bvhNode, 0, sizeof( BVHNode ) * spaceNeeded );
+	bvhNode[0].parent = 0xffffffff; // root sentinel
+	// convert
+	uint32_t nodeIdx = 0, parent = 0xffffffff, stack[128], stackPtr = 0;
+	while (1)
+	{
+		const BVH::BVHNode& orig = original.bvhNode[nodeIdx];
+		bvhNode[nodeIdx].aabbMin = orig.aabbMin, bvhNode[nodeIdx].aabbMax = orig.aabbMax;
+		bvhNode[nodeIdx].triCount = orig.triCount, bvhNode[nodeIdx].parent = parent;
+		if (orig.isLeaf())
+		{
+			bvhNode[nodeIdx].firstTri = orig.leftFirst;
+			if (stackPtr == 0) break;
+			nodeIdx = stack[--stackPtr];
+			parent = stack[--stackPtr];
+		}
+		else
+		{
+			bvhNode[nodeIdx].left = orig.leftFirst;
+			bvhNode[nodeIdx].right = orig.leftFirst + 1;
+			stack[stackPtr++] = nodeIdx;
+			stack[stackPtr++] = orig.leftFirst + 1;
+			parent = nodeIdx;
+			nodeIdx = orig.leftFirst;
+		}
+	}
+	usedNodes = original.usedNodes;
+}
+
 int32_t BVH_Verbose::NodeCount() const
 {
 	// Determine the number of nodes in the tree. Typically the result should
@@ -2352,6 +2392,126 @@ int32_t BVH4::Intersect( Ray& ray ) const
 // BVH4_GPU implementation
 // ----------------------------------------------------------------------------
 
+void BVH4_GPU::ConvertFrom( const BVH4& original )
+{
+	// Convert a 4-wide BVH to a format suitable for GPU traversal. Layout:
+	// offs 0:   aabbMin (12 bytes), 4x quantized child xmin (4 bytes)
+	// offs 16:  aabbMax (12 bytes), 4x quantized child xmax (4 bytes)
+	// offs 32:  4x child ymin, then ymax, zmax, zmax (total 16 bytes)
+	// offs 48:  4x child node info: leaf if MSB set.
+	//           Leaf: 15 bits for tri count, 16 for offset
+	//           Interior: 32 bits for position of child node.
+	// Triangle data ('by value') immediately follows each leaf node.
+	uint32_t blocksNeeded = original.usedNodes * 4; // here, 'block' is 16 bytes.
+	blocksNeeded += 6 * triCount; // this layout stores tris in the same buffer.
+	if (allocatedBlocks < blocksNeeded)
+	{
+		AlignedFree( bvh4Data );
+		bvh4Data = (bvhvec4*)AlignedAlloc( blocksNeeded * 16 );
+		allocatedBlocks = blocksNeeded;
+	}
+	memset( bvh4Data, 0, 16 * blocksNeeded );
+	// start conversion
+	uint32_t nodeIdx = 0, newAlt4Ptr = 0, stack[128], stackPtr = 0, retValPos = 0;
+	while (1)
+	{
+		const BVH4::BVHNode& orig = original.bvh4Node[nodeIdx];
+		// convert BVH4 node - must be an interior node.
+		assert( !bvh4Node[nodeIdx].isLeaf() );
+		bvhvec4* nodeBase = bvh4Data + newAlt4Ptr;
+		uint32_t baseAlt4Ptr = newAlt4Ptr;
+		newAlt4Ptr += 4;
+		nodeBase[0] = bvhvec4( orig.aabbMin, 0 );
+		nodeBase[1] = bvhvec4( (orig.aabbMax - orig.aabbMin) * (1.0f / 255.0f), 0 );
+		BVH4::BVHNode* childNode[4] = {
+			&original.bvh4Node[orig.child[0]], &original.bvh4Node[orig.child[1]],
+			&original.bvh4Node[orig.child[2]], &original.bvh4Node[orig.child[3]]
+		};
+		// start with leaf child node conversion
+		uint32_t childInfo[4] = { 0, 0, 0, 0 }; // will store in final fields later
+		for (int32_t i = 0; i < 4; i++) if (childNode[i]->isLeaf())
+		{
+			childInfo[i] = newAlt4Ptr - baseAlt4Ptr;
+			childInfo[i] |= childNode[i]->triCount << 16;
+			childInfo[i] |= 0x80000000;
+			for (uint32_t j = 0; j < childNode[i]->triCount; j++)
+			{
+				uint32_t t = original.triIdx[childNode[i]->firstTri + j];
+			#ifdef BVH4_GPU_COMPRESSED_TRIS
+				PrecomputeTriangle( verts, t * 3, (float*)&bvh4Alt[newAlt4Ptr] );
+				bvh4Alt[newAlt4Ptr + 3] = bvhvec4( 0, 0, 0, *(float*)&t );
+				newAlt4Ptr += 4;
+			#else
+				bvhvec4 v0 = original.verts[t * 3 + 0];
+				bvh4Data[newAlt4Ptr + 1] = original.verts[t * 3 + 1] - v0;
+				bvh4Data[newAlt4Ptr + 2] = original.verts[t * 3 + 2] - v0;
+				v0.w = *(float*)&t; // as_float
+				bvh4Data[newAlt4Ptr + 0] = v0;
+				newAlt4Ptr += 3;
+			#endif
+			}
+		}
+		// process interior nodes
+		for (int32_t i = 0; i < 4; i++) if (!childNode[i]->isLeaf())
+		{
+			// childInfo[i] = node.child[i] == 0 ? 0 : GPUFormatBVH4( node.child[i] );
+			if (orig.child[i] == 0) childInfo[i] = 0; else
+			{
+				stack[stackPtr++] = (uint32_t)(((float*)&nodeBase[3] + i) - (float*)bvh4Data);
+				stack[stackPtr++] = orig.child[i];
+			}
+		}
+		// store child node bounds, quantized
+		const bvhvec3 extent = orig.aabbMax - orig.aabbMin;
+		bvhvec3 scale;
+		scale.x = extent.x > 1e-10f ? (254.999f / extent.x) : 0;
+		scale.y = extent.y > 1e-10f ? (254.999f / extent.y) : 0;
+		scale.z = extent.z > 1e-10f ? (254.999f / extent.z) : 0;
+		uint8_t* slot0 = (uint8_t*)&nodeBase[0] + 12;	// 4 chars
+		uint8_t* slot1 = (uint8_t*)&nodeBase[1] + 12;	// 4 chars
+		uint8_t* slot2 = (uint8_t*)&nodeBase[2];		// 16 chars
+		if (orig.child[0])
+		{
+			const bvhvec3 relBMin = childNode[0]->aabbMin - orig.aabbMin, relBMax = childNode[0]->aabbMax - orig.aabbMin;
+			slot0[0] = (uint8_t)floorf( relBMin.x * scale.x ), slot1[0] = (uint8_t)ceilf( relBMax.x * scale.x );
+			slot2[0] = (uint8_t)floorf( relBMin.y * scale.y ), slot2[4] = (uint8_t)ceilf( relBMax.y * scale.y );
+			slot2[8] = (uint8_t)floorf( relBMin.z * scale.z ), slot2[12] = (uint8_t)ceilf( relBMax.z * scale.z );
+		}
+		if (orig.child[1])
+		{
+			const bvhvec3 relBMin = childNode[1]->aabbMin - orig.aabbMin, relBMax = childNode[1]->aabbMax - orig.aabbMin;
+			slot0[1] = (uint8_t)floorf( relBMin.x * scale.x ), slot1[1] = (uint8_t)ceilf( relBMax.x * scale.x );
+			slot2[1] = (uint8_t)floorf( relBMin.y * scale.y ), slot2[5] = (uint8_t)ceilf( relBMax.y * scale.y );
+			slot2[9] = (uint8_t)floorf( relBMin.z * scale.z ), slot2[13] = (uint8_t)ceilf( relBMax.z * scale.z );
+		}
+		if (orig.child[2])
+		{
+			const bvhvec3 relBMin = childNode[2]->aabbMin - orig.aabbMin, relBMax = childNode[2]->aabbMax - orig.aabbMin;
+			slot0[2] = (uint8_t)floorf( relBMin.x * scale.x ), slot1[2] = (uint8_t)ceilf( relBMax.x * scale.x );
+			slot2[2] = (uint8_t)floorf( relBMin.y * scale.y ), slot2[6] = (uint8_t)ceilf( relBMax.y * scale.y );
+			slot2[10] = (uint8_t)floorf( relBMin.z * scale.z ), slot2[14] = (uint8_t)ceilf( relBMax.z * scale.z );
+		}
+		if (orig.child[3])
+		{
+			const bvhvec3 relBMin = childNode[3]->aabbMin - orig.aabbMin, relBMax = childNode[3]->aabbMax - orig.aabbMin;
+			slot0[3] = (uint8_t)floorf( relBMin.x * scale.x ), slot1[3] = (uint8_t)ceilf( relBMax.x * scale.x );
+			slot2[3] = (uint8_t)floorf( relBMin.y * scale.y ), slot2[7] = (uint8_t)ceilf( relBMax.y * scale.y );
+			slot2[11] = (uint8_t)floorf( relBMin.z * scale.z ), slot2[15] = (uint8_t)ceilf( relBMax.z * scale.z );
+		}
+		// finalize node
+		nodeBase[3] = bvhvec4(
+			*(float*)&childInfo[0], *(float*)&childInfo[1],
+			*(float*)&childInfo[2], *(float*)&childInfo[3]
+		);
+		// pop new work from the stack
+		if (retValPos > 0) ((uint32_t*)bvh4Data)[retValPos] = baseAlt4Ptr;
+		if (stackPtr == 0) break;
+		nodeIdx = stack[--stackPtr];
+		retValPos = stack[--stackPtr];
+	}
+	usedBlocks = newAlt4Ptr;
+}
+
 // IntersectAlt4Nodes. For testing the converted data only; not efficient.
 // This code replicates how traversal on GPU happens.
 #define SWAP(A,B,C,D) t=A,A=B,B=t,t2=C,C=D,D=t2;
@@ -2516,11 +2676,11 @@ int32_t BVH8::Intersect( Ray& ray ) const
 			BVHNode* child = bvh8Node + node->child[i];
 			float dist = IntersectAABB( ray, child->aabbMin, child->aabbMax );
 			if (dist < BVH_FAR) stack[stackPtr++] = child;
-	}
+		}
 		if (stackPtr == 0) break; else node = stack[--stackPtr];
-}
-	return steps;
 	}
+	return steps;
+}
 
 // ============================================================================
 //
@@ -2968,10 +3128,10 @@ int32_t BVH_SoA::Intersect( Ray& ray ) const
 				const float t = f * dot( edge2, q );
 				if (t < 0 || t > ray.hit.t) continue;
 				ray.hit.t = t, ray.hit.u = u, ray.hit.v = v, ray.hit.prim = tidx;
-		}
+			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
-	}
+		}
 		__m128 x4 = _mm_mul_ps( _mm_sub_ps( node->xxxx, Ox4 ), rDx4 );
 		__m128 y4 = _mm_mul_ps( _mm_sub_ps( node->yyyy, Oy4 ), rDy4 );
 		__m128 z4 = _mm_mul_ps( _mm_sub_ps( node->zzzz, Oz4 ), rDz4 );
@@ -3022,7 +3182,7 @@ int32_t BVH_SoA::Intersect( Ray& ray ) const
 			node = bvhNode + lidx;
 			if (dist2 != BVH_FAR) stack[stackPtr++] = bvhNode + ridx;
 		}
-}
+	}
 	return steps;
 }
 
@@ -3055,10 +3215,10 @@ bool BVH_SoA::IsOccluded( const Ray& ray ) const
 				if (v < 0 || u + v > 1) continue;
 				const float t = f * dot( edge2, q );
 				if (t >= 0 && t <= ray.hit.t) return true;
-		}
+			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
-	}
+		}
 		__m128 x4 = _mm_mul_ps( _mm_sub_ps( node->xxxx, Ox4 ), rDx4 );
 		__m128 y4 = _mm_mul_ps( _mm_sub_ps( node->yyyy, Oy4 ), rDy4 );
 		__m128 z4 = _mm_mul_ps( _mm_sub_ps( node->zzzz, Oz4 ), rDz4 );
@@ -3109,7 +3269,7 @@ bool BVH_SoA::IsOccluded( const Ray& ray ) const
 			node = bvhNode + lidx;
 			if (dist2 != BVH_FAR) stack[stackPtr++] = bvhNode + ridx;
 		}
-}
+	}
 	return false;
 }
 
@@ -3575,8 +3735,8 @@ bool BVH4_Afra::IsOccluded( const Ray& ray ) const
 				const uint32_t first = node.childFirst[lane], count = node.triCount[lane];
 				for (uint32_t j = 0; j < count; j++) // TODO: aim for 4 prims per leaf
 					if (OccludedCompactTri( ray, (float*)(bvh4Tris + first + j * 4) )) return true;
-				}
 			}
+		}
 		else /* hits == 4, 2%: rare */
 		{
 			// blend in lane indices
@@ -4217,12 +4377,12 @@ bool BVH_Afra::IsOccluded( const Ray& ray ) const
 					if (nodeIdx) stack[stackPtr++] = nodeIdx;
 					nodeIdx = childIdx;
 					continue;
-		}
+				}
 				const uint32_t first = node.childFirst[lane], count = node.triCount[lane];
 				for (uint32_t j = 0; j < count; j++) // TODO: aim for 4 prims per leaf
 					if (OccludedCompactTri( ray, (float*)(bvh4Tris + first + j * 4) )) return true;
+			}
 		}
-	}
 		else /* hits == 4, 2%: rare */
 		{
 			// blend in lane indices
@@ -4256,7 +4416,7 @@ bool BVH_Afra::IsOccluded( const Ray& ray ) const
 		// get next task
 		if (nodeIdx) continue;
 		if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
-}
+	}
 	return false;
 }
 
@@ -4783,220 +4943,15 @@ void BVH::Convert( const BVHLayout from, const BVHLayout to, const bool /* delet
 	}
 	else if (from == WALD_32BYTE && to == VERBOSE)
 	{
-		// allocate space
-		uint32_t spaceNeeded = triCount * (refittable ? 2 : 3); // this one needs space to grow to 2N
-		if (allocatedVerbose < spaceNeeded)
-		{
-			FATAL_ERROR_IF( bvhNode == 0, "BVH::Convert( WALD_32BYTE, VERBOSE ), bvhNode == 0." );
-			AlignedFree( verbose );
-			verbose = (BVHNodeVerbose*)AlignedAlloc( sizeof( BVHNodeVerbose ) * spaceNeeded );
-			allocatedVerbose = spaceNeeded;
-		}
-		memset( verbose, 0, sizeof( BVHNodeVerbose ) * spaceNeeded );
-		verbose[0].parent = 0xffffffff; // root sentinel
-		// convert
-		uint32_t nodeIdx = 0, parent = 0xffffffff, stack[128], stackPtr = 0;
-		while (1)
-		{
-			const BVHNode& node = bvhNode[nodeIdx];
-			verbose[nodeIdx].aabbMin = node.aabbMin, verbose[nodeIdx].aabbMax = node.aabbMax;
-			verbose[nodeIdx].triCount = node.triCount, verbose[nodeIdx].parent = parent;
-			if (node.isLeaf())
-			{
-				verbose[nodeIdx].firstTri = node.leftFirst;
-				if (stackPtr == 0) break;
-				nodeIdx = stack[--stackPtr];
-				parent = stack[--stackPtr];
-			}
-			else
-			{
-				verbose[nodeIdx].left = node.leftFirst;
-				verbose[nodeIdx].right = node.leftFirst + 1;
-				stack[stackPtr++] = nodeIdx;
-				stack[stackPtr++] = node.leftFirst + 1;
-				parent = nodeIdx;
-				nodeIdx = node.leftFirst;
-			}
-		}
-		usedVerboseNodes = usedBVHNodes;
+		..
 	}
 	else if (from == WALD_32BYTE && to == BASIC_BVH4)
 	{
-		// allocate space
-		const uint32_t spaceNeeded = usedBVHNodes;
-		if (allocatedBVH4Nodes < spaceNeeded)
-		{
-			FATAL_ERROR_IF( bvhNode == 0, "BVH::Convert( WALD_32BYTE, BASIC_BVH4 ), bvhNode == 0." );
-			AlignedFree( bvh4Node );
-			bvh4Node = (BVHNode4*)AlignedAlloc( spaceNeeded * sizeof( BVHNode4 ) );
-			allocatedBVH4Nodes = spaceNeeded;
-		}
-		memset( bvh4Node, 0, sizeof( BVHNode4 ) * spaceNeeded );
-		// create an mbvh node for each bvh2 node
-		for (uint32_t i = 0; i < usedBVHNodes; i++) if (i != 1)
-		{
-			BVHNode& orig = bvhNode[i];
-			BVHNode4& node4 = bvh4Node[i];
-			node4.aabbMin = orig.aabbMin, node4.aabbMax = orig.aabbMax;
-			if (orig.isLeaf()) node4.triCount = orig.triCount, node4.firstTri = orig.leftFirst;
-			else node4.child[0] = orig.leftFirst, node4.child[1] = orig.leftFirst + 1, node4.childCount = 2;
-		}
-		// collapse
-		uint32_t stack[128], stackPtr = 1, nodeIdx = stack[0] = 0; // i.e., root node
-		while (1)
-		{
-			BVHNode4& node = bvh4Node[nodeIdx];
-			while (node.childCount < 4)
-			{
-				int32_t bestChild = -1;
-				float bestChildSA = 0;
-				for (uint32_t i = 0; i < node.childCount; i++)
-				{
-					// see if we can adopt child i
-					const BVHNode4& child = bvh4Node[node.child[i]];
-					if (!child.isLeaf() && node.childCount - 1 + child.childCount <= 4)
-					{
-						const float childSA = SA( child.aabbMin, child.aabbMax );
-						if (childSA > bestChildSA) bestChild = i, bestChildSA = childSA;
-					}
-				}
-				if (bestChild == -1) break; // could not adopt
-				const BVHNode4& child = bvh4Node[node.child[bestChild]];
-				node.child[bestChild] = child.child[0];
-				for (uint32_t i = 1; i < child.childCount; i++)
-					node.child[node.childCount++] = child.child[i];
-			}
-			// we're done with the node; proceed with the children
-			for (uint32_t i = 0; i < node.childCount; i++)
-			{
-				const uint32_t childIdx = node.child[i];
-				const BVHNode4& child = bvh4Node[childIdx];
-				if (!child.isLeaf()) stack[stackPtr++] = childIdx;
-			}
-			if (stackPtr == 0) break;
-			nodeIdx = stack[--stackPtr];
-		}
-		usedBVH4Nodes = usedBVHNodes; // there will be gaps / unused nodes though.
+		..
 	}
 	else if (from == BASIC_BVH4 && to == BVH4_GPU)
 	{
-		// Convert a 4-wide BVH to a format suitable for GPU traversal. Layout:
-		// offs 0:   aabbMin (12 bytes), 4x quantized child xmin (4 bytes)
-		// offs 16:  aabbMax (12 bytes), 4x quantized child xmax (4 bytes)
-		// offs 32:  4x child ymin, then ymax, zmax, zmax (total 16 bytes)
-		// offs 48:  4x child node info: leaf if MSB set.
-		//           Leaf: 15 bits for tri count, 16 for offset
-		//           Interior: 32 bits for position of child node.
-		// Triangle data ('by value') immediately follows each leaf node.
-		uint32_t blocksNeeded = usedBVH4Nodes * 4; // here, 'block' is 16 bytes.
-		blocksNeeded += 6 * triCount; // this layout stores tris in the same buffer.
-		if (allocatedAlt4aBlocks < blocksNeeded)
-		{
-			FATAL_ERROR_IF( bvh4Node == 0, "BVH::Convert( BASIC_BVH4, BVH4_GPU ), bvh4Node == 0." );
-			AlignedFree( bvh4Alt );
-			bvh4Alt = (bvhvec4*)AlignedAlloc( blocksNeeded * 16 );
-			allocatedAlt4aBlocks = blocksNeeded;
-		}
-		memset( bvh4Alt, 0, 16 * blocksNeeded );
-		// start conversion
-		uint32_t nodeIdx = 0, newAlt4Ptr = 0, stack[128], stackPtr = 0, retValPos = 0;
-		while (1)
-		{
-			const BVHNode4& node = bvh4Node[nodeIdx];
-			// convert BVH4 node - must be an interior node.
-			assert( !bvh4Node[nodeIdx].isLeaf() );
-			bvhvec4* nodeBase = bvh4Alt + newAlt4Ptr;
-			uint32_t baseAlt4Ptr = newAlt4Ptr;
-			newAlt4Ptr += 4;
-			nodeBase[0] = bvhvec4( node.aabbMin, 0 );
-			nodeBase[1] = bvhvec4( (node.aabbMax - node.aabbMin) * (1.0f / 255.0f), 0 );
-			BVHNode4* childNode[4] = {
-				&bvh4Node[node.child[0]], &bvh4Node[node.child[1]],
-				&bvh4Node[node.child[2]], &bvh4Node[node.child[3]]
-			};
-			// start with leaf child node conversion
-			uint32_t childInfo[4] = { 0, 0, 0, 0 }; // will store in final fields later
-			for (int32_t i = 0; i < 4; i++) if (childNode[i]->isLeaf())
-			{
-				childInfo[i] = newAlt4Ptr - baseAlt4Ptr;
-				childInfo[i] |= childNode[i]->triCount << 16;
-				childInfo[i] |= 0x80000000;
-				for (uint32_t j = 0; j < childNode[i]->triCount; j++)
-				{
-					uint32_t t = triIdx[childNode[i]->firstTri + j];
-				#ifdef BVH4_GPU_COMPRESSED_TRIS
-					PrecomputeTriangle( verts, t * 3, (float*)&bvh4Alt[newAlt4Ptr] );
-					bvh4Alt[newAlt4Ptr + 3] = bvhvec4( 0, 0, 0, *(float*)&t );
-					newAlt4Ptr += 4;
-				#else
-					bvhvec4 v0 = verts[t * 3 + 0];
-					bvh4Alt[newAlt4Ptr + 1] = verts[t * 3 + 1] - v0;
-					bvh4Alt[newAlt4Ptr + 2] = verts[t * 3 + 2] - v0;
-					v0.w = *(float*)&t; // as_float
-					bvh4Alt[newAlt4Ptr + 0] = v0;
-					newAlt4Ptr += 3;
-				#endif
-				}
-			}
-			// process interior nodes
-			for (int32_t i = 0; i < 4; i++) if (!childNode[i]->isLeaf())
-			{
-				// childInfo[i] = node.child[i] == 0 ? 0 : GPUFormatBVH4( node.child[i] );
-				if (node.child[i] == 0) childInfo[i] = 0; else
-				{
-					stack[stackPtr++] = (uint32_t)(((float*)&nodeBase[3] + i) - (float*)bvh4Alt);
-					stack[stackPtr++] = node.child[i];
-				}
-			}
-			// store child node bounds, quantized
-			const bvhvec3 extent = node.aabbMax - node.aabbMin;
-			bvhvec3 scale;
-			scale.x = extent.x > 1e-10f ? (254.999f / extent.x) : 0;
-			scale.y = extent.y > 1e-10f ? (254.999f / extent.y) : 0;
-			scale.z = extent.z > 1e-10f ? (254.999f / extent.z) : 0;
-			uint8_t* slot0 = (uint8_t*)&nodeBase[0] + 12;	// 4 chars
-			uint8_t* slot1 = (uint8_t*)&nodeBase[1] + 12;	// 4 chars
-			uint8_t* slot2 = (uint8_t*)&nodeBase[2];		// 16 chars
-			if (node.child[0])
-			{
-				const bvhvec3 relBMin = childNode[0]->aabbMin - node.aabbMin, relBMax = childNode[0]->aabbMax - node.aabbMin;
-				slot0[0] = (uint8_t)floorf( relBMin.x * scale.x ), slot1[0] = (uint8_t)ceilf( relBMax.x * scale.x );
-				slot2[0] = (uint8_t)floorf( relBMin.y * scale.y ), slot2[4] = (uint8_t)ceilf( relBMax.y * scale.y );
-				slot2[8] = (uint8_t)floorf( relBMin.z * scale.z ), slot2[12] = (uint8_t)ceilf( relBMax.z * scale.z );
-			}
-			if (node.child[1])
-			{
-				const bvhvec3 relBMin = childNode[1]->aabbMin - node.aabbMin, relBMax = childNode[1]->aabbMax - node.aabbMin;
-				slot0[1] = (uint8_t)floorf( relBMin.x * scale.x ), slot1[1] = (uint8_t)ceilf( relBMax.x * scale.x );
-				slot2[1] = (uint8_t)floorf( relBMin.y * scale.y ), slot2[5] = (uint8_t)ceilf( relBMax.y * scale.y );
-				slot2[9] = (uint8_t)floorf( relBMin.z * scale.z ), slot2[13] = (uint8_t)ceilf( relBMax.z * scale.z );
-			}
-			if (node.child[2])
-			{
-				const bvhvec3 relBMin = childNode[2]->aabbMin - node.aabbMin, relBMax = childNode[2]->aabbMax - node.aabbMin;
-				slot0[2] = (uint8_t)floorf( relBMin.x * scale.x ), slot1[2] = (uint8_t)ceilf( relBMax.x * scale.x );
-				slot2[2] = (uint8_t)floorf( relBMin.y * scale.y ), slot2[6] = (uint8_t)ceilf( relBMax.y * scale.y );
-				slot2[10] = (uint8_t)floorf( relBMin.z * scale.z ), slot2[14] = (uint8_t)ceilf( relBMax.z * scale.z );
-			}
-			if (node.child[3])
-			{
-				const bvhvec3 relBMin = childNode[3]->aabbMin - node.aabbMin, relBMax = childNode[3]->aabbMax - node.aabbMin;
-				slot0[3] = (uint8_t)floorf( relBMin.x * scale.x ), slot1[3] = (uint8_t)ceilf( relBMax.x * scale.x );
-				slot2[3] = (uint8_t)floorf( relBMin.y * scale.y ), slot2[7] = (uint8_t)ceilf( relBMax.y * scale.y );
-				slot2[11] = (uint8_t)floorf( relBMin.z * scale.z ), slot2[15] = (uint8_t)ceilf( relBMax.z * scale.z );
-			}
-			// finalize node
-			nodeBase[3] = bvhvec4(
-				*(float*)&childInfo[0], *(float*)&childInfo[1],
-				*(float*)&childInfo[2], *(float*)&childInfo[3]
-			);
-			// pop new work from the stack
-			if (retValPos > 0) ((uint32_t*)bvh4Alt)[retValPos] = baseAlt4Ptr;
-			if (stackPtr == 0) break;
-			nodeIdx = stack[--stackPtr];
-			retValPos = stack[--stackPtr];
-		}
-		usedAlt4aBlocks = newAlt4Ptr;
+		..
 	}
 	else if (from == BASIC_BVH4 && to == BVH4_AFRA)
 	{
