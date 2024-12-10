@@ -547,6 +547,7 @@ public:
 protected:
 	void IntersectTri( Ray& ray, const bvhvec4slice& verts, const uint32_t triIdx ) const;
 	static float IntersectAABB( const Ray& ray, const bvhvec3& aabbMin, const bvhvec3& aabbMax );
+	static void PrecomputeTriangle( const bvhvec4slice& vert, uint32_t triIndex, float* T );
 	static float SA( const bvhvec3& aabbMin, const bvhvec3& aabbMax );
 };
 
@@ -601,7 +602,6 @@ public:
 	void Intersect256Rays( Ray* first ) const;
 	void Intersect256RaysSSE( Ray* packet ) const; // requires BVH_USEAVX
 private:
-	void PrecomputeTriangle( const bvhvec4slice& vert, uint32_t triIndex, float* T );
 	bool ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, bvhvec3 minDim );
 	void RefitUpVerbose( uint32_t nodeIdx );
 	uint32_t FindBestNewPosition( const uint32_t Lid );
@@ -847,12 +847,12 @@ public:
 		uint32_t triCount[4];
 	};
 	BVH4_Afra( BVHContext ctx = {} ) { context = ctx; }
-	BVH4_Afra( const BVH4& original );
+	BVH4_Afra( const BVH4& original ) { ConvertFrom( original ); }
 	~BVH4_Afra() { AlignedFree( bvh4Node ); AlignedFree( bvh4Tris ); }
+	void ConvertFrom( const BVH4& original );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// BVH data
-	bvhvec4slice verts = {};		// pointer to input primitive array: 3x16 bytes per tri.
 	BVHNode* bvh4Node = 0;			// 128-byte 4-wide BVH node for efficient CPU rendering.
 	bvhvec4* bvh4Tris = 0;			// triangle data for BVHNode4Alt2 nodes.
 };
@@ -2391,6 +2391,91 @@ int32_t BVH4::Intersect( Ray& ray ) const
 		if (stackPtr == 0) break; else node = stack[--stackPtr];
 	}
 	return steps;
+}
+
+// BVH4_Afra implementation
+// ----------------------------------------------------------------------------
+
+void BVH4_Afra::ConvertFrom( const BVH4& original )
+{
+		// Convert a 4-wide BVH to a format suitable for CPU traversal.
+		// See Faster Incoherent Ray Traversal Using 8-Wide AVX InstructionsLayout,
+		// Atilla T. Áfra, 2013.
+		uint32_t spaceNeeded = original.usedNodes;
+		if (allocatedNodes < spaceNeeded)
+		{
+			AlignedFree( bvh4Node );
+			AlignedFree( bvh4Tris );
+			bvh4Node = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
+			bvh4Tris = (bvhvec4*)AlignedAlloc( original.idxCount * 4 * sizeof( bvhvec4 ) );
+			allocatedNodes = spaceNeeded;
+		}
+		memset( bvh4Node, 0, spaceNeeded * sizeof( BVHNode ) );
+		CopyBasePropertiesFrom( original );
+		// start conversion
+		uint32_t newAlt4Ptr = 0, nodeIdx = 0, stack[128], stackPtr = 0;
+		while (1)
+		{
+			const BVH4::BVHNode& orig = original.bvh4Node[nodeIdx];
+			BVHNode& newNode = bvh4Node[newAlt4Ptr++];
+			int32_t cidx = 0;
+			for (int32_t i = 0; i < 4; i++) if (orig.child[i])
+			{
+				const BVH4::BVHNode& child = original.bvh4Node[orig.child[i]];
+				((float*)&newNode.xmin4)[cidx] = child.aabbMin.x;
+				((float*)&newNode.ymin4)[cidx] = child.aabbMin.y;
+				((float*)&newNode.zmin4)[cidx] = child.aabbMin.z;
+				((float*)&newNode.xmax4)[cidx] = child.aabbMax.x;
+				((float*)&newNode.ymax4)[cidx] = child.aabbMax.y;
+				((float*)&newNode.zmax4)[cidx] = child.aabbMax.z;
+				if (child.isLeaf())
+					newNode.childFirst[cidx] = child.firstTri,
+					newNode.triCount[cidx] = child.triCount;
+				else
+					stack[stackPtr++] = (uint32_t)((uint32_t*)&newNode.childFirst[cidx] - (uint32_t*)bvh4Node),
+					stack[stackPtr++] = orig.child[i];
+				cidx++;
+			}
+			for (; cidx < 4; cidx++)
+			{
+				((float*)&newNode.xmin4)[cidx] = 1e30f, ((float*)&newNode.xmax4)[cidx] = 1.00001e30f;
+				((float*)&newNode.ymin4)[cidx] = 1e30f, ((float*)&newNode.ymax4)[cidx] = 1.00001e30f;
+				((float*)&newNode.zmin4)[cidx] = 1e30f, ((float*)&newNode.zmax4)[cidx] = 1.00001e30f;
+			}
+			// pop next task
+			if (!stackPtr) break;
+			nodeIdx = stack[--stackPtr];
+			uint32_t offset = stack[--stackPtr];
+			((uint32_t*)bvh4Node)[offset] = newAlt4Ptr;
+		}
+		// Convert index list: store primitives 'by value'.
+		// This also allows us to compact and reorder them for best performance.
+		stackPtr = 0, nodeIdx = 0;
+		uint32_t triPtr = 0;
+		while (1)
+		{
+			BVHNode& node = bvh4Node[nodeIdx];
+			for (int32_t i = 0; i < 4; i++) if (node.triCount[i] + node.childFirst[i] > 0)
+			{
+				if (!node.triCount[i]) stack[stackPtr++] = node.childFirst[i]; else
+				{
+					uint32_t first = node.childFirst[i];
+					uint32_t count = node.triCount[i];
+					node.childFirst[i] = triPtr;
+					// assign vertex data
+					for (uint32_t j = 0; j < count; j++)
+					{
+						uint32_t fi = original.triIdx[first + j];
+						PrecomputeTriangle( original.verts, fi * 3, (float*)&bvh4Tris[triPtr] );
+						bvh4Tris[triPtr + 3] = bvhvec4( 0, 0, 0, *(float*)&fi );
+						triPtr += 4;
+					}
+				}
+			}
+			if (!stackPtr) break;
+			nodeIdx = stack[--stackPtr];
+		}
+		usedNodes = newAlt4Ptr;
 }
 
 // BVH4_GPU implementation
@@ -4805,7 +4890,7 @@ float BVHBase::IntersectAABB( const Ray& ray, const bvhvec3& aabbMin, const bvhv
 
 // PrecomputeTriangle (helper), transforms a triangle to the format used in:
 // Fast Ray-Triangle Intersections by Coordinate Transformation. Baldwin & Weber, 2016.
-void BVH::PrecomputeTriangle( const bvhvec4slice& vert, uint32_t triIndex, float* T )
+void BVHBase::PrecomputeTriangle( const bvhvec4slice& vert, uint32_t triIndex, float* T )
 {
 	bvhvec3 v0 = vert[triIndex], v1 = vert[triIndex + 1], v2 = vert[triIndex + 2];
 	bvhvec3 e1 = v1 - v0, e2 = v2 - v0, N = cross( e1, e2 );
@@ -5024,84 +5109,7 @@ void BVH::Convert( const BVHLayout from, const BVHLayout to, const bool /* delet
 	}
 	else if (from == BASIC_BVH4 && to == BVH4_AFRA)
 	{
-		// Convert a 4-wide BVH to a format suitable for CPU traversal.
-		// See Faster Incoherent Ray Traversal Using 8-Wide AVX InstructionsLayout,
-		// Atilla T. Áfra, 2013.
-		uint32_t spaceNeeded = usedBVH4Nodes;
-		if (allocatedAlt4bNodes < spaceNeeded)
-		{
-			FATAL_ERROR_IF( bvh4Node == 0, "BVH::Convert( BASIC_BVH4, BVH4_AFRA ), bvh4Node == 0." );
-			AlignedFree( bvh4Alt2 );
-			AlignedFree( bvh4Tris );
-			bvh4Alt2 = (BVHNode4Alt2*)AlignedAlloc( spaceNeeded * sizeof( BVHNode4Alt2 ) );
-			bvh4Tris = (bvhvec4*)AlignedAlloc( idxCount * 4 * sizeof( bvhvec4 ) );
-			allocatedAlt4bNodes = spaceNeeded;
-		}
-		memset( bvh4Alt2, 0, spaceNeeded * sizeof( BVHNode4Alt2 ) );
-		// start conversion
-		uint32_t newAlt4Ptr = 0, nodeIdx = 0, stack[128], stackPtr = 0;
-		while (1)
-		{
-			const BVHNode4& orig = bvh4Node[nodeIdx];
-			BVHNode4Alt2& newNode = bvh4Alt2[newAlt4Ptr++];
-			int32_t cidx = 0;
-			for (int32_t i = 0; i < 4; i++) if (orig.child[i])
-			{
-				const BVHNode4& child = bvh4Node[orig.child[i]];
-				((float*)&newNode.xmin4)[cidx] = child.aabbMin.x;
-				((float*)&newNode.ymin4)[cidx] = child.aabbMin.y;
-				((float*)&newNode.zmin4)[cidx] = child.aabbMin.z;
-				((float*)&newNode.xmax4)[cidx] = child.aabbMax.x;
-				((float*)&newNode.ymax4)[cidx] = child.aabbMax.y;
-				((float*)&newNode.zmax4)[cidx] = child.aabbMax.z;
-				if (child.isLeaf())
-					newNode.childFirst[cidx] = child.firstTri,
-					newNode.triCount[cidx] = child.triCount;
-				else
-					stack[stackPtr++] = (uint32_t)((uint32_t*)&newNode.childFirst[cidx] - (uint32_t*)bvh4Alt2),
-					stack[stackPtr++] = orig.child[i];
-				cidx++;
-			}
-			for (; cidx < 4; cidx++)
-			{
-				((float*)&newNode.xmin4)[cidx] = 1e30f, ((float*)&newNode.xmax4)[cidx] = 1.00001e30f;
-				((float*)&newNode.ymin4)[cidx] = 1e30f, ((float*)&newNode.ymax4)[cidx] = 1.00001e30f;
-				((float*)&newNode.zmin4)[cidx] = 1e30f, ((float*)&newNode.zmax4)[cidx] = 1.00001e30f;
-			}
-			// pop next task
-			if (!stackPtr) break;
-			nodeIdx = stack[--stackPtr];
-			uint32_t offset = stack[--stackPtr];
-			((uint32_t*)bvh4Alt2)[offset] = newAlt4Ptr;
-		}
-		// Convert index list: store primitives 'by value'.
-		// This also allows us to compact and reorder them for best performance.
-		stackPtr = 0, nodeIdx = 0;
-		uint32_t triPtr = 0;
-		while (1)
-		{
-			BVHNode4Alt2& node = bvh4Alt2[nodeIdx];
-			for (int32_t i = 0; i < 4; i++) if (node.triCount[i] + node.childFirst[i] > 0)
-			{
-				if (!node.triCount[i]) stack[stackPtr++] = node.childFirst[i]; else
-				{
-					uint32_t first = node.childFirst[i];
-					uint32_t count = node.triCount[i];
-					node.childFirst[i] = triPtr;
-					// assign vertex data
-					for (uint32_t j = 0; j < count; j++)
-					{
-						uint32_t fi = triIdx[first + j];
-						PrecomputeTriangle( verts, fi * 3, (float*)&bvh4Tris[triPtr] );
-						bvh4Tris[triPtr + 3] = bvhvec4( 0, 0, 0, *(float*)&fi );
-						triPtr += 4;
-					}
-				}
-			}
-			if (!stackPtr) break;
-			nodeIdx = stack[--stackPtr];
-		}
-		usedAlt4bNodes = newAlt4Ptr;
+		..
 	}
 	else if (from == BASIC_BVH4 && to == BVH4_WIVE)
 	{
