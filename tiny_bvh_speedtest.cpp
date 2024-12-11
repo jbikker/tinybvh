@@ -70,9 +70,9 @@ float traceTime, buildTime, * refDist = 0, * refDistFull = 0;
 unsigned refOccluded = 0, * refOccl = 0;
 
 // bvh layouts
-BVH* bvh = 0;
+BVH* bvh = new BVH();
 BVH_Verbose* bvh_verbose = 0;
-BVH_Double* bvh_double = 0;
+BVH_Double* bvh_double = new BVH_Double();
 BVH_SoA* bvh_soa = 0;
 BVH_GPU* bvh_gpu = 0;
 BVH4* bvh4 = 0;
@@ -575,6 +575,7 @@ int main()
 #ifdef TRAVERSE_CWBVH
 
 	// CWBVH - Not efficient on CPU.
+	if (!bvh8) bvh8 = new BVH8( *bvh );
 	if (!cwbvh) cwbvh = new BVH8_CWBVH( *bvh8 );
 	printf( "- BVH8/CWBVH  - primary: " );
 	traceTime = TestPrimaryRays( _CWBVH, smallBatch, Nsmall, 3 );
@@ -608,7 +609,7 @@ int main()
 #if defined TRAVERSE_OPTIMIZED_ST || defined TRAVERSE_4WAY_OPTIMIZED
 
 	printf( "Optimized BVH performance - Optimizing... " );
-	if (!bvh_verbose) bvh_verbose->ConvertFrom( *bvh );
+	if (!bvh_verbose) bvh_verbose = new BVH_Verbose( *bvh );
 	t.reset();
 	bvh_verbose->Optimize( 1000000 ); // optimize the raw SBVH
 	bvh->ConvertFrom( *bvh_verbose );

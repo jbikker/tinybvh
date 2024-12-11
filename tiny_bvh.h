@@ -724,7 +724,7 @@ public:
 		bool isLeaf() const { return triCount > 0; }
 	};
 	BVH_Verbose( BVHContext ctx = {} ) { context = ctx; }
-	BVH_Verbose( const BVH& original );
+	BVH_Verbose( const BVH& original ) { ConvertFrom( original ); }
 	~BVH_Verbose() { AlignedFree( bvhNode ); }
 	void ConvertFrom( const BVH& original );
 	float SAHCost( const uint32_t nodeIdx = 0 ) const;
