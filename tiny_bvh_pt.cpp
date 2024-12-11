@@ -201,6 +201,7 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 	// render tiles
 	const float scale = 1.0f / spp++;
 
+	tileIdx = 0;
 	std::vector<std::thread> threads;
 
 	for (int i = 0; i < threadCount; ++i) {
