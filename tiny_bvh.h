@@ -661,7 +661,7 @@ public:
 
 #endif
 
-class BVH_AilaLaine : public BVHBase
+class BVH_GPU : public BVHBase
 {
 public:
 	struct BVHNode
@@ -675,9 +675,9 @@ public:
 		bvhvec3 rmax; uint32_t firstTri; // total: 64 bytes
 		bool isLeaf() const { return triCount > 0; }
 	};
-	BVH_AilaLaine( BVHContext ctx = {} ) { context = ctx; }
-	BVH_AilaLaine( const BVH& original ) { ConvertFrom( original ); }
-	~BVH_AilaLaine() { AlignedFree( bvhNode ); }
+	BVH_GPU( BVHContext ctx = {} ) { context = ctx; }
+	BVH_GPU( const BVH& original ) { ConvertFrom( original ); }
+	~BVH_GPU() { AlignedFree( bvhNode ); }
 	void ConvertFrom( const BVH& original );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
@@ -762,7 +762,7 @@ public:
 		bool isLeaf() const { return triCount > 0; }
 	};
 	BVH4( BVHContext ctx = {} ) { context = ctx; }
-	BVH4( const BVH& original );
+	BVH4( const BVH& original ) { ConvertFrom( original ); }
 	~BVH4() { AlignedFree( bvh4Node ); }
 	void ConvertFrom( const BVH& original );
 	int32_t Intersect( Ray& ray ) const;
@@ -835,7 +835,7 @@ public:
 	uint32_t usedBlocks = 0;		// actually used storage.
 };
 
-class BVH4_Afra : public BVHBase
+class BVH4_CPU : public BVHBase
 {
 public:
 	struct BVHNode
@@ -848,9 +848,9 @@ public:
 		uint32_t childFirst[4];
 		uint32_t triCount[4];
 	};
-	BVH4_Afra( BVHContext ctx = {} ) { context = ctx; }
-	BVH4_Afra( const BVH4& original ) { ConvertFrom( original ); }
-	~BVH4_Afra() { AlignedFree( bvh4Node ); AlignedFree( bvh4Tris ); }
+	BVH4_CPU( BVHContext ctx = {} ) { context = ctx; }
+	BVH4_CPU( const BVH4& original ) { ConvertFrom( original ); }
+	~BVH4_CPU() { AlignedFree( bvh4Node ); AlignedFree( bvh4Tris ); }
 	void ConvertFrom( const BVH4& original );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
@@ -2154,10 +2154,10 @@ void BVH_Verbose::MergeLeafs()
 	triIdx = newIdx, may_have_holes = true; // all over the place, in fact
 }
 
-// BVH_AilaLaine implementation
+// BVH_GPU implementation
 // ----------------------------------------------------------------------------
 
-void BVH_AilaLaine::ConvertFrom( const BVH& original )
+void BVH_GPU::ConvertFrom( const BVH& original )
 {
 	// allocate space
 	const uint32_t spaceNeeded = original.usedNodes;
@@ -2201,7 +2201,7 @@ void BVH_AilaLaine::ConvertFrom( const BVH& original )
 	usedNodes = newNodePtr;
 }
 
-int32_t BVH_AilaLaine::Intersect( Ray& ray ) const
+int32_t BVH_GPU::Intersect( Ray& ray ) const
 {
 	BVHNode* node = &bvhNode[0], * stack[64];
 	uint32_t stackPtr = 0, steps = 0;
@@ -2244,7 +2244,7 @@ int32_t BVH_AilaLaine::Intersect( Ray& ray ) const
 	return steps;
 }
 
-bool BVH_AilaLaine::IsOccluded( const Ray& ray ) const
+bool BVH_GPU::IsOccluded( const Ray& ray ) const
 {
 	BVHNode* node = &bvhNode[0], * stack[64];
 	uint32_t stackPtr = 0;
@@ -2440,10 +2440,10 @@ int32_t BVH4::Intersect( Ray& ray ) const
 	return steps;
 }
 
-// BVH4_Afra implementation
+// BVH4_CPU implementation
 // ----------------------------------------------------------------------------
 
-void BVH4_Afra::ConvertFrom( const BVH4& original )
+void BVH4_CPU::ConvertFrom( const BVH4& original )
 {
 	// Convert a 4-wide BVH to a format suitable for CPU traversal.
 	// See Faster Incoherent Ray Traversal Using 8-Wide AVX InstructionsLayout,
@@ -3801,7 +3801,7 @@ inline void IntersectCompactTri( Ray& r, __m128& t4, const float* T )
 	const bool hit = u >= 0 && v >= 0 && u + v < 1;
 	if (hit) r.hit = { ta, u, v, *(uint32_t*)&T[15] }, t4 = _mm_set1_ps( ta );
 }
-int32_t BVH4_Afra::Intersect( Ray& ray ) const
+int32_t BVH4_CPU::Intersect( Ray& ray ) const
 {
 	uint32_t nodeIdx = 0, stack[1024], stackPtr = 0, steps = 0;
 	const __m128 ox4 = _mm_set1_ps( ray.O.x ), rdx4 = _mm_set1_ps( ray.rD.x );
@@ -3965,7 +3965,7 @@ inline bool OccludedCompactTri( const Ray& r, const float* T )
 #pragma GCC push_options
 #pragma GCC optimize ("-O1") // TODO: I must be doing something wrong, figure out what.
 #endif
-bool BVH4_Afra::IsOccluded( const Ray& ray ) const
+bool BVH4_CPU::IsOccluded( const Ray& ray ) const
 {
 	uint32_t nodeIdx = 0, stack[1024], stackPtr = 0;
 	const __m128 ox4 = _mm_set1_ps( ray.O.x ), rdx4 = _mm_set1_ps( ray.rD.x );
@@ -4444,7 +4444,7 @@ inline int32_t ARMVecMovemask( uint32x4_t v ) {
 	return vaddvq_u32( vshlq_u32( vshrq_n_u32( v, 31 ), shift ) );
 }
 
-int32_t BVH4_Afra::Intersect( Ray& ray ) const
+int32_t BVH4_CPU::Intersect( Ray& ray ) const
 {
 	uint32_t nodeIdx = 0, stack[1024], stackPtr = 0, steps = 0;
 	const float32x4_t ox4 = vdupq_n_f32( ray.O.x ), rdx4 = vdupq_n_f32( ray.rD.x );
