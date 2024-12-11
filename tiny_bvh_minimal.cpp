@@ -51,8 +51,8 @@ int main()
 	{
 		tinybvh::BVH bvh;
 		bvh.Build( triangles, TRIANGLE_COUNT );
-		bvh.Convert( tinybvh::BVH::WALD_32BYTE, tinybvh::BVH::VERBOSE );
-		bvh.Refit( tinybvh::BVH::VERBOSE );
+		// bvh.Convert( tinybvh::BVH::WALD_32BYTE, tinybvh::BVH::VERBOSE );
+		// bvh.Refit( tinybvh::BVH::VERBOSE );
 
 		// from here: play with the BVH!
 		int steps = bvh.Intersect( ray );

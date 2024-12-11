@@ -12,7 +12,7 @@
 using namespace tinybvh;
 
 BVH bvh;
-BVH_AilaLaine bvh2;
+BVH_SoA bvh2;
 
 #ifdef LOADSCENE
 bvhvec4* triangles = 0;
