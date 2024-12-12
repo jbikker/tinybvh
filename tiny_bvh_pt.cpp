@@ -209,7 +209,7 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 	}
 	// render tiles
 	const float scale = 1.0f / spp++;
-	tileIdx = 0;
+	tileIdx = threadCount;
 	std::vector<std::thread> threads;
 	for (uint32_t i = 0; i < threadCount; i++)
 		threads.emplace_back( &TraceWorkerThread, buf, scale, i );
