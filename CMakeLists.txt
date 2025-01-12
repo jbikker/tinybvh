@@ -34,9 +34,7 @@ add_executable(tiny_bvh_minimal tiny_bvh_minimal.cpp)
 add_executable(tiny_bvh_renderer tiny_bvh_renderer.cpp)
 add_executable(tiny_bvh_speedtest tiny_bvh_speedtest.cpp)
 if (NOT EMSCRIPTEN) # EMSCRIPTEN doesn't render anything by default (you would need WebGL/WebGPU)
-if (NOT UNIX) # For some reason, X11 suddenly broke on Github.	
 	add_executable(tiny_bvh_fenster tiny_bvh_fenster.cpp)
-endif()
 endif()
 
 target_include_directories(tiny_bvh_speedtest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/external/OpenCL/inc)
