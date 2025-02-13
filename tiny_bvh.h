@@ -2006,7 +2006,7 @@ void BVH::BuildHQ()
 					for (uint32_t i = 0; i < HQBVHBINS - 1; i++)
 					{
 						const float Cspatial = C_TRAV + C_INT * rSAV * (ANL[i] + ANR[i]);
-						if (Cspatial < splitCost && NL[i] + NR[i] < budget)
+						if (Cspatial < splitCost && NL[i] + NR[i] < budget && ANL[i] * ANR[i] > 0)
 						{
 							spatial = true, splitCost = Cspatial, bestAxis = a, bestPos = i;
 							bestLMin = lBMin[i], bestLMax = lBMax[i], bestRMin = rBMin[i], bestRMax = rBMax[i];
@@ -2020,7 +2020,6 @@ void BVH::BuildHQ()
 			float noSplitCost = (float)node.triCount * C_INT;
 			if (splitCost >= noSplitCost)
 			{
-				bvhvec3 nodeMin( BVH_FAR ), nodeMax( -BVH_FAR );
 				for (uint32_t i = 0; i < node.triCount; i++)
 					primIdx[node.leftFirst + i] = fragment[primIdx[node.leftFirst + i]].primIdx;
 				break; // not splitting is better.
@@ -2108,7 +2107,15 @@ void BVH::BuildHQ()
 			memcpy( triIdxA + sliceStart, triIdxB + sliceStart, (sliceEnd - sliceStart) * 4 );
 			// create child nodes
 			uint32_t leftCount = A - sliceStart, rightCount = sliceEnd - B;
-			if (leftCount == 0 || rightCount == 0) break;
+			if (leftCount == 0 || rightCount == 0)
+			{
+				// spatial split failed. We shouldn't get here, but we do sometimes..
+				for (uint32_t i = 0; i < node.triCount; i++)
+					primIdx[node.leftFirst + i] = fragment[primIdx[node.leftFirst + i]].primIdx;
+				node.aabbMin = tinybvh_min( bestLMin, bestRMin );
+				node.aabbMax = tinybvh_max( bestLMax, bestRMax );
+				break;
+			}
 			int32_t leftChildIdx = newNodePtr++, rightChildIdx = newNodePtr++;
 			bvhNode[leftChildIdx].aabbMin = bestLMin, bvhNode[leftChildIdx].aabbMax = bestLMax;
 			bvhNode[leftChildIdx].leftFirst = sliceStart, bvhNode[leftChildIdx].triCount = leftCount;
@@ -2286,13 +2293,13 @@ int32_t BVH::Intersect( Ray& ray ) const
 				#else
 					ray.hit.prim = (ray.hit.prim & PRIM_IDX_MASK) + ray.instIdx;
 				#endif
+				}
 			}
-		}
 			else for (uint32_t i = 0; i < node->triCount; i++, cost += C_INT)
 				IntersectTri( ray, verts, primIdx[node->leftFirst + i] );
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
-	}
+		}
 		BVHNode* child1 = &bvhNode[node->leftFirst];
 		BVHNode* child2 = &bvhNode[node->leftFirst + 1];
 		float dist1 = child1->Intersect( ray ), dist2 = child2->Intersect( ray );
@@ -2306,7 +2313,7 @@ int32_t BVH::Intersect( Ray& ray ) const
 			node = child1; /* continue with the nearest */
 			if (dist2 != BVH_FAR) stack[stackPtr++] = child2; /* push far child */
 		}
-}
+	}
 	return cost;
 }
 
