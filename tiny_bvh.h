@@ -1814,6 +1814,18 @@ void BVH::BuildHQ( const bvhvec4slice& vertices, const uint32_t* indices, uint32
 
 void BVH::PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
 {
+#ifdef SLICEDUMP
+	// this code dumps the passed geometry data to a file - for debugging only.
+	std::fstream df{ "dump.bin", df.binary | df.out };
+	uint32_t vcount = vertices.count, indexed = indices == 0 ? 0 : 1, stride = vertices.stride;
+	uint32_t pcount = indices ? prims : (vertices.count / 3);
+	df.write((char*)&pcount, 4);
+	df.write((char*)&vcount, 4);
+	df.write((char*)&stride, 4);
+	df.write((char*)&indexed, sizeof(uint32_t));
+	df.write((char*)vertices.data, vertices.stride * vertices.count);
+	if (indexed) df.write((char*)indices, prims * 3 * 4);
+#endif
 	uint32_t primCount = prims > 0 ? prims : vertices.count / 3;
 	const uint32_t slack = primCount >> 1; // for split prims
 	const uint32_t spaceNeeded = primCount * 3;
