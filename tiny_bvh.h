@@ -86,7 +86,8 @@ THE SOFTWARE.
 #define TINY_BVH_H_
 
 // Run-time checks; disabled by default.
-// #define PARANOID
+// #define PARANOID // checks out-of-bound access of slices
+// #define SLICEDUMP // dumps the slice used for building to a file
 
 // Binned BVH building: bin count.
 #ifndef BVHBINS
@@ -625,7 +626,8 @@ public:
 		LAYOUT_BVH4_CPU,
 		LAYOUT_BVH4_GPU,
 		LAYOUT_MBVH8,
-		LAYOUT_CWBVH
+		LAYOUT_CWBVH,
+		LAYOUT_BVH4_AVX2
 	};
 	struct ALIGNED( 32 ) Fragment
 	{
@@ -730,7 +732,7 @@ public:
 	bool IsOccluded( const Ray& ray ) const;
 	void Intersect256Rays( Ray* first ) const;
 	void Intersect256RaysSSE( Ray* packet ) const; // requires BVH_USEAVX
-private:
+	// private:
 	void PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build();
 	bool IsOccludedTLAS( const Ray& ray ) const;
@@ -1127,6 +1129,35 @@ public:
 };
 
 #endif
+
+// Experimental & 'under construction' structs
+
+class BVH4_WiVe : public BVHBase
+{
+public:
+	struct BVHNode
+	{
+		// 4-way BVH node, optimized for CPU rendering.
+		// Based on: "Accelerated Single Ray Tracing for Wide Vector Units",
+		// Fuetterling1 et al., 2017.
+		union { SIMDVEC8 xminmax8; float xminmax[8]; }; // x0max,x1max,..,x3max; x0min,x1min,..,x3min
+		union { SIMDVEC8 yminmax8; float yminmax[8]; }; // y0max,y1max,..,y3max; y0min,x1min,..,y3min
+		union { SIMDVEC8 zminmax8; float zminmax[8]; }; // z0max,z1max,..,z3max; z0min,x1min,..,z3min
+		union { SIMDVEC8 sn8; float sn[8]; }; // n0..3, s0..3; total size =  128 bytes.
+		// n_i: inner node flag + child node cluster offset
+	};
+	BVH4_WiVe( BVHContext ctx = {} ) { layout = LAYOUT_BVH4_AVX2; context = ctx; }
+	~BVH4_WiVe();
+	void Build( const bvhvec4* vertices, const uint32_t primCount );
+	void Build( const bvhvec4slice& vertices );
+	void ConvertFrom( MBVH<4>& original, bool compact = true );
+	int32_t Intersect( Ray& ray ) const;
+	bool IsOccluded( const Ray& ray ) const;
+	// BVH4 data
+	bvhvec4slice verts = {};		// pointer to input primitive array: 3x16 bytes per tri.
+	uint32_t* primIdx = 0;			// primitive index array - pointer copied from original.
+	BVHNode* bvh4Node = 0;			// 128-byte 4-wide BVH node for efficient CPU rendering.
+};
 
 } // namespace tinybvh
 
@@ -1587,6 +1618,18 @@ void BVH::Build( BLASInstance* instances, const uint32_t instCount, BVHBase** bl
 
 void BVH::PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
 {
+#ifdef SLICEDUMP
+	// this code dumps the passed geometry data to a file - for debugging only.
+	std::fstream df{ "dump.bin", df.binary | df.out };
+	uint32_t vcount = vertices.count, indexed = indices == 0 ? 0 : 1, stride = vertices.stride;
+	uint32_t pcount = indices ? prims : (vertices.count / 3);
+	df.write( (char*)&pcount, 4 );
+	df.write( (char*)&vcount, 4 );
+	df.write( (char*)&stride, 4 );
+	df.write( (char*)&indexed, sizeof( uint32_t ) );
+	df.write( (char*)vertices.data, vertices.stride * vertices.count );
+	if (indexed) df.write( (char*)indices, prims * 3 * 4 );
+#endif
 	uint32_t primCount = prims > 0 ? prims : vertices.count / 3;
 	const uint32_t spaceNeeded = primCount * 2; // upper limit
 	// allocate memory on first build
@@ -2231,13 +2274,13 @@ int32_t BVH::Intersect( Ray& ray ) const
 				#else
 					ray.hit.prim = (ray.hit.prim & PRIM_IDX_MASK) + ray.instIdx;
 				#endif
-				}
 			}
+		}
 			else for (uint32_t i = 0; i < node->triCount; i++, cost += C_INT)
 				IntersectTri( ray, verts, primIdx[node->leftFirst + i] );
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
-		}
+	}
 		BVHNode* child1 = &bvhNode[node->leftFirst];
 		BVHNode* child2 = &bvhNode[node->leftFirst + 1];
 		float dist1 = child1->Intersect( ray ), dist2 = child2->Intersect( ray );
@@ -2251,7 +2294,7 @@ int32_t BVH::Intersect( Ray& ray ) const
 			node = child1; /* continue with the nearest */
 			if (dist2 != BVH_FAR) stack[stackPtr++] = child2; /* push far child */
 		}
-	}
+}
 	return cost;
 }
 
@@ -5409,6 +5452,71 @@ bool BVH4_CPU::IsOccluded( const Ray& ray ) const
 }
 #ifdef __GNUC__
 #pragma GCC pop_options
+#endif
+
+#if 0 // under construction
+
+uint32_t signShiftAmount( const bool positiveX, bool positiveY, bool positiveZ )
+{
+	return ((positiveX ? 0b001 : 0u) | (positiveY ? 0b010 : 0u) | (positiveZ ? 0b100 : 0u)) * 3;
+}
+
+int32_t BVH4_WiVe::Intersect( Ray& ray ) const
+{
+	__m256 ox8 = _mm256_set1_ps( ray.O.x ), rdx8 = _mm256_set1_ps( ray.rD.x );
+	__m256 oy8 = _mm256_set1_ps( ray.O.y ), rdy8 = _mm256_set1_ps( ray.rD.y );
+	__m256 oz8 = _mm256_set1_ps( ray.O.z ), rdz8 = _mm256_set1_ps( ray.rD.z );
+	__m256 t8 = _mm256_set1_ps( ray.hit.t );
+	__m256i signShift8 = _mm256_set1_epi32( (ray.D.x > 0 ? 3 : 0) + (ray.D.y > 0 ? 6 : 0) + (ray.D.z > 0 ? 12 : 0) );
+	struct StackEntry { uint32_t node; float dist; };
+	ALIGNED( 64 ) StackEntry stack[64];
+	// std::fill( std::begin( stackDistances ), std::end( stackDistances ), std::numeric_limits<float>::max() );
+	uint32_t stackPtr = 1;
+	stack[0].node = 0, stack[0].dist = 0;
+	while (stackPtr > 0)
+	{
+		stackPtr--;
+		uint32_t nodeIdx = stack[--stackPtr].node; // mask with ((1u << 29) - 1) ?
+		const BVHNode& node = bvh4Node[nodeIdx];
+		if (!node.isLeaf())
+		{
+			__m256i child8;
+			__m256 dist8;
+			uint32_t numChildren = intersectInnerNode( node, simdRay, childrenSIMD, distancesSIMD );
+			if (numChildren > 0)
+			{
+				_mm256_storeu_si256( child8, .. ); // childrenSIMD.store( std::span( stackCompressedNodeHandles.data() + stackPtr, 8 ) );
+				_mm256_storeu_ps( dist8, .. ); // distancesSIMD.store( std::span( stackDistances.data() + stackPtr, 8 ) );
+				stackPtr += numChildren;
+			}
+		}
+		else // leaf
+		{
+			if (intersectLeaf( &m_leafIndexAllocator.get( handle ), leafNodePrimitiveCount( compressedNodeHandle ), ray, si ))
+			{
+				t8 = _mm256_set1_ps( ray.hit.t );
+				// compress stack
+				uint32_t outStackPtr = 0;
+				for (size_t i = 0; i < stackPtr; i += 8)
+				{
+					__m256i node8 = _mm256_load_si256( .. ); // node8.loadAligned( std::span( stackCompressedNodeHandles.data() + i, 8 ) );
+					__m256 dist8 = _mm256_load_ps( .. ); // dist8.loadAligned( std::span( stackDistances.data() + i, 8 ) );
+					__m256 mask8 = _mm256_cmp_ps( _CMP_LT_OQ, dist8, t8 );
+					__m256i cpi = mask8.computeCompressPermutation(); // ?
+					dist8 = dist8.permute( cpi );
+					node8 = node8.permute( cpi );
+					_mm256_storeu_ps( dist8, .. ); // dist8.store( std::span( stackDistances.data() + outStackPtr, 8 ) );
+					_mm256_storeu_si256( node8, .. ); // node8.store( std::span( stackCompressedNodeHandles.data() + outStackPtr, 8 ) );
+					uint32_t numItems = tinybvh_min( 8, stackPtr - i );
+					uint32_t validMask = (1 << numItems) - 1;
+					outStackPtr += mask8.count( validMask ); // ?
+				}
+				stackPtr = outStackPtr;
+			}
+		}
+	}
+}
+
 #endif
 
 #endif // BVH_USEAVX
