@@ -8,7 +8,7 @@
 #define SCRHEIGHT	320
 
 // GPU ray tracing
-// #define ENABLE_OPENCL
+#define ENABLE_OPENCL
 
 #if 1
 
@@ -23,21 +23,21 @@
 #define REFIT_MBVH4
 #define REFIT_MBVH8
 #define TRAVERSE_2WAY_ST
-#define TRAVERSE_ALT2WAY_ST
-#define TRAVERSE_SOA2WAY_ST
+// #define TRAVERSE_ALT2WAY_ST
+// #define TRAVERSE_SOA2WAY_ST
 #define TRAVERSE_4WAY
 #define TRAVERSE_8WAY
 #define TRAVERSE_2WAY_DBL
 // #define TRAVERSE_CWBVH
 #define TRAVERSE_2WAY_MT
 #define TRAVERSE_2WAY_MT_PACKET
-#define TRAVERSE_OPTIMIZED_ST
-#define TRAVERSE_8WAY_OPTIMIZED
+// #define TRAVERSE_OPTIMIZED_ST
+// #define TRAVERSE_8WAY_OPTIMIZED
 // #define EMBREE_BUILD // win64-only for now.
 // #define EMBREE_TRAVERSE // win64-only for now.
-#define MADMAN_BUILD_FAST
-#define MADMAN_BUILD_HQ
-#define MADMAN_TRAVERSE
+// #define MADMAN_BUILD_FAST
+// #define MADMAN_BUILD_HQ
+// #define MADMAN_TRAVERSE
 // GPU rays: only if ENABLE_OPENCL is defined.
 #define GPU_2WAY
 #define GPU_4WAY
@@ -45,7 +45,7 @@
 
 #else
 
-// debug run
+// specialized debug run
 #define TRAVERSE_8WAY
 
 #endif
@@ -100,7 +100,7 @@ bvhvec4* triangles = 0;
 #include <fstream>
 int verts = 0;
 float avgCost = 0;
-float traceTime, buildTime, refitTime, * refDist = 0, * refDistFull = 0, refU, refV;
+float traceTime, buildTime, refitTime, * refDist = 0, * refDistFull = 0, refU, refV, refUFull, refVFull;
 unsigned refOccluded[3] = {}, * refOccl[3] = {};
 unsigned Nfull, Nsmall;
 Ray* fullBatch[3], * smallBatch[3], * smallDiffuse[3];
@@ -359,12 +359,12 @@ void ValidateTraceResult( float* ref, unsigned N, unsigned line )
 		exit( 1 );
 	#endif
 	}
-	diff = fabs( refU - batchU );
+	diff = fabs( (N == Nsmall ? refU : refUFull) - batchU );
 	if (diff / refU > 0.05f) // watertight has a big effect here; we just want to catch disasters.
 	{
 		printf( "!! Validation for u failed on line %i: %.1f != %.1f\n", line, refU, batchU );
 	}
-	diff = fabs( refV - batchV );
+	diff = fabs( (N == Nsmall ? refV : refVFull) - batchV );
 	if (diff / refV > 0.05f) // watertight has a big effect here; we just want to catch disasters.
 	{
 		printf( "!! Validation for v failed on line %i: %.1f != %.1f\n", line, refV, batchV );
@@ -562,7 +562,7 @@ int main()
 		if (i == 0)
 		{
 			refDist[j] = ray.hit.t;
-			if ((j & 3) == 0) if (ray.hit.t < 100) refU += ray.hit.u, refV += ray.hit.v;
+			if (ray.hit.t < 100) if ((j & 3) == 0) refU += ray.hit.u, refV += ray.hit.v;
 		}
 		if (ray.hit.t < 100)
 		{
@@ -716,9 +716,12 @@ int main()
 			}
 		} );
 	typename bvh::v2::DefaultBuilder<_Node>::Config config;
-#endif
+	config.quality = bvh::v2::DefaultBuilder<_Node>::Quality::High;
+	auto madmanbvh = bvh::v2::DefaultBuilder<_Node>::build( thread_pool, bboxes, centers, config );
+#else
 	config.quality = bvh::v2::DefaultBuilder<_Node>::Quality::High;
 	madmanbvh = bvh::v2::DefaultBuilder<_Node>::build( thread_pool, bboxes, centers, config );
+#endif
 	buildTime = t.elapsed();
 	printf( "%7.2fms for %7i triangles\n", buildTime * 1000.0f, verts / 3 );
 
@@ -912,7 +915,7 @@ int main()
 		bvh4_cpu = new BVH4_CPU();
 		bvh4_cpu->BuildHQ( triangles, verts / 3 );
 	}
-	printf( "- BVH4_CPU    - primary: " );
+	printf( "- BVH4 (SSE)  - primary: " );
 	PrepareTest();
 	traceTime = TestPrimaryRays( _CPU4, Nsmall, 3 );
 	ValidateTraceResult( refDist, Nsmall, __LINE__ );
@@ -934,7 +937,7 @@ int main()
 		bvh8_cpu = new BVH8_CPU();
 		bvh8_cpu->BuildHQ( triangles, verts / 3 );
 	}
-	printf( "- BVH8_CPU    - primary: " );
+	printf( "- BVH8 (AVX2) - primary: " );
 	PrepareTest();
 	traceTime = TestPrimaryRays( _CPU8, Nsmall, 3 );
 	ValidateTraceResult( refDist, Nsmall, __LINE__ );
@@ -1055,7 +1058,12 @@ int main()
 		threads.emplace_back( &IntersectBvhWorkerThread, batchCount, fullBatch[0], i );
 	for (auto& thread : threads) thread.join();
 	refDistFull = new float[Nfull];
-	for (unsigned i = 0; i < Nfull; i++) refDistFull[i] = fullBatch[0][i].hit.t;
+	refUFull = 0, refVFull = 0;
+	for (unsigned i = 0; i < Nfull; i++)
+	{
+		refDistFull[i] = fullBatch[0][i].hit.t;
+		if ((i & 3) == 0) refUFull += fullBatch[0][i].hit.u, refVFull += fullBatch[0][i].hit.v;
+	}
 
 #ifdef GPU_2WAY
 
@@ -1342,6 +1350,60 @@ int main()
 	for (int i = 0; i < 3; i++) tinybvh::free64( rayhits[i] );
 
 #endif
+
+#ifdef MADMAN_TRAVERSE
+
+	printf( "BVH traversal speed - Madmann91 reference\n" );
+	printf( "- HQ BVH      - primary: " );
+	static constexpr size_t invalid_id = 9999999;
+	static constexpr size_t stack_size = 64;
+	static constexpr bool use_robust_traversal = false;
+	auto prim_id = invalid_id;
+	_Scalar u, v;
+	// This precomputes some data to speed up traversal further.
+	std::vector<PrecomputedTri> precomputed_tris( tris.size() );
+	executor.for_each( 0, tris.size(), [&]( size_t begin, size_t end )
+		{
+			for (size_t i = begin; i < end; ++i)
+			{
+				auto j = madmanbvh.prim_ids[i];
+				precomputed_tris[i] = tris[j];
+			}
+		} );
+	// Process ray batches
+	bvh::v2::SmallStack<_Bvh::Index, stack_size> stack;
+	for (unsigned pass = 0; pass < 4; pass++)
+	{
+		uint32_t view = pass == 0 ? 0 : (3 - pass); // 0, 2, 1, 0
+		Ray* batch = smallBatch[view];
+		if (pass == 1) t.reset();
+		for (unsigned i = 0; i < Nsmall; i++)
+		{
+			Ray& r = batch[i];
+			auto ray = _Ray{
+				_Vec3( r.O.x, r.O.y, r.O.z ),	// Ray origin
+				_Vec3( r.D.x, r.D.y, r.D.z ),	// Ray direction
+				0.f,							// Minimum intersection distance
+				100.f							// Maximum intersection distance
+			};
+			// Traverse the BVH and get the u, v coordinates of the closest intersection.
+			madmanbvh.intersect<false, use_robust_traversal>( ray, madmanbvh.get_root().index, stack,
+				[&]( size_t begin, size_t end ) {
+					for (size_t i = begin; i < end; ++i) {
+						if (auto hit = precomputed_tris[i].intersect( ray )) {
+							prim_id = i;
+							std::tie( ray.tmax, u, v ) = *hit;
+						}
+					}
+					return prim_id != invalid_id;
+				} );
+		}
+	}
+	traceTime = t.elapsed() / 3.0f;
+	printf( "%7.2fMRays/s,  ", (float)Nsmall / traceTime * 1e-6f );
+
+#endif
+
 #endif
 
 	// verify memory management
