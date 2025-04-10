@@ -125,6 +125,9 @@ THE SOFTWARE.
 
 // SBVH: "Unsplitting"
 #define SBVH_UNSPLITTING
+// SBVH: "Ray Distribution Heuristic", WIP.
+// #define RDH_FOR_SBVH
+#define RDH_MAX_WEIGHT 0.8f
 
 // Triangle intersection: "Watertight"
 #define WATERTIGHT_TRITEST
@@ -156,10 +159,6 @@ THE SOFTWARE.
 // BVH8_CPU align to big boundaries - experimental.
 #define BVH8_ALIGN_4K
 // #define BVH8_ALIGN_32K
-// BVH8_CPU uses leafs with up to eight prims - experimental.
-// #define BVH8_MASSIVE_LEAFS
-#define BVH8_FILLER_TRIS
-// #define ASSUME_SINGLE_HIT
 
 // ============================================================================
 //
@@ -843,6 +842,13 @@ protected:
 	void BuildDefault( const bvhvec4slice& vertices );
 	void BuildDefault( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void BuildDefault( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
+	void BuildRRS();
+	// Helpers
+	inline float SplitCostSAH( const float rAparent, const float Aleft, const int Nleft, const float Aright, const int Nright ) const;
+	inline float SplitCostRDH( const int Pleft, const int Nleft, const int Pright, const int Nright ) const;
+	inline float NoSplitCostSAH( const int Nparent ) const;
+	inline float NoSplitCostRDH( const int Nparent ) const;
+	inline float RDHSplitWeight( const int Nparent ) const;
 public:
 	// BVH type identification
 	bool isTLAS() const { return instList != 0; }
@@ -853,6 +859,7 @@ public:
 	bvhvec4slice verts = {};		// pointer to input primitive array: 3x16 bytes per tri.
 	uint32_t* vertIdx = 0;			// vertex indices, only used in case the BVH is built over indexed prims.
 	uint32_t* primIdx = 0;			// primitive index array.
+	uint32_t* rrsHits = 0;			// for RDH: ray hit count per triangle.
 	BLASInstance* instList = 0;		// instance array, for top-level acceleration structure.
 	BVHBase** blasList = 0;			// blas array, for TLAS traversal.
 	uint32_t blasCount = 0;			// number of blasses in blasList.
@@ -1208,21 +1215,6 @@ struct BVHTri4Leaf
 	}
 };
 
-// Storage for up to eight triangles, in SoA layout, for BVH8_CPU.
-struct BVHTri8Leaf
-{
-	SIMDVEC8 v0x8, v0y8, v0z8;
-	SIMDVEC8 e1x8, e1y8, e1z8;
-	SIMDVEC8 e2x8, e2y8, e2z8;
-	uint32_t primIdx[8];		// total: 320 bytes = 5 cachelines.
-	inline void SetData( const bvhvec3& v0, const bvhvec3& e1, const bvhvec3& e2, const uint32_t pidx, const uint32_t slot )
-	{
-		((float*)&v0x8)[slot] = v0.x, ((float*)&v0y8)[slot] = v0.y, ((float*)&v0z8)[slot] = v0.z;
-		((float*)&e1x8)[slot] = e1.x, ((float*)&e1y8)[slot] = e1.y, ((float*)&e1z8)[slot] = e1.z;
-		((float*)&e2x8)[slot] = e2.x, ((float*)&e2y8)[slot] = e2.y, ((float*)&e2z8)[slot] = e2.z, primIdx[slot] = pidx;
-	}
-};
-
 // Storage for a single triangle, for BVH8_CPU.
 struct BVHTri1Leaf
 {
@@ -1383,6 +1375,19 @@ inline uint32_t __bfind( uint32_t x ) // https://github.com/mackron/refcode/blob
 
 // array element counting; https://stackoverflow.com/questions/12784136
 #define BVH_NUM_ELEMS(a) (sizeof(a)/sizeof 0[a])
+
+// random numbers
+uint32_t tinybvh_rnduint( uint32_t& s ) { s ^= s << 13, s ^= s >> 17, s ^= s << 5; return s; }
+float tinybvh_rndfloat( uint32_t& s ) { return tinybvh_rnduint( s ) * 2.3283064365387e-10f; }
+
+// random unit vector
+bvhvec3 tinybvh_rndvec3( uint32_t& s )
+{
+	bvhvec3 R;
+loop: R = bvhvec3( tinybvh_rndfloat( s ) - 0.5f, tinybvh_rndfloat( s ) * 0.5f, tinybvh_rndfloat( s ) * 0.5f );
+	if (tinybvh_dot( R, R ) > 0.25f) goto loop;
+	return tinybvh_normalize( R );
+}
 
 // error handling
 #ifdef _WINDOWS_ // windows.h has been included
@@ -2068,6 +2073,10 @@ void BVH::BuildHQ( const bvhvec4* vertices, const uint32_t* indices, const uint3
 void BVH::BuildHQ( const bvhvec4slice& vertices )
 {
 	PrepareHQBuild( vertices, 0, 0 );
+#ifdef RDH_FOR_SBVH
+	// Generate RRS
+	BuildRRS(); // construct 'representative ray set' to evaluate RDH in BuildHQ.
+#endif
 	BuildHQ();
 }
 
@@ -2075,7 +2084,60 @@ void BVH::BuildHQ( const bvhvec4slice& vertices, const uint32_t* indices, uint32
 {
 	// build the BVH from vertices stored in a slice, indexed by 'indices'.
 	PrepareHQBuild( vertices, indices, prims );
+#ifdef RDH_FOR_SBVH
+	// Generate RRS
+	BuildRRS(); // construct 'representative ray set' to evaluate RDH in BuildHQ.
+#endif
 	BuildHQ();
+}
+
+void BVH::BuildRRS()
+{
+	// Trace a large number of rays to determine probability of polygon hits.
+	rrsHits = (uint32_t*)AlignedAlloc( triCount * 4 );
+	memset( rrsHits, 0, triCount * 4 );
+	// Attempt to load cached data.
+	std::fstream r{ "rrshits.bin", r.binary | r.in };
+	if (r)
+	{
+		r.read( (char*)rrsHits, triCount * 4 );
+		return;
+	}
+	// Build an intermedite BVH.
+	BVH tmp;
+	tmp.Build( verts, vertIdx, vertIdx ? triCount : 0 );
+	// Place 8x8x8 spawn points in the scene
+	bvhvec3 S[8 * 8 * 8], bmin = tmp.aabbMin, bext = tmp.aabbMax - tmp.aabbMin;
+	for (int x = 0; x < 8; x++) for (int y = 0; y < 8; y++) for (int z = 0; z < 8; z++)
+		S[x + y * 8 + z * 64] = bmin + (bvhvec3( (float)x, (float)y, (float)z ) + 1) * (1.0f / 9.0f) * bext;
+	// Create random paths
+	uint32_t seed = 0x123456, totalHits = 0;
+	for (int i = 0; i < 50'000'000; i++)
+	{
+		// Path start
+		bvhvec3 P = S[i & 511], R = tinybvh_rndvec3( seed );
+		// Random walk
+		for (int j = 0; j < 10; j++)
+		{
+			Ray ray( P + R * 0.0001f, R );
+			tmp.Intersect( ray );
+			if (ray.hit.t == BVH_FAR) break;
+			// Get primitive info for path vertex.
+			uint32_t i0, i1, i2, triIdx = ray.hit.prim;
+			GET_PRIM_INDICES_I0_I1_I2( tmp, triIdx );
+			const bvhvec4 v0 = tmp.verts[i0], v1 = tmp.verts[i1], v2 = tmp.verts[i2];
+			bvhvec3 N = tinybvh_normalize( tinybvh_cross( v1 - v0, v2 - v0 ) );
+			if (tinybvh_dot( N, ray.D ) > 0) N *= -1.0f;
+			// After first bounce: register hit.
+			if (j > 0) rrsHits[triIdx]++, totalHits++;
+			R = tinybvh_rndvec3( seed );
+			if (tinybvh_dot( R, N ) < 0) R *= -1.0f;
+			P = P + ray.hit.t * R;
+		}
+	}
+	// Save the result.
+	std::fstream s{ "rrshits.bin", s.binary | s.out };
+	s.write( (char*)rrsHits, triCount * 4 );
 }
 
 void BVH::PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
@@ -2135,8 +2197,42 @@ void BVH::PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices,
 	// clear remainder of index array
 	memset( primIdx + triCount, 0, slack * 4 );
 	bvh_over_indices = indices != nullptr;
-	// all set; actual build happens in BVH::Build.
+	// all set; actual build happens in BVH::BuildHQ.
 }
+
+float BVH::SplitCostSAH( const float rAparent, const float Aleft, const int Nleft, const float Aright, const int Nright ) const
+{
+	const int lN = l_quads ? (((Nleft + 3) >> 2) * 4) : Nleft;
+	const int rN = l_quads ? (((Nright + 3) >> 2) * 4) : Nright;
+	return c_trav + c_int * rAparent * (Aleft * (float)lN + Aright * (float)rN);
+}
+
+float BVH::NoSplitCostSAH( const int Nparent ) const
+{
+	return (float)(l_quads ? (((Nparent + 3) >> 2) * 4) : Nparent) * c_int;
+}
+
+#ifdef RDH_FOR_SBVH
+
+float BVH::SplitCostRDH( const int Pleft, const int Nleft, const int Pright, const int Nright ) const
+{
+	const float Psum = (float)(Pleft + Pright);
+	const float Pl = (float)Pleft / Psum;
+	const float Pr = (float)Pright / Psum;
+	return c_trav + c_int * (Pl * (float)Nleft + Pr * (float)Nright);
+}
+
+float BVH::NoSplitCostRDH( const int Nparent ) const
+{
+	return (float)(l_quads ? (((Nparent + 3) >> 2) * 4) : Nparent) * c_int;
+}
+
+float BVH::RDHSplitWeight( const int Nparent ) const
+{
+	return tinybvh_min( RDH_MAX_WEIGHT, tinybvh_max( 0.0f, (float)Nparent - 250.0f ) / 250.0f );
+}
+
+#endif
 
 void BVH::BuildHQ()
 {
@@ -2165,6 +2261,10 @@ void BVH::BuildHQ()
 			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < HQBVHBINS; i++) binMin[a][i] = BVH_FAR, binMax[a][i] = -BVH_FAR;
 			uint32_t count[3][HQBVHBINS];
 			memset( count, 0, HQBVHBINS * 3 * sizeof( uint32_t ) );
+		#ifdef RDH_FOR_SBVH
+			uint32_t rrsCount[3][HQBVHBINS], rrsTotal = 0;
+			memset( rrsCount, 0, HQBVHBINS * 3 * sizeof( uint32_t ) );
+		#endif
 			const bvhvec3 rpd3 = bvhvec3( HQBVHBINS / (node.aabbMax - node.aabbMin) ), nmin3 = node.aabbMin;
 			for (uint32_t i = 0; i < node.triCount; i++) // process all tris for x,y and z at once
 			{
@@ -2179,36 +2279,58 @@ void BVH::BuildHQ()
 				binMax[1][bi.y] = tinybvh_max( binMax[1][bi.y], fragment[fi].bmax ), count[1][bi.y]++;
 				binMin[2][bi.z] = tinybvh_min( binMin[2][bi.z], fragment[fi].bmin );
 				binMax[2][bi.z] = tinybvh_max( binMax[2][bi.z], fragment[fi].bmax ), count[2][bi.z]++;
+			#ifdef RDH_FOR_SBVH
+				const uint32_t hits = rrsHits[fi]; // RRS samples that landed on this primitive.
+				rrsCount[0][bi.x] += hits;
+				rrsCount[1][bi.y] += hits;
+				rrsCount[2][bi.z] += hits, rrsTotal += hits;
+			#endif
 			}
 			// calculate per-split totals
-			float splitCost = 1e30f, rSAV = 1.0f / node.SurfaceArea();
+		#ifdef RDH_FOR_SBVH
+			float noSplitCostSAH = NoSplitCostSAH( node.triCount );
+			float noSplitCostRDH = NoSplitCostRDH( node.triCount );
+			float rdh_w = RDHSplitWeight( node.triCount );
+			float noSplitCost = rdh_w * noSplitCostRDH + (1 - rdh_w) * noSplitCostSAH;
+		#else
+			float noSplitCost = NoSplitCostSAH( node.triCount );
+		#endif
+			float splitCost = noSplitCost, rSAV = 1.0f / node.SurfaceArea();
 			uint32_t bestAxis = 0, bestPos = 0;
 			for (int32_t a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
 			{
 				bvhvec3 lBMin[HQBVHBINS - 1], rBMin[HQBVHBINS - 1], l1 = BVH_FAR, l2 = -BVH_FAR;
 				bvhvec3 lBMax[HQBVHBINS - 1], rBMax[HQBVHBINS - 1], r1 = BVH_FAR, r2 = -BVH_FAR;
-				float ANL[HQBVHBINS - 1], ANR[HQBVHBINS - 1];
-				for (uint32_t lN = 0, rN = 0, i = 0; i < HQBVHBINS - 1; i++)
+				float AL[HQBVHBINS - 1], AR[HQBVHBINS - 1];		// left and right area per split plane
+				int NL[HQBVHBINS - 1], NR[HQBVHBINS - 1];		// summed left and right tricount
+			#ifdef RDH_FOR_SBVH
+				int PL[HQBVHBINS - 1], PR[HQBVHBINS - 1];		// summed left and right RRS samples
+			#endif
+				for (uint32_t lN = 0, rN = 0, lP = 0, rP = 0, i = 0; i < HQBVHBINS - 1; i++)
 				{
 					lBMin[i] = l1 = tinybvh_min( l1, binMin[a][i] );
 					rBMin[HQBVHBINS - 2 - i] = r1 = tinybvh_min( r1, binMin[a][HQBVHBINS - 1 - i] );
 					lBMax[i] = l2 = tinybvh_max( l2, binMax[a][i] );
 					rBMax[HQBVHBINS - 2 - i] = r2 = tinybvh_max( r2, binMax[a][HQBVHBINS - 1 - i] );
 					lN += count[a][i], rN += count[a][HQBVHBINS - 1 - i];
-				#ifdef BVH8_MASSIVE_LEAFS
-					const uint32_t lNa = l_quads ? (((lN + 7) >> 3) * 8) : lN;
-					const uint32_t rNa = l_quads ? (((rN + 7) >> 3) * 8) : rN;
-				#else
-					const uint32_t lNa = l_quads ? (((lN + 3) >> 2) * 4) : lN;
-					const uint32_t rNa = l_quads ? (((rN + 3) >> 2) * 4) : rN;
+					NL[i] = lN, NR[HQBVHBINS - 2 - i] = rN;
+					AL[i] = lN == 0 ? BVH_FAR : tinybvh_half_area( l2 - l1 );
+					AR[HQBVHBINS - 2 - i] = rN == 0 ? BVH_FAR : tinybvh_half_area( r2 - r1 );
+				#ifdef RDH_FOR_SBVH
+					lP += rrsCount[a][i], rP += rrsCount[a][HQBVHBINS - 1 - i];
+					PL[i] = lP, PR[HQBVHBINS - 2 - i] = rN;
 				#endif
-					ANL[i] = lNa == 0 ? BVH_FAR : (tinybvh_half_area( l2 - l1 ) * (float)lNa);
-					ANR[HQBVHBINS - 2 - i] = rNa == 0 ? BVH_FAR : (tinybvh_half_area( r2 - r1 ) * (float)rNa);
 				}
 				// evaluate bin totals to find best position for object split
 				for (uint32_t i = 0; i < HQBVHBINS - 1; i++)
 				{
-					const float C = c_trav + c_int * rSAV * (ANL[i] + ANR[i]);
+				#ifdef RDH_FOR_SBVH
+					const float C_rdh = SplitCostRDH( PL[i], NL[i], PR[i], NR[i] );
+					const float C_sah = SplitCostSAH( rSAV, AL[i], NL[i], AR[i], NR[i] );
+					const float C = rdh_w * C_rdh + (1 - rdh_w) * C_sah;
+				#else
+					const float C = SplitCostSAH( rSAV, AL[i], NL[i], AR[i], NR[i] );
+				#endif
 					if (C >= splitCost) continue;
 					splitCost = C, bestAxis = a, bestPos = i;
 					bestLMin = lBMin[i], bestRMin = rBMin[i], bestLMax = lBMax[i], bestRMax = rBMax[i];
@@ -2216,67 +2338,76 @@ void BVH::BuildHQ()
 			}
 			// consider a spatial split
 			bool spatial = false;
-			uint32_t NL[HQBVHBINS - 1], NR[HQBVHBINS - 1], budget = sliceEnd - sliceStart, bestNL = 0, bestNR = 0;
+			int bestNL = 0, bestNR = 0, budget = (int)(sliceEnd - sliceStart);
 			bvhvec3 spatialUnion = bestLMax - bestRMin;
 			float spatialOverlap = (tinybvh_half_area( spatialUnion )) / rootArea;
-			if (budget > node.triCount && splitCost < 1e30f && spatialOverlap > 1e-4f)
+			if (budget > (int)node.triCount && (spatialOverlap > 1e-4f || splitCost >= noSplitCost))
 			{
 				float minSplitCost = splitCost * 0.985f; // don't accept a spatial split for minimal gain
-				for (uint32_t a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
+				for (int a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
 				{
 					// setup bins
-					bvhvec3 binaMin[HQBVHBINS], binaMax[HQBVHBINS];
-					for (uint32_t i = 0; i < HQBVHBINS; i++) binaMin[i] = BVH_FAR, binaMax[i] = -BVH_FAR;
-					uint32_t countIn[HQBVHBINS] = { 0 }, countOut[HQBVHBINS] = { 0 };
+					bvhvec3 sbinMin[HQBVHBINS], sbinMax[HQBVHBINS];
+					int countIn[HQBVHBINS] = { 0 }, countOut[HQBVHBINS] = { 0 };
+					for (int i = 0; i < HQBVHBINS; i++) sbinMin[i] = BVH_FAR, sbinMax[i] = -BVH_FAR;
 					// populate bins with clipped fragments
 					const float planeDist = (node.aabbMax[a] - node.aabbMin[a]) / (HQBVHBINS * 0.9999f);
 					const float rPlaneDist = 1.0f / planeDist, nodeMin = node.aabbMin[a];
-					for (uint32_t i = 0; i < node.triCount; i++)
+					for (unsigned i = 0; i < node.triCount; i++)
 					{
-						const uint32_t fragIdx = triIdxA[node.leftFirst + i];
-						const int32_t bin1 = tinybvh_clamp( (int32_t)((fragment[fragIdx].bmin[a] - nodeMin) * rPlaneDist), 0, HQBVHBINS - 1 );
-						const int32_t bin2 = tinybvh_clamp( (int32_t)((fragment[fragIdx].bmax[a] - nodeMin) * rPlaneDist), 0, HQBVHBINS - 1 );
+						const uint32_t fi = triIdxA[node.leftFirst + i];
+						const int bin1 = tinybvh_clamp( (int32_t)((fragment[fi].bmin[a] - nodeMin) * rPlaneDist), 0, HQBVHBINS - 1 );
+						const int bin2 = tinybvh_clamp( (int32_t)((fragment[fi].bmax[a] - nodeMin) * rPlaneDist), 0, HQBVHBINS - 1 );
 						countIn[bin1]++, countOut[bin2]++;
 						if (bin2 == bin1) // fragment fits in a single bin
-							binaMin[bin1] = tinybvh_min( binaMin[bin1], fragment[fragIdx].bmin ),
-							binaMax[bin1] = tinybvh_max( binaMax[bin1], fragment[fragIdx].bmax );
-						else for (int32_t j = bin1; j <= bin2; j++)
+							sbinMin[bin1] = tinybvh_min( sbinMin[bin1], fragment[fi].bmin ),
+							sbinMax[bin1] = tinybvh_max( sbinMax[bin1], fragment[fi].bmax );
+						else for (int j = bin1; j <= bin2; j++)
 						{
 							// clip fragment to each bin it overlaps
 							bvhvec3 bmin = node.aabbMin, bmax = node.aabbMax;
 							bmin[a] = nodeMin + planeDist * j;
 							bmax[a] = j == (HQBVHBINS - 2) ? node.aabbMax[a] : (bmin[a] + planeDist);
-							Fragment orig = fragment[fragIdx];
+							Fragment orig = fragment[fi];
 							Fragment tmpFrag;
 							if (!ClipFrag( orig, tmpFrag, bmin, bmax, minDim, a )) continue;
-							binaMin[j] = tinybvh_min( binaMin[j], tmpFrag.bmin );
-							binaMax[j] = tinybvh_max( binaMax[j], tmpFrag.bmax );
+							sbinMin[j] = tinybvh_min( sbinMin[j], tmpFrag.bmin );
+							sbinMax[j] = tinybvh_max( sbinMax[j], tmpFrag.bmax );
 						}
 					}
 					// evaluate split candidates
 					bvhvec3 lBMin[HQBVHBINS - 1], rBMin[HQBVHBINS - 1], l1 = BVH_FAR, l2 = -BVH_FAR;
 					bvhvec3 lBMax[HQBVHBINS - 1], rBMax[HQBVHBINS - 1], r1 = BVH_FAR, r2 = -BVH_FAR;
-					float ANL[HQBVHBINS], ANR[HQBVHBINS];
-					for (uint32_t lN = 0, rN = 0, i = 0; i < HQBVHBINS - 1; i++)
+					float AL[HQBVHBINS], AR[HQBVHBINS];
+					int NL[HQBVHBINS], NR[HQBVHBINS];
+				#ifdef RDH_FOR_SBVH
+					int PL[HQBVHBINS], PR[HQBVHBINS];
+				#endif
+					for (uint32_t lN = 0, rN = 0, lP = 0, rP = 0, i = 0; i < HQBVHBINS - 1; i++)
 					{
-						lBMin[i] = l1 = tinybvh_min( l1, binaMin[i] ), rBMin[HQBVHBINS - 2 - i] = r1 = tinybvh_min( r1, binaMin[HQBVHBINS - 1 - i] );
-						lBMax[i] = l2 = tinybvh_max( l2, binaMax[i] ), rBMax[HQBVHBINS - 2 - i] = r2 = tinybvh_max( r2, binaMax[HQBVHBINS - 1 - i] );
-						lN += countIn[i], rN += countOut[HQBVHBINS - 1 - i], NL[i] = lN, NR[HQBVHBINS - 2 - i] = rN;
-					#ifdef BVH8_MASSIVE_LEAFS
-						const uint32_t lNa = l_quads ? (((lN + 7) >> 3) * 8) : lN;
-						const uint32_t rNa = l_quads ? (((rN + 7) >> 3) * 8) : rN;
-					#else
-						const uint32_t lNa = l_quads ? (((lN + 3) >> 2) * 4) : lN;
-						const uint32_t rNa = l_quads ? (((rN + 3) >> 2) * 4) : rN;
+						lBMin[i] = l1 = tinybvh_min( l1, sbinMin[i] ), rBMin[HQBVHBINS - 2 - i] = r1 = tinybvh_min( r1, sbinMin[HQBVHBINS - 1 - i] );
+						lBMax[i] = l2 = tinybvh_max( l2, sbinMax[i] ), rBMax[HQBVHBINS - 2 - i] = r2 = tinybvh_max( r2, sbinMax[HQBVHBINS - 1 - i] );
+						lN += countIn[i], rN += countOut[HQBVHBINS - 1 - i];
+						AL[i] = lN == 0 ? BVH_FAR : tinybvh_half_area( l2 - l1 );
+						AR[HQBVHBINS - 2 - i] = rN == 0 ? BVH_FAR : tinybvh_half_area( r2 - r1 );
+						NL[i] = lN, NR[HQBVHBINS - 2 - i] = rN;
+					#ifdef RDH_FOR_SBVH
+						lP += rrsCount[a][i], rP += rrsCount[a][HQBVHBINS - 1 - i];
+						PL[i] = lP, PR[HQBVHBINS - 2 - i] = rN;
 					#endif
-						ANL[i] = lNa == 0 ? BVH_FAR : (tinybvh_half_area( l2 - l1 ) * (float)lNa);
-						ANR[HQBVHBINS - 2 - i] = rNa == 0 ? BVH_FAR : (tinybvh_half_area( r2 - r1 ) * (float)rNa);
 					}
 					// find best position for spatial split
 					for (uint32_t i = 0; i < HQBVHBINS - 1; i++)
 					{
-						const float Cspatial = c_trav + c_int * rSAV * (ANL[i] + ANR[i]);
-						if (Cspatial < minSplitCost && NL[i] + NR[i] < budget && ANL[i] * ANR[i] > 0)
+					#ifdef RDH_FOR_SBVH
+						const float C_rdh = SplitCostRDH( PL[i], NL[i], PR[i], NR[i] );
+						const float C_sah = c_trav + c_int * rSAV * (AL[i] * (float)NL[i] + AR[i] * (float)NR[i]);
+						const float w = tinybvh_min( RDH_MAX_WEIGHT, tinybvh_max( 0.0f, (PL[i] + PR[i]) - 250.0f ) / 250.0f );
+						const float Cspatial = w * C_rdh + (1 - w) * C_sah;
+					#else
+						const float Cspatial = SplitCostSAH( rSAV, AL[i], NL[i], AR[i], NR[i] );
+					#endif
+						if (Cspatial < minSplitCost && NL[i] + NR[i] < budget && NL[i] * NR[i] > 0)
 						{
 							spatial = true, minSplitCost = splitCost = Cspatial, bestAxis = a, bestPos = i;
 							bestLMin = lBMin[i], bestLMax = lBMax[i], bestRMin = rBMin[i], bestRMax = rBMax[i];
@@ -2287,12 +2418,6 @@ void BVH::BuildHQ()
 				}
 			}
 			// evaluate best split cost
-		#ifdef BVH8_MASSIVE_LEAFS
-			const uint32_t parentN = l_quads ? (((node.triCount + 7) >> 3) * 8) : node.triCount;
-		#else
-			const uint32_t parentN = l_quads ? (((node.triCount + 3) >> 2) * 4) : node.triCount;
-		#endif
-			float noSplitCost = (float)parentN * c_int;
 			if (splitCost >= noSplitCost)
 			{
 				for (uint32_t i = 0; i < node.triCount; i++)
@@ -2313,7 +2438,7 @@ void BVH::BuildHQ()
 					const uint32_t bin2 = (uint32_t)tinybvh_max( (fragment[fragIdx].bmax[bestAxis] - nodeMin) * rPlaneDist, 0.0f );
 					if (bin2 <= bestPos) triIdxB[A++] = fragIdx; else if (bin1 > bestPos) triIdxB[--B] = fragIdx; else
 					{
-					#ifdef SBVH_UNSPLITTING
+					#if defined SBVH_UNSPLITTING && !defined RDH_FOR_SBVH
 						// unsplitting: 1. Calculate what happens if we add this primitive entirely to the left side
 						if (bestNR > 1)
 						{
@@ -2321,8 +2446,8 @@ void BVH::BuildHQ()
 							bvhvec3 unsplitLMax = tinybvh_max( bestLMax, fragment[fragIdx].bmax );
 							float AL = tinybvh_half_area( unsplitLMax - unsplitLMin );
 							float AR = tinybvh_half_area( bestRMax - bestRMin );
-							float CunsplitLeft = c_trav + c_int * rSAV * (AL * bestNL + AR * (bestNR - 1));
-							if (CunsplitLeft < splitCost)
+							float CunsplitLeft = SplitCostSAH( rSAV, AL, bestNL, AR, bestNR - 1 );
+							if (CunsplitLeft <= splitCost)
 							{
 								bestNR--, splitCost = CunsplitLeft, triIdxB[A++] = fragIdx;
 								bestLMin = unsplitLMin, bestLMax = unsplitLMax;
@@ -2336,8 +2461,8 @@ void BVH::BuildHQ()
 							const bvhvec3 unsplitRMax = tinybvh_max( bestRMax, fragment[fragIdx].bmax );
 							const float AL = tinybvh_half_area( bestLMax - bestLMin );
 							const float AR = tinybvh_half_area( unsplitRMax - unsplitRMin );
-							const float CunsplitRight = c_trav + c_int * rSAV * (AL * (bestNL - 1) + AR * bestNR);
-							if (CunsplitRight < splitCost)
+							const float CunsplitRight = SplitCostSAH( rSAV, AL, bestNL - 1, AR, bestNR );
+							if (CunsplitRight <= splitCost)
 							{
 								bestNL--, splitCost = CunsplitRight, triIdxB[--B] = fragIdx;
 								bestRMin = unsplitRMin, bestRMax = unsplitRMax;
@@ -2355,8 +2480,8 @@ void BVH::BuildHQ()
 							fragment[nextFrag] = part2, triIdxB[--B] = nextFrag++;
 						else // didn't work out; unsplit (rare)
 							if (leftOK) triIdxB[A++] = fragIdx; else triIdxB[--B] = fragIdx;
+						}
 					}
-				}
 				// for spatial splits, we fully refresh the bounds: clipping is never fully stable..
 				bestLMin = bestRMin = bvhvec3( BVH_FAR ), bestLMax = bestRMax = bvhvec3( -BVH_FAR );
 				for (uint32_t i = sliceStart; i < A; i++)
@@ -2365,7 +2490,7 @@ void BVH::BuildHQ()
 				for (uint32_t i = B; i < sliceEnd; i++)
 					bestRMin = tinybvh_min( bestRMin, fragment[triIdxB[i]].bmin ),
 					bestRMax = tinybvh_max( bestRMax, fragment[triIdxB[i]].bmax );
-			}
+				}
 			else
 			{
 				// object partitioning
@@ -2400,13 +2525,13 @@ void BVH::BuildHQ()
 			// recurse
 			task[taskCount].node = rightChildIdx, task[taskCount].sliceEnd = sliceEnd;
 			task[taskCount++].sliceStart = sliceEnd = (A + B) >> 1, nodeIdx = leftChildIdx;
-		}
+			}
 		// fetch subdivision task from stack
 		if (taskCount == 0) break; else
 			nodeIdx = task[--taskCount].node,
 			sliceStart = task[taskCount].sliceStart,
 			sliceEnd = task[taskCount].sliceEnd;
-	}
+		}
 	// all done.
 	AlignedFree( triIdxB );
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
@@ -2414,7 +2539,7 @@ void BVH::BuildHQ()
 	may_have_holes = false; // there may be holes in the index list, but not in the node list
 	usedNodes = newNodePtr;
 	Compact();
-}
+	}
 
 // Optimize: Will happen via BVH_Verbose.
 void BVH::Optimize( const uint32_t iterations, bool extreme )
@@ -2936,7 +3061,7 @@ void BVH::Intersect256Rays( Ray* packet ) const
 			if (stackPtr == 0) break; else // pop
 				last = stack[--stackPtr], node = bvhNode + stack[--stackPtr],
 				first = last >> 8, last &= 255;
-		}
+			}
 		else
 		{
 			// fetch pointers to child nodes
@@ -3043,8 +3168,8 @@ void BVH::Intersect256Rays( Ray* packet ) const
 				last = stack[--stackPtr], node = bvhNode + stack[--stackPtr],
 				first = last >> 8, last &= 255;
 		}
+		}
 	}
-}
 
 int32_t BVH::NodeCount() const
 {
@@ -4605,11 +4730,7 @@ void BVH8_CPU::ConvertFrom( MBVH<8>& original )
 	// allocate if needed
 	uint32_t nodesNeeded = bvh8.usedNodes, leafsNeeded = bvh8.LeafCount();
 	uint32_t blocksNeeded = nodesNeeded * (sizeof( BVHNode ) / 64); // here, block = cacheline.
-#ifdef BVH8_MASSIVE_LEAFS
-	blocksNeeded += leafsNeeded * (sizeof( BVHTri8Leaf ) / 64);
-#else
 	blocksNeeded += leafsNeeded * (sizeof( BVHTri4Leaf ) / 64);
-#endif
 	if (allocatedBlocks < blocksNeeded)
 	{
 		AlignedFree( bvh8Data );
@@ -4661,56 +4782,6 @@ void BVH8_CPU::ConvertFrom( MBVH<8>& original )
 			((float*)&newNode->zmin8)[cidx] = child.aabbMin.z, ((float*)&newNode->zmax8)[cidx] = child.aabbMax.z;
 			if (child.isLeaf())
 			{
-			#ifdef BVH8_MASSIVE_LEAFS
-				// emit leaf node: group of up to 8 triangles in AoS format.
-				( (uint32_t*)&newNode->child8 )[cidx] = newBlockPtr + LEAF_BIT;
-				BVHTri8Leaf* leaf = (BVHTri8Leaf*)(bvh8Data + newBlockPtr);
-				newBlockPtr += sizeof( BVHTri8Leaf ) / 64;
-				for (uint32_t i0, i1, i2, l = 0; l < 8; l++)
-				{
-					uint32_t primIdx = bvh8.bvh.primIdx[child.firstTri + tinybvh_min( l, child.triCount - 1u )];
-					GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, primIdx );
-					const bvhvec4 v0 = bvh8.bvh.verts[i0], e1 = bvh8.bvh.verts[i1] - v0, e2 = bvh8.bvh.verts[i2] - v0;
-					leaf->SetData( v0, e1, e2, primIdx, l );
-				}
-			#ifdef BVH8_FILLER_TRIS
-				if (child.triCount < 8)
-				{
-					// there is room left; pad with nearby tris - low hit prob, but they're free.
-					for (uint32_t slot = child.triCount; slot < 8; slot++)
-					{
-						uint32_t nearestTri = 0;
-						float bestDist = 1e30f;
-						bvhvec3 NC = (child.aabbMin + child.aabbMax) * 0.5f;
-						for (uint32_t j = 0; j < 8; j++) if (j != i && orig.child[j] != 0)
-						{
-							const MBVH<8>::MBVHNode& sibling = bvh8.mbvhNode[orig.child[j]];
-							if (sibling.isLeaf())
-							{
-								for (uint32_t k = 0; k < sibling.triCount; k++)
-								{
-									uint32_t i0, i1, i2, primIdx = bvh8.bvh.primIdx[sibling.firstTri + k];
-									GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, primIdx );
-									bvhvec3 C = (bvh8.bvh.verts[i0] + bvh8.bvh.verts[i1] + bvh8.bvh.verts[i2]) * 0.33333f;
-									float sqdist = tinybvh_dot( C - NC, C - NC );
-									if (sqdist < bestDist)
-									{
-										bool dupe = false;
-										for (int i = 0; i < 8; i++) if (leaf->primIdx[i] == primIdx) dupe = true;
-										if (!dupe) bestDist = sqdist, nearestTri = primIdx;
-									}
-								}
-							}
-						}
-						if (nearestTri == 0) break;
-						uint32_t i0, i1, i2;
-						GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, nearestTri );
-						const bvhvec4 v0 = bvh8.bvh.verts[i0], e1 = bvh8.bvh.verts[i1] - v0, e2 = bvh8.bvh.verts[i2] - v0;
-						leaf->SetData( v0, e1, e2, nearestTri, slot );
-					}
-				}
-			#endif
-			#else
 				// emit leaf node: group of up to 4 triangles in AoS format.
 				((uint32_t*)&newNode->child8)[cidx] = newBlockPtr + LEAF_BIT;
 				BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + newBlockPtr);
@@ -4722,44 +4793,6 @@ void BVH8_CPU::ConvertFrom( MBVH<8>& original )
 					const bvhvec4 v0 = bvh8.bvh.verts[i0], e1 = bvh8.bvh.verts[i1] - v0, e2 = bvh8.bvh.verts[i2] - v0;
 					leaf->SetData( v0, e1, e2, primIdx, l );
 				}
-			#ifdef BVH8_FILLER_TRIS
-				if (child.triCount < 4)
-				{
-					// there is room left; pad with nearby tris - low hit prob, but they're free.
-					for (uint32_t slot = child.triCount; slot < 4; slot++)
-					{
-						uint32_t nearestTri = 0;
-						float bestDist = 1e30f;
-						bvhvec3 NC = (child.aabbMin + child.aabbMax) * 0.5f;
-						for (int32_t j = 0; j < 8; j++) if (j != i && orig.child[j] != 0)
-						{
-							const MBVH<8>::MBVHNode& sibling = bvh8.mbvhNode[orig.child[j]];
-							if (sibling.isLeaf())
-							{
-								for (uint32_t k = 0; k < sibling.triCount; k++)
-								{
-									uint32_t i0, i1, i2, primIdx = bvh8.bvh.primIdx[sibling.firstTri + k];
-									GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, primIdx );
-									bvhvec3 C = (bvh8.bvh.verts[i0] + bvh8.bvh.verts[i1] + bvh8.bvh.verts[i2]) * 0.33333f;
-									float sqdist = tinybvh_dot( C - NC, C - NC );
-									if (sqdist < bestDist)
-									{
-										bool dupe = false;
-										for (int l = 0; l < 4; l++) if (leaf->primIdx[l] == primIdx) dupe = true;
-										if (!dupe) bestDist = sqdist, nearestTri = primIdx;
-									}
-								}
-							}
-						}
-						if (nearestTri == 0) break;
-						uint32_t i0, i1, i2;
-						GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, nearestTri );
-						const bvhvec4 v0 = bvh8.bvh.verts[i0], e1 = bvh8.bvh.verts[i1] - v0, e2 = bvh8.bvh.verts[i2] - v0;
-						leaf->SetData( v0, e1, e2, nearestTri, slot );
-					}
-				}
-			#endif
-			#endif
 			}
 			else
 			{
@@ -6128,17 +6161,9 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 	const __m256 rx8 = _mm256_set1_ps( ray.O.x * ray.rD.x ), rdx8 = _mm256_set1_ps( ray.rD.x );
 	const __m256 ry8 = _mm256_set1_ps( ray.O.y * ray.rD.y ), rdy8 = _mm256_set1_ps( ray.rD.y );
 	const __m256 rz8 = _mm256_set1_ps( ray.O.z * ray.rD.z ), rdz8 = _mm256_set1_ps( ray.rD.z );
-#ifdef BVH8_MASSIVE_LEAFS
-	const __m256 ox8 = _mm256_set1_ps( ray.O.x ), oy8 = _mm256_set1_ps( ray.O.y ), oz8 = _mm256_set1_ps( ray.O.z );
-	const __m256 dx8 = _mm256_set1_ps( ray.D.x ), dy8 = _mm256_set1_ps( ray.D.y ), dz8 = _mm256_set1_ps( ray.D.z );
-	const __m256 epsNeg8 = _mm256_set1_ps( -0.000001f ), eps8 = _mm256_set1_ps( 0.000001f ), one8 = _mm256_set1_ps( 1.0f );
-	const __m256 inf8 = _mm256_set1_ps( 1e34f );
-	const __m256i signMask8 = _mm256_set1_epi32( 0x7fffffff );
-#else
 	const __m128 ox4 = _mm_set1_ps( ray.O.x ), oy4 = _mm_set1_ps( ray.O.y ), oz4 = _mm_set1_ps( ray.O.z );
 	const __m128 dx4 = _mm_set1_ps( ray.D.x ), dy4 = _mm_set1_ps( ray.D.y ), dz4 = _mm_set1_ps( ray.D.z );
 	const __m128 one4 = _mm_set1_ps( 1 ), inf4 = _mm_set1_ps( 1e34f );
-#endif
 #ifdef _DEBUG
 	// sorry, not even this can be tolerated in this function. Only in debug.
 	uint32_t steps = 0;
@@ -6190,113 +6215,6 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
 		uint32_t n;
 		memcpy( &n, &nodeIdx, 4 );
-	#ifdef BVH8_MASSIVE_LEAFS
-		const BVHTri8Leaf* leaf = (BVHTri8Leaf*)(bvh8Data + (n & 0x1fffffff));
-		const __m256 hx8 = _mm256_fmsub_ps( dy8, leaf->e2z8, _mm256_mul_ps( dz8, leaf->e2y8 ) );
-		const __m256 hy8 = _mm256_fmsub_ps( dz8, leaf->e2x8, _mm256_mul_ps( dx8, leaf->e2z8 ) );
-		const __m256 hz8 = _mm256_fmsub_ps( dx8, leaf->e2y8, _mm256_mul_ps( dy8, leaf->e2x8 ) );
-		const __m256 sx8 = _mm256_sub_ps( ox8, leaf->v0x8 ), sy8 = _mm256_sub_ps( oy8, leaf->v0y8 );
-		const __m256 sz8 = _mm256_sub_ps( oz8, leaf->v0z8 );
-		const __m256 det8 = _mm256_fmadd_ps( leaf->e1z8, hz8, _mm256_fmadd_ps( leaf->e1x8, hx8, _mm256_mul_ps( leaf->e1y8, hy8 ) ) );
-		const __m256 qz8 = _mm256_fmsub_ps( sx8, leaf->e1y8, _mm256_mul_ps( sy8, leaf->e1x8 ) );
-		const __m256 qx8 = _mm256_fmsub_ps( sy8, leaf->e1z8, _mm256_mul_ps( sz8, leaf->e1y8 ) );
-		const __m256 qy8 = _mm256_fmsub_ps( sz8, leaf->e1x8, _mm256_mul_ps( sx8, leaf->e1z8 ) );
-		const __m256 inv_det8 = fastrcp8( det8 );
-		const __m256 u8 = _mm256_mul_ps( _mm256_fmadd_ps( sz8, hz8, _mm256_fmadd_ps( sx8, hx8, _mm256_mul_ps( sy8, hy8 ) ) ), inv_det8 );
-		const __m256 v8 = _mm256_mul_ps( _mm256_fmadd_ps( dz8, qz8, _mm256_fmadd_ps( dx8, qx8, _mm256_mul_ps( dy8, qy8 ) ) ), inv_det8 );
-		const __m256 ta8 = _mm256_mul_ps( _mm256_fmadd_ps( leaf->e2z8, qz8, _mm256_fmadd_ps( leaf->e2x8, qx8, _mm256_mul_ps( leaf->e2y8, qy8 ) ) ), inv_det8 );
-		const __m256 mask1 = _mm256_cmp_ps( u8, zero8, _CMP_GE_OQ );
-		const __m256 mask2 = _mm256_cmp_ps( v8, zero8, _CMP_GE_OQ );
-		const __m256 mask3 = _mm256_cmp_ps( _mm256_add_ps( u8, v8 ), one8, _CMP_LE_OQ );
-		const __m256 mask4 = _mm256_cmp_ps( ta8, t8, _CMP_LT_OQ );
-		const __m256 mask5 = _mm256_cmp_ps( ta8, zero8, _CMP_GT_OQ );
-		const __m256 combined = _mm256_and_ps( _mm256_and_ps( _mm256_and_ps( mask1, mask2 ), _mm256_and_ps( mask3, mask4 ) ), mask5 );
-	#ifdef ASSUME_SINGLE_HIT
-		const int bits = _mm256_movemask_ps( combined );
-		if (bits)
-		{
-			uint32_t lane;
-			if (__popc( bits ) == 1) lane = __bfind( bits ); else
-			{
-				// find closest hit distance
-				const __m256 dist8 = _mm256_blendv_ps( inf8, ta8, combined );
-				const __m128 hiQuad = _mm256_extractf128_ps( dist8, 1 ), loQuad = _mm256_castps256_ps128( dist8 );
-				const __m128 minQuad = _mm_min_ps( loQuad, hiQuad ), loDual = minQuad;
-				const __m128 hiDual = _mm_movehl_ps( minQuad, minQuad ), minDual = _mm_min_ps( loDual, hiDual );
-				const __m128 lo = minDual, hi = _mm_shuffle_ps( minDual, minDual, 1 ), v = _mm_min_ss( lo, hi );
-				const __m128 res = _mm_shuffle_ps( v, v, 0 );
-				const __m256 r8 = _mm256_castps128_ps256( res ), c8 = _mm256_insertf128_ps( r8, res, 1 );
-				lane = __bfind( _mm256_movemask_ps( _mm256_cmp_ps( c8, dist8, _CMP_EQ_OQ ) ) );
-			}
-			const __m256 _d8 = ta8;
-			const float t = ((float*)&_d8)[lane];
-			const __m256 _u8 = u8, _v8 = v8;
-			ray.hit.t = t, ray.hit.u = ((float*)&_u8)[lane], ray.hit.v = ((float*)&_v8)[lane];
-		#if INST_IDX_BITS == 32
-			ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
-		#else
-			ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
-		#endif
-			t8 = _mm256_set1_ps( t );
-			// compress stack
-			uint32_t outStackPtr = 0;
-			for (int32_t i = 0; i < stackPtr; i += 8)
-			{
-				__m256i node8 = _mm256_load_si256( (__m256i*)(nodeStack + i) );
-				__m256 d8 = _mm256_load_ps( (float*)(distStack + i) );
-				const __m256i mask8 = _mm256_cmpgt_epi32( _mm256_castps_si256( d8 ), _mm256_castps_si256( t8 ) );
-				const uint32_t mask = _mm256_movemask_ps( _mm256_castsi256_ps( mask8 ) );
-				const __m256i cpi = idxLUT256[mask];
-				d8 = _mm256_permutevar8x32_ps( d8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
-				_mm256_storeu_ps( (float*)(distStack + outStackPtr), d8 );
-				_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
-				const int32_t numItems = tinybvh_min( 8, stackPtr - i ), validMask = (1 << numItems) - 1;
-				outStackPtr += __popc( (255 - mask) & validMask );
-			}
-			stackPtr = outStackPtr;
-		}
-	#else
-		if (_mm256_movemask_ps( combined ))
-		{
-			// find closest hit distance
-			const __m256 dist8 = _mm256_blendv_ps( inf8, ta8, combined );
-			const __m128 hiQuad = _mm256_extractf128_ps( dist8, 1 ), loQuad = _mm256_castps256_ps128( dist8 );
-			const __m128 minQuad = _mm_min_ps( loQuad, hiQuad ), loDual = minQuad;
-			const __m128 hiDual = _mm_movehl_ps( minQuad, minQuad ), minDual = _mm_min_ps( loDual, hiDual );
-			const __m128 lo = minDual, hi = _mm_shuffle_ps( minDual, minDual, 1 ), v = _mm_min_ss( lo, hi );
-			const __m128 res = _mm_shuffle_ps( v, v, 0 );
-			const __m256 r8 = _mm256_castps128_ps256( res ), c8 = _mm256_insertf128_ps( r8, res, 1 );
-			const uint32_t lane = __bfind( _mm256_movemask_ps( _mm256_cmp_ps( c8, dist8, _CMP_EQ_OQ ) ) );
-			// update hit record
-			const __m256 _d8 = dist8;
-			const float t = ((float*)&_d8)[lane];
-			const __m256 _u8 = u8, _v8 = v8;
-			ray.hit.t = t, ray.hit.u = ((float*)&_u8)[lane], ray.hit.v = ((float*)&_v8)[lane];
-		#if INST_IDX_BITS == 32
-			ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
-		#else
-			ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
-		#endif
-			t8 = _mm256_set1_ps( t );
-			// compress stack
-			uint32_t outStackPtr = 0;
-			for (int32_t i = 0; i < stackPtr; i += 8)
-			{
-				__m256i node8 = _mm256_load_si256( (__m256i*)(nodeStack + i) );
-				__m256 d8 = _mm256_load_ps( (float*)(distStack + i) );
-				const __m256i mask8 = _mm256_cmpgt_epi32( _mm256_castps_si256( d8 ), _mm256_castps_si256( t8 ) );
-				const uint32_t mask = _mm256_movemask_ps( _mm256_castsi256_ps( mask8 ) );
-				const __m256i cpi = idxLUT256[mask];
-				d8 = _mm256_permutevar8x32_ps( d8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
-				_mm256_storeu_ps( (float*)(distStack + outStackPtr), d8 );
-				_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
-				const int32_t numItems = tinybvh_min( 8, stackPtr - i ), validMask = (1 << numItems) - 1;
-				outStackPtr += __popc( (255 - mask) & validMask );
-			}
-			stackPtr = outStackPtr;
-		}
-	#endif
-	#else
 		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (n & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, leaf->e2z4, _mm_mul_ps( dz4, leaf->e2y4 ) );
 		const __m128 hy4 = _mm_fmsub_ps( dz4, leaf->e2x4, _mm_mul_ps( dx4, leaf->e2z4 ) );
@@ -6351,7 +6269,6 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 			}
 			stackPtr = outStackPtr;
 		}
-	#endif
 		if (!stackPtr) break;
 		nodeIdx = nodeStack[--stackPtr];
 	}
@@ -6383,18 +6300,10 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 	const __m256 rx8 = _mm256_set1_ps( ray.O.x * ray.rD.x ), rdx8 = _mm256_set1_ps( ray.rD.x );
 	const __m256 ry8 = _mm256_set1_ps( ray.O.y * ray.rD.y ), rdy8 = _mm256_set1_ps( ray.rD.y );
 	const __m256 rz8 = _mm256_set1_ps( ray.O.z * ray.rD.z ), rdz8 = _mm256_set1_ps( ray.rD.z );
-#ifdef BVH8_MASSIVE_LEAFS
-	const __m256 ox8 = _mm256_set1_ps( ray.O.x ), oy8 = _mm256_set1_ps( ray.O.y ), oz8 = _mm256_set1_ps( ray.O.z );
-	const __m256 dx8 = _mm256_set1_ps( ray.D.x ), dy8 = _mm256_set1_ps( ray.D.y ), dz8 = _mm256_set1_ps( ray.D.z );
-	const __m256 epsNeg8 = _mm256_set1_ps( -0.000001f ), eps8 = _mm256_set1_ps( 0.000001f );
-	const __m256 one8 = _mm256_set1_ps( 1.0f ), zero8 = _mm256_setzero_ps();
-	const __m256i signMask8 = _mm256_set1_epi32( 0x7fffffff );
-#else
 	const __m128 ox4 = _mm_set1_ps( ray.O.x ), oy4 = _mm_set1_ps( ray.O.y ), oz4 = _mm_set1_ps( ray.O.z );
 	const __m128 dx4 = _mm_set1_ps( ray.D.x ), dy4 = _mm_set1_ps( ray.D.y ), dz4 = _mm_set1_ps( ray.D.z );
 	const __m128 epsNeg4 = _mm_set1_ps( -0.000001f ), eps4 = _mm_set1_ps( 0.000001f ), t4 = _mm_set1_ps( ray.hit.t );
 	const __m128 one4 = _mm_set1_ps( 1.0f ), zero4 = _mm_setzero_ps();
-#endif
 	while (1)
 	{
 		while (!(nodeIdx & LEAF_BIT))
@@ -6433,30 +6342,6 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 		}
 		uint32_t n;
 		memcpy( &n, &nodeIdx, 4 );
-	#ifdef BVH8_MASSIVE_LEAFS
-		// Moeller-Trumbore ray/triangle intersection algorithm for eight triangles
-		const BVHTri8Leaf* leaf = (BVHTri8Leaf*)(bvh8Data + (n & 0x1fffffff));
-		const __m256 hx8 = _mm256_fmsub_ps( dy8, leaf->e2z8, _mm256_mul_ps( dz8, leaf->e2y8 ) );
-		const __m256 hy8 = _mm256_fmsub_ps( dz8, leaf->e2x8, _mm256_mul_ps( dx8, leaf->e2z8 ) );
-		const __m256 hz8 = _mm256_fmsub_ps( dx8, leaf->e2y8, _mm256_mul_ps( dy8, leaf->e2x8 ) );
-		const __m256 sx8 = _mm256_sub_ps( ox8, leaf->v0x8 ), sy8 = _mm256_sub_ps( oy8, leaf->v0y8 );
-		const __m256 sz8 = _mm256_sub_ps( oz8, leaf->v0z8 );
-		const __m256 det8 = _mm256_fmadd_ps( leaf->e1z8, hz8, _mm256_fmadd_ps( leaf->e1x8, hx8, _mm256_mul_ps( leaf->e1y8, hy8 ) ) );
-		const __m256 qz8 = _mm256_fmsub_ps( sx8, leaf->e1y8, _mm256_mul_ps( sy8, leaf->e1x8 ) );
-		const __m256 qx8 = _mm256_fmsub_ps( sy8, leaf->e1z8, _mm256_mul_ps( sz8, leaf->e1y8 ) );
-		const __m256 qy8 = _mm256_fmsub_ps( sz8, leaf->e1x8, _mm256_mul_ps( sx8, leaf->e1z8 ) );
-		const __m256 inv_det8 = fastrcp8( det8 );
-		const __m256 u8 = _mm256_mul_ps( _mm256_fmadd_ps( sz8, hz8, _mm256_fmadd_ps( sx8, hx8, _mm256_mul_ps( sy8, hy8 ) ) ), inv_det8 );
-		const __m256 v8 = _mm256_mul_ps( _mm256_fmadd_ps( dz8, qz8, _mm256_fmadd_ps( dx8, qx8, _mm256_mul_ps( dy8, qy8 ) ) ), inv_det8 );
-		const __m256 ta8 = _mm256_mul_ps( _mm256_fmadd_ps( leaf->e2z8, qz8, _mm256_fmadd_ps( leaf->e2x8, qx8, _mm256_mul_ps( leaf->e2y8, qy8 ) ) ), inv_det8 );
-		const __m256 mask1 = _mm256_cmp_ps( u8, zero8, _CMP_GE_OQ );
-		const __m256 mask2 = _mm256_cmp_ps( v8, zero8, _CMP_GE_OQ );
-		const __m256 mask3 = _mm256_cmp_ps( _mm256_add_ps( u8, v8 ), one8, _CMP_LE_OQ );
-		const __m256 mask4 = _mm256_cmp_ps( ta8, t8, _CMP_LT_OQ );
-		const __m256 mask5 = _mm256_cmp_ps( ta8, zero8, _CMP_GT_OQ );
-		const __m256 combined = _mm256_and_ps( _mm256_and_ps( _mm256_and_ps( mask1, mask2 ), _mm256_and_ps( mask3, mask4 ) ), mask5 );
-		if (_mm256_movemask_ps( combined )) return true;
-	#else
 		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
 		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (n & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, leaf->e2z4, _mm_mul_ps( dz4, leaf->e2y4 ) );
@@ -6480,7 +6365,6 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 		const __m128 mask5 = _mm_cmpgt_ps( ta4, zero4 );
 		__m128 combined = _mm_and_ps( _mm_and_ps( _mm_and_ps( mask1, mask2 ), _mm_and_ps( mask3, mask4 ) ), mask5 );
 		if (_mm_movemask_ps( combined )) return true;
-	#endif
 		if (!stackPtr) return false;
 		nodeIdx = nodeStack[--stackPtr];
 	}
