@@ -8,6 +8,7 @@
 
 #define LOADSCENE
 
+#define TINYBVH_NO_SIMD
 #define TINYBVH_IMPLEMENTATION
 #include "tiny_bvh.h"
 #include <fstream>
