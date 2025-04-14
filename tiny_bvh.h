@@ -88,7 +88,7 @@ THE SOFTWARE.
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
 #define TINY_BVH_VERSION_MINOR	5
-#define TINY_BVH_VERSION_SUB	1
+#define TINY_BVH_VERSION_SUB	2
 
 // Run-time checks; disabled by default.
 // #define PARANOID // checks out-of-bound access of slices
@@ -825,6 +825,7 @@ public:
 	// private:
 	void PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build();
+	void BuildFullSweep();
 	bool IsOccludedTLAS( const Ray& ray ) const;
 	int32_t IntersectTLAS( Ray& ray ) const;
 	void PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
@@ -842,13 +843,18 @@ protected:
 	void BuildDefault( const bvhvec4slice& vertices );
 	void BuildDefault( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void BuildDefault( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
+#ifdef RDH_FOR_SBVH
 	void BuildRRS();
+#endif
 	// Helpers
 	inline float SplitCostSAH( const float rAparent, const float Aleft, const int Nleft, const float Aright, const int Nright ) const;
-	inline float SplitCostRDH( const int Pleft, const int Nleft, const int Pright, const int Nright ) const;
 	inline float NoSplitCostSAH( const int Nparent ) const;
+#ifdef RDH_FOR_SBVH
+	inline float SplitCostRDH( const int Pleft, const int Nleft, const int Pright, const int Nright ) const;
 	inline float NoSplitCostRDH( const int Nparent ) const;
 	inline float RDHSplitWeight( const int Nparent ) const;
+#endif
+	void QuickSort( const float* centroid, int first, int last );
 public:
 	// BVH type identification
 	bool isTLAS() const { return instList != 0; }
@@ -866,6 +872,7 @@ public:
 	BVHNode* bvhNode = 0;			// BVH node pool, Wald 32-byte format. Root is always in node 0.
 	uint32_t newNodePtr = 0;		// used during build to keep track of next free node in pool.
 	Fragment* fragment = 0;			// input primitive bounding boxes.
+	bool useFullSweep = false;		// for experiments only; full-sweep SAH builder.
 	// Custom geometry intersection callback
 	bool (*customIntersect)(Ray&, const unsigned) = 0;
 	bool (*customIsOccluded)(const Ray&, const unsigned) = 0;
@@ -1693,7 +1700,7 @@ int32_t BVH::PrimCount( const uint32_t nodeIdx ) const
 // Basic single-function BVH builder, using mid-point splits.
 // This builder yields a correct BVH in little time, but the quality of the
 // structure will be low. Use this only if build time is the bottleneck in
-// your application (e.g., when you need to trace few rays).
+// your application, e.g., when you need to trace few rays.
 void BVH::BuildQuick( const bvhvec4* vertices, const uint32_t primCount )
 {
 	// build the BVH with a continuous array of bvhvec4 vertices:
@@ -1958,6 +1965,12 @@ void BVH::PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, c
 
 void BVH::Build()
 {
+	// pass control to full sweep builder if requested
+	if (useFullSweep)
+	{
+		BuildFullSweep();
+		return;
+	}
 	// subdivide root node recursively
 	uint32_t task[256], taskCount = 0, nodeIdx = 0;
 	BVHNode& root = bvhNode[0];
@@ -2008,7 +2021,7 @@ void BVH::Build()
 				// evaluate bin totals to find best position for object split
 				for (uint32_t i = 0; i < BVHBINS - 1; i++)
 				{
-					const float C = c_trav + rSAV * c_int * (ANL[i] + ANR[i]);
+					const float C = ANL[i] + ANR[i];
 					if (C < splitCost)
 					{
 						splitCost = C, bestAxis = a, bestPos = i;
@@ -2016,6 +2029,7 @@ void BVH::Build()
 					}
 				}
 			}
+			splitCost = c_trav + c_int * rSAV * splitCost;
 			float noSplitCost = (float)node.triCount * c_int;
 			if (splitCost >= noSplitCost) break; // not splitting is better.
 			// in-place partition
@@ -2043,6 +2057,112 @@ void BVH::Build()
 		// fetch subdivision task from stack
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
+	// all done.
+	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
+	refittable = true; // not using spatial splits: can refit this BVH
+	may_have_holes = false; // the reference builder produces a continuous list of nodes
+	bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
+	usedNodes = newNodePtr;
+}
+
+void BVH::QuickSort( const float* a, int f, int l ) // minimal qsort
+{
+	int s[1024], p = 0;
+start: while (f >= l) { if (p == 0) return; else f = s[--p], l = s[--p]; }
+	int w = f, r = w, h, * q = (int*)primIdx;
+	for (int i = w + 1; i <= l; i++) if (a[q[i]] < a[q[w]]) h = q[++r], q[r] = q[i], q[i] = h;
+	h = q[w], q[w] = q[r], q[r] = h, s[p++] = l, s[p++] = r + 1, l = r - 1; goto start;
+}
+
+// Full-sweep SAH builder.
+// Instead of using binning, this builder evaluates all possible split plane
+// candidates for each axis. Not efficient; e.g. sorting for each split can
+// be prevented.
+void BVH::BuildFullSweep()
+{
+	// allocate and calculate fragment centroids, per axis
+	float* centroid[3];
+	for (int a = 0; a < 3; a++) centroid[a] = (float*)AlignedAlloc( triCount * sizeof( float ) );
+	uint32_t* backup = (uint32_t*)AlignedAlloc( triCount * 4 );
+	for (uint32_t i = 0; i < triCount; i++)
+	{
+		const bvhvec3 C = fragment[i].bmin + fragment[i].bmax;
+		centroid[0][i] = C.x, centroid[1][i] = C.y, centroid[2][i] = C.z;
+	}
+	// allocate space for right sweep
+	float* SAR = (float*)AlignedAlloc( triCount * sizeof( float ) );
+	// subdivide root node recursively
+	uint32_t task[256], taskCount = 0, nodeIdx = 0;
+	bvhvec3 minDim = (bvhNode->aabbMax - bvhNode->aabbMin) * 1e-20f;
+	while (1)
+	{
+		while (1)
+		{
+			BVHNode& node = bvhNode[nodeIdx];
+			// update node bounds
+			node.aabbMin = bvhvec3( BVH_FAR ), node.aabbMax = bvhvec3( -BVH_FAR );
+			for( uint32_t i = 0; i < node.triCount; i++ )
+			{
+				const uint32_t fi = primIdx[node.leftFirst + i];
+				node.aabbMin = tinybvh_min( node.aabbMin, fragment[fi].bmin );
+				node.aabbMax = tinybvh_max( node.aabbMax, fragment[fi].bmax );
+			}
+			if (node.triCount == 1) break; // can't split one triangle.
+			const float rSAV = 1.0f / node.SurfaceArea();
+			const bvhvec3 extent = node.aabbMax - node.aabbMin;
+			// iterate over x,y,z
+			float splitCost = 1e30f;
+			uint32_t splitAxis = 0, splitPos = 0;
+			memcpy( backup + node.leftFirst, primIdx + node.leftFirst, node.triCount * 4 );
+			for (uint32_t a = 0; a < 3; a++) if (extent[a] > minDim[a])
+			{
+				// sort indices
+				QuickSort( centroid[a], node.leftFirst, node.leftFirst + node.triCount - 1 );
+				// sweep from right to left
+				bvhvec3 Rmin( BVH_FAR ), Rmax( -BVH_FAR );
+				for (uint32_t i = 0; i < node.triCount; i++)
+				{
+					const uint32_t fi = primIdx[node.leftFirst + node.triCount - i - 1];
+					SAR[node.triCount - i - 1] = (float)i * tinybvh_half_area( Rmax - Rmin );
+					Rmin = tinybvh_min( Rmin, fragment[fi].bmin );
+					Rmax = tinybvh_max( Rmax, fragment[fi].bmax );
+				}
+				// sweep from left to right
+				bvhvec3 Lmin( BVH_FAR ), Lmax( -BVH_FAR );
+				for( uint32_t i = 0; i < node.triCount - 1; i++ )
+				{
+					const uint32_t fi = primIdx[node.leftFirst + i];
+					Lmin = tinybvh_min( Lmin, fragment[fi].bmin );
+					Lmax = tinybvh_max( Lmax, fragment[fi].bmax );
+					const float SAL = (float)(i + 1) * tinybvh_half_area( Lmax - Lmin );
+					const float C = SAL + SAR[i];
+					if (C < splitCost) splitCost = C, splitPos = i + 1, splitAxis = a;
+				}
+				// restore from backup
+				memcpy( primIdx + node.leftFirst, backup + node.leftFirst, node.triCount * 4 );
+			}
+			splitCost = c_trav + c_int * splitCost * rSAV;
+			float noSplitCost = (float)node.triCount * c_int;
+			if (splitCost >= noSplitCost) break; // not splitting is better.
+			// create child nodes
+			uint32_t leftCount = splitPos, rightCount = node.triCount - leftCount;
+			if (leftCount >= node.triCount || rightCount >= node.triCount || taskCount == BVH_NUM_ELEMS( task )) break;
+			QuickSort( centroid[splitAxis], node.leftFirst, node.leftFirst + node.triCount - 1 );
+			bvhNode[newNodePtr].leftFirst = node.leftFirst;
+			bvhNode[newNodePtr++].triCount = leftCount;
+			bvhNode[newNodePtr].leftFirst = node.leftFirst + leftCount;
+			bvhNode[newNodePtr++].triCount = rightCount;
+			node.leftFirst = newNodePtr - 2, node.triCount = 0;
+			// recurse
+			task[taskCount++] = newNodePtr - 1, nodeIdx = newNodePtr - 2;
+		}
+		// fetch subdivision task from stack
+		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
+	}
+	// cleanup allocated buffers
+	for (int a = 0; a < 3; a++) AlignedFree( centroid[a] );
+	AlignedFree( SAR );
+	AlignedFree( backup );
 	// all done.
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 	refittable = true; // not using spatial splits: can refit this BVH
@@ -2090,6 +2210,8 @@ void BVH::BuildHQ( const bvhvec4slice& vertices, const uint32_t* indices, uint32
 #endif
 	BuildHQ();
 }
+
+#ifdef RDH_FOR_SBVH
 
 void BVH::BuildRRS()
 {
@@ -2139,6 +2261,8 @@ void BVH::BuildRRS()
 	std::fstream s{ "rrshits.bin", s.binary | s.out };
 	s.write( (char*)rrsHits, triCount * 4 );
 }
+
+#endif
 
 void BVH::PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
 {
@@ -2335,7 +2459,7 @@ void BVH::BuildHQ()
 					splitCost = C, bestAxis = a, bestPos = i;
 					bestLMin = lBMin[i], bestRMin = rBMin[i], bestLMax = lBMax[i], bestRMax = rBMax[i];
 				}
-			}
+				}
 			// consider a spatial split
 			bool spatial = false;
 			int bestNL = 0, bestNR = 0, budget = (int)(sliceEnd - sliceStart);
@@ -2415,8 +2539,8 @@ void BVH::BuildHQ()
 							bestLMax[a] = bestRMin[a]; // accurate
 						}
 					}
+					}
 				}
-			}
 			// evaluate best split cost
 			if (splitCost >= noSplitCost)
 			{
@@ -2480,8 +2604,8 @@ void BVH::BuildHQ()
 							fragment[nextFrag] = part2, triIdxB[--B] = nextFrag++;
 						else // didn't work out; unsplit (rare)
 							if (leftOK) triIdxB[A++] = fragIdx; else triIdxB[--B] = fragIdx;
-						}
 					}
+				}
 				// for spatial splits, we fully refresh the bounds: clipping is never fully stable..
 				bestLMin = bestRMin = bvhvec3( BVH_FAR ), bestLMax = bestRMax = bvhvec3( -BVH_FAR );
 				for (uint32_t i = sliceStart; i < A; i++)
@@ -2490,7 +2614,7 @@ void BVH::BuildHQ()
 				for (uint32_t i = B; i < sliceEnd; i++)
 					bestRMin = tinybvh_min( bestRMin, fragment[triIdxB[i]].bmin ),
 					bestRMax = tinybvh_max( bestRMax, fragment[triIdxB[i]].bmax );
-				}
+			}
 			else
 			{
 				// object partitioning
@@ -2531,7 +2655,7 @@ void BVH::BuildHQ()
 			nodeIdx = task[--taskCount].node,
 			sliceStart = task[taskCount].sliceStart,
 			sliceEnd = task[taskCount].sliceEnd;
-		}
+			}
 	// all done.
 	AlignedFree( triIdxB );
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
@@ -2539,7 +2663,7 @@ void BVH::BuildHQ()
 	may_have_holes = false; // there may be holes in the index list, but not in the node list
 	usedNodes = newNodePtr;
 	Compact();
-	}
+			}
 
 // Optimize: Will happen via BVH_Verbose.
 void BVH::Optimize( const uint32_t iterations, bool extreme )
@@ -2755,7 +2879,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::Intersect( Ray& ray ) co
 					ray.hit.prim = (ray.hit.prim & PRIM_IDX_MASK) + ray.instIdx;
 				#endif
 				}
-			}
+				}
 			else for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
 			{
 				const uint32_t pi = primIdx[node->leftFirst + i];
@@ -2763,7 +2887,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::Intersect( Ray& ray ) co
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
-		}
+			}
 		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
 		float dist1 = BVH_FAR, dist2 = BVH_FAR;
 		SLAB_TEST_TWO_NODES;
@@ -2777,9 +2901,9 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::Intersect( Ray& ray ) co
 			node = child1; /* continue with the nearest */
 			if (dist2 != BVH_FAR) stack[stackPtr++] = child2; /* push far child */
 		}
-	}
+		}
 	return (int32_t)cost; // cast to not break interface.
-}
+	}
 
 template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray ) const
 {
@@ -2835,10 +2959,10 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				}
 				// 3. Restore ray
 				ray.hit = tmp.hit;
-			}
+				}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
-		}
+			}
 		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
 		float dist1 = BVH_FAR, dist2 = BVH_FAR;
 		SLAB_TEST_TWO_NODES;
@@ -2852,9 +2976,9 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 			node = child1; /* continue with the nearest */
 			if (dist2 != BVH_FAR) stack[stackPtr++] = child2; /* push far child */
 		}
-	}
+		}
 	return (int32_t)cost;
-}
+	}
 
 bool BVH::IsOccluded( const Ray& ray ) const
 {
@@ -2973,10 +3097,10 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 					if (blas->layout == LAYOUT_BVH8_AVX2) { if (((BVH8_CPU*)blas)->IsOccluded( tmp )) return true; }
 				#endif
 				}
-			}
+				}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
-		}
+			}
 		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
 		float dist1 = BVH_FAR, dist2 = BVH_FAR;
 		SLAB_TEST_TWO_NODES;
@@ -2990,9 +3114,9 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 			node = child1; /* continue with the nearest */
 			if (dist2 != BVH_FAR) stack[stackPtr++] = child2; /* push far child */
 		}
-	}
+		}
 	return false;
-}
+	}
 
 // Intersect a WALD_32BYTE BVH with a ray packet.
 // The 256 rays travel together to better utilize the caches and to amortize the cost
@@ -3057,7 +3181,7 @@ void BVH::Intersect256Rays( Ray* packet ) const
 					ray.hit.prim = idx + ray.instIdx;
 				#endif
 				}
-			}
+				}
 			if (stackPtr == 0) break; else // pop
 				last = stack[--stackPtr], node = bvhNode + stack[--stackPtr],
 				first = last >> 8, last &= 255;
@@ -5394,9 +5518,8 @@ inline float halfArea( const __m256& a /* a contains aabb itself, with min.xyz n
 #endif
 }
 #define PROCESS_PLANE( a, pos, ANLR, lN, rN, lb, rb ) if (lN * rN != 0) { \
-	ANLR = halfArea( lb ) * (float)lN + halfArea( rb ) * (float)rN; \
-	const float C = c_trav + c_int * rSAV * ANLR; if (C < splitCost) \
-	splitCost = C, bestAxis = a, bestPos = pos, bestLBox = lb, bestRBox = rb; }
+	ANLR = halfArea( lb ) * (float)lN + halfArea( rb ) * (float)rN; if (ANLR < splitCost) \
+	splitCost = ANLR, bestAxis = a, bestPos = pos, bestLBox = lb, bestRBox = rb; }
 #if defined _MSC_VER
 #pragma warning ( push )
 #pragma warning( disable:4701 ) // "potentially uninitialized local variable 'bestLBox' used"
@@ -5583,6 +5706,7 @@ void BVH::BuildAVX()
 				float ANLR0 = BVH_FAR; PROCESS_PLANE( a, 0, ANLR0, lN0, rN6, lb0, rb6 );
 				float ANLR6 = BVH_FAR; PROCESS_PLANE( a, 6, ANLR6, lN6, rN0, lb6, rb0 ); // least likely split
 			}
+			splitCost = c_trav + c_int * rSAV * splitCost;
 			float noSplitCost = (float)node.triCount * c_int;
 			if (splitCost >= noSplitCost) break; // not splitting is better.
 			// in-place partition
