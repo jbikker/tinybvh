@@ -224,7 +224,7 @@ WARNING( "AVX2 and FMA not enabled in compilation." )
 #endif
 #include "immintrin.h"	// for __m128 and __m256
 #elif defined __aarch64__ || defined _M_ARM64
-#if !defined __NEON__
+#if !defined __ARM_NEON
 WARNING( "NEON not enabled in compilation." )
 #define TINYBVH_NO_SIMD
 #else
@@ -854,7 +854,7 @@ protected:
 	inline float NoSplitCostRDH( const int Nparent ) const;
 	inline float RDHSplitWeight( const int Nparent ) const;
 #endif
-	void QuickSort( const float* centroid, int first, int last );
+	void QuickSort( const float* centroid, uint32_t* primIdx, int first, int last );
 public:
 	// BVH type identification
 	bool isTLAS() const { return instList != 0; }
@@ -2065,13 +2065,12 @@ void BVH::Build()
 	usedNodes = newNodePtr;
 }
 
-void BVH::QuickSort( const float* a, int f, int l ) // minimal qsort
+void BVH::QuickSort( const float* a, uint32_t* q, int f, int l ) // minimal qsort
 {
-	int s[1024], p = 0;
+	int s[1024], p = 0, h, i, r;
 start: while (f >= l) { if (p == 0) return; else f = s[--p], l = s[--p]; }
-	int w = f, r = w, h, * q = (int*)primIdx;
-	for (int i = w + 1; i <= l; i++) if (a[q[i]] < a[q[w]]) h = q[++r], q[r] = q[i], q[i] = h;
-	h = q[w], q[w] = q[r], q[r] = h, s[p++] = l, s[p++] = r + 1, l = r - 1; goto start;
+	for ( r = f, i = f + 1; i <= l; i++) if (a[q[i]] < a[q[f]]) h = q[++r], q[r] = q[i], q[i] = h;
+	h = q[f], q[f] = q[r], q[r] = h, s[p++] = l, s[p++] = r + 1, l = r - 1; goto start;
 }
 
 // Full-sweep SAH builder.
@@ -2083,11 +2082,21 @@ void BVH::BuildFullSweep()
 	// allocate and calculate fragment centroids, per axis
 	float* centroid[3];
 	for (int a = 0; a < 3; a++) centroid[a] = (float*)AlignedAlloc( triCount * sizeof( float ) );
-	uint32_t* backup = (uint32_t*)AlignedAlloc( triCount * 4 );
+	// allocate data for O(N) stable partition
+	uint8_t* flag = (uint8_t*)AlignedAlloc( triCount );
+	uint32_t* tmp = (uint32_t*)AlignedAlloc( triCount * 4 );
+	// prepare per-axis sorted primitive index arrays
 	for (uint32_t i = 0; i < triCount; i++)
 	{
 		const bvhvec3 C = fragment[i].bmin + fragment[i].bmax;
 		centroid[0][i] = C.x, centroid[1][i] = C.y, centroid[2][i] = C.z;
+	}
+	uint32_t* sortedIdx[3];
+	for (int a = 0; a < 3; a++) sortedIdx[a] = (uint32_t*)AlignedAlloc( triCount * 4 );
+	for( uint32_t a = 0; a < 3; a++ ) 
+	{
+		memcpy( sortedIdx[a], primIdx, triCount * 4 );
+		QuickSort( centroid[a], sortedIdx[a], 0, triCount - 1 );
 	}
 	// allocate space for right sweep
 	float* SAR = (float*)AlignedAlloc( triCount * sizeof( float ) );
@@ -2103,7 +2112,7 @@ void BVH::BuildFullSweep()
 			node.aabbMin = bvhvec3( BVH_FAR ), node.aabbMax = bvhvec3( -BVH_FAR );
 			for( uint32_t i = 0; i < node.triCount; i++ )
 			{
-				const uint32_t fi = primIdx[node.leftFirst + i];
+				const uint32_t fi = sortedIdx[0][node.leftFirst + i];
 				node.aabbMin = tinybvh_min( node.aabbMin, fragment[fi].bmin );
 				node.aabbMax = tinybvh_max( node.aabbMax, fragment[fi].bmax );
 			}
@@ -2113,16 +2122,13 @@ void BVH::BuildFullSweep()
 			// iterate over x,y,z
 			float splitCost = 1e30f;
 			uint32_t splitAxis = 0, splitPos = 0;
-			memcpy( backup + node.leftFirst, primIdx + node.leftFirst, node.triCount * 4 );
 			for (uint32_t a = 0; a < 3; a++) if (extent[a] > minDim[a])
 			{
-				// sort indices
-				QuickSort( centroid[a], node.leftFirst, node.leftFirst + node.triCount - 1 );
 				// sweep from right to left
 				bvhvec3 Rmin( BVH_FAR ), Rmax( -BVH_FAR );
 				for (uint32_t i = 0; i < node.triCount; i++)
 				{
-					const uint32_t fi = primIdx[node.leftFirst + node.triCount - i - 1];
+					const uint32_t fi = sortedIdx[a][node.leftFirst + node.triCount - i - 1];
 					SAR[node.triCount - i - 1] = (float)i * tinybvh_half_area( Rmax - Rmin );
 					Rmin = tinybvh_min( Rmin, fragment[fi].bmin );
 					Rmax = tinybvh_max( Rmax, fragment[fi].bmax );
@@ -2131,23 +2137,34 @@ void BVH::BuildFullSweep()
 				bvhvec3 Lmin( BVH_FAR ), Lmax( -BVH_FAR );
 				for( uint32_t i = 0; i < node.triCount - 1; i++ )
 				{
-					const uint32_t fi = primIdx[node.leftFirst + i];
+					const uint32_t fi = sortedIdx[a][node.leftFirst + i];
 					Lmin = tinybvh_min( Lmin, fragment[fi].bmin );
 					Lmax = tinybvh_max( Lmax, fragment[fi].bmax );
 					const float SAL = (float)(i + 1) * tinybvh_half_area( Lmax - Lmin );
 					const float C = SAL + SAR[i];
 					if (C < splitCost) splitCost = C, splitPos = i + 1, splitAxis = a;
 				}
-				// restore from backup
-				memcpy( primIdx + node.leftFirst, backup + node.leftFirst, node.triCount * 4 );
 			}
 			splitCost = c_trav + c_int * splitCost * rSAV;
 			float noSplitCost = (float)node.triCount * c_int;
-			if (splitCost >= noSplitCost) break; // not splitting is better.
+			if (splitCost >= noSplitCost) break; // not splitting turns out to be better.
+			// partition
+			for( int i = 0; i < splitPos; i++ ) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 0; // "left"
+			for( int i = splitPos; i < node.triCount; i++ ) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 1; // "right"
+			for( int a = 0; a < 3; a++ ) if (a != splitAxis)
+			{
+				int p0 = 0, p1 = 0;
+				for( int i = 0; i < node.triCount; i++ )
+				{
+					const uint32_t fi = sortedIdx[a][node.leftFirst + i];
+					if (flag[fi]) tmp[p1++] = fi; else sortedIdx[a][node.leftFirst + p0++] = fi;
+				}
+				memcpy( &sortedIdx[a][node.leftFirst + p0], tmp, p1 * 4 );
+			}
 			// create child nodes
 			uint32_t leftCount = splitPos, rightCount = node.triCount - leftCount;
 			if (leftCount >= node.triCount || rightCount >= node.triCount || taskCount == BVH_NUM_ELEMS( task )) break;
-			QuickSort( centroid[splitAxis], node.leftFirst, node.leftFirst + node.triCount - 1 );
+			memcpy( primIdx + node.leftFirst, sortedIdx[splitAxis] + node.leftFirst, node.triCount * 4 );
 			bvhNode[newNodePtr].leftFirst = node.leftFirst;
 			bvhNode[newNodePtr++].triCount = leftCount;
 			bvhNode[newNodePtr].leftFirst = node.leftFirst + leftCount;
@@ -2161,8 +2178,10 @@ void BVH::BuildFullSweep()
 	}
 	// cleanup allocated buffers
 	for (int a = 0; a < 3; a++) AlignedFree( centroid[a] );
+	for (int a = 0; a < 3; a++) AlignedFree( sortedIdx[a] );
 	AlignedFree( SAR );
-	AlignedFree( backup );
+	AlignedFree( flag );
+	AlignedFree( tmp );
 	// all done.
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 	refittable = true; // not using spatial splits: can refit this BVH
@@ -6683,7 +6702,7 @@ void BVH::BuildNEON()
 			memset( count, 0, sizeof( count ) );
 			float32x4x2_t r0, r1, r2, f = _mm256_xor_ps( _mm256_and_ps( frag8[fi], mask6 ), signFlip8 );
 			const float32x4_t fmin = vandq_u32( frag4[fi].bmin4, mask3 ), fmax = vandq_u32( frag4[fi].bmax4, mask3 );
-			const int32x4_t bi4 = vcvtq_s32_f32( vrnd32xq_f32( vsubq_f32( vmulq_f32( vsubq_f32( vaddq_f32( frag4[fi].bmax4, frag4[fi].bmin4 ), nmin4 ), rpd4 ), half4 ) ) );
+			const int32x4_t bi4 = vcvtq_s32_f32( vrnd32nq_f32( vsubq_f32( vmulq_f32( vsubq_f32( vaddq_f32( frag4[fi].bmax4, frag4[fi].bmin4 ), nmin4 ), rpd4 ), half4 ) ) );
 			const int32x4_t b4c = vmaxq_s32( vminq_s32( bi4, maxbin4 ), vdupq_n_s32( 0 ) ); // clamp needed after all
 			memcpy( binbox, binboxOrig, sizeof( binbox ) );
 			uint32_t i0 = ILANE( b4c, 0 ), i1 = ILANE( b4c, 1 ), i2 = ILANE( b4c, 2 ), * ti = primIdx + node.leftFirst + 1;
@@ -6696,7 +6715,7 @@ void BVH::BuildNEON()
 				const float32x4x2_t b0 = binbox[i0], b1 = binbox[AVXBINS + i1], b2 = binbox[2 * AVXBINS + i2];
 				const float32x4_t frmin = vandq_u32( frag4[fid].bmin4, mask3 ), frmax = vandq_u32( frag4[fid].bmax4, mask3 );
 				r0 = _mm256_max_ps( b0, f ), r1 = _mm256_max_ps( b1, f ), r2 = _mm256_max_ps( b2, f );
-				const int32x4_t b4 = vcvtq_s32_f32( vrnd32xq_f32( (vsubq_f32( vmulq_f32( vsubq_f32( vaddq_f32( frmax, frmin ), nmin4 ), rpd4 ), half4 )) ) );
+				const int32x4_t b4 = vcvtq_s32_f32( vrnd32nq_f32( (vsubq_f32( vmulq_f32( vsubq_f32( vaddq_f32( frmax, frmin ), nmin4 ), rpd4 ), half4 )) ) );
 				const int32x4_t bc4 = vmaxq_s32( vminq_s32( b4, maxbin4 ), vdupq_n_s32( 0 ) ); // clamp needed after all
 				f = _mm256_xor_ps( _mm256_and_ps( frag8[fid], mask6 ), signFlip8 ), count[0][i0]++, count[1][i1]++, count[2][i2]++;
 				binbox[i0] = r0, i0 = ILANE( bc4, 0 );
