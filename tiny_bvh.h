@@ -6877,7 +6877,8 @@ bool BVH_SoA::IsOccluded( const Ray& ray ) const
 			{
 				const uint32_t tidx = primIdx[node->firstTri + i], vertIdx = tidx * 3;
 				const bvhvec3 v0 = verts[vertIdx];
-				const bvhvec3 e1 = verts[vertIdx + 1] - v0, e2 = verts[vertIdx + 2] - v0;
+				const bvhvec3 e1 = bvhvec3( verts[vertIdx + 1] ) - v0;
+				const bvhvec3 e2 = bvhvec3( verts[vertIdx + 2] ) - v0;
 				MOLLER_TRUMBORE_TEST( ray.hit.t, continue );
 				return true;
 			}
