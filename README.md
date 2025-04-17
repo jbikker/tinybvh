@@ -68,7 +68,7 @@ The **performance measurement tool** can be compiled with:
 
 ````g++ -mavx2 -mfma -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest````
 
-# Version 1.5.2
+# Version 1.5.3
 
 Version 1.5.0 introduced a new fast layout for x86/x64 systems that do not (or cannot be presumed to) support AVX2. For those, please use BVH4_CPU form optimal performance (about 80% of the fastest AVX2 code).
 
