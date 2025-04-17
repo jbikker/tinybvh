@@ -542,25 +542,14 @@ inline double tinybvh_half_area( const bvhdbl3& v ) { return v.x < -BVH_FAR ? 0 
 #endif // DOUBLE_PRECISION_SUPPORT
 
 // SIMD typedef, helps keeping the interface generic
-#ifdef BVH_USESSE
+#if defined BVH_USESSE
 typedef __m128 SIMDVEC4;
 typedef __m128i SIMDIVEC4;
 #define SIMD_SETVEC(a,b,c,d) _mm_set_ps( a, b, c, d )
 #define SIMD_SETRVEC(a,b,c,d) _mm_set_ps( d, c, b, a )
-#else
-typedef bvhvec4 SIMDVEC4;
-typedef struct { int x, y, z, w; } SIMDIVEC4;
-#define SIMD_SETVEC(a,b,c,d) bvhvec4( d, c, b, a )
-#define SIMD_SETRVEC(a,b,c,d) bvhvec4( a, b, c, d )
-#endif
-#ifdef BVH_USEAVX
-typedef __m256 SIMDVEC8;
-typedef __m256i SIMDIVEC8;
 #elif defined BVH_USENEON
 typedef float32x4_t SIMDVEC4;
 typedef int32x4_t SIMDIVEC4;
-typedef float32x4x2_t SIMDVEC8;
-typedef int32x4x2_t SIMDIVEC8;
 inline float32x4_t SIMD_SETVEC( float w, float z, float y, float x )
 {
 	ALIGNED( 64 ) float data[4] = { x, y, z, w };
@@ -576,6 +565,18 @@ inline uint32x4_t SIMD_SETRVECU( uint32_t x, uint32_t y, uint32_t z, uint32_t w 
 	ALIGNED( 64 ) uint32_t data[4] = { x, y, z, w };
 	return vld1q_u32( data );
 }
+#else
+typedef bvhvec4 SIMDVEC4;
+typedef struct { int x, y, z, w; } SIMDIVEC4;
+#define SIMD_SETVEC(a,b,c,d) bvhvec4( d, c, b, a )
+#define SIMD_SETRVEC(a,b,c,d) bvhvec4( a, b, c, d )
+#endif
+#ifdef BVH_USEAVX
+typedef __m256 SIMDVEC8;
+typedef __m256i SIMDIVEC8;
+#elif defined BVH_USENEON
+typedef float32x4x2_t SIMDVEC8;
+typedef int32x4x2_t SIMDIVEC8;
 #else
 typedef struct { float v0, v1, v2, v3, v4, v5, v6, v7; } SIMDVEC8;
 typedef struct { int v0, v1, v2, v3, v4, v5, v6, v7; } SIMDIVEC8;
@@ -2149,12 +2150,12 @@ void BVH::BuildFullSweep()
 			float noSplitCost = (float)node.triCount * c_int;
 			if (splitCost >= noSplitCost) break; // not splitting turns out to be better.
 			// partition
-			for( int i = 0; i < splitPos; i++ ) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 0; // "left"
-			for( int i = splitPos; i < node.triCount; i++ ) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 1; // "right"
+			for( uint32_t i = 0; i < splitPos; i++ ) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 0; // "left"
+			for( uint32_t i = splitPos; i < node.triCount; i++ ) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 1; // "right"
 			for( int a = 0; a < 3; a++ ) if (a != splitAxis)
 			{
 				int p0 = 0, p1 = 0;
-				for( int i = 0; i < node.triCount; i++ )
+				for( uint32_t i = 0; i < node.triCount; i++ )
 				{
 					const uint32_t fi = sortedIdx[a][node.leftFirst + i];
 					if (flag[fi]) tmp[p1++] = fi; else sortedIdx[a][node.leftFirst + p0++] = fi;
