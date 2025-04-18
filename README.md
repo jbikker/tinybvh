@@ -1,5 +1,5 @@
 # dev
-This is the **development branch** for TinyBVH. Changes are tested here first.
+This is the **development branch** for TinyBVH. New functionality will be tested here first.
 
 # tinybvh
 Single-header BVH construction and traversal library written as "Sane C++" (or "C with classes"). Some C++11 is used, e.g. for threading. The library has no dependencies. 
@@ -68,7 +68,7 @@ The **performance measurement tool** can be compiled with:
 
 ````g++ -mavx2 -mfma -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest````
 
-# Version 1.5.1
+# Version 1.5.3
 
 Version 1.5.0 introduced a new fast layout for x86/x64 systems that do not (or cannot be presumed to) support AVX2. For those, please use BVH4_CPU form optimal performance (about 80% of the fastest AVX2 code).
 
