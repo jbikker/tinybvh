@@ -224,7 +224,7 @@ WARNING( "AVX2 and FMA not enabled in compilation." )
 #endif
 #include "immintrin.h"	// for __m128 and __m256
 #elif defined __aarch64__ || defined _M_ARM64
-#if !defined __NEON__
+#if !defined __NEON__ && !defined(__APPLE__)
 WARNING( "NEON not enabled in compilation." )
 #define TINYBVH_NO_SIMD
 #else
@@ -547,20 +547,9 @@ typedef __m128 SIMDVEC4;
 typedef __m128i SIMDIVEC4;
 #define SIMD_SETVEC(a,b,c,d) _mm_set_ps( a, b, c, d )
 #define SIMD_SETRVEC(a,b,c,d) _mm_set_ps( d, c, b, a )
-#else
-typedef bvhvec4 SIMDVEC4;
-typedef struct { int x, y, z, w; } SIMDIVEC4;
-#define SIMD_SETVEC(a,b,c,d) bvhvec4( d, c, b, a )
-#define SIMD_SETRVEC(a,b,c,d) bvhvec4( a, b, c, d )
-#endif
-#ifdef BVH_USEAVX
-typedef __m256 SIMDVEC8;
-typedef __m256i SIMDIVEC8;
 #elif defined BVH_USENEON
 typedef float32x4_t SIMDVEC4;
 typedef int32x4_t SIMDIVEC4;
-typedef float32x4x2_t SIMDVEC8;
-typedef int32x4x2_t SIMDIVEC8;
 inline float32x4_t SIMD_SETVEC( float w, float z, float y, float x )
 {
 	ALIGNED( 64 ) float data[4] = { x, y, z, w };
@@ -571,6 +560,18 @@ inline float32x4_t SIMD_SETRVEC( float x, float y, float z, float w )
 	ALIGNED( 64 ) float data[4] = { x, y, z, w };
 	return vld1q_f32( data );
 }
+#else
+typedef bvhvec4 SIMDVEC4;
+typedef struct { int x, y, z, w; } SIMDIVEC4;
+#define SIMD_SETVEC(a,b,c,d) bvhvec4( d, c, b, a )
+#define SIMD_SETRVEC(a,b,c,d) bvhvec4( a, b, c, d )
+#endif
+#ifdef BVH_USEAVX
+typedef __m256 SIMDVEC8;
+typedef __m256i SIMDIVEC8;
+#elif defined BVH_USENEON
+typedef float32x4x2_t SIMDVEC8;
+typedef int32x4x2_t SIMDIVEC8;
 inline uint32x4_t SIMD_SETRVECU( uint32_t x, uint32_t y, uint32_t z, uint32_t w )
 {
 	ALIGNED( 64 ) uint32_t data[4] = { x, y, z, w };
@@ -6787,8 +6788,8 @@ int32_t BVH_SoA::Intersect( Ray& ray ) const
 			for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
 			{
 				const uint32_t tidx = primIdx[node->firstTri + i], vertIdx = tidx * 3;
-				const bvhvec3 e0 = verts[vertIdx];
-				const bvhvec3 e1 = verts[vertIdx + 1] - v0, e2 = verts[vertIdx + 2] - v0;
+				const bvhvec4 v0_ = verts[vertIdx];
+				const bvhvec3 v0 = v0_, e1 = verts[vertIdx + 1] - v0_, e2 = verts[vertIdx + 2] - v0_;
 				MOLLER_TRUMBORE_TEST( ray.hit.t, continue );
 				ray.hit.t = t, ray.hit.u = u, ray.hit.v = v, ray.hit.prim = tidx;
 			}
@@ -6855,8 +6856,8 @@ bool BVH_SoA::IsOccluded( const Ray& ray ) const
 			for (uint32_t i = 0; i < node->triCount; i++)
 			{
 				const uint32_t tidx = primIdx[node->firstTri + i], vertIdx = tidx * 3;
-				const bvhvec3 v0 = verts[vertIdx];
-				const bvhvec3 e1 = verts[vertIdx + 1] - v0, e2 = verts[vertIdx + 2] - v0;
+				const bvhvec4 v0_ = verts[vertIdx];
+				const bvhvec3 v0 = v0_, e1 = verts[vertIdx + 1] - v0_, e2 = verts[vertIdx + 2] - v0_;
 				MOLLER_TRUMBORE_TEST( ray.hit.t, continue );
 				return true;
 			}
