@@ -647,6 +647,20 @@ struct ALIGNED( 64 ) Ray
 	Intersection hit;
 };
 
+inline float tinybvh_intersect_aabb( Ray& ray, const bvhvec3& aabbMin, const bvhvec3& aabbMax )
+{
+	// "slab test" ray/AABB intersection
+	float tx1 = (aabbMin.x - ray.O.x) * ray.rD.x, tx2 = (aabbMax.x - ray.O.x) * ray.rD.x;
+	float tmin = tinybvh_min( tx1, tx2 ), tmax = tinybvh_max( tx1, tx2 );
+	float ty1 = (aabbMin.y - ray.O.y) * ray.rD.y, ty2 = (aabbMax.y - ray.O.y) * ray.rD.y;
+	tmin = tinybvh_max( tmin, tinybvh_min( ty1, ty2 ) );
+	tmax = tinybvh_min( tmax, tinybvh_max( ty1, ty2 ) );
+	float tz1 = (aabbMin.z - ray.O.z) * ray.rD.z, tz2 = (aabbMax.z - ray.O.z) * ray.rD.z;
+	tmin = tinybvh_max( tmin, tinybvh_min( tz1, tz2 ) );
+	tmax = tinybvh_min( tmax, tinybvh_max( tz1, tz2 ) );
+	if (tmax >= tmin && tmin < ray.hit.t && tmax >= 0) return tmin; else return BVH_FAR;
+}
+
 #ifdef DOUBLE_PRECISION_SUPPORT
 
 struct IntersectionEx
@@ -7395,7 +7409,7 @@ bool BVH_Double::IsOccludedTLAS( const RayEx& ray ) const
 	return false;
 }
 
-// IntersectAABB, double precision
+// BVHNode::Intersect, double precision
 double BVH_Double::BVHNode::Intersect( const RayEx& ray ) const
 {
 	// double-precision "slab test" ray/AABB intersection
