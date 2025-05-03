@@ -46,11 +46,12 @@ THE SOFTWARE.
 #include <cl.h>
 #endif
 #include <vector>
+#endif
 
 // aligned memory allocation
 // note: formally, size needs to be a multiple of 'alignment', see:
 // https://en.cppreference.com/w/c/memory/aligned_alloc.
-// EMSCRIPTEN enforces this. 
+// EMSCRIPTEN enforces this.
 // Copy of the same construct in tinyocl, in a different namespace.
 namespace tinyocl {
 inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alignment - 1)) & ~(alignment - 1); }
