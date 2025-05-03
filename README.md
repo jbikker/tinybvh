@@ -1,5 +1,5 @@
 # dev
-This is the **development branch** for TinyBVH. New functionality will be tested here first.
+This is the **TinyBVH development branch**. New developments are tested here first.
 
 # tinybvh
 Single-header BVH construction and traversal library written as "Sane C++" (or "C with classes"). Some C++11 is used, e.g. for threading. The library has no dependencies. 
@@ -52,21 +52,25 @@ The library ````tiny_bvh.h```` is designed to be easy to use. Please have a look
 
 The single-source sample **ASCII test renderer** can be compiled with
 
-````g++ tiny_bvh_renderer.cpp -o tiny_bvh_renderer````
+````c++ --std=c++17 tiny_bvh_renderer.cpp -o tiny_bvh_renderer````
 
 The cross-platform fenster-based single-source **bitmap renderer** can be compiled with
 
 ````g++ -mwindows -O3 tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on windows)
 
-````g++ -framework -O3 Cocoa tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on macOS)
+````c++ --std=c++17 -framework Cocoa -O3 tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on macOS)
 
 The multi-threaded **path tracing** demo can be compiled with
 
 ````g++ -mwindows -O3 tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on windows)
 
+````c++ --std=c++17 -framework Cocoa -O3 tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on macOS)
+
 The **performance measurement tool** can be compiled with:
 
-````g++ -mavx2 -mfma -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest````
+````g++ -mavx2 -mfma -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on windows)
+
+````c++ --std=c++17 -framework OpenCL -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on macOS)
 
 # Version 1.5.3
 
