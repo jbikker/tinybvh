@@ -44,6 +44,7 @@ THE SOFTWARE.
 #include <OpenCL/cl.h>  // use with -framework OpenCL
 #else
 #include <cl.h>
+#endif
 #include <vector>
 #endif
 
