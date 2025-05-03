@@ -4,6 +4,7 @@
 #include "external/fenster.h" // https://github.com/zserge/fenster
 
 #define TINYBVH_IMPLEMENTATION
+#define TINYBVH_NO_SIMD
 #include "tiny_bvh.h"
 #include <fstream>
 
