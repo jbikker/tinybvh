@@ -98,6 +98,7 @@ using PrecomputedTri = bvh::v2::PrecomputedTri<_Scalar>;
 
 bvhvec4* triangles = 0;
 #include <fstream>
+#include <vector>
 int verts = 0;
 float avgCost = 0;
 float traceTime, buildTime, refitTime, * refDist = 0, * refDistFull = 0, refU, refV, refUFull, refVFull;
@@ -374,7 +375,6 @@ void ValidateTraceResult( float* ref, unsigned N, unsigned line )
 // Multi-threading
 #include <atomic>
 #include <thread>
-#include <vector>
 
 static unsigned threadCount = std::thread::hardware_concurrency();
 static std::atomic<int> batchIdx( 0 );
