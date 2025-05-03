@@ -40,13 +40,17 @@ THE SOFTWARE.
 #define TINY_OCL_H_
 
 #define CL_TARGET_OPENCL_VERSION 300
+#ifdef __APPLE__
+#include <OpenCL/cl.h>  // use with -framework OpenCL
+#else
 #include <cl.h>
 #include <vector>
+#endif
 
 // aligned memory allocation
 // note: formally, size needs to be a multiple of 'alignment', see:
 // https://en.cppreference.com/w/c/memory/aligned_alloc.
-// EMSCRIPTEN enforces this. 
+// EMSCRIPTEN enforces this.
 // Copy of the same construct in tinyocl, in a different namespace.
 namespace tinyocl {
 inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alignment - 1)) & ~(alignment - 1); }
@@ -494,8 +498,10 @@ bool CheckCL( cl_int result, const char* file, int line )
 	if (result == CL_INVALID_COMPILER_OPTIONS) FatalError( "Error: CL_INVALID_COMPILER_OPTIONS\n%s, line %i", file, line, "OpenCL error" );
 	if (result == CL_INVALID_LINKER_OPTIONS) FatalError( "Error: CL_INVALID_LINKER_OPTIONS\n%s, line %i", file, line, "OpenCL error" );
 	if (result == CL_INVALID_DEVICE_PARTITION_COUNT) FatalError( "Error: CL_INVALID_DEVICE_PARTITION_COUNT\n%s, line %i", file, line, "OpenCL error" );
+#ifndef __APPLE__
 	if (result == CL_INVALID_PIPE_SIZE) FatalError( "Error: CL_INVALID_PIPE_SIZE\n%s, line %i", file, line, "OpenCL error" );
 	if (result == CL_INVALID_DEVICE_QUEUE) FatalError( "Error: CL_INVALID_DEVICE_QUEUE\n%s, line %i", file, line, "OpenCL error" );
+#endif
 	return false;
 }
 

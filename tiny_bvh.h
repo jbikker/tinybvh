@@ -225,7 +225,7 @@ WARNING( "AVX2 and FMA not enabled in compilation." )
 #endif
 #include "immintrin.h"	// for __m128 and __m256
 #elif defined __aarch64__ || defined _M_ARM64
-#if !defined __ARM_NEON
+#if !defined __ARM_NEON && !defined __APPLE__
 WARNING( "NEON not enabled in compilation." )
 #define TINYBVH_NO_SIMD
 #else
