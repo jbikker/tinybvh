@@ -46,7 +46,6 @@ THE SOFTWARE.
 #include <cl.h>
 #endif
 #include <vector>
-#endif
 
 // aligned memory allocation
 // note: formally, size needs to be a multiple of 'alignment', see:
