@@ -837,6 +837,7 @@ public:
 	void Optimize( const uint32_t iterations = 25, bool extreme = false, bool stochastic = false );
 	uint32_t CombineLeafs( const uint32_t primCount, uint32_t& firstIdx, uint32_t nodeIdx = 0 );
 	int32_t Intersect( Ray& ray ) const;
+	int32_t IntersectRaw( Ray& ray ) const;
 	bool IntersectSphere( const bvhvec3& pos, const float r ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	void Intersect256Rays( Ray* first ) const;
@@ -2847,6 +2848,93 @@ bool BVH::IntersectSphere( const bvhvec3& pos, const float r ) const
 	return false;
 }
 
+int32_t BVH::IntersectRaw( Ray& ray ) const
+{
+	BVHNode* node = &bvhNode[0], * stack[64];
+	uint32_t stackPtr = 0;
+	float cost = 0;
+#if 1
+	int major = ray.D.x > ray.D.y ? 0 : 1;
+	major = ray.D.z > ray.D[major] ? 2 : major;
+	const float scale = ray.rD[major];
+	// const bvhvec3 rayDnormalized = ray.D * scale;
+	// const float to = -ray.O[major] * scale;
+	// const bvhvec3 rayOnormalized = ray.O + to * ray.D;
+	const bvhvec3 nrdo = -ray.O * ray.rD;
+	const uint32_t n0 = ray.D.x > 0 ? 0 : 4, f0 = ray.D.x > 0 ? 4 : 0;
+	const uint32_t n1 = ray.D.y > 0 ? 1 : 5, f1 = ray.D.y > 0 ? 5 : 1;
+	const uint32_t n2 = ray.D.z > 0 ? 2 : 6, f2 = ray.D.z > 0 ? 6 : 2;
+#endif
+	while (1)
+	{
+		cost += c_trav;
+		if (node->isLeaf())
+		{
+			for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
+			{
+				const uint32_t pi = primIdx[node->leftFirst + i];
+				IntersectTri( ray, pi, verts, pi * 3, pi * 3 + 1, pi * 3 + 2 );
+			}
+			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			continue;
+		}
+		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
+	#if 1
+		float dist1, dist2;
+		{
+			const float* b = (const float*)child1;
+			const float tx0n = b[n0] * ray.rD.x + nrdo.x, tx0f = b[f0] * ray.rD.x + nrdo.x;
+			const float tx1n = b[n1] * ray.rD.y + nrdo.y, tx1f = b[f1] * ray.rD.y + nrdo.y;
+			const float tx2n = b[n2] * ray.rD.z + nrdo.z, tx2f = b[f2] * ray.rD.z + nrdo.z;
+			const float tnear = tinybvh_max( tinybvh_max( tinybvh_max( tx0n, tx1n ), tx2n ), 0.0f );
+			const float tfar = tinybvh_min( tinybvh_min( tinybvh_min( tx0f, tx1f ), tx2f ), ray.hit.t );
+			dist1 = tnear <= tfar ? tnear : BVH_FAR;
+		}
+		{
+			const float* b = (const float*)child2;
+			const float tx0n = b[n0] * ray.rD.x + nrdo.x, tx0f = b[f0] * ray.rD.x + nrdo.x;
+			const float tx1n = b[n1] * ray.rD.y + nrdo.y, tx1f = b[f1] * ray.rD.y + nrdo.y;
+			const float tx2n = b[n2] * ray.rD.z + nrdo.z, tx2f = b[f2] * ray.rD.z + nrdo.z;
+			const float tnear = tinybvh_max( tinybvh_max( tinybvh_max( tx0n, tx1n ), tx2n ), 0.0f );
+			const float tfar = tinybvh_min( tinybvh_min( tinybvh_min( tx0f, tx1f ), tx2f ), ray.hit.t );
+			dist2 = tnear <= tfar ? tnear : BVH_FAR;
+		}
+	#else
+		float dist1 = tinybvh_intersect_aabb( ray, child1->aabbMin, child1->aabbMax );
+		float dist2 = tinybvh_intersect_aabb( ray, child2->aabbMin, child2->aabbMax );
+	#endif
+		if (dist1 > dist2) { tinybvh_swap( dist1, dist2 ); tinybvh_swap( child1, child2 ); }
+		if (dist1 == BVH_FAR /* missed both child nodes */)
+		{
+			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			continue;
+		}
+		node = child1;
+		if (dist2 != BVH_FAR) stack[stackPtr++] = child2; /* push far child */
+	}
+	return (int32_t)cost; // cast to not break interface.
+}
+
+#define SLAB_TEST_TWO_NODES \
+	float tx1a = (posX ? child1->aabbMin.x : child1->aabbMax.x) * ray.rD.x - rox; /* expect fma. */ \
+	float ty1a = (posY ? child1->aabbMin.y : child1->aabbMax.y) * ray.rD.y - roy; \
+	float tz1a = (posZ ? child1->aabbMin.z : child1->aabbMax.z) * ray.rD.z - roz; \
+	float tx1b = (posX ? child2->aabbMin.x : child2->aabbMax.x) * ray.rD.x - rox; \
+	float ty1b = (posY ? child2->aabbMin.y : child2->aabbMax.y) * ray.rD.y - roy; \
+	float tz1b = (posZ ? child2->aabbMin.z : child2->aabbMax.z) * ray.rD.z - roz; \
+	float tx2a = (posX ? child1->aabbMax.x : child1->aabbMin.x) * ray.rD.x - rox; \
+	float ty2a = (posY ? child1->aabbMax.y : child1->aabbMin.y) * ray.rD.y - roy; \
+	float tz2a = (posZ ? child1->aabbMax.z : child1->aabbMin.z) * ray.rD.z - roz; \
+	float tx2b = (posX ? child2->aabbMax.x : child2->aabbMin.x) * ray.rD.x - rox; \
+	float ty2b = (posY ? child2->aabbMax.y : child2->aabbMin.y) * ray.rD.y - roy; \
+	float tz2b = (posZ ? child2->aabbMax.z : child2->aabbMin.z) * ray.rD.z - roz; \
+	float tmina = tinybvh_max( tinybvh_max( tx1a, ty1a ), tinybvh_max( tz1a, 0.0f ) ); \
+	float tminb = tinybvh_max( tinybvh_max( tx1b, ty1b ), tinybvh_max( tz1b, 0.0f ) ); \
+	float tmaxa = tinybvh_min( tinybvh_min( tx2a, ty2a ), tinybvh_min( tz2a, ray.hit.t ) ); \
+	float tmaxb = tinybvh_min( tinybvh_min( tx2b, ty2b ), tinybvh_min( tz2b, ray.hit.t ) ); \
+	if (tmaxa >= tmina) dist1 = tmina; \
+	if (tmaxb >= tminb) dist2 = tminb;
+
 int32_t BVH::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
@@ -2871,26 +2959,6 @@ int32_t BVH::Intersect( Ray& ray ) const
 		if (posZ) return IntersectTLAS<false, false, true>( ray ); else return IntersectTLAS<false, false, false>( ray );
 	}
 }
-
-#define SLAB_TEST_TWO_NODES \
-	float tx1a = (posX ? child1->aabbMin.x : child1->aabbMax.x) * ray.rD.x - rox; /* expect fma. */ \
-	float ty1a = (posY ? child1->aabbMin.y : child1->aabbMax.y) * ray.rD.y - roy; \
-	float tz1a = (posZ ? child1->aabbMin.z : child1->aabbMax.z) * ray.rD.z - roz; \
-	float tx1b = (posX ? child2->aabbMin.x : child2->aabbMax.x) * ray.rD.x - rox; \
-	float ty1b = (posY ? child2->aabbMin.y : child2->aabbMax.y) * ray.rD.y - roy; \
-	float tz1b = (posZ ? child2->aabbMin.z : child2->aabbMax.z) * ray.rD.z - roz; \
-	float tx2a = (posX ? child1->aabbMax.x : child1->aabbMin.x) * ray.rD.x - rox; \
-	float ty2a = (posY ? child1->aabbMax.y : child1->aabbMin.y) * ray.rD.y - roy; \
-	float tz2a = (posZ ? child1->aabbMax.z : child1->aabbMin.z) * ray.rD.z - roz; \
-	float tx2b = (posX ? child2->aabbMax.x : child2->aabbMin.x) * ray.rD.x - rox; \
-	float ty2b = (posY ? child2->aabbMax.y : child2->aabbMin.y) * ray.rD.y - roy; \
-	float tz2b = (posZ ? child2->aabbMax.z : child2->aabbMin.z) * ray.rD.z - roz; \
-	float tmina = tinybvh_max( tinybvh_max( tx1a, ty1a ), tinybvh_max( tz1a, 0.0f ) ); \
-	float tminb = tinybvh_max( tinybvh_max( tx1b, ty1b ), tinybvh_max( tz1b, 0.0f ) ); \
-	float tmaxa = tinybvh_min( tinybvh_min( tx2a, ty2a ), tinybvh_min( tz2a, ray.hit.t ) ); \
-	float tmaxb = tinybvh_min( tinybvh_min( tx2b, ty2b ), tinybvh_min( tz2b, ray.hit.t ) ); \
-	if (tmaxa >= tmina) dist1 = tmina; \
-	if (tmaxb >= tminb) dist2 = tminb;
 
 template <bool posX, bool posY, bool posZ> int32_t BVH::Intersect( Ray& ray ) const
 {
