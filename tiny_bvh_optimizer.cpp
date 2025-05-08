@@ -1,3 +1,5 @@
+// EXPERIMENTAL CODE - PLEASE IGNORE FOR NOW.
+
 #define TINYBVH_IMPLEMENTATION
 #include "tiny_bvh.h"
 
@@ -8,8 +10,10 @@
 // 4: Bistro
 // 5: Legocar
 // 6: San Miguel
-#define SCENE	5
-#define VERIFY_OPTIMIZED_BVH
+#define SCENE	1
+// #define VERIFY_OPTIMIZED_BVH
+// #define RANDOM_BIN_COUNT
+#define RRS_SIZE 2'000'000
 
 // Includes, needful things
 #ifdef _MSC_VER
@@ -46,7 +50,6 @@ struct Timer
 // Spawns random paths from 8 x 8 x 8 points in the scene to create a final selection of 1M rays,
 // in four equally sized groups: 'primary rays', 'short diffuse rays', 'long diffuse rays', and
 // rays to the sky. The set will be used to somewhat objectively measure the traversal cost of a BVH.
-#define RRS_SIZE 5'000'000
 Ray* rayset = new Ray[RRS_SIZE];
 void RepresentativeRaysInterior()
 {
@@ -165,12 +168,7 @@ void TraceCostThread( const BVH* bvh, const BVH* refBVH, const int set, const in
 		r = r2 = rayset[i];
 		sum += bvh->Intersect( r );
 		refBVH->Intersect( r2 );
-		if (r.hit.t != r2.hit.t)
-		{
-			printf( "damaged BVH.\n" );
-			r2 = rayset[i];
-			refBVH->Intersect( r2 );
-		}
+		if (r.hit.t != r2.hit.t) printf( "damaged BVH.\n" );
 	}
 	else for (uint32_t i = start; i < end; i++) r = rayset[i], sum += bvh->Intersect( r );
 	splitSum[set] = sum;
@@ -247,31 +245,52 @@ int main()
 
 	// STAGE 1: Find optimal bin count between 8 and 99.
 
-	int bins = 8, bestCostBins = -1, first = 1;
-	float bestSAH = 1e30f, bestRRSCost = 1e30f, baseCost = 0;
+	int bins = 8, bestCostBins = -1;
+	float bestSAH = 1e30f, bestRRSCost, baseCost = 0;
 	BVH bvh;
 	std::fstream test{ "sbvh.bin", test.binary | test.in }; // skip if sbvh.bin already exists
-	if (!test) while (1)
+	// reference: 8 bins
+	bvh.hqbvhbins = 8;
+	bvh.hqbvhrndbins = false;
+	bvh.BuildHQ( tris, triCount );
+	baseCost = bestRRSCost = RRSTraceCost( &bvh );
+	bool odd = false;
+	// find optimal BVH
+	if (!test)
 	{
-		Timer t;
-		bvh.hqbvhbins = bins;
-		bvh.BuildHQ( tris, triCount );
-		float buildTime = t.elapsed();
-		// Evaluate traversal cost using RRS
-		float sah = bvh.SAHCost();
-		float RRScost = RRSTraceCost( &bvh );
-		if (RRScost < bestRRSCost) // we optimize for RRS cost, not SAH.
+		while (1)
 		{
-			bestRRSCost = RRScost, bestCostBins = bins, bestSAH = sah;
-			bvh.Save( "sbvh.bin" ); // overwrites previous best
+			Timer t;
+		#ifdef RANDOM_BIN_COUNT
+			// split with random bin count between 35 and 97.
+			bvh.hqbvhbins = bins;
+			bvh.hqbvhbinseed = ((rand() & 8191) + 1) * 13;
+			bvh.hqbvhrndbins = true;
+		#else
+			// use 'bins' splits, with one extra for odd tree levels.
+			bvh.hqbvhbins = bins;
+			bvh.hqbvhoddeven = odd;
+			odd = !odd;
+		#endif
+			bvh.BuildHQ( tris, triCount );
+			float buildTime = t.elapsed();
+			// Evaluate traversal cost using RRS
+			float sah = bvh.SAHCost();
+			float RRScost = RRSTraceCost( &bvh );
+			float percentage = baseCost * 100 / RRScost;
+			printf( "SBVH, %i.%i bins (%.1fs): SAH=%5.1f, RRS %.2f [%.2f%%] ",
+				bins, (bvh.hqbvhoddeven ? 5 : 0), buildTime, sah, RRScost, percentage );
+			if (RRScost < bestRRSCost) // we optimize for RRS cost, not SAH.
+			{
+				bestRRSCost = RRScost, bestCostBins = bins, bestSAH = sah;
+				bvh.Save( "sbvh.bin" ); // overwrites previous best
+				printf( " ==> saved to ""sbvh.bin"".\n" );
+			}
+			else printf( "\n" );
+			if (!odd) bins++;
+			if (bins == 128) break; // searching beyond this point doesn't seem to make sense.
 		}
-		// Report
-		if (first) first = 0, baseCost = RRScost;
-		float percentage = (bestRRSCost * 100) / baseCost;
-		printf( "SBVH, %2u|127 bins (%.1fs): SAH=%5.1f, RRS %.2f", bins, buildTime, sah, RRScost );
-		if (bestCostBins == bins) printf( " ==> saved to ""sbvh.bin"".\n" ); else
-			printf( " (best: %2u bins, RRS %.2f [%.2f%%])\n", bestCostBins, bestRRSCost, percentage );
-		if (++bins == 128) break; // searching beyond this point doesn't seem to make sense.
+		while (1) { /* freeze */ }
 	}
 
 	// STAGE 2: Optimize bvh with optimal bin count
@@ -283,8 +302,11 @@ int main()
 	float refCost = RRSTraceCost( &refbvh );
 	// Load SBVH with best split plane count
 	bvh.Load( "sbvh.bin", tris, triCount ); // generated in STAGE 1
+	float startCost = RRSTraceCost( &bvh );
+	printf( "BVH in sbvh.bin: SAH=%.2f, cost=%.2f (%.2f%%).\n", bvh.SAHCost(), startCost, 100 * refCost / startCost );
 	BVH::BVHNode* backup = (BVH::BVHNode*)malloc64( bvh.allocatedNodes * sizeof( BVH::BVHNode ) );
 	BVH_Verbose* verbose = new BVH_Verbose();
+	uint32_t iteration = 0;
 	// Optimize
 	while (1)
 	{
@@ -301,7 +323,7 @@ int main()
 	#else
 		float costAfter = RRSTraceCost( &bvh, 0 );
 	#endif
-		printf( "Optimizer: SAH from %.2f to %.2f, cost from %.3f to %.3f", SAHBefore, SAHafter, costBefore, costAfter );
+		printf( "Iteration %05i: SAH from %.2f to %.2f, cost from %.3f to %.3f", iteration++, SAHBefore, SAHafter, costBefore, costAfter );
 		if (costAfter >= costBefore)
 		{
 			printf( " - REJECTED\n" );
@@ -310,7 +332,7 @@ int main()
 		}
 		else
 		{
-			float percentage = (costAfter * 100) / refCost;
+			float percentage = refCost * 100 / costAfter;
 			printf( " - %.2f%%, saved to sbvh_opt.bin\n", percentage );
 		#if SCENE == 1
 			bvh.Save( "sbvh_sponza_opt.bin" );
@@ -347,6 +369,33 @@ int main()
 	bvhBinned.Build( tris, triCount );
 	sah = bvhBinned.SAHCost(), rrs = RRSTraceCost( &bvhBinned );
 	printf( "SAH BVH Binned (8) - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+
+	BVH_Verbose verbose( bvhBinned );
+	FILE* f = 0;
+#if SCENE == 1
+	f = fopen( "cryteksponza.hploc", "rb" );
+#elif SCENE == 3
+	f = fopen( "dragon.hploc", "rb" );
+#elif SCENE == 4
+	f = fopen( "bistro_ext.hploc", "rb" );
+#elif SCENE == 5
+	f = fopen( "legocar.hploc", "rb" );
+#endif
+	if (f)
+	{
+		bvhvec3 bmin, bmax;
+		fread( &bmin, 1, 12, f );
+		fread( &bmax, 1, 12, f );
+		uint32_t triCount, nodeCount;
+		fread( &triCount, 1, 4, f );
+		nodeCount = triCount * 2 - 1;
+		fread( verbose.bvhNode, sizeof( BVH_Verbose::BVHNode ), nodeCount, f );
+		verbose.usedNodes = nodeCount;
+		BVH ploc;
+		ploc.ConvertFrom( verbose );
+		sah = ploc.SAHCost(), rrs = RRSTraceCost( &ploc );
+		printf( "H-PLOC build   - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+	}
 
 #if SCENE != 2
 

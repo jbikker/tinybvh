@@ -126,8 +126,6 @@ THE SOFTWARE.
 
 // SBVH: "Unsplitting"
 #define SBVH_UNSPLITTING
-// SBVH: "Ray Distribution Heuristic", WIP.
-// #define RDH_FOR_SBVH
 #define RDH_MAX_WEIGHT 0.8f
 
 // Triangle intersection: "Watertight"
@@ -150,12 +148,13 @@ THE SOFTWARE.
 #define ENABLE_CUSTOM_GEOMETRY
 #endif
 
-// Experimental features
+// Experimental / WIP features
 
 // CWBVH triangle format - doesn't seem to help on GPU?
 // #define CWBVH_COMPRESSED_TRIS
 // BVH4 triangle format
 // #define BVH4_GPU_COMPRESSED_TRIS
+// #define NORMALIZED_RAY_BOX_INTERSECTION
 
 // BVH8_CPU align to big boundaries - experimental.
 #define BVH8_ALIGN_4K
@@ -752,6 +751,7 @@ public:
 	bool l_quads = false;			// some layouts have 4 prims in each leaf; adjust SAH cost for this.
 	uint32_t hqbvhbins = HQBVHBINS;	// number of bins to use in SBVH construction.
 	bool hqbvhrndbins = false;		// if true, bin count will be randomized at each split.
+	bool hqbvhoddeven = false;		// if true, odd levels will use one extra bin during construction.
 	uint32_t hqbvhbinseed = 123;	// seed to be used for randomized bin count builds.
 	bvhvec3 aabbMin, aabbMax;		// bounds of the root node of the BVH.
 	// Custom memory allocation
@@ -863,17 +863,9 @@ protected:
 	void BuildDefault( const bvhvec4slice& vertices );
 	void BuildDefault( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void BuildDefault( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
-#ifdef RDH_FOR_SBVH
-	void BuildRRS();
-#endif
 	// Helpers
 	inline float SplitCostSAH( const float rAparent, const float Aleft, const int Nleft, const float Aright, const int Nright ) const;
 	inline float NoSplitCostSAH( const int Nparent ) const;
-#ifdef RDH_FOR_SBVH
-	inline float SplitCostRDH( const int Pleft, const int Nleft, const int Pright, const int Nright ) const;
-	inline float NoSplitCostRDH( const int Nparent ) const;
-	inline float RDHSplitWeight( const int Nparent ) const;
-#endif
 	void QuickSort( const float* centroid, uint32_t* primIdx, int first, int last );
 public:
 	// BVH type identification
@@ -2232,10 +2224,6 @@ void BVH::BuildHQ( const bvhvec4* vertices, const uint32_t* indices, const uint3
 void BVH::BuildHQ( const bvhvec4slice& vertices )
 {
 	PrepareHQBuild( vertices, 0, 0 );
-#ifdef RDH_FOR_SBVH
-	// Generate RRS
-	BuildRRS(); // construct 'representative ray set' to evaluate RDH in BuildHQ.
-#endif
 	BuildHQ();
 }
 
@@ -2243,65 +2231,8 @@ void BVH::BuildHQ( const bvhvec4slice& vertices, const uint32_t* indices, uint32
 {
 	// build the BVH from vertices stored in a slice, indexed by 'indices'.
 	PrepareHQBuild( vertices, indices, prims );
-#ifdef RDH_FOR_SBVH
-	// Generate RRS
-	BuildRRS(); // construct 'representative ray set' to evaluate RDH in BuildHQ.
-#endif
 	BuildHQ();
 }
-
-#ifdef RDH_FOR_SBVH
-
-void BVH::BuildRRS()
-{
-	// Trace a large number of rays to determine probability of polygon hits.
-	rrsHits = (uint32_t*)AlignedAlloc( triCount * 4 );
-	memset( rrsHits, 0, triCount * 4 );
-	// Attempt to load cached data.
-	std::fstream r{ "rrshits.bin", r.binary | r.in };
-	if (r)
-	{
-		r.read( (char*)rrsHits, triCount * 4 );
-		return;
-	}
-	// Build an intermedite BVH.
-	BVH tmp;
-	tmp.Build( verts, vertIdx, vertIdx ? triCount : 0 );
-	// Place 8x8x8 spawn points in the scene
-	bvhvec3 S[8 * 8 * 8], bmin = tmp.aabbMin, bext = tmp.aabbMax - tmp.aabbMin;
-	for (int x = 0; x < 8; x++) for (int y = 0; y < 8; y++) for (int z = 0; z < 8; z++)
-		S[x + y * 8 + z * 64] = bmin + (bvhvec3( (float)x, (float)y, (float)z ) + 1) * (1.0f / 9.0f) * bext;
-	// Create random paths
-	uint32_t seed = 0x123456, totalHits = 0;
-	for (int i = 0; i < 50'000'000; i++)
-	{
-		// Path start
-		bvhvec3 P = S[i & 511], R = tinybvh_rndvec3( seed );
-		// Random walk
-		for (int j = 0; j < 10; j++)
-		{
-			Ray ray( P + R * 0.0001f, R );
-			tmp.Intersect( ray );
-			if (ray.hit.t == BVH_FAR) break;
-			// Get primitive info for path vertex.
-			uint32_t i0, i1, i2, triIdx = ray.hit.prim;
-			GET_PRIM_INDICES_I0_I1_I2( tmp, triIdx );
-			const bvhvec4 v0 = tmp.verts[i0], v1 = tmp.verts[i1], v2 = tmp.verts[i2];
-			bvhvec3 N = tinybvh_normalize( tinybvh_cross( v1 - v0, v2 - v0 ) );
-			if (tinybvh_dot( N, ray.D ) > 0) N *= -1.0f;
-			// After first bounce: register hit.
-			if (j > 0) rrsHits[triIdx]++, totalHits++;
-			R = tinybvh_rndvec3( seed );
-			if (tinybvh_dot( R, N ) < 0) R *= -1.0f;
-			P = P + ray.hit.t * R;
-		}
-	}
-	// Save the result.
-	std::fstream s{ "rrshits.bin", s.binary | s.out };
-	s.write( (char*)rrsHits, triCount * 4 );
-}
-
-#endif
 
 void BVH::PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
 {
@@ -2375,28 +2306,6 @@ float BVH::NoSplitCostSAH( const int Nparent ) const
 	return (float)(l_quads ? (((Nparent + 3) >> 2) * 4) : Nparent) * c_int;
 }
 
-#ifdef RDH_FOR_SBVH
-
-float BVH::SplitCostRDH( const int Pleft, const int Nleft, const int Pright, const int Nright ) const
-{
-	const float Psum = (float)(Pleft + Pright);
-	const float Pl = (float)Pleft / Psum;
-	const float Pr = (float)Pright / Psum;
-	return c_trav + c_int * (Pl * (float)Nleft + Pr * (float)Nright);
-}
-
-float BVH::NoSplitCostRDH( const int Nparent ) const
-{
-	return (float)(l_quads ? (((Nparent + 3) >> 2) * 4) : Nparent) * c_int;
-}
-
-float BVH::RDHSplitWeight( const int Nparent ) const
-{
-	return tinybvh_min( RDH_MAX_WEIGHT, tinybvh_max( 0.0f, (float)Nparent - 250.0f ) / 250.0f );
-}
-
-#endif
-
 void BVH::BuildHQ()
 {
 	const uint32_t slack = triCount >> 1; // for split prims
@@ -2409,9 +2318,9 @@ void BVH::BuildHQ()
 	// subdivide recursively
 	BVHNode& root = bvhNode[0];
 	const float rootArea = tinybvh_half_area( root.aabbMax - root.aabbMin );
-	struct Task { uint32_t node, sliceStart, sliceEnd, dummy; };
+	struct Task { uint32_t node, sliceStart, sliceEnd, depth; };
 	ALIGNED( 64 ) Task task[1024];
-	uint32_t taskCount = 0, nodeIdx = 0, sliceStart = 0, sliceEnd = triCount + slack;
+	uint32_t taskCount = 0, nodeIdx = 0, sliceStart = 0, sliceEnd = triCount + slack, depth = 0, bins = hqbvhbins;
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f /* don't touch, carefully picked */;
 	bvhvec3 bestLMin = 0, bestLMax = 0, bestRMin = 0, bestRMax = 0;
 	while (1)
@@ -2422,18 +2331,15 @@ void BVH::BuildHQ()
 			// randomize bin count if hqbvhrand is set
 			if (hqbvhrndbins)
 			{
-				hqbvhbins = 3 + (hqbvhbinseed & 127);
+				hqbvhbins = 35 + 2 * (hqbvhbinseed & 31);
 				hqbvhbinseed = hqbvhbinseed * 16843009u + 826366247u;
 			}
+			if (hqbvhoddeven) hqbvhbins = bins + (depth & 1); // odd levels get one more.
 			// find optimal object split
 			bvhvec3 binMin[3][MAXHQBINS], binMax[3][MAXHQBINS];
 			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < hqbvhbins; i++) binMin[a][i] = BVH_FAR, binMax[a][i] = -BVH_FAR;
 			uint32_t count[3][MAXHQBINS];
 			for (uint32_t i = 0; i < 3; i++) memset( count[i], 0, hqbvhbins * 4 );
-		#ifdef RDH_FOR_SBVH
-			uint32_t rrsCount[3][MAXHQBINS], rrsTotal = 0;
-			for (uint32_t i = 0; i < 3; i++) memset( rrsCount[i], 0, hqbvhbins * 4 );
-		#endif
 			const bvhvec3 rpd3 = bvhvec3( (float)hqbvhbins / (node.aabbMax - node.aabbMin) ), nmin3 = node.aabbMin;
 			for (uint32_t i = 0; i < node.triCount; i++) // process all tris for x,y and z at once
 			{
@@ -2448,22 +2354,9 @@ void BVH::BuildHQ()
 				binMax[1][bi.y] = tinybvh_max( binMax[1][bi.y], fragment[fi].bmax ), count[1][bi.y]++;
 				binMin[2][bi.z] = tinybvh_min( binMin[2][bi.z], fragment[fi].bmin );
 				binMax[2][bi.z] = tinybvh_max( binMax[2][bi.z], fragment[fi].bmax ), count[2][bi.z]++;
-			#ifdef RDH_FOR_SBVH
-				const uint32_t hits = rrsHits[fi]; // RRS samples that landed on this primitive.
-				rrsCount[0][bi.x] += hits;
-				rrsCount[1][bi.y] += hits;
-				rrsCount[2][bi.z] += hits, rrsTotal += hits;
-			#endif
 			}
 			// calculate per-split totals
-		#ifdef RDH_FOR_SBVH
-			float noSplitCostSAH = NoSplitCostSAH( node.triCount );
-			float noSplitCostRDH = NoSplitCostRDH( node.triCount );
-			float rdh_w = RDHSplitWeight( node.triCount );
-			float noSplitCost = rdh_w * noSplitCostRDH + (1 - rdh_w) * noSplitCostSAH;
-		#else
 			float noSplitCost = NoSplitCostSAH( node.triCount );
-		#endif
 			float splitCost = noSplitCost, rSAV = 1.0f / node.SurfaceArea();
 			uint32_t bestAxis = 0, bestPos = 0;
 			for (int32_t a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
@@ -2472,9 +2365,6 @@ void BVH::BuildHQ()
 				bvhvec3 lBMax[MAXHQBINS - 1], rBMax[MAXHQBINS - 1], r1 = BVH_FAR, r2 = -BVH_FAR;
 				float AL[MAXHQBINS - 1], AR[MAXHQBINS - 1];		// left and right area per split plane
 				int NL[MAXHQBINS - 1], NR[MAXHQBINS - 1];		// summed left and right tricount
-			#ifdef RDH_FOR_SBVH
-				int PL[MAXHQBINS - 1], PR[MAXHQBINS - 1];		// summed left and right RRS samples
-			#endif
 				for (uint32_t lN = 0, rN = 0, lP = 0, rP = 0, i = 0; i < hqbvhbins - 1; i++)
 				{
 					lBMin[i] = l1 = tinybvh_min( l1, binMin[a][i] );
@@ -2485,21 +2375,11 @@ void BVH::BuildHQ()
 					NL[i] = lN, NR[hqbvhbins - 2 - i] = rN;
 					AL[i] = lN == 0 ? BVH_FAR : tinybvh_half_area( l2 - l1 );
 					AR[hqbvhbins - 2 - i] = rN == 0 ? BVH_FAR : tinybvh_half_area( r2 - r1 );
-				#ifdef RDH_FOR_SBVH
-					lP += rrsCount[a][i], rP += rrsCount[a][hqbvhbins - 1 - i];
-					PL[i] = lP, PR[hqbvhbins - 2 - i] = rN;
-				#endif
 				}
 				// evaluate bin totals to find best position for object split
 				for (uint32_t i = 0; i < hqbvhbins - 1; i++)
 				{
-				#ifdef RDH_FOR_SBVH
-					const float C_rdh = SplitCostRDH( PL[i], NL[i], PR[i], NR[i] );
-					const float C_sah = SplitCostSAH( rSAV, AL[i], NL[i], AR[i], NR[i] );
-					const float C = rdh_w * C_rdh + (1 - rdh_w) * C_sah;
-				#else
 					const float C = SplitCostSAH( rSAV, AL[i], NL[i], AR[i], NR[i] );
-				#endif
 					if (C >= splitCost) continue;
 					splitCost = C, bestAxis = a, bestPos = i;
 					bestLMin = lBMin[i], bestRMin = rBMin[i], bestLMax = lBMax[i], bestRMax = rBMax[i];
@@ -2551,9 +2431,6 @@ void BVH::BuildHQ()
 					bvhvec3 lBMax[MAXHQBINS - 1], rBMax[MAXHQBINS - 1], r1 = BVH_FAR, r2 = -BVH_FAR;
 					float AL[MAXHQBINS], AR[MAXHQBINS];
 					int NL[MAXHQBINS], NR[MAXHQBINS];
-				#ifdef RDH_FOR_SBVH
-					int PL[MAXHQBINS], PR[MAXHQBINS];
-				#endif
 					for (uint32_t lN = 0, rN = 0, lP = 0, rP = 0, i = 0; i < hqbvhbins - 1; i++)
 					{
 						lBMin[i] = l1 = tinybvh_min( l1, sbinMin[i] ), rBMin[hqbvhbins - 2 - i] = r1 = tinybvh_min( r1, sbinMin[hqbvhbins - 1 - i] );
@@ -2562,22 +2439,11 @@ void BVH::BuildHQ()
 						AL[i] = lN == 0 ? BVH_FAR : tinybvh_half_area( l2 - l1 );
 						AR[hqbvhbins - 2 - i] = rN == 0 ? BVH_FAR : tinybvh_half_area( r2 - r1 );
 						NL[i] = lN, NR[hqbvhbins - 2 - i] = rN;
-					#ifdef RDH_FOR_SBVH
-						lP += rrsCount[a][i], rP += rrsCount[a][hqbvhbins - 1 - i];
-						PL[i] = lP, PR[hqbvhbins - 2 - i] = rN;
-					#endif
 					}
 					// find best position for spatial split
 					for (uint32_t i = 0; i < hqbvhbins - 1; i++)
 					{
-					#ifdef RDH_FOR_SBVH
-						const float C_rdh = SplitCostRDH( PL[i], NL[i], PR[i], NR[i] );
-						const float C_sah = c_trav + c_int * rSAV * (AL[i] * (float)NL[i] + AR[i] * (float)NR[i]);
-						const float w = tinybvh_min( RDH_MAX_WEIGHT, tinybvh_max( 0.0f, (PL[i] + PR[i]) - 250.0f ) / 250.0f );
-						const float Cspatial = w * C_rdh + (1 - w) * C_sah;
-					#else
 						const float Cspatial = SplitCostSAH( rSAV, AL[i], NL[i], AR[i], NR[i] );
-					#endif
 						if (Cspatial < minSplitCost && NL[i] + NR[i] < budget && NL[i] * NR[i] > 0)
 						{
 							spatial = true, minSplitCost = splitCost = Cspatial, bestAxis = a, bestPos = i;
@@ -2609,7 +2475,7 @@ void BVH::BuildHQ()
 					const uint32_t bin2 = (uint32_t)tinybvh_max( (fragment[fragIdx].bmax[bestAxis] - nodeMin) * rPlaneDist, 0.0f );
 					if (bin2 <= bestPos) triIdxB[A++] = fragIdx; else if (bin1 > bestPos) triIdxB[--B] = fragIdx; else
 					{
-					#if defined SBVH_UNSPLITTING && !defined RDH_FOR_SBVH
+					#if defined SBVH_UNSPLITTING
 						// unsplitting: 1. Calculate what happens if we add this primitive entirely to the left side
 						if (bestNR > 1)
 						{
@@ -2694,6 +2560,7 @@ void BVH::BuildHQ()
 			bvhNode[rightChildIdx].leftFirst = B, bvhNode[rightChildIdx].triCount = rightCount;
 			node.leftFirst = leftChildIdx, node.triCount = 0;
 			// recurse
+			task[taskCount].depth = depth + 1;
 			task[taskCount].node = rightChildIdx, task[taskCount].sliceEnd = sliceEnd;
 			task[taskCount++].sliceStart = sliceEnd = (A + B) >> 1, nodeIdx = leftChildIdx;
 		}
@@ -2701,7 +2568,8 @@ void BVH::BuildHQ()
 		if (taskCount == 0) break; else
 			nodeIdx = task[--taskCount].node,
 			sliceStart = task[taskCount].sliceStart,
-			sliceEnd = task[taskCount].sliceEnd;
+			sliceEnd = task[taskCount].sliceEnd,
+			depth = task[taskCount].depth;
 	}
 	// all done.
 	AlignedFree( triIdxB );
@@ -2848,23 +2716,33 @@ bool BVH::IntersectSphere( const bvhvec3& pos, const float r ) const
 	return false;
 }
 
+#ifdef NORMALIZED_RAY_BOX_INTERSECTION
+
 int32_t BVH::IntersectRaw( Ray& ray ) const
 {
 	BVHNode* node = &bvhNode[0], * stack[64];
 	uint32_t stackPtr = 0;
 	float cost = 0;
-#if 1
-	int major = ray.D.x > ray.D.y ? 0 : 1;
-	major = ray.D.z > ray.D[major] ? 2 : major;
-	const float scale = ray.rD[major];
-	// const bvhvec3 rayDnormalized = ray.D * scale;
-	// const float to = -ray.O[major] * scale;
-	// const bvhvec3 rayOnormalized = ray.O + to * ray.D;
+	// initialize transformed ray
+	int i = ray.D.x > ray.D.y ? 0 : 1;
+	i = ray.D.z > ray.D[i] ? 2 : i;			// i = axis of greatest magnitude
+	int j = (i + 1) % 3, k = (i + 2) % 3;	// j, k = other axii
+#if 0
+	// no transform
 	const bvhvec3 nrdo = -ray.O * ray.rD;
-	const uint32_t n0 = ray.D.x > 0 ? 0 : 4, f0 = ray.D.x > 0 ? 4 : 0;
-	const uint32_t n1 = ray.D.y > 0 ? 1 : 5, f1 = ray.D.y > 0 ? 5 : 1;
-	const uint32_t n2 = ray.D.z > 0 ? 2 : 6, f2 = ray.D.z > 0 ? 6 : 2;
+#else
+	// transform
+	const float scale = ray.rD[i];
+	const bvhvec3 Dnorm = ray.D * scale;
+	const float t = -ray.O[i] * scale;
+	const bvhvec3 Onorm = ray.O + t * ray.D;
+	const bvhvec3 nrdo = -Onorm * Dnorm;
 #endif
+	// AABB component offsets
+	const uint32_t n0 = j + (ray.D[j] > 0 ? 0 : 4), f0 = j + (ray.D[j] > 0 ? 4 : 0);
+	const uint32_t n1 = k + (ray.D[k] > 0 ? 0 : 4), f1 = k + (ray.D[k] > 0 ? 4 : 0);
+	const uint32_t n2 = i + (ray.D[i] > 0 ? 0 : 4), f2 = i + (ray.D[i] > 0 ? 4 : 0);
+	// traversal loop
 	while (1)
 	{
 		cost += c_trav;
@@ -2878,30 +2756,38 @@ int32_t BVH::IntersectRaw( Ray& ray ) const
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
 		}
-		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
 	#if 1
-		float dist1, dist2;
-		{
-			const float* b = (const float*)child1;
-			const float tx0n = b[n0] * ray.rD.x + nrdo.x, tx0f = b[f0] * ray.rD.x + nrdo.x;
-			const float tx1n = b[n1] * ray.rD.y + nrdo.y, tx1f = b[f1] * ray.rD.y + nrdo.y;
-			const float tx2n = b[n2] * ray.rD.z + nrdo.z, tx2f = b[f2] * ray.rD.z + nrdo.z;
-			const float tnear = tinybvh_max( tinybvh_max( tinybvh_max( tx0n, tx1n ), tx2n ), 0.0f );
-			const float tfar = tinybvh_min( tinybvh_min( tinybvh_min( tx0f, tx1f ), tx2f ), ray.hit.t );
-			dist1 = tnear <= tfar ? tnear : BVH_FAR;
-		}
-		{
-			const float* b = (const float*)child2;
-			const float tx0n = b[n0] * ray.rD.x + nrdo.x, tx0f = b[f0] * ray.rD.x + nrdo.x;
-			const float tx1n = b[n1] * ray.rD.y + nrdo.y, tx1f = b[f1] * ray.rD.y + nrdo.y;
-			const float tx2n = b[n2] * ray.rD.z + nrdo.z, tx2f = b[f2] * ray.rD.z + nrdo.z;
-			const float tnear = tinybvh_max( tinybvh_max( tinybvh_max( tx0n, tx1n ), tx2n ), 0.0f );
-			const float tfar = tinybvh_min( tinybvh_min( tinybvh_min( tx0f, tx1f ), tx2f ), ray.hit.t );
-			dist2 = tnear <= tfar ? tnear : BVH_FAR;
-		}
+		// Listing 1
+		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
+		const float* b1 = (const float*)child1, * b2 = (const float*)child2;
+		const float tx0n1 = b1[n0] * ray.rD.x + nrdo.x, tx0f1 = b1[f0] * ray.rD.x + nrdo.x;
+		const float tx1n1 = b1[n1] * ray.rD.y + nrdo.y, tx1f1 = b1[f1] * ray.rD.y + nrdo.y;
+		const float tx2n1 = b1[n2] * ray.rD.z + nrdo.z, tx2f1 = b1[f2] * ray.rD.z + nrdo.z;
+		const float tnear1 = tinybvh_max( tinybvh_max( tinybvh_max( tx0n1, tx1n1 ), tx2n1 ), 0.0f );
+		const float tfar1 = tinybvh_min( tinybvh_min( tinybvh_min( tx0f1, tx1f1 ), tx2f1 ), ray.hit.t );
+		const float tx0n2 = b2[n0] * ray.rD.x + nrdo.x, tx0f2 = b2[f0] * ray.rD.x + nrdo.x;
+		const float tx1n2 = b2[n1] * ray.rD.y + nrdo.y, tx1f2 = b2[f1] * ray.rD.y + nrdo.y;
+		const float tx2n2 = b2[n2] * ray.rD.z + nrdo.z, tx2f2 = b2[f2] * ray.rD.z + nrdo.z;
+		const float tnear2 = tinybvh_max( tinybvh_max( tinybvh_max( tx0n2, tx1n2 ), tx2n2 ), 0.0f );
+		const float tfar2 = tinybvh_min( tinybvh_min( tinybvh_min( tx0f2, tx1f2 ), tx2f2 ), ray.hit.t );
+		float dist2 = tnear2 <= tfar2 ? tnear2 : BVH_FAR, dist1 = tnear1 <= tfar1 ? tnear1 : BVH_FAR;
 	#else
-		float dist1 = tinybvh_intersect_aabb( ray, child1->aabbMin, child1->aabbMax );
-		float dist2 = tinybvh_intersect_aabb( ray, child2->aabbMin, child2->aabbMax );
+		// Listing 2
+		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
+		const float* b1 = (const float*)child1, * b2 = (const float*)child2;
+		const float tx0n1 = b1[n0] * ray.rD.x + nrdo.x, tx0f1 = b1[f0] * ray.rD.x + nrdo.x;
+		const float tx1n1 = b1[n1] * ray.rD.y + nrdo.y, tx1f1 = b1[f1] * ray.rD.y + nrdo.y;
+		const float tx2n1 = b1[n2], tx2f1 = b1[f2];
+		const float tnear1 = tinybvh_max( tinybvh_max( tinybvh_max( tx0n1, tx1n1 ), tx2n1 ), 0.0f );
+		const float tfar1 = tinybvh_min( tinybvh_min( tinybvh_min( tx0f1, tx1f1 ), tx2f1 ), ray.hit.t );
+		const float tx0n2 = b2[n0] * ray.rD.x + nrdo.x, tx0f2 = b2[f0] * ray.rD.x + nrdo.x;
+		const float tx1n2 = b2[n1] * ray.rD.y + nrdo.y, tx1f2 = b2[f1] * ray.rD.y + nrdo.y;
+		const float tx2n2 = b2[n2], tx2f2 = b2[f2];
+		const float tnear2 = tinybvh_max( tinybvh_max( tinybvh_max( tx0n2, tx1n2 ), tx2n2 ), 0.0f );
+		const float tfar2 = tinybvh_min( tinybvh_min( tinybvh_min( tx0f2, tx1f2 ), tx2f2 ), ray.hit.t );
+		float dist2 = tnear2 <= tfar2 ? tnear2 : BVH_FAR, dist1 = tnear1 <= tfar1 ? tnear1 : BVH_FAR;
+		// convert distances
+		// TODO
 	#endif
 		if (dist1 > dist2) { tinybvh_swap( dist1, dist2 ); tinybvh_swap( child1, child2 ); }
 		if (dist1 == BVH_FAR /* missed both child nodes */)
@@ -2914,6 +2800,8 @@ int32_t BVH::IntersectRaw( Ray& ray ) const
 	}
 	return (int32_t)cost; // cast to not break interface.
 }
+
+#endif
 
 #define SLAB_TEST_TWO_NODES \
 	float tx1a = (posX ? child1->aabbMin.x : child1->aabbMax.x) * ray.rD.x - rox; /* expect fma. */ \
