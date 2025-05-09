@@ -23,7 +23,7 @@ static std::atomic<int> tileIdx( 0 );
 
 // setup view pyramid for a pinhole camera
 static bvhvec3 view = tinybvh_normalize( bvhvec3( -1, 0, 0 ) );
-static bvhvec3 eye( -15, 10, 0 ), C = eye + view;
+static bvhvec3 eye( 5, 2, 0 ), C = eye + view;
 static bvhvec3 p1 = C + bvhvec3( 0, 1, -1 ), p2 = C + bvhvec3( 0, 1, 1 ), p3 = C + bvhvec3( 0, -1, -1 );
 
 // scene management - Append a file, with optional position, scale and color override, tinyfied
@@ -42,15 +42,7 @@ void AddMesh( const char* file, float scale = 1, bvhvec3 pos = {}, int c = 0, in
 void Init()
 {
 	// load raw vertex data
-#if 1
-	tris = (bvhvec4*)malloc64( 3 * sizeof( bvhvec4 ) );
-	tris[0] = bvhvec4( -32, 3, -5, 0 );
-	tris[1] = bvhvec4( -32, 20, 0, 0 );
-	tris[2] = bvhvec4( -32, 3, 5, 0 );
-	triCount = 1;
-#else
-	AddMesh( "./testdata/cryteksponza.bin", 1, bvhvec3( 0 ), 0xffffff );
-#endif
+	AddMesh( "./testdata/cryteksponza.bin", 1, bvhvec3( 0 ) );
 	bvh.Build( tris, triCount );
 }
 
@@ -59,7 +51,40 @@ bvhvec3 Trace( Ray ray, unsigned& seed, unsigned depth = 0 )
 {
 	// find primary intersection
 	bvh.Intersect( ray );
-	return ray.hit.t;
+	// handle ray miss
+	if (ray.hit.t == BVH_FAR) return 0;
+	// obtain material color
+	unsigned primIdx = ray.hit.prim;
+	unsigned v0 = primIdx * 3;
+	unsigned v1 = primIdx * 3 + 1;
+	unsigned v2 = primIdx * 3 + 2;
+	bvhvec4 vert0 = tris[v0];
+	bvhvec4 vert1 = tris[v1];
+	bvhvec4 vert2 = tris[v2];
+	unsigned color = *((unsigned*)&vert0.w);
+	int red = (color >> 16) & 255;
+	int green = (color >> 8) & 255;
+	int blue = color & 255;
+	bvhvec3 albedo = bvhvec3( red, green, blue ) * (1.0f / 255.0f);
+	// calculate normal
+	bvhvec3 N = tinybvh_normalize( tinybvh_cross( vert1 - vert0, vert2 - vert0 ) );
+	bvhvec3 I = ray.O + ray.hit.t * ray.D;
+	if (tinybvh_dot( N, ray.D ) > 0) N = -N;
+	// add reflection
+	if (N.y == 1 && depth == 0)
+	{
+		bvhvec3 R = ray.D - 2 * tinybvh_dot( ray.D, N ) * N;
+		bvhvec3 reflectedLight = Trace( Ray( I + 0.0001f * R, R ), seed, depth + 1 );
+		return albedo * reflectedLight;
+	}
+	// add shadow
+	bvhvec3 Lpos( 0, 50, 4 );
+	bvhvec3 L = tinybvh_normalize( I - Lpos );
+	float dist = tinybvh_length( Lpos - I );
+	Ray sr( Lpos, L, dist - 0.0001f );
+	bool isOccluded = bvh.IsOccluded( sr );
+	if (isOccluded) return albedo * 0.2f;
+	return albedo;
 }
 
 void TraceWorkerThread( uint32_t* buf, int tile )
@@ -76,8 +101,10 @@ void TraceWorkerThread( uint32_t* buf, int tile )
 			const bvhvec3 D = tinybvh_normalize( p1 + u * (p2 - p1) + v * (p3 - p1) - eye );
 			// trace
 			bvhvec3 color = Trace( Ray( eye, D ), seed );
-			int c = (int)(tinybvh_min( 1.0f, color.x * 0.03f ) * 255.0f);
-			buf[pixel_x + pixel_y * SCRWIDTH] = c + (c << 8) + (c << 16);
+			int r = (int)(tinybvh_min( 1.0f, color.x ) * 255.0f);
+			int g = (int)(tinybvh_min( 1.0f, color.y ) * 255.0f);
+			int b = (int)(tinybvh_min( 1.0f, color.z ) * 255.0f);
+			buf[pixel_x + pixel_y * SCRWIDTH] = r + (g << 8) + (b << 16);
 		}
 		tile = tileIdx++;
 	}
