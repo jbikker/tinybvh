@@ -4,16 +4,95 @@
 #include "tiny_bvh.h"
 
 // SCENES:
+// --------------------------------------------------
 // 1: Crytek Sponza
 // 2: Conference Room
 // 3: Stanford Dragon
 // 4: Bistro
 // 5: Legocar
 // 6: San Miguel
-#define SCENE	1
+#define SCENE	6
+
+// STAGES:
+// --------------------------------------------------
+// 1: Determine best bin count
+// 2: Optimize using reinsertion & RRS
+// 3: Report
+#define STAGE	1
+
+// EXPERIMENT SETTINGS:
+// --------------------------------------------------
 // #define VERIFY_OPTIMIZED_BVH
 // #define RANDOM_BIN_COUNT
-#define RRS_SIZE 2'000'000
+
+// RAY SETS:
+// --------------------------------------------------
+#define RRS_INTERIOR	1	// 8x8x8 grid of spherical path sources
+#define RRS_OBJECT		2	// scene-surrounding sphere of path sources
+
+// FILES:
+// --------------------------------------------------
+#if SCENE == 1
+#define SCENE_NAME		"Crytek Sponza"
+#define RAYSET_TYPE		RRS_INTERIOR
+#define GEOM_FILE		"./testdata/cryteksponza.bin"
+#define STAT_FILE		"sbvh_cryteksponza.csv"
+#define HPLOC_FILE		"cryteksponza.hploc"
+#define OPTIMIZED_BVH	"sbvh_cryteksponza_opt.bin"
+#define RRS_SIZE		2'000'000
+#define BEST_BINCOUNT	27.5f
+#define BEST_BINNED_BVH	"sbvh_cryteksponza_27.5bins.bin"
+#elif SCENE == 2
+#define SCENE_NAME		"Conference Room"
+#define RAYSET_TYPE		RRS_INTERIOR
+#define GEOM_FILE		"./testdata/conference.bin"
+#define STAT_FILE		"sbvh_conference.csv"
+#define HPLOC_FILE		"conference.hploc"
+#define OPTIMIZED_BVH	"sbvh_conference_opt.bin"
+#define RRS_SIZE		1'000'000
+#define BEST_BINCOUNT	31.5f // UPDATED
+#define BEST_BINNED_BVH	"sbvh_conference_31.5bins.bin"
+#elif SCENE == 3
+#define SCENE_NAME		"Stanford Dragon"
+#define RAYSET_TYPE		RRS_OBJECT
+#define GEOM_FILE		"./testdata/dragon.bin"
+#define STAT_FILE		"sbvh_dragon.csv"
+#define HPLOC_FILE		"dragon.hploc"
+#define OPTIMIZED_BVH	"sbvh_sponza_opt.bin"
+#define RRS_SIZE		1'000'000
+#define BEST_BINCOUNT	123.0f // UPDATED
+#define BEST_BINNED_BVH	"sbvh_dragon_123bins.bin"
+#elif SCENE == 4
+#define SCENE_NAME		"Amazon Lumberyard Bistro"
+#define RAYSET_TYPE		RRS_OBJECT
+#define GEOM_FILE		"./testdata/bistro_ext_part1.bin"
+#define STAT_FILE		"sbvh_bistro_ext.csv"
+#define HPLOC_FILE		"bistro_ext.hploc"
+#define OPTIMIZED_BVH	"sbvh_bistro_opt.bin"
+#define RRS_SIZE		2'500'000
+#define BEST_BINCOUNT	105.0f // UPDATED
+#define BEST_BINNED_BVH	"sbvh_bistro_105bins.bin"
+#elif SCENE == 5
+#define SCENE_NAME		"Lego Car"
+#define RAYSET_TYPE		RRS_OBJECT
+#define GEOM_FILE		"./testdata/legocar.bin"
+#define STAT_FILE		"sbvh_legocar.csv"
+#define HPLOC_FILE		"legocar.hploc"
+#define OPTIMIZED_BVH	"sbvh_legocar_opt.bin"
+#define RRS_SIZE		500'000
+#define BEST_BINCOUNT	56.5f // UPDATED
+#define BEST_BINNED_BVH	"sbvh_legocar_56.5bins.bin"
+#elif SCENE == 6
+#define SCENE_NAME		"San Miguel"
+#define RAYSET_TYPE		RRS_INTERIOR
+#define GEOM_FILE		"./testdata/sanmiguel.bin"
+#define STAT_FILE		"sbvh_sanmiguel.csv"
+#define HPLOC_FILE		"sanmiguel.hploc"
+#define OPTIMIZED_BVH	"sbvh_sanmiguel_opt.bin"
+#define RRS_SIZE		2'500'000
+#define BEST_BINCOUNT	27.0f
+#define BEST_BINNED_BVH	"sbvh_sanmiguel_27bins.bin"
+#endif
 
 // Includes, needful things
 #ifdef _MSC_VER
@@ -46,111 +125,100 @@ struct Timer
 	std::chrono::high_resolution_clock::time_point start;
 };
 
-// "Representative Ray Set" generator, INTERIOR version:
+// "Representative Ray Set" generators.
+// INTERIOR version:
 // Spawns random paths from 8 x 8 x 8 points in the scene to create a final selection of 1M rays,
 // in four equally sized groups: 'primary rays', 'short diffuse rays', 'long diffuse rays', and
 // rays to the sky. The set will be used to somewhat objectively measure the traversal cost of a BVH.
+// OBJECT version:
+// Spawns random paths from a sphere surrounding the scene, towards a smaller sphere on the scene
+// origin. Compared to the 'interior' version, this approach avoids paths that start inside objects.
 Ray* rayset = new Ray[RRS_SIZE];
-void RepresentativeRaysInterior()
+void RepresentativeRays( const uint32_t setType )
 {
 	// Build an intermedite BVH.
 	BVH tmp;
 	tmp.Build( tris, triCount );
-	// Place path spawn points in the scene on an 8x8x8 grid.
-	bvhvec3 S[8 * 8 * 8], bmin = tmp.aabbMin, bext = tmp.aabbMax - tmp.aabbMin;
-	for (int x = 0; x < 8; x++) for (int y = 0; y < 8; y++) for (int z = 0; z < 8; z++)
-		S[x + y * 8 + z * 64] = bmin + (bvhvec3( (float)x, (float)y, (float)z ) + 1) * (1.0f / 9.0f) * bext;
-	// Scene-size dependent values
+	// Common preparations:
+	bvhvec3 S[512], bmin = tmp.aabbMin, bext = tmp.aabbMax - tmp.aabbMin;
 	const float sceneSize = tinybvh_max( tinybvh_max( bext.x, bext.y ), bext.z );
 	const float shortRay = sceneSize * 0.03f, longRay = sceneSize * 10;
 	const float epsilon = sceneSize * 0.00001f, tooShort = 50 * epsilon;
-	// Create random paths
-	printf( "Generating representative ray set" );
 	uint32_t seed = 0x123456, progress = 0, spawnIdx = 0;
 	uint32_t Ngroup1 = 0;		// primary ray ending on surface
 	uint32_t Ngroup2 = 0;		// from prim to prim, short distance
 	uint32_t Ngroup3 = 0;		// from prim to prim, long distance
 	uint32_t Ngroup4 = 0;		// from prim to nothing
-	while (Ngroup1 + Ngroup2 + Ngroup3 + Ngroup4 < RRS_SIZE)
+	// Produce the set.
+	printf( "Generating representative ray set" );
+	if (setType == RRS_INTERIOR)
 	{
-		if (++progress == RRS_SIZE / 10) { printf( "." ); progress = 0; }
-		// Random walk
-		bvhvec3 P = S[spawnIdx++ & 511], R = tinybvh_rndvec3( seed );
-		for (int j = 0; j < 8; j++)
+		// Place path spawn points in the scene on an 8x8x8 grid.
+		for (int x = 0; x < 8; x++) for (int y = 0; y < 8; y++) for (int z = 0; z < 8; z++)
+			S[x + y * 8 + z * 64] = bmin + (bvhvec3( (float)x, (float)y, (float)z ) + 1) * (1.0f / 9.0f) * bext;
+		// Create random paths
+		while (Ngroup1 + Ngroup2 + Ngroup3 + Ngroup4 < RRS_SIZE)
 		{
-			Ray ray( P + R * epsilon, R ), r = ray /* copy with pristine hit record */;
-			tmp.Intersect( ray );
-			// Classify and store ray.
-			if (j == 0 && ray.hit.t < longRay && Ngroup1 < RRS_SIZE / 4) rayset[Ngroup1++] = r;
-			else if (j > 0 && ray.hit.t < shortRay && ray.hit.t > tooShort && Ngroup2 < RRS_SIZE / 4)
-				rayset[Ngroup2++ + RRS_SIZE / 4] = r;
-			else if (j > 0 && ray.hit.t < longRay && ray.hit.t > shortRay && Ngroup3 < RRS_SIZE / 4)
-				rayset[Ngroup3++ + RRS_SIZE / 2] = r;
-			else if (j > 0 && ray.hit.t == BVH_FAR && Ngroup4 < RRS_SIZE / 4)
-				rayset[Ngroup4++ + 3 * (RRS_SIZE / 4)] = r;
-			// Random bounce.
-			if (ray.hit.t == BVH_FAR) break;
-			uint32_t i0, i1, i2, triIdx = ray.hit.prim;
-			GET_PRIM_INDICES_I0_I1_I2( tmp, triIdx );
-			const bvhvec4 v0 = tmp.verts[i0], v1 = tmp.verts[i1], v2 = tmp.verts[i2];
-			bvhvec3 N = tinybvh_normalize( tinybvh_cross( v1 - v0, v2 - v0 ) );
-			if (tinybvh_dot( N, ray.D ) > 0) N *= -1.0f;
-			R = tinybvh_rndvec3( seed );
-			if (tinybvh_dot( R, N ) < 0) R *= -1.0f;
-			P = P + ray.hit.t * R;
+			if (++progress == RRS_SIZE / 10) { printf( "." ); progress = 0; }
+			// Random walk
+			bvhvec3 P = S[spawnIdx++ & 511], R = tinybvh_rndvec3( seed );
+			for (int j = 0; j < 8; j++)
+			{
+				Ray ray( P + R * epsilon, R ), r = ray /* copy with pristine hit record */;
+				tmp.Intersect( ray );
+				// Classify and store ray.
+				if (j == 0 && ray.hit.t < longRay && Ngroup1 < RRS_SIZE / 4) rayset[Ngroup1++] = r;
+				else if (j > 0 && ray.hit.t < shortRay && ray.hit.t > tooShort && Ngroup2 < RRS_SIZE / 4)
+					rayset[Ngroup2++ + RRS_SIZE / 4] = r;
+				else if (j > 0 && ray.hit.t < longRay && ray.hit.t > shortRay && Ngroup3 < RRS_SIZE / 4)
+					rayset[Ngroup3++ + RRS_SIZE / 2] = r;
+				else if (j > 0 && ray.hit.t == BVH_FAR && Ngroup4 < RRS_SIZE / 4)
+					rayset[Ngroup4++ + 3 * (RRS_SIZE / 4)] = r;
+				// Random bounce.
+				if (ray.hit.t == BVH_FAR) break;
+				uint32_t i0, i1, i2, triIdx = ray.hit.prim;
+				GET_PRIM_INDICES_I0_I1_I2( tmp, triIdx );
+				const bvhvec4 v0 = tmp.verts[i0], v1 = tmp.verts[i1], v2 = tmp.verts[i2];
+				bvhvec3 N = tinybvh_normalize( tinybvh_cross( v1 - v0, v2 - v0 ) );
+				if (tinybvh_dot( N, ray.D ) > 0) N *= -1.0f;
+				R = tinybvh_rndvec3( seed );
+				if (tinybvh_dot( R, N ) < 0) R *= -1.0f;
+				P = P + ray.hit.t * R;
+			}
 		}
 	}
-	printf( " done.\n" );
-}
-
-// "Representative Ray Set" generator, EXTERIOR version:
-// Spawns random paths from a sphere surrounding the scene, towards a smaller sphere on the scene
-// origin. Compared to the 'interior' version, this approach avoids paths that start inside objects.
-void RepresentativeRaysExterior()
-{
-	// Build an intermedite BVH.
-	BVH tmp;
-	tmp.Build( tris, triCount );
-	// Calculate path spawn points on a elipsoid.
-	bvhvec3 S[512], bmin = tmp.aabbMin, bext = tmp.aabbMax - tmp.aabbMin;
-	uint32_t seed = 0x123456;
-	for (int i = 0; i < 512; i++) S[i] = tinybvh_rndvec3( seed ) * bext * 2;
-	// Scene-size dependent values
-	const float sceneSize = tinybvh_max( tinybvh_max( bext.x, bext.y ), bext.z );
-	const float shortRay = sceneSize * 0.03f, longRay = sceneSize * 10;
-	const float epsilon = sceneSize * 0.00001f, tooShort = 50 * epsilon;
-	// Create random paths
-	printf( "Generating representative ray set" );
-	uint32_t progress = 0, spawnIdx = 0;
-	uint32_t Ngroup1 = 0;		// primary ray ending on surface, 50%
-	uint32_t Ngroup2 = 0;		// from prim to prim, 25%
-	uint32_t Ngroup3 = 0;		// from prim to nothing, 25%
-	while (Ngroup1 + Ngroup2 + Ngroup3 < RRS_SIZE)
+	else
 	{
-		if (++progress == RRS_SIZE / 10) { printf( "." ); progress = 0; }
-		// Random walk
-		bvhvec3 P = S[spawnIdx++ & 511], P2 = S[(spawnIdx * 13) & 511] * 0.1f;
-		bvhvec3 R = tinybvh_normalize( P2 - P );
-		for (int j = 0; j < 8; j++)
+		// Calculate path spawn points on a elipsoid.
+		for (int i = 0; i < 512; i++) S[i] = tinybvh_rndvec3( seed ) * bext * 2;
+		// Create random paths
+		while (Ngroup1 + Ngroup2 + Ngroup3 < RRS_SIZE)
 		{
-			Ray ray( P + R * epsilon, R ), r = ray /* copy with pristine hit record */;
-			tmp.Intersect( ray );
-			// Classify and store ray.
-			if (j == 0 && ray.hit.t < longRay && Ngroup1 < RRS_SIZE / 2) rayset[Ngroup1++] = r;
-			else if (j > 0 && ray.hit.t > tooShort && Ngroup2 < RRS_SIZE / 4)
-				rayset[Ngroup2++ + RRS_SIZE / 2] = r;
-			else if (j > 0 && ray.hit.t == BVH_FAR && Ngroup3 < RRS_SIZE / 4)
-				rayset[Ngroup3++ + 3 * (RRS_SIZE / 4)] = r;
-			// Random bounce.
-			if (ray.hit.t == BVH_FAR) break;
-			uint32_t i0, i1, i2, triIdx = ray.hit.prim;
-			GET_PRIM_INDICES_I0_I1_I2( tmp, triIdx );
-			const bvhvec4 v0 = tmp.verts[i0], v1 = tmp.verts[i1], v2 = tmp.verts[i2];
-			bvhvec3 N = tinybvh_normalize( tinybvh_cross( v1 - v0, v2 - v0 ) );
-			if (tinybvh_dot( N, ray.D ) > 0) N *= -1.0f;
-			R = tinybvh_rndvec3( seed );
-			if (tinybvh_dot( R, N ) < 0) R *= -1.0f;
-			P = P + ray.hit.t * R;
+			if (++progress == RRS_SIZE / 10) { printf( "." ); progress = 0; }
+			// Random walk
+			bvhvec3 P = S[spawnIdx++ & 511], P2 = S[(spawnIdx * 13) & 511] * 0.1f;
+			bvhvec3 R = tinybvh_normalize( P2 - P );
+			for (int j = 0; j < 8; j++)
+			{
+				Ray ray( P + R * epsilon, R ), r = ray /* copy with pristine hit record */;
+				tmp.Intersect( ray );
+				// Classify and store ray.
+				if (j == 0 && ray.hit.t < longRay && Ngroup1 < RRS_SIZE / 2) rayset[Ngroup1++] = r;
+				else if (j > 0 && ray.hit.t > tooShort && Ngroup2 < RRS_SIZE / 4)
+					rayset[Ngroup2++ + RRS_SIZE / 2] = r;
+				else if (j > 0 && ray.hit.t == BVH_FAR && Ngroup3 < RRS_SIZE / 4)
+					rayset[Ngroup3++ + 3 * (RRS_SIZE / 4)] = r;
+				// Random bounce.
+				if (ray.hit.t == BVH_FAR) break;
+				uint32_t i0, i1, i2, triIdx = ray.hit.prim;
+				GET_PRIM_INDICES_I0_I1_I2( tmp, triIdx );
+				const bvhvec4 v0 = tmp.verts[i0], v1 = tmp.verts[i1], v2 = tmp.verts[i2];
+				bvhvec3 N = tinybvh_normalize( tinybvh_cross( v1 - v0, v2 - v0 ) );
+				if (tinybvh_dot( N, ray.D ) > 0) N *= -1.0f;
+				R = tinybvh_rndvec3( seed );
+				if (tinybvh_dot( R, N ) < 0) R *= -1.0f;
+				P = P + ray.hit.t * R;
+			}
 		}
 	}
 	printf( " done.\n" );
@@ -165,8 +233,7 @@ void TraceCostThread( const BVH* bvh, const BVH* refBVH, const int set, const in
 	Ray r, r2;
 	if (refBVH) for (uint32_t i = start; i < end; i++)
 	{
-		r = r2 = rayset[i];
-		sum += bvh->Intersect( r );
+		r = r2 = rayset[i], sum += bvh->Intersect( r );
 		refBVH->Intersect( r2 );
 		if (r.hit.t != r2.hit.t) printf( "damaged BVH.\n" );
 	}
@@ -175,16 +242,11 @@ void TraceCostThread( const BVH* bvh, const BVH* refBVH, const int set, const in
 }
 float RRSTraceCost( const BVH* bvh, const BVH* refBVH = 0 )
 {
-#ifdef _DEBUG
-	TraceCostThread( bvh, refBVH, 0, 1 );
-	uint32_t sum = splitSum[0];
-#else
 	std::vector<std::thread> threads;
 	for (uint32_t i = 0; i < 8; i++) threads.emplace_back( &TraceCostThread, bvh, refBVH, i, 8 );
 	for (auto& thread : threads) thread.join();
 	uint32_t sum = 0;
 	for (int i = 0; i < 8; i++) sum += splitSum[i];
-#endif
 	return (float)sum / RRS_SIZE;
 }
 
@@ -200,110 +262,88 @@ void AddMesh( const char* file, float scale = 1, bvhvec3 pos = {}, int c = 0, in
 		*(bvhvec3*)b = *(bvhvec3*)b * scale + pos, b[3] = c ? c : b[3], b += 4;
 }
 
-// Scene management - Load specified scene
-void LoadScene()
-{
-#if SCENE == 1
-	AddMesh( "./testdata/cryteksponza.bin" );
-	printf( "Results for Crytek Sponza (%i tris)\n------------------------------\n", triCount );
-	RepresentativeRaysInterior();
-#elif SCENE == 2
-	AddMesh( "./testdata/conference.bin" );
-	printf( "Results for Conference (%i tris)\n------------------------------\n", triCount );
-	RepresentativeRaysInterior();
-#elif SCENE == 3
-	AddMesh( "./testdata/dragon.bin" );
-	printf( "Results for Stanford Dragon (%i tris)\n------------------------------\n", triCount );
-	RepresentativeRaysExterior();
-#elif SCENE == 4
-	AddMesh( "./testdata/bistro_ext_part1.bin", 1 );
-	AddMesh( "./testdata/bistro_ext_part2.bin", 1 );
-	printf( "Results for Bistro (%i tris)\n------------------------------\n", triCount );
-	RepresentativeRaysExterior();
-#elif SCENE == 5
-	AddMesh( "./testdata/legocar.bin", 1 );
-	printf( "Results for Legocar (%i tris)\n------------------------------\n", triCount );
-	RepresentativeRaysExterior();
-#elif SCENE == 6
-	AddMesh( "./testdata/sanmiguel.bin", 1 );
-	printf( "Results for SanMiguel (%i tris)\n------------------------------\n", triCount );
-#ifndef _DEBUG
-	RepresentativeRaysInterior();
-#endif
-#endif
-}
-
-#if 1
-
 int main()
 {
 	// Initialize
 	int minor = TINY_BVH_VERSION_MINOR, major = TINY_BVH_VERSION_MAJOR, sub = TINY_BVH_VERSION_SUB;
 	printf( "TinyBVH v%i.%i.%i Optimizing Tool\n", major, minor, sub );
 	printf( "----------------------------------------------------------------\n" );
-	LoadScene();
+	printf( "Loading... " );
+	AddMesh( GEOM_FILE );
+#if SCENE == 4
+	AddMesh( "./testdata/bistro_ext_part2.bin", 1 ); // only scene with two files
+#endif
+	char n[] = SCENE_NAME;
+	printf( "done. Results for %s (%i tris)\n-----------------------\n", n, triCount );
+	RepresentativeRays( RAYSET_TYPE );
 
-	// STAGE 1: Find optimal bin count between 8 and 99.
+#if STAGE == 1 // STAGE 1: Find optimal bin count between 8 and 99, also try 'odd/even' counts.
 
 	int bins = 8, bestCostBins = -1;
 	float bestSAH = 1e30f, bestRRSCost, baseCost = 0;
-	BVH bvh;
-	std::fstream test{ "sbvh.bin", test.binary | test.in }; // skip if sbvh.bin already exists
 	// reference: 8 bins
+	printf( "Building reference BVH (8 bins)... " );
+	BVH bvh;
 	bvh.hqbvhbins = 8;
-	bvh.hqbvhrndbins = false;
 	bvh.BuildHQ( tris, triCount );
+	printf( "done.\n" );
 	baseCost = bestRRSCost = RRSTraceCost( &bvh );
 	bool odd = false;
-	// find optimal BVH
-	if (!test)
+	// find optimal bin count by minimizing RRS cost.
+	char t[] = STAT_FILE;
+	FILE* f = fopen( t, "w" );
+	while (1)
 	{
-		while (1)
+		Timer t;
+	#ifdef RANDOM_BIN_COUNT
+		// split with random bin count between 35 and 97. Deprecated, not helping.
+		bvh.hqbvhbins = bins;
+		bvh.hqbvhbinseed = ((rand() & 8191) + 1) * 13;
+		bvh.hqbvhrndbins = true;
+	#else
+		// use 'bins' splits, with one extra for odd tree levels.
+		bvh.hqbvhbins = bins;
+		bvh.hqbvhoddeven = odd;
+		odd = !odd;
+	#endif
+		bvh.BuildHQ( tris, triCount );
+		float buildTime = t.elapsed();
+		// Evaluate traversal cost using RRS
+		float sah = bvh.SAHCost();
+		float RRScost = RRSTraceCost( &bvh );
+		float percentage = baseCost * 100 / RRScost;
+		printf( "SBVH, %i.%i bins (%.1fs): SAH=%5.1f, RRS %.2f [%.2f%%] ",
+			bins, (bvh.hqbvhoddeven ? 5 : 0), buildTime, sah, RRScost, percentage );
+		fprintf( f, "bins,%i.%i,time,%f,SAH,%f,RRS,%f\n", bins, (bvh.hqbvhoddeven ? 5 : 0), buildTime, sah, RRScost );
+		if (RRScost < bestRRSCost) // we optimize for RRS cost, not SAH.
 		{
-			Timer t;
-		#ifdef RANDOM_BIN_COUNT
-			// split with random bin count between 35 and 97.
-			bvh.hqbvhbins = bins;
-			bvh.hqbvhbinseed = ((rand() & 8191) + 1) * 13;
-			bvh.hqbvhrndbins = true;
-		#else
-			// use 'bins' splits, with one extra for odd tree levels.
-			bvh.hqbvhbins = bins;
-			bvh.hqbvhoddeven = odd;
-			odd = !odd;
-		#endif
-			bvh.BuildHQ( tris, triCount );
-			float buildTime = t.elapsed();
-			// Evaluate traversal cost using RRS
-			float sah = bvh.SAHCost();
-			float RRScost = RRSTraceCost( &bvh );
-			float percentage = baseCost * 100 / RRScost;
-			printf( "SBVH, %i.%i bins (%.1fs): SAH=%5.1f, RRS %.2f [%.2f%%] ",
-				bins, (bvh.hqbvhoddeven ? 5 : 0), buildTime, sah, RRScost, percentage );
-			if (RRScost < bestRRSCost) // we optimize for RRS cost, not SAH.
-			{
-				bestRRSCost = RRScost, bestCostBins = bins, bestSAH = sah;
-				bvh.Save( "sbvh.bin" ); // overwrites previous best
-				printf( " ==> saved to ""sbvh.bin"".\n" );
-			}
-			else printf( "\n" );
-			if (!odd) bins++;
-			if (bins == 128) break; // searching beyond this point doesn't seem to make sense.
+			bestRRSCost = RRScost, bestCostBins = bins, bestSAH = sah;
+			char t[] = BEST_BINNED_BVH;
+			bvh.Save( t ); // overwrites previous best
+			printf( " ==> saved to %s.\n", t );
 		}
-		while (1) { /* freeze */ }
+		else printf( "\n" );
+		if (!odd) bins++;
+		if (bins == 128) break; // searching beyond this point doesn't seem to make sense.
 	}
+	fclose( f );
+	printf( "All done.\n" );
 
-	// STAGE 2: Optimize bvh with optimal bin count
+#elif STAGE == 2 // STAGE 2: Optimize bvh with optimal bin count
 
 	// Obtain reference SBVH stats
 	BVH refbvh;
 	refbvh.hqbvhbins = HQBVHBINS;
+	printf( "Building reference BVH (8 bins)... " );
 	refbvh.BuildHQ( tris, triCount );
+	printf( "done.\n" );
 	float refCost = RRSTraceCost( &refbvh );
 	// Load SBVH with best split plane count
-	bvh.Load( "sbvh.bin", tris, triCount ); // generated in STAGE 1
+	char t[] = BEST_BINNED_BVH; // generated in STAGE 1
+	BVH bvh;
+	bvh.Load( t, tris, triCount );
 	float startCost = RRSTraceCost( &bvh );
-	printf( "BVH in sbvh.bin: SAH=%.2f, cost=%.2f (%.2f%%).\n", bvh.SAHCost(), startCost, 100 * refCost / startCost );
+	printf( "BVH in %s: SAH=%.2f, cost=%.2f (%.2f%%).\n", t, bvh.SAHCost(), startCost, 100 * refCost / startCost );
 	BVH::BVHNode* backup = (BVH::BVHNode*)malloc64( bvh.allocatedNodes * sizeof( BVH::BVHNode ) );
 	BVH_Verbose* verbose = new BVH_Verbose();
 	uint32_t iteration = 0;
@@ -332,124 +372,111 @@ int main()
 		}
 		else
 		{
-			float percentage = refCost * 100 / costAfter;
-			printf( " - %.2f%%, saved to sbvh_opt.bin\n", percentage );
-		#if SCENE == 1
-			bvh.Save( "sbvh_sponza_opt.bin" );
-		#elif SCENE == 2
-			bvh.Save( "sbvh_conference_opt.bin" );
-		#elif SCENE == 3
-			bvh.Save( "sbvh_dragon_opt.bin" );
-		#elif SCENE == 4
-			bvh.Save( "sbvh_bistro_opt.bin" );
-		#elif SCENE == 5
-			bvh.Save( "sbvh_legocar_opt.bin" );
-		#elif SCENE == 6
-			bvh.Save( "sbvh_sanmiguel_opt.bin" );
-		#endif
+			char t[] = OPTIMIZED_BVH;
+			printf( " - %.2f%%, saved to %s\n", refCost * 100 / costAfter, t );
+			bvh.Save( t );
 		}
 	}
 
-	printf( "all done." );
-	return 0;
-}
-
 #else
 
-// Report on BVH quality
-int main()
-{
-	// Initialize
-	LoadScene();
-
-	// Prepare and evaluate several BVHs
-	float sah, rrs;
-
-	BVH bvhBinned;
-	bvhBinned.Build( tris, triCount );
-	sah = bvhBinned.SAHCost(), rrs = RRSTraceCost( &bvhBinned );
-	printf( "SAH BVH Binned (8) - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-
-	BVH_Verbose verbose( bvhBinned );
-	FILE* f = 0;
-#if SCENE == 1
-	f = fopen( "cryteksponza.hploc", "rb" );
-#elif SCENE == 3
-	f = fopen( "dragon.hploc", "rb" );
-#elif SCENE == 4
-	f = fopen( "bistro_ext.hploc", "rb" );
-#elif SCENE == 5
-	f = fopen( "legocar.hploc", "rb" );
-#endif
-	if (f)
+	// Report on BVH quality
+	int main()
 	{
-		bvhvec3 bmin, bmax;
-		fread( &bmin, 1, 12, f );
-		fread( &bmax, 1, 12, f );
-		uint32_t triCount, nodeCount;
-		fread( &triCount, 1, 4, f );
-		nodeCount = triCount * 2 - 1;
-		fread( verbose.bvhNode, sizeof( BVH_Verbose::BVHNode ), nodeCount, f );
-		verbose.usedNodes = nodeCount;
-		BVH ploc;
-		ploc.ConvertFrom( verbose );
-		sah = ploc.SAHCost(), rrs = RRSTraceCost( &ploc );
-		printf( "H-PLOC build   - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+		// Initialize
+		LoadScene();
+
+		// Prepare and evaluate several BVHs
+		float sah, rrs;
+
+		BVH bvhBinned;
+		bvhBinned.Build( tris, triCount );
+		sah = bvhBinned.SAHCost(), rrs = RRSTraceCost( &bvhBinned );
+		printf( "SAH BVH Binned (8) - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+
+		BVH_Verbose verbose( bvhBinned );
+		FILE* f = 0;
+	#if SCENE == 1
+		f = fopen( "cryteksponza.hploc", "rb" );
+	#elif SCENE == 3
+		f = fopen( "dragon.hploc", "rb" );
+	#elif SCENE == 4
+		f = fopen( "bistro_ext.hploc", "rb" );
+	#elif SCENE == 5
+		f = fopen( "legocar.hploc", "rb" );
+	#endif
+		if (f)
+		{
+			bvhvec3 bmin, bmax;
+			fread( &bmin, 1, 12, f );
+			fread( &bmax, 1, 12, f );
+			uint32_t triCount, nodeCount;
+			fread( &triCount, 1, 4, f );
+			nodeCount = triCount * 2 - 1;
+			fread( verbose.bvhNode, sizeof( BVH_Verbose::BVHNode ), nodeCount, f );
+			verbose.usedNodes = nodeCount;
+			BVH ploc;
+			ploc.ConvertFrom( verbose );
+			sah = ploc.SAHCost(), rrs = RRSTraceCost( &ploc );
+			printf( "H-PLOC build   - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+		}
+
+	#if SCENE != 2
+
+		BVH bvhSweep;
+		bvhSweep.useFullSweep = true;
+		bvhSweep.Build( tris, triCount );
+		sah = bvhSweep.SAHCost(), rrs = RRSTraceCost( &bvhSweep );
+		printf( "Full-sweep SAH BVH - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+
+	#endif
+
+		BVH bvhSpatial;
+		bvhSpatial.BuildHQ( tris, triCount );
+		sah = bvhSpatial.SAHCost(), rrs = RRSTraceCost( &bvhSpatial );
+		printf( "Spatial split BVH  - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+
+		BVH bvhOptimized;
+		bvhOptimized.Build( tris, triCount );
+		bvhOptimized.Optimize( 250, true );
+		sah = bvhOptimized.SAHCost(), rrs = RRSTraceCost( &bvhOptimized );
+		printf( "Optimized binned   - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+	#if 0
+		bvhOptimized.Optimize( 1000, true );
+		sah = bvhOptimized.SAHCost(), rrs = RRSTraceCost( &bvhOptimized );
+		printf( "Optimized+ binned  - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+	#endif
+
+		BVH bvhSpatialOptimized;
+		bvhSpatialOptimized.BuildHQ( tris, triCount );
+		bvhSpatialOptimized.Optimize( 250, true );
+		sah = bvhSpatialOptimized.SAHCost(), rrs = RRSTraceCost( &bvhSpatialOptimized );
+		printf( "Optimized SBVH     - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+	#if 0
+		bvhSpatialOptimized.Optimize( 1000, true );
+		sah = bvhSpatialOptimized.SAHCost(), rrs = RRSTraceCost( &bvhSpatialOptimized );
+		printf( "Optimized+ SBVH    - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+	#endif
+
+		BVH bvhExtreme;
+	#if SCENE == 1
+		bvhExtreme.Load( "sbvh_sponza_opt.bin", tris, triCount );
+	#elif SCENE == 2
+		bvhExtreme.Load( "sbvh_conference_opt.bin", tris, triCount );
+	#elif SCENE == 3
+		bvhExtreme.Load( "sbvh_dragon_opt.bin", tris, triCount );
+	#elif SCENE == 4
+		bvhExtreme.Load( "sbvh_bistro_opt.bin", tris, triCount );
+	#elif SCENE == 5
+		bvhExtreme.Load( "sbvh_legocar_opt.bin", tris, triCount );
+	#elif SCENE == 6
+		bvhExtreme.Load( "sbvh_sanmiguel_opt.bin", tris, triCount );
+	#endif
+		sah = bvhExtreme.SAHCost(), rrs = RRSTraceCost( &bvhExtreme );
+		printf( "Ours               - SAH: %.3f, RRS: %.3f\n", sah, rrs );
 	}
 
-#if SCENE != 2
-
-	BVH bvhSweep;
-	bvhSweep.useFullSweep = true;
-	bvhSweep.Build( tris, triCount );
-	sah = bvhSweep.SAHCost(), rrs = RRSTraceCost( &bvhSweep );
-	printf( "Full-sweep SAH BVH - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-
 #endif
 
-	BVH bvhSpatial;
-	bvhSpatial.BuildHQ( tris, triCount );
-	sah = bvhSpatial.SAHCost(), rrs = RRSTraceCost( &bvhSpatial );
-	printf( "Spatial split BVH  - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-
-	BVH bvhOptimized;
-	bvhOptimized.Build( tris, triCount );
-	bvhOptimized.Optimize( 250, true );
-	sah = bvhOptimized.SAHCost(), rrs = RRSTraceCost( &bvhOptimized );
-	printf( "Optimized binned   - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-#if 0
-	bvhOptimized.Optimize( 1000, true );
-	sah = bvhOptimized.SAHCost(), rrs = RRSTraceCost( &bvhOptimized );
-	printf( "Optimized+ binned  - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-#endif
-
-	BVH bvhSpatialOptimized;
-	bvhSpatialOptimized.BuildHQ( tris, triCount );
-	bvhSpatialOptimized.Optimize( 250, true );
-	sah = bvhSpatialOptimized.SAHCost(), rrs = RRSTraceCost( &bvhSpatialOptimized );
-	printf( "Optimized SBVH     - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-#if 0
-	bvhSpatialOptimized.Optimize( 1000, true );
-	sah = bvhSpatialOptimized.SAHCost(), rrs = RRSTraceCost( &bvhSpatialOptimized );
-	printf( "Optimized+ SBVH    - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-#endif
-
-	BVH bvhExtreme;
-#if SCENE == 1
-	bvhExtreme.Load( "sbvh_sponza_opt.bin", tris, triCount );
-#elif SCENE == 2
-	bvhExtreme.Load( "sbvh_conference_opt.bin", tris, triCount );
-#elif SCENE == 3
-	bvhExtreme.Load( "sbvh_dragon_opt.bin", tris, triCount );
-#elif SCENE == 4
-	bvhExtreme.Load( "sbvh_bistro_opt.bin", tris, triCount );
-#elif SCENE == 5
-	bvhExtreme.Load( "sbvh_legocar_opt.bin", tris, triCount );
-#elif SCENE == 6
-	bvhExtreme.Load( "sbvh_sanmiguel_opt.bin", tris, triCount );
-#endif
-	sah = bvhExtreme.SAHCost(), rrs = RRSTraceCost( &bvhExtreme );
-	printf( "Ours               - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+	return 0;
 }
-
-#endif
