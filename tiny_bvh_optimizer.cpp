@@ -11,14 +11,14 @@
 // 4: Bistro
 // 5: Legocar
 // 6: San Miguel
-#define SCENE	6
+#define SCENE	2
 
 // STAGES:
 // --------------------------------------------------
 // 1: Determine best bin count
 // 2: Optimize using reinsertion & RRS
 // 3: Report
-#define STAGE	1
+#define STAGE	2
 
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
@@ -38,9 +38,9 @@
 #define GEOM_FILE		"./testdata/cryteksponza.bin"
 #define STAT_FILE		"sbvh_cryteksponza.csv"
 #define HPLOC_FILE		"cryteksponza.hploc"
-#define OPTIMIZED_BVH	"sbvh_cryteksponza_opt.bin"
+#define OPTIMIZED_BVH	"sbvh_cryteksponza_opt.bin" // 112.16%
 #define RRS_SIZE		2'000'000
-#define BEST_BINCOUNT	27.5f
+#define BEST_BINCOUNT	27.5f // UPDATED
 #define BEST_BINNED_BVH	"sbvh_cryteksponza_27.5bins.bin"
 #elif SCENE == 2
 #define SCENE_NAME		"Conference Room"
@@ -338,12 +338,23 @@ int main()
 	refbvh.BuildHQ( tris, triCount );
 	printf( "done.\n" );
 	float refCost = RRSTraceCost( &refbvh );
-	// Load SBVH with best split plane count
-	char t[] = BEST_BINNED_BVH; // generated in STAGE 1
 	BVH bvh;
-	bvh.Load( t, tris, triCount );
-	float startCost = RRSTraceCost( &bvh );
-	printf( "BVH in %s: SAH=%.2f, cost=%.2f (%.2f%%).\n", t, bvh.SAHCost(), startCost, 100 * refCost / startCost );
+	// Try to continue where we left off
+	char b[] = OPTIMIZED_BVH;
+	float startCost;
+	if (!bvh.Load( b, tris, triCount ))
+	{
+		// Load SBVH with best split plane count
+		char t[] = BEST_BINNED_BVH; // generated in STAGE 1
+		bvh.Load( t, tris, triCount );
+		startCost = RRSTraceCost( &bvh );
+		printf( "BVH in %s: SAH=%.2f, cost=%.2f (%.2f%%).\n", t, bvh.SAHCost(), startCost, 100 * refCost / startCost );
+	}
+	else
+	{
+		startCost = RRSTraceCost( &bvh );
+		printf( "BVH in %s: SAH=%.2f, cost=%.2f (%.2f%%).\n", b, bvh.SAHCost(), startCost, 100 * refCost / startCost );
+	}
 	BVH::BVHNode* backup = (BVH::BVHNode*)malloc64( bvh.allocatedNodes * sizeof( BVH::BVHNode ) );
 	BVH_Verbose* verbose = new BVH_Verbose();
 	uint32_t iteration = 0;
