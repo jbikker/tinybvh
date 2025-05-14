@@ -11,14 +11,14 @@
 // 4: Bistro
 // 5: Legocar
 // 6: San Miguel
-#define SCENE	2
+#define SCENE	1
 
 // STAGES:
 // --------------------------------------------------
 // 1: Determine best bin count
 // 2: Optimize using reinsertion & RRS
 // 3: Report
-#define STAGE	2
+#define STAGE	3
 
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
@@ -40,7 +40,7 @@
 #define HPLOC_FILE		"cryteksponza.hploc"
 #define OPTIMIZED_BVH	"sbvh_cryteksponza_opt.bin" // 112.16%
 #define RRS_SIZE		2'000'000
-#define BEST_BINCOUNT	27.5f // UPDATED
+#define BEST_BINCOUNT	27.5f
 #define BEST_BINNED_BVH	"sbvh_cryteksponza_27.5bins.bin"
 #elif SCENE == 2
 #define SCENE_NAME		"Conference Room"
@@ -50,7 +50,7 @@
 #define HPLOC_FILE		"conference.hploc"
 #define OPTIMIZED_BVH	"sbvh_conference_opt.bin"
 #define RRS_SIZE		1'000'000
-#define BEST_BINCOUNT	31.5f // UPDATED
+#define BEST_BINCOUNT	31.5f
 #define BEST_BINNED_BVH	"sbvh_conference_31.5bins.bin"
 #elif SCENE == 3
 #define SCENE_NAME		"Stanford Dragon"
@@ -58,9 +58,9 @@
 #define GEOM_FILE		"./testdata/dragon.bin"
 #define STAT_FILE		"sbvh_dragon.csv"
 #define HPLOC_FILE		"dragon.hploc"
-#define OPTIMIZED_BVH	"sbvh_sponza_opt.bin"
+#define OPTIMIZED_BVH	"sbvh_dragon_opt.bin"
 #define RRS_SIZE		1'000'000
-#define BEST_BINCOUNT	123.0f // UPDATED
+#define BEST_BINCOUNT	123.0f
 #define BEST_BINNED_BVH	"sbvh_dragon_123bins.bin"
 #elif SCENE == 4
 #define SCENE_NAME		"Amazon Lumberyard Bistro"
@@ -70,7 +70,7 @@
 #define HPLOC_FILE		"bistro_ext.hploc"
 #define OPTIMIZED_BVH	"sbvh_bistro_opt.bin"
 #define RRS_SIZE		2'500'000
-#define BEST_BINCOUNT	105.0f // UPDATED
+#define BEST_BINCOUNT	105.0f
 #define BEST_BINNED_BVH	"sbvh_bistro_105bins.bin"
 #elif SCENE == 5
 #define SCENE_NAME		"Lego Car"
@@ -80,7 +80,7 @@
 #define HPLOC_FILE		"legocar.hploc"
 #define OPTIMIZED_BVH	"sbvh_legocar_opt.bin"
 #define RRS_SIZE		500'000
-#define BEST_BINCOUNT	56.5f // UPDATED
+#define BEST_BINCOUNT	56.5f
 #define BEST_BINNED_BVH	"sbvh_legocar_56.5bins.bin"
 #elif SCENE == 6
 #define SCENE_NAME		"San Miguel"
@@ -262,6 +262,12 @@ void AddMesh( const char* file, float scale = 1, bvhvec3 pos = {}, int c = 0, in
 		*(bvhvec3*)b = *(bvhvec3*)b * scale + pos, b[3] = c ? c : b[3], b += 4;
 }
 
+float refsah = 0, refrrs = 0;
+void printstat( float sah, float rrs )
+{
+	printf( "SAH: %.3f, RRS: %.3f (%+.2f%%,%+.2f%%)\n", sah, rrs, 100 * refsah / sah - 100, 100 * refrrs / rrs - 100 );
+}
+
 int main()
 {
 	// Initialize
@@ -389,103 +395,109 @@ int main()
 		}
 	}
 
-#else
+#elif STAGE == 3
 
-	// Report on BVH quality
-	int main()
+	// Prepare and evaluate several BVHs
 	{
-		// Initialize
-		LoadScene();
-
-		// Prepare and evaluate several BVHs
-		float sah, rrs;
-
-		BVH bvhBinned;
-		bvhBinned.Build( tris, triCount );
-		sah = bvhBinned.SAHCost(), rrs = RRSTraceCost( &bvhBinned );
-		printf( "SAH BVH Binned (8) - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-
-		BVH_Verbose verbose( bvhBinned );
-		FILE* f = 0;
-	#if SCENE == 1
-		f = fopen( "cryteksponza.hploc", "rb" );
-	#elif SCENE == 3
-		f = fopen( "dragon.hploc", "rb" );
-	#elif SCENE == 4
-		f = fopen( "bistro_ext.hploc", "rb" );
-	#elif SCENE == 5
-		f = fopen( "legocar.hploc", "rb" );
-	#endif
-		if (f)
-		{
-			bvhvec3 bmin, bmax;
-			fread( &bmin, 1, 12, f );
-			fread( &bmax, 1, 12, f );
-			uint32_t triCount, nodeCount;
-			fread( &triCount, 1, 4, f );
-			nodeCount = triCount * 2 - 1;
-			fread( verbose.bvhNode, sizeof( BVH_Verbose::BVHNode ), nodeCount, f );
-			verbose.usedNodes = nodeCount;
-			BVH ploc;
-			ploc.ConvertFrom( verbose );
-			sah = ploc.SAHCost(), rrs = RRSTraceCost( &ploc );
-			printf( "H-PLOC build   - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-		}
-
-	#if SCENE != 2
-
 		BVH bvhSweep;
 		bvhSweep.useFullSweep = true;
 		bvhSweep.Build( tris, triCount );
+		float sah = bvhSweep.SAHCost(), rrs = RRSTraceCost( &bvhSweep );
+		printf( "SAH (full sweep) -   SAH: %.3f, RRS: %.3f - REFERENCE\n", sah, rrs );
+		refsah = sah, refrrs = rrs;
+		bvhSweep.Optimize( 50 );
 		sah = bvhSweep.SAHCost(), rrs = RRSTraceCost( &bvhSweep );
-		printf( "Full-sweep SAH BVH - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-
-	#endif
-
-		BVH bvhSpatial;
-		bvhSpatial.BuildHQ( tris, triCount );
-		sah = bvhSpatial.SAHCost(), rrs = RRSTraceCost( &bvhSpatial );
-		printf( "Spatial split BVH  - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-
-		BVH bvhOptimized;
-		bvhOptimized.Build( tris, triCount );
-		bvhOptimized.Optimize( 250, true );
-		sah = bvhOptimized.SAHCost(), rrs = RRSTraceCost( &bvhOptimized );
-		printf( "Optimized binned   - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-	#if 0
-		bvhOptimized.Optimize( 1000, true );
-		sah = bvhOptimized.SAHCost(), rrs = RRSTraceCost( &bvhOptimized );
-		printf( "Optimized+ binned  - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-	#endif
-
-		BVH bvhSpatialOptimized;
-		bvhSpatialOptimized.BuildHQ( tris, triCount );
-		bvhSpatialOptimized.Optimize( 250, true );
-		sah = bvhSpatialOptimized.SAHCost(), rrs = RRSTraceCost( &bvhSpatialOptimized );
-		printf( "Optimized SBVH     - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-	#if 0
-		bvhSpatialOptimized.Optimize( 1000, true );
-		sah = bvhSpatialOptimized.SAHCost(), rrs = RRSTraceCost( &bvhSpatialOptimized );
-		printf( "Optimized+ SBVH    - SAH: %.3f, RRS: %.3f\n", sah, rrs );
-	#endif
-
-		BVH bvhExtreme;
-	#if SCENE == 1
-		bvhExtreme.Load( "sbvh_sponza_opt.bin", tris, triCount );
-	#elif SCENE == 2
-		bvhExtreme.Load( "sbvh_conference_opt.bin", tris, triCount );
-	#elif SCENE == 3
-		bvhExtreme.Load( "sbvh_dragon_opt.bin", tris, triCount );
-	#elif SCENE == 4
-		bvhExtreme.Load( "sbvh_bistro_opt.bin", tris, triCount );
-	#elif SCENE == 5
-		bvhExtreme.Load( "sbvh_legocar_opt.bin", tris, triCount );
-	#elif SCENE == 6
-		bvhExtreme.Load( "sbvh_sanmiguel_opt.bin", tris, triCount );
-	#endif
-		sah = bvhExtreme.SAHCost(), rrs = RRSTraceCost( &bvhExtreme );
-		printf( "Ours               - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+		printf( "Optimized f.sweep -  " );
+		printstat( sah, rrs );
 	}
+	{
+		BVH bvhBinned; // defaults to 8 bins
+		bvhBinned.Build( tris, triCount );
+		float sah = bvhBinned.SAHCost(), rrs = RRSTraceCost( &bvhBinned );
+		printf( "SAH BVH Binned (8) - " );
+		printstat( sah, rrs );
+		bvhBinned.Optimize( 50 );
+		sah = bvhBinned.SAHCost(), rrs = RRSTraceCost( &bvhBinned );
+		printf( "Optimized BVH -      " );
+		printstat( sah, rrs );
+	}
+	{
+		BVH sbvh8bins;
+		sbvh8bins.hqbvhbins = 8;
+		sbvh8bins.BuildHQ( tris, triCount );
+		float sah = sbvh8bins.SAHCost(), rrs = RRSTraceCost( &sbvh8bins );
+		printf( "SBVH, 8 bins -       " );
+		printstat( sah, rrs );
+	}
+	{
+		BVH sbvh32bins;
+		sbvh32bins.hqbvhbins = 32;
+		sbvh32bins.BuildHQ( tris, triCount );
+		float sah = sbvh32bins.SAHCost(), rrs = RRSTraceCost( &sbvh32bins );
+		printf( "SBVH, 32 bins -      " );
+		printstat( sah, rrs );
+		sbvh32bins.Optimize( 50 );
+		sah = sbvh32bins.SAHCost(), rrs = RRSTraceCost( &sbvh32bins );
+		printf( "SBVH optimized -     " );
+		printstat( sah, rrs );
+		sbvh32bins.Optimize( 50 );
+	}
+	{
+		BVH sbvhBestBins;
+		char t[] = BEST_BINNED_BVH;
+		printf( "SBVH, optimal bins - " );
+		if (!sbvhBestBins.Load( t, tris, triCount )) printf( "FILE NOT FOUND.\n" ); else
+		{
+			float sah = sbvhBestBins.SAHCost(), rrs = RRSTraceCost( &sbvhBestBins );
+			printstat( sah, rrs );
+		}
+	}
+	{
+		BVH sbvhOurs;
+		char t[] = OPTIMIZED_BVH;
+		printf( "SBVH RRSopt (ours) - " );
+		if (!sbvhOurs.Load( t, tris, triCount )) printf( "FILE NOT FOUND.\n" ); else
+		{
+			float sah = sbvhOurs.SAHCost(), rrs = RRSTraceCost( &sbvhOurs );
+			printstat( sah, rrs );
+		}
+	}
+
+	// TODO:
+	// Compare against H-PLOC
+	// Just time RRS tracing. :)
+	// Check if other binned builders show similar behavior for bin count
+
+#if 0
+
+	BVH_Verbose verbose( bvhBinned );
+	FILE* f = 0;
+#if SCENE == 1
+	f = fopen( "cryteksponza.hploc", "rb" );
+#elif SCENE == 3
+	f = fopen( "dragon.hploc", "rb" );
+#elif SCENE == 4
+	f = fopen( "bistro_ext.hploc", "rb" );
+#elif SCENE == 5
+	f = fopen( "legocar.hploc", "rb" );
+#endif
+	if (f)
+	{
+		bvhvec3 bmin, bmax;
+		fread( &bmin, 1, 12, f );
+		fread( &bmax, 1, 12, f );
+		uint32_t triCount, nodeCount;
+		fread( &triCount, 1, 4, f );
+		nodeCount = triCount * 2 - 1;
+		fread( verbose.bvhNode, sizeof( BVH_Verbose::BVHNode ), nodeCount, f );
+		verbose.usedNodes = nodeCount;
+		BVH ploc;
+		ploc.ConvertFrom( verbose );
+		sah = ploc.SAHCost(), rrs = RRSTraceCost( &ploc );
+		printf( "H-PLOC build   - SAH: %.3f, RRS: %.3f\n", sah, rrs );
+	}
+
+#endif
 
 #endif
 
