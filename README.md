@@ -190,6 +190,8 @@ Questions, remarks? Contact me at bikker.j@gmail.com ~~or on twitter: @j_bikker,
 # License
 This library is made available under the MIT license, which starts as follows: "Permission is hereby granted, free of charge, .. , to deal in the Software **without restriction**". Enjoy. If you are using this work in your research, please cite TinyBVH: Details are available in BibTeX and APA format, see the 'About' section for this repo on Github.
 
+# Acknowledgement
+The development of this library is supported by an AMD hardware grant.
 
 ![Output of the sample wavefront path tracer](images/wavefront.png)
 
