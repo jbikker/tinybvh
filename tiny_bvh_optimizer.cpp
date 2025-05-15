@@ -272,14 +272,15 @@ float RRSTraceTime( const BVH* bvh )
 	fastbvh.bvh8.bvh = *bvh;
 	fastbvh.ConvertFrom( fastbvh.bvh8 );
 	Timer t;
+	uint32_t sum = 0;
 	for (int i = 0; i <= 10; i++)
 	{
 		if (i == 1) t.reset(); // first one is for cache warming
-		uint32_t sum = 0;
 		Ray r;
 		for (int j = 0; j < RRS_SIZE; j++) r = rayset[j], sum += fastbvh.Intersect( r );
 	}
 	float runtime = t.elapsed() * 0.1f;
+	fastbvh.bvh8.triCount = sum; // dummy operation to avoid dead code elimination
 	fastbvh.bvh8 = MBVH<8>();
 	return runtime; // average of 10 runs
 }
