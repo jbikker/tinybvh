@@ -1,4 +1,17 @@
-// EXPERIMENTAL CODE - PLEASE IGNORE FOR NOW.
+// Code for SBVH optimization experiments.
+// Usage:
+// - Specify the scene using #define SCENE
+// - Start with STAGE 1 to determine an optimized bin count. This also
+//   produces a precalculated BVH on disk which will be used in stage 2.
+// - Set STAGE to 2 to optimize the BVH. A new precalculated BVH will
+//   be saved to disk. The process takes several hours for most scenes.
+// - Get detailed statistics on the results by setting STAGE to 3.
+
+// set C_INT and C_TRAV to match the paper 
+// "On Quality Metrics of Bounding Volume Hierarchies", 
+// Aila et al., 20213
+#define C_INT	1.0f
+#define C_TRAV	1.2f
 
 #define TINYBVH_IMPLEMENTATION
 #include "tiny_bvh.h"
@@ -11,14 +24,14 @@
 // 4: Bistro
 // 5: Legocar
 // 6: San Miguel
-#define SCENE	5
+#define SCENE	1
 
 // STAGES:
 // --------------------------------------------------
 // 1: Determine best bin count
 // 2: Optimize using reinsertion & RRS
 // 3: Report
-#define STAGE	3
+#define STAGE	1
 
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
@@ -52,6 +65,7 @@
 #define RRS_SIZE		1'000'000
 #define BEST_BINCOUNT	31.5f
 #define BEST_BINNED_BVH	"sbvh_conference_31.5bins.bin"
+#define	W_EPO			0.41f // as specified in paper, overriding default 0.71
 #elif SCENE == 3
 #define SCENE_NAME		"Stanford Dragon"
 #define RAYSET_TYPE		RRS_OBJECT
@@ -62,6 +76,7 @@
 #define RRS_SIZE		1'000'000
 #define BEST_BINCOUNT	123.0f
 #define BEST_BINNED_BVH	"sbvh_dragon_123bins.bin"
+#define	W_EPO			0.61f // as specified in paper, overriding default 0.71
 #elif SCENE == 4
 #define SCENE_NAME		"Amazon Lumberyard Bistro"
 #define RAYSET_TYPE		RRS_OBJECT
@@ -92,6 +107,7 @@
 #define RRS_SIZE		2'500'000
 #define BEST_BINCOUNT	27.0f
 #define BEST_BINNED_BVH	"sbvh_sanmiguel_27bins.bin"
+#define	W_EPO			0.72f // as specified in paper, overriding default 0.71
 #endif
 
 // Includes, needful things
@@ -280,13 +296,14 @@ void AddMesh( const char* file, float scale = 1, bvhvec3 pos = {}, int c = 0, in
 		*(bvhvec3*)b = *(bvhvec3*)b * scale + pos, b[3] = c ? c : b[3], b += 4;
 }
 
-float refsah = 0, refrrs = 0, refsec = 0;
-void printstat( float sah, float rrs, float sec )
+float refsah = 0, refrrs = 0, refepo = 0, refsec = 0;
+void printstat( float sah, float rrs, float epo, float sec )
 {
-	printf( "SAH: %.3f, RRS: %.3f, time: %.3f (%+6.2f%%, %+6.2f%%, %+6.2f%%)\n",
-		sah, rrs, sec,
+	printf( "SAH: %.3f, RRS: %.3f, EPO: %.3f, time: %.3f (%+6.2f%%, %+6.2f%%, %+6.2f%%, %+6.2f%%)\n",
+		sah, rrs, epo, sec,
 		100 * refsah / sah - 100,
 		100 * refrrs / rrs - 100,
+		100 * refepo / epo - 100,
 		100 * refsec / sec - 100
 	);
 }
@@ -304,6 +321,12 @@ int main()
 #endif
 	char n[] = SCENE_NAME;
 	printf( "done. Results for %s (%i tris)\n-----------------------\n", n, triCount );
+#if 0
+	BVH test;
+	test.Build( tris, triCount );
+	float epo = test.EPOCost();
+	int w = 0;
+#endif
 	RepresentativeRays( RAYSET_TYPE );
 
 #if STAGE == 1 // STAGE 1: Find optimal bin count between 8 and 99, also try 'odd/even' counts.
@@ -449,44 +472,44 @@ int main()
 		BVH bvhSweep;
 		bvhSweep.useFullSweep = true;
 		bvhSweep.Build( tris, triCount );
-		float sah = bvhSweep.SAHCost(), rrs = RRSTraceCost( &bvhSweep ), sec = RRSTraceTime( &bvhSweep );
-		printf( "SAH (full sweep) -   SAH: %.3f, RRS: %.3f, time: %.3f - REFERENCE\n", sah, rrs, sec );
-		refsah = sah, refrrs = rrs, refsec = sec;
+		float sah = bvhSweep.SAHCost(), rrs = RRSTraceCost( &bvhSweep ), epo = bvhSweep.EPOCost(), sec = RRSTraceTime( &bvhSweep );
+		printf( "SAH (full sweep) -   SAH: %.3f, RRS: %.3f, EPO: %.3f, time: %.3f - REFERENCE\n", sah, rrs, epo, sec );
+		refsah = sah, refrrs = rrs, refepo = epo, refsec = sec;
 		bvhSweep.Optimize( 50 );
-		sah = bvhSweep.SAHCost(), rrs = RRSTraceCost( &bvhSweep ), sec = RRSTraceTime( &bvhSweep );
+		sah = bvhSweep.SAHCost(), rrs = RRSTraceCost( &bvhSweep ), epo = bvhSweep.EPOCost(), sec = RRSTraceTime( &bvhSweep );
 		printf( "Optimized f.sweep -  " );
-		printstat( sah, rrs, sec );
+		printstat( sah, rrs, epo, sec );
 	}
 	{
 		BVH bvhBinned; // defaults to 8 bins
 		bvhBinned.Build( tris, triCount );
-		float sah = bvhBinned.SAHCost(), rrs = RRSTraceCost( &bvhBinned ), sec = RRSTraceTime( &bvhBinned );
+		float sah = bvhBinned.SAHCost(), rrs = RRSTraceCost( &bvhBinned ), epo = bvhBinned.EPOCost(), sec = RRSTraceTime( &bvhBinned );
 		printf( "SAH BVH Binned (8) - " );
-		printstat( sah, rrs, sec );
+		printstat( sah, rrs, epo, sec );
 		bvhBinned.Optimize( 50 );
-		sah = bvhBinned.SAHCost(), rrs = RRSTraceCost( &bvhBinned ), sec = RRSTraceTime( &bvhBinned );
+		sah = bvhBinned.SAHCost(), rrs = RRSTraceCost( &bvhBinned ), epo = bvhBinned.EPOCost(), sec = RRSTraceTime( &bvhBinned );
 		printf( "Optimized BVH -      " );
-		printstat( sah, rrs, sec );
+		printstat( sah, rrs, epo, sec );
 	}
 	{
 		BVH sbvh8bins;
 		sbvh8bins.hqbvhbins = 8;
 		sbvh8bins.BuildHQ( tris, triCount );
-		float sah = sbvh8bins.SAHCost(), rrs = RRSTraceCost( &sbvh8bins ), sec = RRSTraceTime( &sbvh8bins );
+		float sah = sbvh8bins.SAHCost(), rrs = RRSTraceCost( &sbvh8bins ), epo = sbvh8bins.EPOCost(), sec = RRSTraceTime( &sbvh8bins );
 		printf( "SBVH, 8 bins -       " );
-		printstat( sah, rrs, sec );
+		printstat( sah, rrs, epo, sec );
 	}
 	{
 		BVH sbvh32bins;
 		sbvh32bins.hqbvhbins = 32;
 		sbvh32bins.BuildHQ( tris, triCount );
-		float sah = sbvh32bins.SAHCost(), rrs = RRSTraceCost( &sbvh32bins ), sec = RRSTraceTime( &sbvh32bins );
+		float sah = sbvh32bins.SAHCost(), rrs = RRSTraceCost( &sbvh32bins ), epo = sbvh32bins.EPOCost(), sec = RRSTraceTime( &sbvh32bins );
 		printf( "SBVH, 32 bins -      " );
-		printstat( sah, rrs, sec );
+		printstat( sah, rrs, epo, sec );
 		sbvh32bins.Optimize( 50 );
-		sah = sbvh32bins.SAHCost(), rrs = RRSTraceCost( &sbvh32bins ), sec = RRSTraceTime( &sbvh32bins );
+		sah = sbvh32bins.SAHCost(), rrs = RRSTraceCost( &sbvh32bins ), epo = sbvh32bins.EPOCost(), sec = RRSTraceTime( &sbvh32bins );
 		printf( "SBVH optimized -     " );
-		printstat( sah, rrs, sec );
+		printstat( sah, rrs, epo, sec );
 		sbvh32bins.Optimize( 50 );
 	}
 	{
@@ -495,8 +518,8 @@ int main()
 		printf( "SBVH, optimal bins - " );
 		if (!sbvhBestBins.Load( t, tris, triCount )) printf( "FILE NOT FOUND.\n" ); else
 		{
-			float sah = sbvhBestBins.SAHCost(), rrs = RRSTraceCost( &sbvhBestBins ), sec = RRSTraceTime( &sbvhBestBins );
-			printstat( sah, rrs, sec );
+			float sah = sbvhBestBins.SAHCost(), rrs = RRSTraceCost( &sbvhBestBins ), epo = sbvhBestBins.EPOCost(), sec = RRSTraceTime( &sbvhBestBins );
+			printstat( sah, rrs, epo, sec );
 		}
 	}
 	{
@@ -505,8 +528,8 @@ int main()
 		printf( "SBVH RRSopt (ours) - " );
 		if (!sbvhOurs.Load( t, tris, triCount )) printf( "FILE NOT FOUND.\n" ); else
 		{
-			float sah = sbvhOurs.SAHCost(), rrs = RRSTraceCost( &sbvhOurs ), sec = RRSTraceTime( &sbvhOurs );
-			printstat( sah, rrs, sec );
+			float sah = sbvhOurs.SAHCost(), rrs = RRSTraceCost( &sbvhOurs ), epo = sbvhOurs.EPOCost(), sec = RRSTraceTime( &sbvhOurs );
+			printstat( sah, rrs, epo, sec );
 		}
 	}
 

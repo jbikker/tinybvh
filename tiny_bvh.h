@@ -123,6 +123,9 @@ THE SOFTWARE.
 #ifndef C_TRAV
 #define C_TRAV	1
 #endif
+#ifndef W_EPO
+#define W_EPO	0.71f
+#endif
 
 // SBVH: "Unsplitting"
 #define SBVH_UNSPLITTING
@@ -800,6 +803,7 @@ public:
 	void ConvertFrom( const BVH_Verbose& original, bool compact = true );
 	void SplitLeafs( const uint32_t maxPrims );
 	float SAHCost( const uint32_t nodeIdx = 0 ) const;
+	float EPOCost( const uint32_t nodeIdx = 0 ) const;
 	int32_t NodeCount() const;
 	int32_t LeafCount() const;
 	int32_t PrimCount( const uint32_t nodeIdx = 0 ) const;
@@ -857,8 +861,8 @@ public:
 		uint32_t* triIdxB, uint32_t& nextFrag, uint32_t& taskCount,
 		SubdivTask* task
 	);
-	bool ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, bvhvec3 minDim, const uint32_t splitAxis );
-	void SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const bvhvec3& minDim, const uint32_t splitAxis, const float splitPos, bool& leftOK, bool& rightOK );
+	bool ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, bvhvec3 minDim, const uint32_t splitAxis ) const;
+	void SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const bvhvec3& minDim, const uint32_t splitAxis, const float splitPos, bool& leftOK, bool& rightOK ) const;
 protected:
 	template <bool posX, bool posY, bool posZ> int32_t Intersect( Ray& ray ) const;
 	template <bool posX, bool posY, bool posZ> int32_t IntersectTLAS( Ray& ray ) const;
@@ -872,6 +876,8 @@ protected:
 	inline float SplitCostSAH( const float rAparent, const float Aleft, const int Nleft, const float Aright, const int Nright ) const;
 	inline float NoSplitCostSAH( const int Nparent ) const;
 	void QuickSort( const float* centroid, uint32_t* primIdx, int first, int last );
+	float EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx = 0 ) const;
+	float PrimArea( const uint32_t p ) const;
 public:
 	// BVH type identification
 	bool isTLAS() const { return instList != 0; }
@@ -1676,6 +1682,98 @@ float BVH::SAHCost( const uint32_t nodeIdx ) const
 	return nodeIdx == 0 ? (cost / n.SurfaceArea()) : cost;
 }
 
+float BVH::PrimArea( const uint32_t p ) const
+{
+	uint32_t vidx = primIdx[p] * 3;
+	bvhvec3 v0, v1, v2;
+	if (vertIdx) v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
+	else v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
+	return 0.5f * tinybvh_length( tinybvh_cross( v1 - v0, v2 - v0 ) );
+}
+
+float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx ) const
+{
+	// abort if we reached the subtree
+	if (nodeIdx == subtreeRoot) return 0;
+	const BVHNode& n = bvhNode[nodeIdx];
+	const BVHNode& subtree = bvhNode[subtreeRoot];
+	// abort if node n does not overlap the subtree
+	bool overlap = 
+		n.aabbMin.x <= subtree.aabbMax.x && n.aabbMax.x >= subtree.aabbMin.x &&
+		n.aabbMin.y <= subtree.aabbMax.y && n.aabbMax.y >= subtree.aabbMin.y &&
+		n.aabbMin.z <= subtree.aabbMax.z && n.aabbMax.z >= subtree.aabbMin.z;
+	if (!overlap) return 0;
+	// handle case where n is a leaf node
+	float area = 0;
+	if (n.isLeaf())
+	{
+		// clip triangles to AABB of subtreeRoot and sum resulting areas
+		const bvhvec3 bmin = subtree.aabbMin, bmax = subtree.aabbMax;
+		for( unsigned i = 0; i < n.triCount; i++ )
+		{
+			// Sutherland-Hodgeman against six bounding planes
+			uint32_t Nin = 3, vidx = primIdx[n.leftFirst + i] * 3;
+			bvhvec3 vin[10], vout[10], C;
+			if (vertIdx)
+				vin[0] = verts[vertIdx[vidx]], vin[1] = verts[vertIdx[vidx + 1]], vin[2] = verts[vertIdx[vidx + 2]];
+			else
+				vin[0] = verts[vidx], vin[1] = verts[vidx + 1], vin[2] = verts[vidx + 2];
+			for (uint32_t a = 0; a < 3; a++)
+			{
+				uint32_t Nout = 0;
+				const float l = bmin[a], r = bmax[a];
+				for (uint32_t v = 0; v < Nin; v++)
+				{
+					bvhvec3 v0 = vin[v], v1 = vin[(v + 1) % Nin];
+					const bool v0in = v0[a] >= l, v1in = v1[a] >= l;
+					if (!(v0in || v1in)) continue; else if (v0in ^ v1in)
+						C = v0 + (l - v0[a]) / (v1[a] - v0[a]) * (v1 - v0),
+						C[a] = l /* accurate */, vout[Nout++] = C;
+					if (v1in) vout[Nout++] = v1;
+				}
+				Nin = 0;
+				for (uint32_t v = 0; v < Nout; v++)
+				{
+					bvhvec3 v0 = vout[v], v1 = vout[(v + 1) % Nout];
+					const bool v0in = v0[a] <= r, v1in = v1[a] <= r;
+					if (!(v0in || v1in)) continue; else if (v0in ^ v1in)
+						C = v0 + (r - v0[a]) / (v1[a] - v0[a]) * (v1 - v0),
+						C[a] = r /* accurate */, vin[Nin++] = C;
+					if (v1in) vin[Nin++] = v1;
+				}
+			}
+			if (Nin < 3) continue;
+			// calculate area of remaining convex shape in vin
+			const uint32_t tris = Nin - 2;
+			bvhvec3 v0 = vin[0], v1, v2;
+			for( uint32_t j = 0; j < tris; j++ )
+				v1 = vin[j + 1], v2 = vin[j + 2],
+				area += 0.5f * tinybvh_length( tinybvh_cross( v1 - v0, v2 - v0 ) );
+		}
+		return area;
+	}
+	// recurse if n is an inner node
+	area += EPOArea( subtreeRoot, n.leftFirst );
+	area += EPOArea( subtreeRoot, n.leftFirst + 1 );
+	return area;
+}
+
+float BVH::EPOCost( const uint32_t nodeIdx ) const
+{
+	// Determine the EPO cost of the tree. See:
+	// "On Quality Metrics of Bounding Volume Hierarchies", Aila et al., 2013.
+	const BVHNode& n = bvhNode[nodeIdx];
+	float area = EPOArea( nodeIdx );
+	float cost = (n.isLeaf() ? (c_int * n.triCount) : c_trav) * area;
+	if (!n.isLeaf()) cost += EPOCost( n.leftFirst ) + EPOCost( n.leftFirst + 1 );
+	if (nodeIdx > 0) return cost;
+	// recursion ends with node 0: Finalize EPO calculation
+	float totalArea = 0;
+	for( unsigned i = 0; i < triCount; i++ ) totalArea += PrimArea( i );
+	cost /= totalArea;
+	return (1.0f - W_EPO) * SAHCost( 0 ) + W_EPO * cost;
+}
+
 void BVH::SplitLeafs( const uint32_t maxPrims )
 {
 	uint32_t stack[64], stackPtr = 0, nodeIdx = 0;
@@ -1954,7 +2052,7 @@ void BVH::PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, c
 			const bvhvec4 v0 = verts[i * 3], v1 = verts[i * 3 + 1], v2 = verts[i * 3 + 2];
 			const bvhvec4 fmin = tinybvh_min( v0, tinybvh_min( v1, v2 ) );
 			const bvhvec4 fmax = tinybvh_max( v0, tinybvh_max( v1, v2 ) );
-			fragment[i].bmin = fmin, fragment[i].bmax = fmax;
+			fragment[i].bmin = fmin, fragment[i].bmax = fmax, fragment[i].primIdx = i;
 			root.aabbMin = tinybvh_min( root.aabbMin, fragment[i].bmin );
 			root.aabbMax = tinybvh_max( root.aabbMax, fragment[i].bmax ), primIdx[i] = i;
 		}
@@ -1969,7 +2067,7 @@ void BVH::PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, c
 			const bvhvec4 v0 = verts[i0], v1 = verts[i1], v2 = verts[i2];
 			const bvhvec4 fmin = tinybvh_min( v0, tinybvh_min( v1, v2 ) );
 			const bvhvec4 fmax = tinybvh_max( v0, tinybvh_max( v1, v2 ) );
-			fragment[i].bmin = fmin, fragment[i].bmax = fmax;
+			fragment[i].bmin = fmin, fragment[i].bmax = fmax, fragment[i].primIdx = i;
 			root.aabbMin = tinybvh_min( root.aabbMin, fragment[i].bmin );
 			root.aabbMax = tinybvh_max( root.aabbMax, fragment[i].bmax ), primIdx[i] = i;
 		}
@@ -2084,7 +2182,7 @@ void BVH::Build()
 
 void BVH::QuickSort( const float* a, uint32_t* q, int f, int l ) // minimal qsort
 {
-	int s[1024], p = 0, h, i, r;
+	int s[4096], p = 0, h, i, r;
 start: while (f >= l) { if (p == 0) return; else f = s[--p], l = s[--p]; }
 	for (r = f, i = f + 1; i <= l; i++) if (a[q[i]] < a[q[f]]) h = q[++r], q[r] = q[i], q[i] = h;
 	h = q[f], q[f] = q[r], q[r] = h, s[p++] = l, s[p++] = r + 1, l = r - 1; goto start;
@@ -2591,7 +2689,7 @@ void BVH::BuildHQ()
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f /* don't touch, carefully picked */;
 	BuildHQTask( nodeIdx, bins, depth, 5, sliceStart, sliceEnd, minDim, 
 		rootArea, idxTmp, nextFrag, taskCount, task );
-	for( int i = 0; i < taskCount; i++ )
+	for( unsigned i = 0; i < taskCount; i++ )
 	{
 		nodeIdx = task[i].node, depth = task[i].depth,
 		sliceStart = task[i].sliceStart, sliceEnd = task[i].sliceEnd;
@@ -7623,7 +7721,7 @@ bool BVH::BVHNode::Intersect( const bvhvec3& bmin, const bvhvec3& bmax ) const
 }
 
 // Faster ClipFrag, which clips against only two planes if a tri wasn't clipped before.
-bool BVH::ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, bvhvec3 minDim, const uint32_t axis )
+bool BVH::ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, bvhvec3 minDim, const uint32_t axis ) const
 {
 	// find intersection of bmin/bmax and orig bmin/bmax
 	bmin = tinybvh_max( bmin, orig.bmin ), bmax = tinybvh_min( bmax, orig.bmax );
@@ -7740,7 +7838,7 @@ bool BVH::ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhve
 }
 
 // SplitFrag: cut a fragment in two new fragments.
-void BVH::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const bvhvec3& minDim, const uint32_t splitAxis, const float splitPos, bool& leftOK, bool& rightOK )
+void BVH::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const bvhvec3& minDim, const uint32_t splitAxis, const float splitPos, bool& leftOK, bool& rightOK ) const
 {
 	// method: we will split the fragment against the main split axis into two new fragments.
 	// In case the original fragment was clipped before, we first clip to the AABB of 'orig'.
