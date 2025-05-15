@@ -31,12 +31,11 @@
 // 1: Determine best bin count
 // 2: Optimize using reinsertion & RRS
 // 3: Report
-#define STAGE	1
+#define STAGE	3
 
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
 // #define VERIFY_OPTIMIZED_BVH
-// #define RANDOM_BIN_COUNT
 
 // RAY SETS:
 // --------------------------------------------------
@@ -105,8 +104,8 @@
 #define HPLOC_FILE		"sanmiguel.hploc"
 #define OPTIMIZED_BVH	"sbvh_sanmiguel_opt.bin"
 #define RRS_SIZE		2'500'000
-#define BEST_BINCOUNT	27.0f
-#define BEST_BINNED_BVH	"sbvh_sanmiguel_27bins.bin"
+#define BEST_BINCOUNT	46.5f // for EPO; 27.0 for RRS
+#define BEST_BINNED_BVH	"sbvh_sanmiguel_46.5bins.bin"
 #define	W_EPO			0.72f // as specified in paper, overriding default 0.71
 #endif
 
@@ -343,17 +342,10 @@ int main()
 	while (1)
 	{
 		Timer t;
-	#ifdef RANDOM_BIN_COUNT
-		// split with random bin count between 35 and 97. Deprecated, not helping.
-		bvh.hqbvhbins = bins;
-		bvh.hqbvhbinseed = ((rand() & 8191) + 1) * 13;
-		bvh.hqbvhrndbins = true;
-	#else
 		// use 'bins' splits, with one extra for odd tree levels.
 		bvh.hqbvhbins = bins;
 		bvh.hqbvhoddeven = odd;
 		odd = !odd;
-	#endif
 		bvh.BuildHQ( tris, triCount );
 		float buildTime = t.elapsed();
 		// Evaluate traversal cost using RRS
@@ -391,7 +383,7 @@ int main()
 	printf( "Building reference BVH (8 bins)... " );
 	refbvh.BuildHQ( tris, triCount );
 	printf( "done.\n" );
-	float refCost = RRSTraceCost( &refbvh );
+	float refCost = refbvh.EPOCost(); // RRSTraceCost( &refbvh );
 	BVH bvh;
 	// Try to continue where we left off
 	char b[] = OPTIMIZED_BVH;
@@ -401,34 +393,34 @@ int main()
 		// Load SBVH with best split plane count
 		char t[] = BEST_BINNED_BVH; // generated in STAGE 1
 		bvh.Load( t, tris, triCount );
-		startCost = RRSTraceCost( &bvh );
+		startCost = bvh.EPOCost(); // RRSTraceCost( &bvh );
 		printf( "BVH in %s: SAH=%.2f, cost=%.2f (%.2f%%).\n", t, bvh.SAHCost(), startCost, 100 * refCost / startCost );
 	}
 	else
 	{
-		startCost = RRSTraceCost( &bvh );
+		startCost = bvh.EPOCost(); // RRSTraceCost( &bvh );
 		printf( "BVH in %s: SAH=%.2f, cost=%.2f (%.2f%%).\n", b, bvh.SAHCost(), startCost, 100 * refCost / startCost );
 	}
 	BVH::BVHNode* backup = (BVH::BVHNode*)malloc64( bvh.allocatedNodes * sizeof( BVH::BVHNode ) );
 	BVH_Verbose* verbose = new BVH_Verbose();
 	uint32_t iteration = 0;
 	// Optimize
+	float sahBefore = bvh.SAHCost();
+	float costBefore = bvh.EPOCost(); // RRSTraceCost( &bvh );
 	while (1)
 	{
-		float SAHBefore = bvh.SAHCost();
-		float costBefore = RRSTraceCost( &bvh );
 		memcpy( backup, bvh.bvhNode, bvh.allocatedNodes * sizeof( BVH::BVHNode ) );
 		uint32_t usedBackup = bvh.usedNodes, allocBackup = bvh.allocatedNodes;
 		verbose->ConvertFrom( bvh );
 		verbose->Optimize( 1, false, true );
 		bvh.ConvertFrom( *verbose, false );
-		float SAHafter = bvh.SAHCost();
+		float sahAfter = bvh.SAHCost();
 	#ifdef VERIFY_OPTIMIZED_BVH
-		float costAfter = RRSTraceCost( &bvh, &refbvh );
+		float costAfter = bvh.EPOCost(); // RRSTraceCost( &bvh, &refbvh );
 	#else
-		float costAfter = RRSTraceCost( &bvh, 0 );
+		float costAfter = bvh.EPOCost(); // RRSTraceCost( &bvh, 0 );
 	#endif
-		printf( "Iteration %05i: SAH from %.2f to %.2f, cost from %.3f to %.3f", iteration++, SAHBefore, SAHafter, costBefore, costAfter );
+		printf( "Iteration %05i: SAH from %.2f to %.2f, cost from %.3f to %.3f", iteration++, sahBefore, sahAfter, costBefore, costAfter );
 		if (costAfter >= costBefore)
 		{
 			printf( " - REJECTED\n" );
@@ -440,6 +432,8 @@ int main()
 			char t[] = OPTIMIZED_BVH;
 			printf( " - %.2f%%, saved to %s\n", refCost * 100 / costAfter, t );
 			bvh.Save( t );
+			sahBefore = sahAfter;
+			costBefore = costAfter;
 		}
 	}
 
