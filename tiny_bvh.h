@@ -840,7 +840,10 @@ public:
 	void Optimize( const uint32_t iterations = 25, bool extreme = false, bool stochastic = false );
 	uint32_t CombineLeafs( const uint32_t primCount, uint32_t& firstIdx, uint32_t nodeIdx = 0 );
 	int32_t Intersect( Ray& ray ) const;
+#ifdef NORMALIZED_RAY_BOX_INTERSECTION
+	// Experimental code, WIP.
 	int32_t IntersectRaw( Ray& ray ) const;
+#endif
 	bool IntersectSphere( const bvhvec3& pos, const float r ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	void Intersect256Rays( Ray* first ) const;
