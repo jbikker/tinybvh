@@ -24,7 +24,7 @@
 // 4: Bistro
 // 5: Legocar
 // 6: San Miguel
-#define SCENE	1
+#define SCENE	5
 
 // STAGES:
 // --------------------------------------------------
@@ -51,9 +51,9 @@
 #define GEOM_FILE		"./testdata/cryteksponza.bin"
 #define STAT_FILE		"sbvh_cryteksponza.csv"
 #define HPLOC_FILE		"cryteksponza.hploc"
-#define OPTIMIZED_BVH	"sbvh_cryteksponza_opt.bin" // 112.16%
+#define OPTIMIZED_BVH	"sbvh_cryteksponza_opt.bin"
 #define RRS_SIZE		2'000'000
-#define BEST_BINCOUNT	27.5f
+#define BEST_BINCOUNT	27.5f // for EPO; 27.5 for RRS 
 #define BEST_BINNED_BVH	"sbvh_cryteksponza_27.5bins.bin"
 #elif SCENE == 2
 #define SCENE_NAME		"Conference Room"
@@ -63,7 +63,7 @@
 #define HPLOC_FILE		"conference.hploc"
 #define OPTIMIZED_BVH	"sbvh_conference_opt.bin"
 #define RRS_SIZE		1'000'000
-#define BEST_BINCOUNT	31.5f
+#define BEST_BINCOUNT	31.5f // for EPO; 31.5 for RRS
 #define BEST_BINNED_BVH	"sbvh_conference_31.5bins.bin"
 #define	W_EPO			0.41f // as specified in paper, overriding default 0.71
 #elif SCENE == 3
@@ -74,8 +74,8 @@
 #define HPLOC_FILE		"dragon.hploc"
 #define OPTIMIZED_BVH	"sbvh_dragon_opt.bin"
 #define RRS_SIZE		1'000'000
-#define BEST_BINCOUNT	123.0f
-#define BEST_BINNED_BVH	"sbvh_dragon_123bins.bin"
+#define BEST_BINCOUNT	127.0f // for EPO; 123 for RRS
+#define BEST_BINNED_BVH	"sbvh_dragon_127bins.bin"
 #define	W_EPO			0.61f // as specified in paper, overriding default 0.71
 #elif SCENE == 4
 #define SCENE_NAME		"Amazon Lumberyard Bistro"
@@ -85,8 +85,8 @@
 #define HPLOC_FILE		"bistro_ext.hploc"
 #define OPTIMIZED_BVH	"sbvh_bistro_opt.bin"
 #define RRS_SIZE		2'500'000
-#define BEST_BINCOUNT	105.0f
-#define BEST_BINNED_BVH	"sbvh_bistro_105bins.bin"
+#define BEST_BINCOUNT	109.0f // for EPO; 105 for RRS
+#define BEST_BINNED_BVH	"sbvh_bistro_109bins.bin"
 #elif SCENE == 5
 #define SCENE_NAME		"Lego Car"
 #define RAYSET_TYPE		RRS_OBJECT
@@ -95,7 +95,7 @@
 #define HPLOC_FILE		"legocar.hploc"
 #define OPTIMIZED_BVH	"sbvh_legocar_opt.bin"
 #define RRS_SIZE		500'000
-#define BEST_BINCOUNT	56.5f
+#define BEST_BINCOUNT	70.5f // for EPO; 56.5 for RRS
 #define BEST_BINNED_BVH	"sbvh_legocar_56.5bins.bin"
 #elif SCENE == 6
 #define SCENE_NAME		"San Miguel"
@@ -322,18 +322,12 @@ int main()
 #endif
 	char n[] = SCENE_NAME;
 	printf( "done. Results for %s (%i tris)\n-----------------------\n", n, triCount );
-#if 0
-	BVH test;
-	test.Build( tris, triCount );
-	float epo = test.EPOCost();
-	int w = 0;
-#endif
 	RepresentativeRays( RAYSET_TYPE );
 
 #if STAGE == 1 // STAGE 1: Find optimal bin count between 8 and 99, also try 'odd/even' counts.
 
 	int bins = 8, bestCostBins = -1;
-	float bestSAH = 1e30f, bestRRSCost, baseCost = 0;
+	float bestSAH = 1e30f, bestRRSCost, baseCost = 0, baseEpo, bestEpo;
 	// reference: 8 bins
 	printf( "Building reference BVH (8 bins)... " );
 	BVH bvh;
@@ -341,6 +335,7 @@ int main()
 	bvh.BuildHQ( tris, triCount );
 	printf( "done.\n" );
 	baseCost = bestRRSCost = RRSTraceCost( &bvh );
+	baseEpo = bestEpo = bvh.EPOCost();
 	bool odd = false;
 	// find optimal bin count by minimizing RRS cost.
 	char t[] = STAT_FILE;
@@ -363,14 +358,20 @@ int main()
 		float buildTime = t.elapsed();
 		// Evaluate traversal cost using RRS
 		float sah = bvh.SAHCost();
+		float epo = bvh.EPOCost();
 		float RRScost = RRSTraceCost( &bvh );
-		float percentage = baseCost * 100 / RRScost;
-		printf( "SBVH, %i.%i bins (%.1fs): SAH=%5.1f, RRS %.2f [%.2f%%] ",
-			bins, (bvh.hqbvhoddeven ? 5 : 0), buildTime, sah, RRScost, percentage );
-		fprintf( f, "bins,%i.%i,time,%f,SAH,%f,RRS,%f\n", bins, (bvh.hqbvhoddeven ? 5 : 0), buildTime, sah, RRScost );
-		if (RRScost < bestRRSCost) // we optimize for RRS cost, not SAH.
+		float RRSpercentage = baseCost * 100 / RRScost;
+		float EPOpercentage = baseEpo * 100 / epo;
+		printf( "SBVH, %i.%i bins (%.1fs): SAH=%5.1f, RRS %.2f [%.2f%%], EPO %.2f [%.2f%%] ",
+			bins, (bvh.hqbvhoddeven ? 5 : 0), buildTime, sah, RRScost, RRSpercentage, epo, EPOpercentage );
+		fprintf( f, "bins,%i.%i,time,%f,SAH,%f,RRS,%f,EPO,%f\n", bins, (bvh.hqbvhoddeven ? 5 : 0), buildTime, sah, RRScost, epo );
+		// if (RRScost < bestRRSCost)	// we optimize for RRS cost
+		if (epo < bestEpo)				// we optimize for EPO cost
 		{
-			bestRRSCost = RRScost, bestCostBins = bins, bestSAH = sah;
+			// bestSAH = sah;
+			// bestRRSCost = RRScost;
+			bestEpo = epo;
+			bestCostBins = bins;
 			char t[] = BEST_BINNED_BVH;
 			bvh.Save( t ); // overwrites previous best
 			printf( " ==> saved to %s.\n", t );
