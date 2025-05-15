@@ -1,5 +1,5 @@
 # dev
-This is the **TinyBVH development branch**. New developments are tested here first.
+This is the **TinyBVH development branch**. New features are tested here first.
 
 # tinybvh
 Single-header BVH construction and traversal library written as "Sane C++" (or "C with classes"). Some C++11 is used, e.g. for threading. The library has no dependencies. 
@@ -72,7 +72,7 @@ The **performance measurement tool** can be compiled with:
 
 ````c++ --std=c++17 -framework OpenCL -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on macOS)
 
-# Version 1.5.4
+# Version 1.5.5
 
 Version 1.5.0 introduced a new fast layout for x86/x64 systems that do not (or cannot be presumed to) support AVX2. For those, please use BVH4_CPU form optimal performance (about 80% of the fastest AVX2 code).
 
@@ -118,6 +118,7 @@ This version of the library includes the following functionality:
 * Fast binned SAH BVH builder using AVX intrinsics
 * Fast binned SAH BVH builder using NEON intrinsices, by [wuyakuma](https://github.com/wuyakuma)
 * Customizable SAH parameters
+* "End-Point Overlap" BVH cost metric (["On Quality Metrics of Bounding Volume Hierarchies"](https://users.aalto.fi/~ailat1/publications/aila2013hpg_paper.pdf), Aila et al., 2013)
 * TLAS builder with instancing and fast TLAS/BLAS traversal, even for 'mixed trees'
 * TLAS masking (similar to [OptiX](https://raytracing-docs.nvidia.com/optix7/guide/optix_guide.230712.A4.pdf)), by [Romain Augier](https://github.com/romainaugier).
 * Double-precision binned SAH BVH builder
@@ -193,6 +194,8 @@ Questions, remarks? Contact me at bikker.j@gmail.com ~~or on twitter: @j_bikker,
 # License
 This library is made available under the MIT license, which starts as follows: "Permission is hereby granted, free of charge, .. , to deal in the Software **without restriction**". Enjoy. If you are using this work in your research, please cite TinyBVH: Details are available in BibTeX and APA format, see the 'About' section for this repo on Github.
 
+# Acknowledgement
+The development of this library is supported by an AMD hardware grant.
 
 ![Output of the sample wavefront path tracer](images/wavefront.png)
 
