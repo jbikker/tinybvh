@@ -6,4 +6,35 @@
   <ItemGroup>
     <ClCompile Include="..\tiny_bvh_optimizer.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <Filter Include="opencl">
+      <UniqueIdentifier>{684e9ac3-fe94-413b-af24-f6e0da12f100}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\wavefront.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\tools.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\traverse.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\traverse_bvh2.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\traverse_bvh4.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\traverse_cwbvh.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\traverse_tlas.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\wavefront2.cl">
+      <Filter>opencl</Filter>
+    </None>
+  </ItemGroup>
 </Project>
