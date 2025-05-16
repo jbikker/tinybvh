@@ -7,14 +7,21 @@
 //   be saved to disk. The process takes several hours for most scenes.
 // - Get detailed statistics on the results by setting STAGE to 3.
 
-// set C_INT and C_TRAV to match the paper 
-// "On Quality Metrics of Bounding Volume Hierarchies", 
+// set C_INT and C_TRAV to match the paper
+// "On Quality Metrics of Bounding Volume Hierarchies",
 // Aila et al., 20213
 #define C_INT	1.0f
 #define C_TRAV	1.2f
 
 #define TINYBVH_IMPLEMENTATION
 #include "tiny_bvh.h"
+
+#ifdef _MSC_VER
+#include "Windows.h"
+#endif
+
+#define TINY_OCL_IMPLEMENTATION
+#include "tiny_ocl.h"
 
 // SCENES:
 // --------------------------------------------------
@@ -52,7 +59,7 @@
 #define HPLOC_FILE		"cryteksponza.hploc"
 #define OPTIMIZED_BVH	"sbvh_cryteksponza_opt.bin"
 #define RRS_SIZE		2'000'000
-#define BEST_BINCOUNT	27.5f // for EPO; 27.5 for RRS 
+#define BEST_BINCOUNT	27.5f // for EPO; 27.5 for RRS
 #define BEST_BINNED_BVH	"sbvh_cryteksponza_27.5bins.bin"
 #elif SCENE == 2
 #define SCENE_NAME		"Conference Room"
@@ -264,7 +271,7 @@ float RRSTraceCost( const BVH* bvh, const BVH* refBVH = 0 )
 	for (int i = 0; i < 8; i++) sum += splitSum[i];
 	return (float)sum / RRS_SIZE;
 }
-float RRSTraceTime( const BVH* bvh )
+float RRSTraceTimeCPU( const BVH* bvh )
 {
 	BVH8_CPU fastbvh;
 	fastbvh.bvh8.bvh.context = fastbvh.bvh8.context = bvh->context;
@@ -283,29 +290,64 @@ float RRSTraceTime( const BVH* bvh )
 	fastbvh.bvh8 = MBVH<8>();
 	return runtime; // average of 10 runs
 }
+float RRSTraceTimeGPU( const BVH* bvh )
+{
+	BVH_GPU bvhgpu;
+	bvhgpu.context = bvh->context;
+	bvhgpu.ConvertFrom( *bvh );
+	static tinyocl::Buffer* gpuNodes = 0, * idxData = 0, * triData = 0;
+	static tinyocl::Kernel ailalaine_kernel( "traverse.cl", "batch_ailalaine" );
+	if (!gpuNodes) gpuNodes = new tinyocl::Buffer( bvh->allocatedNodes * 2 /* room for growth */ * sizeof( BVH_GPU::BVHNode ) );
+	if (!idxData) idxData = new tinyocl::Buffer( bvh->idxCount * 2 /* room for growth */ * sizeof( unsigned ) );
+	if (!triData)
+		triData = new tinyocl::Buffer( bvh->triCount * 3 * sizeof( tinybvh::bvhvec4 ), tris ),
+		triData->CopyToDevice(); // sync once; will not change for subsequent measurements
+	memcpy( gpuNodes->GetHostPtr(), bvhgpu.bvhNode, bvhgpu.usedNodes * sizeof( BVH_GPU::BVHNode ) );
+	memcpy( idxData->GetHostPtr(), bvhgpu.bvh.primIdx, bvh->idxCount * sizeof( unsigned ) );
+	gpuNodes->CopyToDevice();
+	idxData->CopyToDevice();
+	// create rays and send them to the gpu side
+	tinyocl::Buffer rayData( RRS_SIZE * 64 /* sizeof( tinybvh::Ray ) */ );
+	for (unsigned i = 0; i < RRS_SIZE; i++) // TODO: single memcpy will be faster.
+		memcpy( (unsigned char*)rayData.GetHostPtr() + 64 * i, &rayset[i], 64 );
+	rayData.CopyToDevice();
+	// start timer and start kernel on gpu
+	cl_event event;
+	cl_ulong startTime, endTime;
+	float traceTime = 0;
+	ailalaine_kernel.SetArguments( gpuNodes, idxData, triData, &rayData );
+	for (int pass = 0; pass <= 50; pass++)
+	{
+		ailalaine_kernel.Run( RRS_SIZE, 64, 0, &event );
+		clWaitForEvents( 1, &event ); // OpenCL kernsl run asynchronously
+		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
+		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );
+		if (pass == 0) continue; // first pass is for cache warming
+		traceTime += (endTime - startTime) * 1e-9f; // event timing is in nanoseconds
+	}
+	return traceTime * 0.02f;
+}
 
 // Scene management - Append a file, with optional position, scale and color override, tinyfied
 void AddMesh( const char* file, float scale = 1, bvhvec3 pos = {}, int c = 0, int N = 0 )
 {
 	std::fstream s{ file, s.binary | s.in };
 	s.read( (char*)&N, 4 );
-	bvhvec4* data = (bvhvec4*)malloc64( (N + triCount) * 48 );
-	if (tris) memcpy( data, tris, triCount * 48 ), free64( tris );
+	bvhvec4* data = (bvhvec4*)tinybvh::malloc64( (N + triCount) * 48 );
+	if (tris) memcpy( data, tris, triCount * 48 ), tinybvh::free64( tris );
 	tris = data, s.read( (char*)tris + triCount * 48, N * 48 ), triCount += N;
 	for (int* b = (int*)tris + (triCount - N) * 12, i = 0; i < N * 3; i++)
 		*(bvhvec3*)b = *(bvhvec3*)b * scale + pos, b[3] = c ? c : b[3], b += 4;
 }
 
-float refsah = 0, refrrs = 0, refepo = 0, refsec = 0;
-void printstat( float sah, float rrs, float epo, float sec )
+float refsah = 0, refrrs = 0, refepo = 0, refcpu = 0, refgpu = 0;
+void printstat( float sah, float rrs, float epo, float cpu, float gpu )
 {
-	printf( "SAH: %.3f, RRS: %.3f, EPO: %.3f, time: %.3f (%+6.2f%%, %+6.2f%%, %+6.2f%%, %+6.2f%%)\n",
-		sah, rrs, epo, sec,
-		100 * refsah / sah - 100,
-		100 * refrrs / rrs - 100,
-		100 * refepo / epo - 100,
-		100 * refsec / sec - 100
-	);
+	printf( "%.3f (%+6.2f%%)  ", sah, 100 * refsah / sah - 100 );
+	printf( "%.3f (%+6.2f%%)  ", rrs, 100 * refrrs / rrs - 100 );
+	printf( "%.3f (%+6.2f%%)  ", epo, 100 * refepo / epo - 100 );
+	printf( "%.3f (%+6.2f%%)  ", cpu, 100 * refcpu / cpu - 100 );
+	printf( "%.3f (%+6.2f%%)\n", gpu, 100 * refgpu / gpu - 100 );
 }
 
 int main()
@@ -444,9 +486,9 @@ int main()
 	FILE* f = fopen( HPLOC_FILE, "rb" );
 	if (f)
 	{
-		BVH bvhBinned;
-		bvhBinned.Build( tris, triCount );
-		BVH_Verbose verbose( bvhBinned );
+		BVH bvh;
+		bvh.Build( tris, triCount );
+		BVH_Verbose verbose( bvh );
 		bvhvec3 bmin, bmax;
 		fread( &bmin, 1, 12, f );
 		fread( &bmax, 1, 12, f );
@@ -455,8 +497,8 @@ int main()
 		fread( verbose.bvhNode + 1, sizeof( BVH_Verbose::BVHNode ), nodeCount, f );
 		verbose.bvhNode[0] = verbose.bvhNode[nodeCount]; // hploc has root in last node.
 		verbose.usedNodes = nodeCount;
-		bvhBinned.ConvertFrom( verbose );
-		float sah = bvhBinned.SAHCost(), rrs = RRSTraceCost( &bvhBinned ), sec = RRSTraceTime( &bvhBinned );
+		bvh.ConvertFrom( verbose );
+		float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), sec = RRSTraceTime( &bvh );
 		printf( "H-PLOC build   - " );
 		printstat( sah, rrs, sec );
 	}
@@ -465,67 +507,78 @@ int main()
 
 	// Prepare and evaluate several BVHs
 	{
-		BVH bvhSweep;
-		bvhSweep.useFullSweep = true;
-		bvhSweep.Build( tris, triCount );
-		float sah = bvhSweep.SAHCost(), rrs = RRSTraceCost( &bvhSweep ), epo = bvhSweep.EPOCost(), sec = RRSTraceTime( &bvhSweep );
-		printf( "SAH (full sweep) -   SAH: %.3f, RRS: %.3f, EPO: %.3f, time: %.3f - REFERENCE\n", sah, rrs, epo, sec );
-		refsah = sah, refrrs = rrs, refepo = epo, refsec = sec;
-		bvhSweep.Optimize( 50 );
-		sah = bvhSweep.SAHCost(), rrs = RRSTraceCost( &bvhSweep ), epo = bvhSweep.EPOCost(), sec = RRSTraceTime( &bvhSweep );
-		printf( "Optimized f.sweep -  " );
-		printstat( sah, rrs, epo, sec );
+		BVH bvh;
+		bvh.useFullSweep = true;
+		bvh.Build( tris, triCount );
+		float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = bvh.EPOCost();
+		float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+		printf( "                     SAH               RRS               EPO               CPU time         GPU time\n" );
+		printf( "                     ----------------------------------------------------------------------------------------\n" );
+		printf( "SAH (full sweep)     %.3f ( 100.0%%)  %.3f ( 100.0%%)  %.3f ( 100.0%%)  %.3f ( 100.0%%)  %.3f ( 100.0%%)\n", sah, rrs, epo, cpu, gpu );
+		refsah = sah, refrrs = rrs, refepo = epo, refcpu = cpu, refgpu = gpu;
+		bvh.Optimize( 50 );
+		sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = bvh.EPOCost();
+		cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+		printf( "Optimized f.sweep    " );
+		printstat( sah, rrs, epo, cpu, gpu );
 	}
 	{
-		BVH bvhBinned; // defaults to 8 bins
-		bvhBinned.Build( tris, triCount );
-		float sah = bvhBinned.SAHCost(), rrs = RRSTraceCost( &bvhBinned ), epo = bvhBinned.EPOCost(), sec = RRSTraceTime( &bvhBinned );
-		printf( "SAH BVH Binned (8) - " );
-		printstat( sah, rrs, epo, sec );
-		bvhBinned.Optimize( 50 );
-		sah = bvhBinned.SAHCost(), rrs = RRSTraceCost( &bvhBinned ), epo = bvhBinned.EPOCost(), sec = RRSTraceTime( &bvhBinned );
-		printf( "Optimized BVH -      " );
-		printstat( sah, rrs, epo, sec );
+		BVH bvh; // defaults to 8 bins
+		bvh.Build( tris, triCount );
+		float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = bvh.EPOCost();
+		float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+		printf( "SAH BVH Binned (8)   " );
+		printstat( sah, rrs, epo, cpu, gpu );
+		bvh.Optimize( 50 );
+		sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = bvh.EPOCost();
+		cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+		printf( "Optimized BVH        " );
+		printstat( sah, rrs, epo, cpu, gpu );
 	}
 	{
-		BVH sbvh8bins;
-		sbvh8bins.hqbvhbins = 8;
-		sbvh8bins.BuildHQ( tris, triCount );
-		float sah = sbvh8bins.SAHCost(), rrs = RRSTraceCost( &sbvh8bins ), epo = sbvh8bins.EPOCost(), sec = RRSTraceTime( &sbvh8bins );
-		printf( "SBVH, 8 bins -       " );
-		printstat( sah, rrs, epo, sec );
+		BVH bvh;
+		bvh.hqbvhbins = 8;
+		bvh.BuildHQ( tris, triCount );
+		float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = bvh.EPOCost();
+		float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+		printf( "SBVH, 8 bins         " );
+		printstat( sah, rrs, epo, cpu, gpu );
 	}
 	{
-		BVH sbvh32bins;
-		sbvh32bins.hqbvhbins = 32;
-		sbvh32bins.BuildHQ( tris, triCount );
-		float sah = sbvh32bins.SAHCost(), rrs = RRSTraceCost( &sbvh32bins ), epo = sbvh32bins.EPOCost(), sec = RRSTraceTime( &sbvh32bins );
-		printf( "SBVH, 32 bins -      " );
-		printstat( sah, rrs, epo, sec );
-		sbvh32bins.Optimize( 50 );
-		sah = sbvh32bins.SAHCost(), rrs = RRSTraceCost( &sbvh32bins ), epo = sbvh32bins.EPOCost(), sec = RRSTraceTime( &sbvh32bins );
-		printf( "SBVH optimized -     " );
-		printstat( sah, rrs, epo, sec );
-		sbvh32bins.Optimize( 50 );
+		BVH bvh;
+		bvh.hqbvhbins = 32;
+		bvh.BuildHQ( tris, triCount );
+		float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = bvh.EPOCost();
+		float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+		printf( "SBVH, 32 bins        " );
+		printstat( sah, rrs, epo, cpu, gpu );
+		bvh.Optimize( 50 );
+		sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = bvh.EPOCost();
+		cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+		printf( "SBVH optimized       " );
+		printstat( sah, rrs, epo, cpu, gpu );
+		bvh.Optimize( 50 );
 	}
 	{
-		BVH sbvhBestBins;
+		BVH bvh;
 		char t[] = BEST_BINNED_BVH;
-		printf( "SBVH, optimal bins - " );
-		if (!sbvhBestBins.Load( t, tris, triCount )) printf( "FILE NOT FOUND.\n" ); else
+		printf( "SBVH, optimal bins   " );
+		if (!bvh.Load( t, tris, triCount )) printf( "FILE NOT FOUND.\n" ); else
 		{
-			float sah = sbvhBestBins.SAHCost(), rrs = RRSTraceCost( &sbvhBestBins ), epo = sbvhBestBins.EPOCost(), sec = RRSTraceTime( &sbvhBestBins );
-			printstat( sah, rrs, epo, sec );
+			float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = bvh.EPOCost();
+			float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+			printstat( sah, rrs, epo, cpu, gpu );
 		}
 	}
 	{
-		BVH sbvhOurs;
+		BVH bvh;
 		char t[] = OPTIMIZED_BVH;
-		printf( "SBVH RRSopt (ours) - " );
-		if (!sbvhOurs.Load( t, tris, triCount )) printf( "FILE NOT FOUND.\n" ); else
+		printf( "SBVH RRSopt (ours)   " );
+		if (!bvh.Load( t, tris, triCount )) printf( "FILE NOT FOUND.\n" ); else
 		{
-			float sah = sbvhOurs.SAHCost(), rrs = RRSTraceCost( &sbvhOurs ), epo = sbvhOurs.EPOCost(), sec = RRSTraceTime( &sbvhOurs );
-			printstat( sah, rrs, epo, sec );
+			float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = bvh.EPOCost();
+			float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+			printstat( sah, rrs, epo, cpu, gpu );
 		}
 	}
 
