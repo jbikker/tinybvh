@@ -584,6 +584,7 @@ int main()
 			verbose.SortIndices();
 			bvh.ConvertFrom( verbose );
 			bvh.CombineLeafs();
+			bvh.CombineLeafs();
 			float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = 0;
 		#ifdef CALCULATE_EPO
 			epo = bvh.EPOCost();
