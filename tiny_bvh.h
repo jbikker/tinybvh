@@ -3700,7 +3700,7 @@ void BVH_Verbose::SortIndices()
 		if (node.isLeaf())
 		{
 			uint32_t tmpFirst = nextIdx;
-			for( int i = 0; i < node.triCount; i++ ) tmp[nextIdx++] = primIdx[node.firstTri + i];
+			for( unsigned i = 0; i < node.triCount; i++ ) tmp[nextIdx++] = primIdx[node.firstTri + i];
 			node.firstTri = tmpFirst;
 			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
 			continue;

@@ -13,16 +13,6 @@
 #define C_INT	1.0f
 #define C_TRAV	1.2f
 
-#define TINYBVH_IMPLEMENTATION
-#include "tiny_bvh.h"
-
-#ifdef _MSC_VER
-#include "Windows.h"
-#endif
-
-#define TINY_OCL_IMPLEMENTATION
-#include "tiny_ocl.h"
-
 // SCENES:
 // --------------------------------------------------
 // 1: Crytek Sponza
@@ -31,19 +21,19 @@
 // 4: Bistro
 // 5: Legocar
 // 6: San Miguel
-#define SCENE	5
+#define SCENE	6
 
 // STAGES:
 // --------------------------------------------------
 // 1: Determine best bin count
 // 2: Optimize using reinsertion & RRS
 // 3: Report
-#define STAGE	3
+#define STAGE	2
 
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
 // #define VERIFY_OPTIMIZED_BVH
-#define CALCULATE_EPO
+// #define CALCULATE_EPO
 
 // RAY SETS:
 // --------------------------------------------------
@@ -116,6 +106,17 @@
 #define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_sanmiguel_27bins.bin"
 #define	W_EPO			0.72f // as specified in paper, overriding default 0.71
 #endif
+
+// TinyBVH, TinyOCL
+#define TINYBVH_IMPLEMENTATION
+#include "tiny_bvh.h"
+
+#ifdef _MSC_VER
+#include "Windows.h"
+#endif
+
+#define TINY_OCL_IMPLEMENTATION
+#include "tiny_ocl.h"
 
 // Includes, needful things
 #ifdef _MSC_VER
