@@ -31,7 +31,7 @@
 // 4: Bistro
 // 5: Legocar
 // 6: San Miguel
-#define SCENE	5
+#define SCENE	6
 
 // STAGES:
 // --------------------------------------------------
@@ -56,64 +56,64 @@
 #define SCENE_NAME		"Crytek Sponza"
 #define RAYSET_TYPE		RRS_INTERIOR
 #define GEOM_FILE		"./testdata/cryteksponza.bin"
-#define STAT_FILE		"sbvh_cryteksponza.csv"
+#define STAT_FILE		"./testdata/opt_rrs/sbvh_cryteksponza.csv"
 #define HPLOC_FILE		"cryteksponza.hploc"
-#define OPTIMIZED_BVH	"sbvh_cryteksponza_opt.bin"
+#define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_cryteksponza_opt.bin"
 #define RRS_SIZE		2'000'000
-#define BEST_BINCOUNT	27.5f // for EPO; 27.5 for RRS
-#define BEST_BINNED_BVH	"sbvh_cryteksponza_27.5bins.bin"
+#define BEST_BINCOUNT	33.5f
+#define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_cryteksponza_33.5bins.bin"
 #elif SCENE == 2
 #define SCENE_NAME		"Conference Room"
 #define RAYSET_TYPE		RRS_INTERIOR
 #define GEOM_FILE		"./testdata/conference.bin"
-#define STAT_FILE		"sbvh_conference.csv"
+#define STAT_FILE		"./testdata/opt_rrs/sbvh_conference.csv"
 #define HPLOC_FILE		"conference.hploc"
-#define OPTIMIZED_BVH	"sbvh_conference_opt.bin"
+#define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_conference_opt.bin"
 #define RRS_SIZE		1'000'000
-#define BEST_BINCOUNT	31.5f // for EPO; 31.5 for RRS
-#define BEST_BINNED_BVH	"sbvh_conference_31.5bins.bin"
+#define BEST_BINCOUNT	31.5f
+#define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_conference_31.5bins.bin"
 #define	W_EPO			0.41f // as specified in paper, overriding default 0.71
 #elif SCENE == 3
 #define SCENE_NAME		"Stanford Dragon"
 #define RAYSET_TYPE		RRS_OBJECT
 #define GEOM_FILE		"./testdata/dragon.bin"
-#define STAT_FILE		"sbvh_dragon.csv"
+#define STAT_FILE		"./testdata/opt_rrs/sbvh_dragon.csv"
 #define HPLOC_FILE		"dragon.hploc"
-#define OPTIMIZED_BVH	"sbvh_dragon_opt.bin"
+#define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_dragon_opt.bin"
 #define RRS_SIZE		1'000'000
-#define BEST_BINCOUNT	127.0f // for EPO; 123 for RRS
-#define BEST_BINNED_BVH	"sbvh_dragon_127bins.bin"
+#define BEST_BINCOUNT	93.0f
+#define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_dragon_93bins.bin"
 #define	W_EPO			0.61f // as specified in paper, overriding default 0.71
 #elif SCENE == 4
 #define SCENE_NAME		"Amazon Lumberyard Bistro"
 #define RAYSET_TYPE		RRS_OBJECT
 #define GEOM_FILE		"./testdata/bistro_ext_part1.bin"
 #define STAT_FILE		"sbvh_bistro_ext.csv"
-#define HPLOC_FILE		"bistro_ext.hploc"
-#define OPTIMIZED_BVH	"sbvh_bistro_opt.bin"
+#define HPLOC_FILE		"./testdata/opt_rrs/bistro_ext.hploc"
+#define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_bistro_opt.bin"
 #define RRS_SIZE		2'500'000
-#define BEST_BINCOUNT	109.0f // for EPO; 105 for RRS
-#define BEST_BINNED_BVH	"sbvh_bistro_109bins.bin"
+#define BEST_BINCOUNT	105.0f 
+#define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_bistro_105bins.bin"
 #elif SCENE == 5
 #define SCENE_NAME		"Lego Car"
 #define RAYSET_TYPE		RRS_OBJECT
 #define GEOM_FILE		"./testdata/legocar.bin"
-#define STAT_FILE		"sbvh_legocar.csv"
+#define STAT_FILE		"./testdata/opt_rrs/sbvh_legocar.csv"
 #define HPLOC_FILE		"legocar.hploc"
-#define OPTIMIZED_BVH	"sbvh_legocar_opt.bin"
+#define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_legocar_opt.bin"
 #define RRS_SIZE		500'000
-#define BEST_BINCOUNT	70.5f // for EPO; 56.5 for RRS
-#define BEST_BINNED_BVH	"sbvh_legocar_56.5bins.bin"
+#define BEST_BINCOUNT	38.5f
+#define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_legocar_38.5bins.bin"
 #elif SCENE == 6
 #define SCENE_NAME		"San Miguel"
 #define RAYSET_TYPE		RRS_INTERIOR
 #define GEOM_FILE		"./testdata/sanmiguel.bin"
-#define STAT_FILE		"sbvh_sanmiguel.csv"
+#define STAT_FILE		"./testdata/opt_rrs/sbvh_sanmiguel.csv"
 #define HPLOC_FILE		"sanmiguel.hploc"
-#define OPTIMIZED_BVH	"sbvh_sanmiguel_opt.bin"
+#define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_sanmiguel_opt.bin"
 #define RRS_SIZE		2'500'000
-#define BEST_BINCOUNT	46.5f // for EPO; 27.0 for RRS
-#define BEST_BINNED_BVH	"sbvh_sanmiguel_46.5bins.bin"
+#define BEST_BINCOUNT	27.0f
+#define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_sanmiguel_27bins.bin"
 #define	W_EPO			0.72f // as specified in paper, overriding default 0.71
 #endif
 
