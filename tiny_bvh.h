@@ -846,6 +846,7 @@ public:
 	void Refit( const uint32_t nodeIdx = 0 );
 	void Optimize( const uint32_t iterations = 25, bool extreme = false, bool stochastic = false );
 	uint32_t CombineLeafs( const uint32_t primCount, uint32_t& firstIdx, uint32_t nodeIdx = 0 );
+	void CombineLeafs( const uint32_t nodeIdx = 0 );
 	int32_t Intersect( Ray& ray ) const;
 #ifdef NORMALIZED_RAY_BOX_INTERSECTION
 	// Experimental code, WIP.
@@ -1069,6 +1070,7 @@ public:
 	void Refit( const uint32_t nodeIdx = 0, bool skipLeafs = false );
 	void CheckFit( const uint32_t nodeIdx = 0, bool skipLeafs = false );
 	void Compact();
+	void SortIndices();
 	void SplitLeafs( const uint32_t maxPrims = 1 );
 	void MergeLeafs();
 	void Optimize( const uint32_t iterations = 25, bool extreme = false, bool stochastic = false );
@@ -2790,6 +2792,30 @@ uint32_t BVH::CombineLeafs( const uint32_t primCount, uint32_t& firstIdx, uint32
 	return leftCount + rightCount;
 }
 
+// CombineLeafs: Combine leaf nodes if this improves tree SAH cost. For HPLOC postprocessing.
+void BVH::CombineLeafs( const uint32_t nodeIdx )
+{
+	BVHNode& node = bvhNode[nodeIdx];
+	if (node.isLeaf()) return;
+	BVHNode& left = bvhNode[node.leftFirst];
+	BVHNode& right = bvhNode[node.leftFirst + 1];
+	if (left.isLeaf() && right.isLeaf())
+	{
+		int triCount = left.triCount + right.triCount;
+		float rAnode = 1.0f / tinybvh_half_area( node.aabbMax - node.aabbMin );
+		float Cnode = c_int * triCount;
+		float Cleft = c_int * left.triCount * tinybvh_half_area( left.aabbMax - left.aabbMin ) * rAnode;
+		float Cright = c_int * right.triCount * tinybvh_half_area( right.aabbMax - right.aabbMin ) * rAnode;
+		float Csplit = Cleft + Cright + c_trav;
+		if (Cnode < Csplit) if (right.leftFirst == (left.leftFirst + left.triCount))
+			node.leftFirst = left.leftFirst,
+			node.triCount = triCount;
+		return;
+	}
+	CombineLeafs( node.leftFirst );
+	CombineLeafs( node.leftFirst + 1 );
+}
+
 bool BVH::IntersectSphere( const bvhvec3& pos, const float r ) const
 {
 	const bvhvec3 bmin = pos - bvhvec3( r ), bmax = pos + bvhvec3( r );
@@ -3662,6 +3688,26 @@ void BVH_Verbose::Compact()
 	usedNodes = newNodePtr;
 	AlignedFree( bvhNode );
 	bvhNode = tmp;
+}
+
+void BVH_Verbose::SortIndices()
+{
+	// create a new primIdx array which has the primitive indices sorted by depth-first traversal order.
+	uint32_t nodeIdx = 0, stack[256], stackPtr = 0, *tmp = new uint32_t[triCount], nextIdx = 0;
+	while (1)
+	{
+		BVHNode& node = bvhNode[nodeIdx];
+		if (node.isLeaf())
+		{
+			uint32_t tmpFirst = nextIdx;
+			for( int i = 0; i < node.triCount; i++ ) tmp[nextIdx++] = primIdx[node.firstTri + i];
+			node.firstTri = tmpFirst;
+			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
+			continue;
+		}
+		nodeIdx = node.left;
+		stack[stackPtr++] = node.right;
+	}
 }
 
 void BVH_Verbose::Optimize( const uint32_t iterations, const bool extreme, bool stochastic )
