@@ -43,7 +43,7 @@
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
 // #define VERIFY_OPTIMIZED_BVH
-// #define CALCULATE_EPO
+#define CALCULATE_EPO
 
 // RAY SETS:
 // --------------------------------------------------
@@ -88,8 +88,8 @@
 #define SCENE_NAME		"Amazon Lumberyard Bistro"
 #define RAYSET_TYPE		RRS_OBJECT
 #define GEOM_FILE		"./testdata/bistro_ext_part1.bin"
-#define STAT_FILE		"./testdata/hploc/sbvh_bistro_ext.csv"
-#define HPLOC_FILE		"./testdata/opt_rrs/bistro_ext.hploc"
+#define STAT_FILE		"./testdata/rrs/sbvh_bistro_ext.csv"
+#define HPLOC_FILE		"./testdata/hploc/bistro.hploc"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_bistro_opt.bin"
 #define RRS_SIZE		2'500'032 // must be a multiple of 64 for NVIDIA OpenCL
 #define BEST_BINCOUNT	105.0f 
@@ -580,11 +580,12 @@ int main()
 			fread( verbose.bvhNode, sizeof( BVH_Verbose::BVHNode ), nodeCount, f );
 			verbose.usedNodes = nodeCount;
 			for( int i = 0; i < triCount; i++ ) verbose.primIdx[i] = i;
-			verbose.Refit();
+			// verbose.Refit();
 			verbose.SortIndices();
 			bvh.ConvertFrom( verbose );
 			bvh.CombineLeafs();
 			bvh.CombineLeafs();
+			verbose.Refit();
 			float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = 0;
 		#ifdef CALCULATE_EPO
 			epo = bvh.EPOCost();

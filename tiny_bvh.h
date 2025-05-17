@@ -3708,6 +3708,8 @@ void BVH_Verbose::SortIndices()
 		nodeIdx = node.left;
 		stack[stackPtr++] = node.right;
 	}
+	memcpy( primIdx, tmp, triCount * 4 );
+	delete [] tmp;
 }
 
 void BVH_Verbose::Optimize( const uint32_t iterations, const bool extreme, bool stochastic )
