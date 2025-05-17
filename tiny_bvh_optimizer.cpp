@@ -31,14 +31,14 @@
 // 4: Bistro
 // 5: Legocar
 // 6: San Miguel
-#define SCENE	6
+#define SCENE	5
 
 // STAGES:
 // --------------------------------------------------
 // 1: Determine best bin count
 // 2: Optimize using reinsertion & RRS
 // 3: Report
-#define STAGE	2
+#define STAGE	3
 
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
@@ -57,9 +57,9 @@
 #define RAYSET_TYPE		RRS_INTERIOR
 #define GEOM_FILE		"./testdata/cryteksponza.bin"
 #define STAT_FILE		"./testdata/opt_rrs/sbvh_cryteksponza.csv"
-#define HPLOC_FILE		"cryteksponza.hploc"
+#define HPLOC_FILE		"./testdata/hploc/cryteksponza.hploc"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_cryteksponza_opt.bin"
-#define RRS_SIZE		2'000'000
+#define RRS_SIZE		2'000'000 // must be a multiple of 64 for NVIDIA OpenCL
 #define BEST_BINCOUNT	33.5f
 #define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_cryteksponza_33.5bins.bin"
 #elif SCENE == 2
@@ -67,9 +67,9 @@
 #define RAYSET_TYPE		RRS_INTERIOR
 #define GEOM_FILE		"./testdata/conference.bin"
 #define STAT_FILE		"./testdata/opt_rrs/sbvh_conference.csv"
-#define HPLOC_FILE		"conference.hploc"
+#define HPLOC_FILE		"./testdata/hploc/conference.hploc"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_conference_opt.bin"
-#define RRS_SIZE		1'000'000
+#define RRS_SIZE		1'000'000 // must be a multiple of 64 for NVIDIA OpenCL
 #define BEST_BINCOUNT	31.5f
 #define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_conference_31.5bins.bin"
 #define	W_EPO			0.41f // as specified in paper, overriding default 0.71
@@ -78,9 +78,9 @@
 #define RAYSET_TYPE		RRS_OBJECT
 #define GEOM_FILE		"./testdata/dragon.bin"
 #define STAT_FILE		"./testdata/opt_rrs/sbvh_dragon.csv"
-#define HPLOC_FILE		"dragon.hploc"
+#define HPLOC_FILE		"./testdata/hploc/dragon.hploc"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_dragon_opt.bin"
-#define RRS_SIZE		1'000'000
+#define RRS_SIZE		1'000'000 // must be a multiple of 64 for NVIDIA OpenCL
 #define BEST_BINCOUNT	93.0f
 #define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_dragon_93bins.bin"
 #define	W_EPO			0.61f // as specified in paper, overriding default 0.71
@@ -88,10 +88,10 @@
 #define SCENE_NAME		"Amazon Lumberyard Bistro"
 #define RAYSET_TYPE		RRS_OBJECT
 #define GEOM_FILE		"./testdata/bistro_ext_part1.bin"
-#define STAT_FILE		"sbvh_bistro_ext.csv"
+#define STAT_FILE		"./testdata/hploc/sbvh_bistro_ext.csv"
 #define HPLOC_FILE		"./testdata/opt_rrs/bistro_ext.hploc"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_bistro_opt.bin"
-#define RRS_SIZE		2'500'000
+#define RRS_SIZE		2'500'032 // must be a multiple of 64 for NVIDIA OpenCL
 #define BEST_BINCOUNT	105.0f 
 #define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_bistro_105bins.bin"
 #elif SCENE == 5
@@ -99,9 +99,9 @@
 #define RAYSET_TYPE		RRS_OBJECT
 #define GEOM_FILE		"./testdata/legocar.bin"
 #define STAT_FILE		"./testdata/opt_rrs/sbvh_legocar.csv"
-#define HPLOC_FILE		"legocar.hploc"
+#define HPLOC_FILE		"./testdata/hploc/legocar.hploc"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_legocar_opt.bin"
-#define RRS_SIZE		500'000
+#define RRS_SIZE		500'032 // must be a multiple of 64 for NVIDIA OpenCL
 #define BEST_BINCOUNT	38.5f
 #define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_legocar_38.5bins.bin"
 #elif SCENE == 6
@@ -109,9 +109,9 @@
 #define RAYSET_TYPE		RRS_INTERIOR
 #define GEOM_FILE		"./testdata/sanmiguel.bin"
 #define STAT_FILE		"./testdata/opt_rrs/sbvh_sanmiguel.csv"
-#define HPLOC_FILE		"sanmiguel.hploc"
+#define HPLOC_FILE		"./testdata/hploc/sanmiguel.hploc"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_sanmiguel_opt.bin"
-#define RRS_SIZE		2'500'000
+#define RRS_SIZE		2'500'032 // must be a multiple of 64 for NVIDIA OpenCL
 #define BEST_BINCOUNT	27.0f
 #define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_sanmiguel_27bins.bin"
 #define	W_EPO			0.72f // as specified in paper, overriding default 0.71
@@ -536,30 +536,6 @@ int main()
 
 #elif STAGE == 3
 
-#if 0
-
-	FILE* f = fopen( HPLOC_FILE, "rb" );
-	if (f)
-	{
-		BVH bvh;
-		bvh.Build( tris, triCount );
-		BVH_Verbose verbose( bvh );
-		bvhvec3 bmin, bmax;
-		fread( &bmin, 1, 12, f );
-		fread( &bmax, 1, 12, f );
-		uint32_t nodeCount;
-		fread( &nodeCount, 1, 4, f );
-		fread( verbose.bvhNode + 1, sizeof( BVH_Verbose::BVHNode ), nodeCount, f );
-		verbose.bvhNode[0] = verbose.bvhNode[nodeCount]; // hploc has root in last node.
-		verbose.usedNodes = nodeCount;
-		bvh.ConvertFrom( verbose );
-		float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), sec = RRSTraceTime( &bvh );
-		printf( "H-PLOC build   - " );
-		printstat( sah, rrs, sec );
-	}
-
-#endif
-
 	// Prepare and evaluate several BVHs
 	{
 		BVH bvh;
@@ -570,9 +546,15 @@ int main()
 		epo = bvh.EPOCost();
 	#endif
 		float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+	#ifdef CALCULATE_EPO
 		printf( "                     SAH               RRS               EPO               CPU time         GPU time\n" );
 		printf( "                     ----------------------------------------------------------------------------------------\n" );
 		printf( "SAH (full sweep)     %.3f ( 100.0%%)  %.3f ( 100.0%%)  %.3f ( 100.0%%)  %.3f ( 100.0%%)  %.3f ( 100.0%%)\n", sah, rrs, epo, cpu, gpu );
+	#else
+		printf( "                     SAH               RRS               CPU time         GPU time\n" );
+		printf( "                     -----------------------------------------------------------------------\n" );
+		printf( "SAH (full sweep)     %.3f ( 100.0%%)  %.3f ( 100.0%%)  %.3f ( 100.0%%)  %.3f ( 100.0%%)\n", sah, rrs, cpu, gpu );
+	#endif
 		refsah = sah, refrrs = rrs, refepo = epo, refcpu = cpu, refgpu = gpu;
 		bvh.Optimize( 50 );
 		sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh );
@@ -582,6 +564,34 @@ int main()
 		cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
 		printf( "Optimized f.sweep    " );
 		printstat( sah, rrs, epo, cpu, gpu );
+	}
+	{
+		FILE* f = fopen( HPLOC_FILE, "rb" );
+		if (f)
+		{
+			BVH bvh;
+			bvh.Build( tris, triCount );
+			BVH_Verbose verbose( bvh );
+			bvhvec3 bmin, bmax;
+			fread( &bmin, 1, 12, f );
+			fread( &bmax, 1, 12, f );
+			uint32_t nodeCount;
+			fread( &nodeCount, 1, 4, f );
+			fread( verbose.bvhNode, sizeof( BVH_Verbose::BVHNode ), nodeCount, f );
+			verbose.usedNodes = nodeCount;
+			for( int i = 0; i < triCount; i++ ) verbose.primIdx[i] = i;
+			verbose.Refit();
+			verbose.SortIndices();
+			bvh.ConvertFrom( verbose );
+			bvh.CombineLeafs();
+			float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = 0;
+		#ifdef CALCULATE_EPO
+			epo = bvh.EPOCost();
+		#endif
+			float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+			printf( "H-PLOC build         " );
+			printstat( sah, rrs, epo, cpu, gpu );
+		}
 	}
 	{
 		BVH bvh; // defaults to 8 bins
