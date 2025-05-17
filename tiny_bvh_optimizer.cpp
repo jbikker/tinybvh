@@ -21,19 +21,19 @@
 // 4: Bistro
 // 5: Legocar
 // 6: San Miguel
-#define SCENE	6
+#define SCENE	5
 
 // STAGES:
 // --------------------------------------------------
 // 1: Determine best bin count
 // 2: Optimize using reinsertion & RRS
 // 3: Report
-#define STAGE	2
+#define STAGE	3
 
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
 // #define VERIFY_OPTIMIZED_BVH
-// #define CALCULATE_EPO
+#define CALCULATE_EPO
 
 // RAY SETS:
 // --------------------------------------------------
@@ -48,6 +48,7 @@
 #define GEOM_FILE		"./testdata/cryteksponza.bin"
 #define STAT_FILE		"./testdata/opt_rrs/sbvh_cryteksponza.csv"
 #define HPLOC_FILE		"./testdata/hploc/cryteksponza.hploc"
+#define RESULTS_FILE	"./testdata/sponza_results.csv"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_cryteksponza_opt.bin"
 #define RRS_SIZE		2'000'000 // must be a multiple of 64 for NVIDIA OpenCL
 #define BEST_BINCOUNT	33.5f
@@ -58,6 +59,7 @@
 #define GEOM_FILE		"./testdata/conference.bin"
 #define STAT_FILE		"./testdata/opt_rrs/sbvh_conference.csv"
 #define HPLOC_FILE		"./testdata/hploc/conference.hploc"
+#define RESULTS_FILE	"./testdata/conference_results.csv"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_conference_opt.bin"
 #define RRS_SIZE		1'000'000 // must be a multiple of 64 for NVIDIA OpenCL
 #define BEST_BINCOUNT	31.5f
@@ -69,6 +71,7 @@
 #define GEOM_FILE		"./testdata/dragon.bin"
 #define STAT_FILE		"./testdata/opt_rrs/sbvh_dragon.csv"
 #define HPLOC_FILE		"./testdata/hploc/dragon.hploc"
+#define RESULTS_FILE	"./testdata/dragon_results.csv"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_dragon_opt.bin"
 #define RRS_SIZE		1'000'000 // must be a multiple of 64 for NVIDIA OpenCL
 #define BEST_BINCOUNT	93.0f
@@ -80,6 +83,7 @@
 #define GEOM_FILE		"./testdata/bistro_ext_part1.bin"
 #define STAT_FILE		"./testdata/rrs/sbvh_bistro_ext.csv"
 #define HPLOC_FILE		"./testdata/hploc/bistro.hploc"
+#define RESULTS_FILE	"./testdata/bistro_results.csv"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_bistro_opt.bin"
 #define RRS_SIZE		2'500'032 // must be a multiple of 64 for NVIDIA OpenCL
 #define BEST_BINCOUNT	105.0f 
@@ -90,6 +94,7 @@
 #define GEOM_FILE		"./testdata/legocar.bin"
 #define STAT_FILE		"./testdata/opt_rrs/sbvh_legocar.csv"
 #define HPLOC_FILE		"./testdata/hploc/legocar.hploc"
+#define RESULTS_FILE	"./testdata/lego_results.csv"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_legocar_opt.bin"
 #define RRS_SIZE		500'032 // must be a multiple of 64 for NVIDIA OpenCL
 #define BEST_BINCOUNT	38.5f
@@ -100,6 +105,7 @@
 #define GEOM_FILE		"./testdata/sanmiguel.bin"
 #define STAT_FILE		"./testdata/opt_rrs/sbvh_sanmiguel.csv"
 #define HPLOC_FILE		"./testdata/hploc/sanmiguel.hploc"
+#define RESULTS_FILE	"./testdata/sanmiguel_results.csv"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_sanmiguel_opt.bin"
 #define RRS_SIZE		2'500'032 // must be a multiple of 64 for NVIDIA OpenCL
 #define BEST_BINCOUNT	27.0f
@@ -538,6 +544,7 @@ int main()
 #elif STAGE == 3
 
 	// Prepare and evaluate several BVHs
+	FILE* c = fopen( RESULTS_FILE, "w" );
 	{
 		BVH bvh;
 		bvh.useFullSweep = true;
@@ -556,6 +563,8 @@ int main()
 		printf( "                     -----------------------------------------------------------------------\n" );
 		printf( "SAH (full sweep)     %.3f ( 100.0%%)  %.3f ( 100.0%%)  %.3f ( 100.0%%)  %.3f ( 100.0%%)\n", sah, rrs, cpu, gpu );
 	#endif
+		fprintf( c, ",sah,rrs,epo,cpu,gpu\n" );
+		fprintf( c, "full sweep,%f,%f,%f,%f,%f\n", sah, rrs, epo, cpu, gpu );
 		refsah = sah, refrrs = rrs, refepo = epo, refcpu = cpu, refgpu = gpu;
 		bvh.Optimize( 50 );
 		sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh );
@@ -592,6 +601,7 @@ int main()
 			epo = bvh.EPOCost();
 		#endif
 			float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+			fprintf( c, "hploc,%f,%f,%f,%f,%f\n", sah, rrs, epo, cpu, gpu );
 			printf( "H-PLOC build         " );
 			printstat( sah, rrs, epo, cpu, gpu );
 		}
@@ -605,6 +615,7 @@ int main()
 	#endif
 		float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
 		printf( "SAH BVH Binned (8)   " );
+		fprintf( c, "binned[8],%f,%f,%f,%f,%f\n", sah, rrs, epo, cpu, gpu );
 		printstat( sah, rrs, epo, cpu, gpu );
 		bvh.Optimize( 50 );
 		sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh );
@@ -613,6 +624,7 @@ int main()
 	#endif
 		cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
 		printf( "Optimized BVH        " );
+		fprintf( c, "binned[8] optimized,%f,%f,%f,%f,%f\n", sah, rrs, epo, cpu, gpu );
 		printstat( sah, rrs, epo, cpu, gpu );
 	}
 	{
@@ -625,6 +637,7 @@ int main()
 	#endif
 		float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
 		printf( "SBVH, 8 bins         " );
+		fprintf( c, "sbvh[8],%f,%f,%f,%f,%f\n", sah, rrs, epo, cpu, gpu );
 		printstat( sah, rrs, epo, cpu, gpu );
 	}
 	{
@@ -634,6 +647,7 @@ int main()
 		float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = bvh.EPOCost();
 		float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
 		printf( "SBVH, 32 bins        " );
+		fprintf( c, "sbvh[32],%f,%f,%f,%f,%f\n", sah, rrs, epo, cpu, gpu );
 		printstat( sah, rrs, epo, cpu, gpu );
 		bvh.Optimize( 50 );
 		sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = 0;
@@ -642,6 +656,7 @@ int main()
 	#endif
 		cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
 		printf( "SBVH optimized       " );
+		fprintf( c, "sbvh[32] optimized,%f,%f,%f,%f,%f\n", sah, rrs, epo, cpu, gpu );
 		printstat( sah, rrs, epo, cpu, gpu );
 		bvh.Optimize( 50 );
 	}
@@ -656,6 +671,7 @@ int main()
 			epo = bvh.EPOCost();
 		#endif
 			float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+			fprintf( c, "sbvh best bins,%f,%f,%f,%f,%f\n", sah, rrs, epo, cpu, gpu );
 			printstat( sah, rrs, epo, cpu, gpu );
 		}
 	}
@@ -670,12 +686,13 @@ int main()
 			epo = bvh.EPOCost();
 		#endif
 			float cpu = RRSTraceTimeCPU( &bvh ), gpu = RRSTraceTimeGPU( &bvh );
+			fprintf( c, "sbvh (ours),%f,%f,%f,%f,%f\n", sah, rrs, epo, cpu, gpu );
 			printstat( sah, rrs, epo, cpu, gpu );
 		}
 	}
+	fclose( c );
 
 	// TODO:
-	// Compare against H-PLOC
 	// Check if other binned builders show similar behavior for bin count
 
 #endif
