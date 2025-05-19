@@ -201,7 +201,7 @@ void RepresentativeRays( const uint32_t setType )
 {
 	// Build an intermedite BVH.
 	BVH tmp;
-	tmp.Build( tris, triCount );
+	tmp.BuildHQ( tris, triCount );
 	// Common preparations:
 	bvhvec3 S[512], bmin = tmp.aabbMin, bext = tmp.aabbMax - tmp.aabbMin;
 	const float sceneSize = tinybvh_max( tinybvh_max( bext.x, bext.y ), bext.z );
@@ -572,11 +572,7 @@ int main()
 	{
 		BVH bvh;
 		bvh.useFullSweep = true;
-	#if SCENE == 8 // this scene will not build with 8 bins due to massive diagonals!
-		bvh.BuildHQ( tris, triCount );
-	#else
 		bvh.Build( tris, triCount );
-	#endif
 		float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = 0;
 	#ifdef CALCULATE_EPO
 		epo = bvh.EPOCost();
