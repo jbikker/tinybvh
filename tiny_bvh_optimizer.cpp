@@ -30,7 +30,7 @@
 // 1: Determine best bin count
 // 2: Optimize using reinsertion & RRS
 // 3: Report
-#define STAGE	1
+#define STAGE	3
 
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
@@ -572,7 +572,11 @@ int main()
 	{
 		BVH bvh;
 		bvh.useFullSweep = true;
+	#if SCENE == 8 // this scene will not build with 8 bins due to massive diagonals!
+		bvh.BuildHQ( tris, triCount );
+	#else
 		bvh.Build( tris, triCount );
+	#endif
 		float sah = bvh.SAHCost(), rrs = RRSTraceCost( &bvh ), epo = 0;
 	#ifdef CALCULATE_EPO
 		epo = bvh.EPOCost();
@@ -630,6 +634,7 @@ int main()
 			printstat( sah, rrs, epo, cpu, gpu );
 		}
 	}
+#if SCENE != 8
 	{
 		BVH bvh; // defaults to 8 bins
 		bvh.Build( tris, triCount );
@@ -651,6 +656,10 @@ int main()
 		fprintf( c, "binned[8] optimized,%f,%f,%f,%f,%f\n", sah, rrs, epo, cpu, gpu );
 		printstat( sah, rrs, epo, cpu, gpu );
 	}
+#else
+	printf( "SAH BVH Binned (8)   SKIPPED\n" );
+	printf( "Optimized BVH        SKIPPED\n" );
+#endif
 	{
 		BVH bvh;
 		bvh.hqbvhbins = 8;
