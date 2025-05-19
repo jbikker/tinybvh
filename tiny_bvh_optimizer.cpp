@@ -21,7 +21,8 @@
 // 4: Bistro
 // 5: Legocar
 // 6: San Miguel
-#define SCENE	5
+// 7: Living Room
+#define SCENE	7
 
 // STAGES:
 // --------------------------------------------------
@@ -33,7 +34,7 @@
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
 // #define VERIFY_OPTIMIZED_BVH
-#define CALCULATE_EPO
+// #define CALCULATE_EPO
 
 // RAY SETS:
 // --------------------------------------------------
@@ -81,12 +82,12 @@
 #define SCENE_NAME		"Amazon Lumberyard Bistro"
 #define RAYSET_TYPE		RRS_OBJECT
 #define GEOM_FILE		"./testdata/bistro_ext_part1.bin"
-#define STAT_FILE		"./testdata/rrs/sbvh_bistro_ext.csv"
+#define STAT_FILE		"./testdata/opt_rrs/sbvh_bistro_ext.csv"
 #define HPLOC_FILE		"./testdata/hploc/bistro.hploc"
 #define RESULTS_FILE	"./testdata/bistro_results.csv"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_bistro_opt.bin"
 #define RRS_SIZE		2'500'032 // must be a multiple of 64 for NVIDIA OpenCL
-#define BEST_BINCOUNT	105.0f 
+#define BEST_BINCOUNT	105.0f
 #define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_bistro_105bins.bin"
 #elif SCENE == 5
 #define SCENE_NAME		"Lego Car"
@@ -111,6 +112,17 @@
 #define BEST_BINCOUNT	27.0f
 #define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_sanmiguel_27bins.bin"
 #define	W_EPO			0.72f // as specified in paper, overriding default 0.71
+#elif SCENE == 7
+#define SCENE_NAME		"Living Room"
+#define RAYSET_TYPE		RRS_INTERIOR
+#define GEOM_FILE		"./testdata/living.bin"
+#define STAT_FILE		"./testdata/opt_rrs/sbvh_living.csv"
+#define HPLOC_FILE		"./testdata/hploc/living.hploc"
+#define RESULTS_FILE	"./testdata/living_results.csv"
+#define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_living_opt.bin"
+#define RRS_SIZE		2'500'032
+#define BEST_BINCOUNT	124.5f
+#define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_living_124.5bins.bin"
 #endif
 
 // TinyBVH, TinyOCL
@@ -589,7 +601,7 @@ int main()
 			fread( &nodeCount, 1, 4, f );
 			fread( verbose.bvhNode, sizeof( BVH_Verbose::BVHNode ), nodeCount, f );
 			verbose.usedNodes = nodeCount;
-			for( int i = 0; i < triCount; i++ ) verbose.primIdx[i] = i;
+			for (int i = 0; i < triCount; i++) verbose.primIdx[i] = i;
 			// verbose.Refit();
 			verbose.SortIndices();
 			bvh.ConvertFrom( verbose );
