@@ -22,14 +22,15 @@
 // 5: Legocar
 // 6: San Miguel
 // 7: Living Room
-#define SCENE	7
+// 8: Living Room, rotated
+#define SCENE	8
 
 // STAGES:
 // --------------------------------------------------
 // 1: Determine best bin count
 // 2: Optimize using reinsertion & RRS
 // 3: Report
-#define STAGE	3
+#define STAGE	1
 
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
@@ -123,6 +124,17 @@
 #define RRS_SIZE		2'500'032
 #define BEST_BINCOUNT	124.5f
 #define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_living_124.5bins.bin"
+#elif SCENE == 8
+#define SCENE_NAME		"Living Room (rotated)"
+#define RAYSET_TYPE		RRS_INTERIOR
+#define GEOM_FILE		"./testdata/living_rotated.bin"
+#define STAT_FILE		"./testdata/opt_rrs/sbvh_living_rotated.csv"
+#define HPLOC_FILE		"./testdata/hploc/living_rotated.hploc"
+#define RESULTS_FILE	"./testdata/living_rotated_results.csv"
+#define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_living_rotated_opt.bin"
+#define RRS_SIZE		2'500'032
+#define BEST_BINCOUNT	124.5f
+#define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_living_rotated_124.5bins.bin"
 #endif
 
 // TinyBVH, TinyOCL
