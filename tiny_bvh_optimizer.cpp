@@ -629,6 +629,7 @@ int main()
 			printf( "H-PLOC build         " );
 			printstat( sah, rrs, epo, cpu, gpu );
 		}
+		else printf( "H-PLOC build         MISSING FILE, SKIPPED\n" );
 	}
 #if SCENE != 8
 	{
