@@ -30,7 +30,7 @@
 // 1: Determine best bin count
 // 2: Optimize using reinsertion & RRS
 // 3: Report
-#define STAGE	1
+#define STAGE	2
 
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
@@ -133,8 +133,8 @@
 #define RESULTS_FILE	"./testdata/living_rotated_results.csv"
 #define OPTIMIZED_BVH	"./testdata/opt_rrs/sbvh_living_rotated_opt.bin"
 #define RRS_SIZE		2'500'032
-#define BEST_BINCOUNT	124.5f
-#define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_living_rotated_124.5bins.bin"
+#define BEST_BINCOUNT	23.0f
+#define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_living_rotated_23bins.bin"
 #endif
 
 // TinyBVH, TinyOCL
