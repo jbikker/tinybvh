@@ -6640,20 +6640,20 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 			const __m256 tz2 = _mm256_fmsub_ps( posZ ? n->zmax8 : n->zmin8, rdz8, rz8 );
 			const __m256 tmin = _mm256_max_ps( _mm256_max_ps( _mm256_max_ps( _mm256_setzero_ps(), tx1 ), ty1 ), tz1 );
 			const __m256 tmax = _mm256_min_ps( _mm256_min_ps( _mm256_min_ps( tx2, t8 ), ty2 ), tz2 );
-			const __m256i mask8 = _mm256_cmpgt_epi32( _mm256_castps_si256( tmin ), _mm256_castps_si256( tmax ) );
-			const uint32_t mask = _mm256_movemask_ps( _mm256_castsi256_ps( _mm256_or_si256( c8, mask8 ) ) );
-			const uint32_t invalidNodes = __popc( mask );
-			if (invalidNodes == 7)
+			const __m256 mask8 = _mm256_cmp_ps( tmin, tmax, _CMP_LE_OQ );
+			const uint32_t mask = _mm256_movemask_ps( mask8 ); // _mm256_or_ps( _mm256_castsi256_ps( c8 ), mask8 ) );
+			const uint32_t validNodes = __popc( mask );
+			if (validNodes == 1)
 			{
-				const uint32_t lane = __bfind( 255 - mask );
+				const uint32_t lane = __bfind( mask );
 				nodeIdx = ((uint32_t*)&n->child8)[lane];
 			}
-			else if (invalidNodes < 7)
+			else if (validNodes > 0)
 			{
-				const __m256i cpi = idxLUT256[mask];
+				const __m256i cpi = idxLUT256[255 - mask];
 				const __m256i child8 = _mm256_permutevar8x32_epi32( c8, cpi );
 				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), child8 );
-				stackPtr += 7 - invalidNodes;
+				stackPtr += validNodes - 1;
 				nodeIdx = nodeStack[stackPtr];
 			}
 			else
