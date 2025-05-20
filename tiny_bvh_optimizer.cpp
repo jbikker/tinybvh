@@ -30,7 +30,7 @@
 // 1: Determine best bin count
 // 2: Optimize using reinsertion & RRS
 // 3: Report
-#define STAGE	2
+#define STAGE	3
 
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
@@ -201,7 +201,7 @@ void RepresentativeRays( const uint32_t setType )
 {
 	// Build an intermedite BVH.
 	BVH tmp;
-	tmp.Build( tris, triCount );
+	tmp.BuildHQ( tris, triCount );
 	// Common preparations:
 	bvhvec3 S[512], bmin = tmp.aabbMin, bext = tmp.aabbMax - tmp.aabbMin;
 	const float sceneSize = tinybvh_max( tinybvh_max( bext.x, bext.y ), bext.z );
@@ -629,7 +629,9 @@ int main()
 			printf( "H-PLOC build         " );
 			printstat( sah, rrs, epo, cpu, gpu );
 		}
+		else printf( "H-PLOC build         MISSING FILE, SKIPPED\n" );
 	}
+#if SCENE != 8
 	{
 		BVH bvh; // defaults to 8 bins
 		bvh.Build( tris, triCount );
@@ -651,6 +653,10 @@ int main()
 		fprintf( c, "binned[8] optimized,%f,%f,%f,%f,%f\n", sah, rrs, epo, cpu, gpu );
 		printstat( sah, rrs, epo, cpu, gpu );
 	}
+#else
+	printf( "SAH BVH Binned (8)   SKIPPED\n" );
+	printf( "Optimized BVH        SKIPPED\n" );
+#endif
 	{
 		BVH bvh;
 		bvh.hqbvhbins = 8;

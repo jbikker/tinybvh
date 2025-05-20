@@ -2157,7 +2157,11 @@ void BVH::Build()
 			}
 			splitCost = c_trav + c_int * rSAV * splitCost;
 			float noSplitCost = (float)node.triCount * c_int;
-			if (splitCost >= noSplitCost) break; // not splitting is better.
+			if (splitCost >= noSplitCost) 
+			{
+				if (node.triCount > 512) printf( "Warning: failed to split large node (%i tris).\n", node.triCount );
+				break; // not splitting is better.
+			}
 			// in-place partition
 			uint32_t j = node.leftFirst + node.triCount, src = node.leftFirst;
 			const float rpd = rpd3[bestAxis], nmin = nmin3[bestAxis];
@@ -2193,7 +2197,8 @@ void BVH::Build()
 
 void BVH::QuickSort( const float* a, uint32_t* q, int f, int l ) // minimal qsort
 {
-	int s[4096], p = 0, h, i, r;
+	static int* s = (int*)AlignedAlloc( 4096 * 4 ); // some scenes have weird distributions.
+	int p = 0, h, i, r;
 start: while (f >= l) { if (p == 0) return; else f = s[--p], l = s[--p]; }
 	for (r = f, i = f + 1; i <= l; i++) if (a[q[i]] < a[q[f]]) h = q[++r], q[r] = q[i], q[i] = h;
 	h = q[f], q[f] = q[r], q[r] = h, s[p++] = l, s[p++] = r + 1, l = r - 1; goto start;
@@ -6503,26 +6508,26 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 			const __m256 tz2 = _mm256_fmsub_ps( posZ ? n->zmax8 : n->zmin8, rdz8, rz8 );
 			__m256 tmin = _mm256_max_ps( _mm256_max_ps( _mm256_max_ps( zero8, tx1 ), ty1 ), tz1 );
 			__m256 tmax = _mm256_min_ps( _mm256_min_ps( _mm256_min_ps( tx2, t8 ), ty2 ), tz2 );
-			const __m256i mask8 = _mm256_cmpgt_epi32( _mm256_castps_si256( tmin ), _mm256_castps_si256( tmax ) );
-			const uint32_t mask = _mm256_movemask_ps( _mm256_castsi256_ps( mask8 ) );
-			const uint32_t invalidNodes = __popc( mask );
-			if (invalidNodes == 7)
+			const __m256 mask8 = _mm256_cmp_ps( tmin, tmax, _CMP_LE_OQ );
+			const uint32_t mask = _mm256_movemask_ps( mask8 );
+			const uint32_t validNodes = __popc( mask );
+			if (validNodes == 1)
 			{
-				const uint32_t lane = __bfind( 255 - mask );
+				const uint32_t lane = __bfind( mask );
 				nodeIdx = ((uint32_t*)&n->child8)[lane];
 			}
-			else if (invalidNodes < 7)
+			else if (validNodes > 0)
 			{
 				const __m256i index = _mm256_srli_epi32( n->perm8, signShift );
-				const uint32_t m = _mm256_movemask_ps( _mm256_castsi256_ps( _mm256_permutevar8x32_epi32( mask8, index ) ) );
+				const uint32_t m = _mm256_movemask_ps( _mm256_permutevar8x32_ps( mask8, index ) );
 				tmin = _mm256_permutevar8x32_ps( tmin, index );
-				const __m256i cpi = idxLUT256[m];
+				const __m256i cpi = idxLUT256[255 - m];
 				const __m256i c8 = _mm256_permutevar8x32_epi32( n->child8, index );
 				const __m256 dist8 = _mm256_permutevar8x32_ps( tmin, cpi );
 				const __m256i child8 = _mm256_permutevar8x32_epi32( c8, cpi );
 				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), child8 );
 				_mm256_storeu_ps( (float*)(distStack + stackPtr), dist8 );
-				stackPtr += 7 - invalidNodes;
+				stackPtr += validNodes - 1;
 				nodeIdx = nodeStack[stackPtr];
 			}
 			else
@@ -6577,14 +6582,13 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 			{
 				__m256i node8 = _mm256_load_si256( (__m256i*)(nodeStack + i) );
 				__m256 dist8 = _mm256_load_ps( (float*)(distStack + i) );
-				const __m256i mask8 = _mm256_cmpgt_epi32( _mm256_castps_si256( dist8 ), _mm256_castps_si256( t8 ) );
-				const uint32_t mask = _mm256_movemask_ps( _mm256_castsi256_ps( mask8 ) );
-				const __m256i cpi = idxLUT256[mask];
+				const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) );
+				const __m256i cpi = idxLUT256[255 - mask];
 				dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
 				_mm256_storeu_ps( (float*)(distStack + outStackPtr), dist8 );
 				_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
 				const int32_t numItems = tinybvh_min( 8, stackPtr - i ), validMask = (1 << numItems) - 1;
-				outStackPtr += __popc( (255 - mask) & validMask );
+				outStackPtr += __popc( mask & validMask );
 			}
 			stackPtr = outStackPtr;
 		}
@@ -6637,20 +6641,20 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 			const __m256 tz2 = _mm256_fmsub_ps( posZ ? n->zmax8 : n->zmin8, rdz8, rz8 );
 			const __m256 tmin = _mm256_max_ps( _mm256_max_ps( _mm256_max_ps( _mm256_setzero_ps(), tx1 ), ty1 ), tz1 );
 			const __m256 tmax = _mm256_min_ps( _mm256_min_ps( _mm256_min_ps( tx2, t8 ), ty2 ), tz2 );
-			const __m256i mask8 = _mm256_cmpgt_epi32( _mm256_castps_si256( tmin ), _mm256_castps_si256( tmax ) );
-			const uint32_t mask = _mm256_movemask_ps( _mm256_castsi256_ps( _mm256_or_si256( c8, mask8 ) ) );
-			const uint32_t invalidNodes = __popc( mask );
-			if (invalidNodes == 7)
+			const __m256 mask8 = _mm256_cmp_ps( tmin, tmax, _CMP_LE_OQ );
+			const uint32_t mask = _mm256_movemask_ps( mask8 ); // _mm256_or_ps( _mm256_castsi256_ps( c8 ), mask8 ) );
+			const uint32_t validNodes = __popc( mask );
+			if (validNodes == 1)
 			{
-				const uint32_t lane = __bfind( 255 - mask );
+				const uint32_t lane = __bfind( mask );
 				nodeIdx = ((uint32_t*)&n->child8)[lane];
 			}
-			else if (invalidNodes < 7)
+			else if (validNodes > 0)
 			{
-				const __m256i cpi = idxLUT256[mask];
+				const __m256i cpi = idxLUT256[255 - mask];
 				const __m256i child8 = _mm256_permutevar8x32_epi32( c8, cpi );
 				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), child8 );
-				stackPtr += 7 - invalidNodes;
+				stackPtr += validNodes - 1;
 				nodeIdx = nodeStack[stackPtr];
 			}
 			else
