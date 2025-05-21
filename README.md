@@ -197,8 +197,10 @@ This library is made available under the MIT license, which starts as follows: "
 # Acknowledgement
 The development of this library is supported by an AMD hardware grant.
 
+<p align="center">
 ![Student work: Tamara Heeffer](images/tamara.jpg)
-Image credit: Tamara Heeffer, IGAD / Breda University
+_Image credit: Tamara Heeffer, IGAD / Breda University_
 
 ![Student work: Hesam Ghadimi](images/hesam.jpg)
-Image credit: Hesam Ghadimi, IGAD / Breda University
+_Image credit: Hesam Ghadimi, IGAD / Breda University_
+</p>
