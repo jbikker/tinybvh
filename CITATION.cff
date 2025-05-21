@@ -19,5 +19,5 @@ abstract: ' C/C++ Single-header library for BVH construction and traversal'
 keywords:
   - 'raytracing, bvh'
 license: MIT
-version: 1.4.6
-date-released: '2025-03-18'
+version: 1.5.5
+date-released: '2025-05-21'
