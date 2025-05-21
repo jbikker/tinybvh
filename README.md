@@ -202,5 +202,6 @@ The development of this library is supported by an AMD hardware grant.
 ![Student work: Tamara Heeffer](images/tamara.jpg)
 <p align="center"><i>Image credit: Tamara Heeffer, IGAD / Breda University</i> </p>
 
+
 ![Student work: Hesam Ghadimi](images/hesam.jpg)
 <p align="center"><i>Image credit: Hesam Ghadimi, IGAD / Breda University</i> </p>
