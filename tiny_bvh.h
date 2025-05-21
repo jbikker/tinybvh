@@ -3017,7 +3017,7 @@ int32_t BVH::Intersect( Ray& ray ) const
 
 template <bool posX, bool posY, bool posZ> int32_t BVH::Intersect( Ray& ray ) const
 {
-	BVHNode* node = &bvhNode[0], * stack[64];
+	BVHNode* node = &bvhNode[0], * stack[256];
 	uint32_t stackPtr = 0;
 	float cost = 0;
 	const float rox = ray.O.x * ray.rD.x;
