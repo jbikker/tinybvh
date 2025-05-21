@@ -197,6 +197,5 @@ This library is made available under the MIT license, which starts as follows: "
 # Acknowledgement
 The development of this library is supported by an AMD hardware grant.
 
-![Output of the sample wavefront path tracer](images/wavefront.png)
-
-![Rendered with tinybvh](images/test.png)
+![Student work: Tamara Heeffer](images/Tamara Heeffer 1.png)
+![Student work: Hesam Ghadimi](images/Hesam Ghadimi 2.png)
