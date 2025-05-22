@@ -1,9 +1,13 @@
+// Minimal example for TinyBVH.
+// The code in main generates a collection of random triangles.
+// All triangles are specified as 3 vertices; each vertex is a 'vec4'. 
+// A Ray is constructed using an origin and direction.
+// A BVH is instantiated and constructed using BVH::Build( .. ). 
+// A ray is traced using BVH::Intersect( .. ).
+// The intersection result is obtained from the ray.hit record.
+
 #define TINYBVH_IMPLEMENTATION
-#define _CRT_SECURE_NO_WARNINGS
 #include "tiny_bvh.h"
-
-// Minimal example for tiny_bvh.h
-
 #include <cstdlib>
 #include <cstdio>
 

@@ -125,7 +125,8 @@ BVH4_CPU* bvh4_cpu = 0;
 BVH4_GPU* bvh4_gpu = 0;
 BVH8_CWBVH* cwbvh = 0;
 BVH8_CPU* bvh8_cpu = 0;
-enum { _DEFAULT = 1, _BVH, _SWEEP, _VERBOSE, _DOUBLE, _SOA, _GPU2, _BVH4, _CPU4, _ALT4, _CPU4A, _CPU8, _GPU4, _BVH8, _CWBVH };
+BVH8_CPU* bvh8_cpu_opt = 0;
+enum { _DEFAULT = 1, _BVH, _SWEEP, _VERBOSE, _DOUBLE, _SOA, _GPU2, _BVH4, _CPU4, _ALT4, _CPU4A, _CPU8, _OPT8, _GPU4, _BVH8, _CWBVH };
 
 #if defined _WIN32 || defined _WIN64
 #if defined EMBREE_BUILD || defined EMBREE_TRAVERSE
@@ -205,6 +206,7 @@ float TestPrimaryRays( uint32_t layout, unsigned N, unsigned passes, float* avgC
 		case _CWBVH: for (unsigned i = 0; i < N; i++) travCost += cwbvh->Intersect( batch[i] ); break;
 		case _SOA: for (unsigned i = 0; i < N; i++) travCost += bvh_soa->Intersect( batch[i] ); break;
 		case _CPU8: for (unsigned i = 0; i < N; i++) travCost += bvh8_cpu->Intersect( batch[i] ); break;
+		case _OPT8: for (unsigned i = 0; i < N; i++) travCost += bvh8_cpu_opt->Intersect( batch[i] ); break;
 		#endif
 		default: break;
 		};
@@ -242,7 +244,8 @@ float TestDiffuseRays( uint32_t layout, unsigned passes, float* avgCost = 0 )
 		#ifdef BVH_USEAVX
 		case _CWBVH: for (unsigned i = 0; i < Nsmall; i++) travCost += cwbvh->Intersect( batch[i] ); break;
 		case _SOA: for (unsigned i = 0; i < Nsmall; i++) travCost += bvh_soa->Intersect( batch[i] ); break;
-		case _CPU8: for (unsigned i = 0; i < Nsmall; i++) travCost += bvh8_cpu->Intersect( batch[i] );
+		case _CPU8: for (unsigned i = 0; i < Nsmall; i++) travCost += bvh8_cpu->Intersect( batch[i] ); break;
+		case _OPT8: for (unsigned i = 0; i < Nsmall; i++) travCost += bvh8_cpu_opt->Intersect( batch[i] ); break;
 		#endif
 		default: break;
 		};
@@ -313,6 +316,7 @@ float TestShadowRays( uint32_t layout, unsigned N, unsigned passes )
 		#endif
 		#ifdef BVH_USEAVX2
 		case _CPU8: for (unsigned i = 0; i < N; i++) occluded += bvh8_cpu->IsOccluded( batch[i] ); break;
+		case _OPT8: for (unsigned i = 0; i < N; i++) occluded += bvh8_cpu_opt->IsOccluded( batch[i] ); break;
 		#endif
 		case _GPU2: for (unsigned i = 0; i < N; i++) occluded += bvh_gpu->IsOccluded( batch[i] ); break;
 		case _DEFAULT: for (unsigned i = 0; i < N; i++) occluded += mybvh->IsOccluded( batch[i] ); break;
@@ -967,6 +971,24 @@ int main()
 	printf( "shadow: %7.2fMRays/s,  ", (float)Nsmall / traceTime * 1e-6f );
 	traceTime = TestDiffuseRays( _CPU8, 3 );
 	printf( "diffuse: %7.2fMRays/s\n", (float)Nsmall / traceTime * 1e-6f );
+
+	// If it is available, rerun with optimized BVH
+	BVH optimized;
+	if (optimized.Load( "./testdata/opt_rrs/sbvh_cryteksponza_opt.bin", triangles, verts / 3 ))
+	{
+		bvh8_cpu_opt = new BVH8_CPU();
+		bvh8_cpu_opt->bvh8.bvh.context = bvh8_cpu_opt->bvh8.context = optimized.context;
+		bvh8_cpu_opt->bvh8.bvh = optimized;
+		bvh8_cpu_opt->ConvertFrom( bvh8_cpu_opt->bvh8 );
+		PrepareTest();
+		printf( "- BVH8 (OPT)  - primary: " );
+		traceTime = TestPrimaryRays( _OPT8, Nsmall, 3 );
+		printf( "%7.2fMRays/s,  ", (float)Nsmall / traceTime * 1e-6f );
+		traceTime = TestShadowRays( _OPT8, Nsmall, 3 );
+		printf( "shadow: %7.2fMRays/s,  ", (float)Nsmall / traceTime * 1e-6f );
+		traceTime = TestDiffuseRays( _OPT8, 3 );
+		printf( "diffuse: %7.2fMRays/s\n", (float)Nsmall / traceTime * 1e-6f );
+	}
 
 #endif
 

@@ -69,7 +69,7 @@ The **performance measurement tool** can be compiled with:
 
 ````c++ --std=c++17 -framework OpenCL -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on macOS)
 
-# Version 1.5.4
+# Version 1.5.5
 
 Version 1.5.0 introduced a new fast layout for x86/x64 systems that do not (or cannot be presumed to) support AVX2. For those, please use BVH4_CPU form optimal performance (about 80% of the fastest AVX2 code).
 
@@ -186,7 +186,7 @@ The tinybvh library can now also be used from Rust, with the [Rust bindings](htt
 Created or know about other projects? [Let me know](mailto:bikker.j@gmail.com)!
 
 # Contact
-Questions, remarks? Contact me at bikker.j@gmail.com ~~or on twitter: @j_bikker,~~ or BlueSky: @jbikker.bsky.social .
+Questions, remarks? Contact me at bikker.j@protonmail.com or BlueSky: @jbikker.bsky.social .
 
 # License
 This library is made available under the MIT license, which starts as follows: "Permission is hereby granted, free of charge, .. , to deal in the Software **without restriction**". Enjoy. If you are using this work in your research, please cite TinyBVH: Details are available in BibTeX and APA format, see the 'About' section for this repo on Github.
@@ -194,6 +194,12 @@ This library is made available under the MIT license, which starts as follows: "
 # Acknowledgement
 The development of this library is supported by an AMD hardware grant.
 
-![Output of the sample wavefront path tracer](images/wavefront.png)
 
-![Rendered with tinybvh](images/test.png)
+<br><br>
+  
+![Student work: Tamara Heeffer](images/tamara.jpg)
+<p align="center"><i>Image credit: Tamara Heeffer, IGAD / Breda University</i> </p>
+
+<br><br>
+![Student work: Hesam Ghadimi](images/hesam.jpg)
+<p align="center"><i>Image credit: Hesam Ghadimi, IGAD / Breda University</i> </p>

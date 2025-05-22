@@ -11,6 +11,9 @@
 *.sln.docstates
 *.bin
 *.bvh
+*.csv
+*.exe
+*.dll
 path.txt
 
 # User-specific files (MonoDevelop/Xamarin Studio)
