@@ -4,6 +4,6 @@
     <ClInclude Include="..\tiny_bvh.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\tiny_bvh_minimal_gpu.cpp" />
+    <ClCompile Include="..\tiny_bvh_minimal.cpp" />
   </ItemGroup>
 </Project>

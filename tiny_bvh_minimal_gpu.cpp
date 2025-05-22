@@ -2,7 +2,9 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "tiny_bvh.h"
 
-// Minimal example for tiny_bvh.h
+// This application uses tinyocl - And this file will include the implementation.
+#define TINY_OCL_IMPLEMENTATION
+#include "tiny_ocl.h"
 
 #include <cstdlib>
 #include <cstdio>

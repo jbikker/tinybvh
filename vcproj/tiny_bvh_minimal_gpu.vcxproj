@@ -27,7 +27,7 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{0b5c86b2-9438-49e3-bf1a-4e1593bb436d}</ProjectGuid>
+    <ProjectGuid>{4475EEBD-BE5B-42FC-B64B-363F4BBEC335}</ProjectGuid>
     <RootNamespace>tinybvhtest</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
     <ProjectName>tiny_bvh_minimal_gpu</ProjectName>
