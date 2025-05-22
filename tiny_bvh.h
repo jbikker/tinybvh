@@ -368,6 +368,22 @@ struct bvhuint2
 	uint32_t x, y;
 };
 
+struct bvhuint3
+{
+	bvhuint3() = default;
+	bvhuint3( const uint32_t a, const uint32_t b, const uint32_t c ) : x( a ), y( b ), z( c ) {}
+	bvhuint3( const uint32_t a ) : x( a ), y( a ), z( a ) {}
+	uint32_t x, y, z;
+};
+
+struct bvhuint4
+{
+	bvhuint4() = default;
+	bvhuint4( const uint32_t a, const uint32_t b, const uint32_t c, const uint32_t d ) : x( a ), y( b ), z( c ), w( d ) {}
+	bvhuint4( const uint32_t a ) : x( a ), y( a ), z( a ), w( a ) {}
+	uint32_t x, y, z, w;
+};
+
 #endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
 struct ALIGNED( 32 ) bvhaabb
@@ -2157,7 +2173,7 @@ void BVH::Build()
 			}
 			splitCost = c_trav + c_int * rSAV * splitCost;
 			float noSplitCost = (float)node.triCount * c_int;
-			if (splitCost >= noSplitCost) 
+			if (splitCost >= noSplitCost)
 			{
 				if (node.triCount > 512) printf( "Warning: failed to split large node (%i tris).\n", node.triCount );
 				break; // not splitting is better.
@@ -3698,14 +3714,14 @@ void BVH_Verbose::Compact()
 void BVH_Verbose::SortIndices()
 {
 	// create a new primIdx array which has the primitive indices sorted by depth-first traversal order.
-	uint32_t nodeIdx = 0, stack[256], stackPtr = 0, *tmp = new uint32_t[triCount], nextIdx = 0;
+	uint32_t nodeIdx = 0, stack[256], stackPtr = 0, * tmp = new uint32_t[triCount], nextIdx = 0;
 	while (1)
 	{
 		BVHNode& node = bvhNode[nodeIdx];
 		if (node.isLeaf())
 		{
 			uint32_t tmpFirst = nextIdx;
-			for( unsigned i = 0; i < node.triCount; i++ ) tmp[nextIdx++] = primIdx[node.firstTri + i];
+			for (unsigned i = 0; i < node.triCount; i++) tmp[nextIdx++] = primIdx[node.firstTri + i];
 			node.firstTri = tmpFirst;
 			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
 			continue;
@@ -3714,7 +3730,7 @@ void BVH_Verbose::SortIndices()
 		stack[stackPtr++] = node.right;
 	}
 	memcpy( primIdx, tmp, triCount * 4 );
-	delete [] tmp;
+	delete[] tmp;
 }
 
 void BVH_Verbose::Optimize( const uint32_t iterations, const bool extreme, bool stochastic )

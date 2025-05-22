@@ -31,6 +31,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_collide", "vcproj\
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_optimizer", "vcproj\tiny_bvh_optimizer.vcxproj", "{26FC343E-C545-402D-A5A4-A5580CE687D5}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_gltf", "vcproj\tiny_bvh_gltf.vcxproj", "{60516DDD-BA13-49B2-A777-A4FB8DFFCE67}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -151,6 +153,14 @@ Global
 		{26FC343E-C545-402D-A5A4-A5580CE687D5}.Release|x64.Build.0 = Release|x64
 		{26FC343E-C545-402D-A5A4-A5580CE687D5}.Release|x86.ActiveCfg = Release|Win32
 		{26FC343E-C545-402D-A5A4-A5580CE687D5}.Release|x86.Build.0 = Release|Win32
+		{60516DDD-BA13-49B2-A777-A4FB8DFFCE67}.Debug|x64.ActiveCfg = Debug|x64
+		{60516DDD-BA13-49B2-A777-A4FB8DFFCE67}.Debug|x64.Build.0 = Debug|x64
+		{60516DDD-BA13-49B2-A777-A4FB8DFFCE67}.Debug|x86.ActiveCfg = Debug|Win32
+		{60516DDD-BA13-49B2-A777-A4FB8DFFCE67}.Debug|x86.Build.0 = Debug|Win32
+		{60516DDD-BA13-49B2-A777-A4FB8DFFCE67}.Release|x64.ActiveCfg = Release|x64
+		{60516DDD-BA13-49B2-A777-A4FB8DFFCE67}.Release|x64.Build.0 = Release|x64
+		{60516DDD-BA13-49B2-A777-A4FB8DFFCE67}.Release|x86.ActiveCfg = Release|Win32
+		{60516DDD-BA13-49B2-A777-A4FB8DFFCE67}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
