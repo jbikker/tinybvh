@@ -102,10 +102,6 @@ void Init()
 	cwbvhTris->CopyToDevice();
 	triData = new Buffer( triCount * 3 * sizeof( bvhvec4 ), tris );
 	triData->CopyToDevice();
-	// load camera position / direction from file
-	std::fstream t = std::fstream{ "camera_gpu.bin", t.binary | t.in };
-	if (!t.is_open()) return;
-	t.read( (char*)&rd, sizeof( rd ) );
 }
 
 // Keyboard handling
@@ -173,9 +169,4 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 }
 
 // Application Shutdown
-void Shutdown()
-{
-	// save camera position / direction to file
-	std::fstream s = std::fstream{ "camera_gpu.bin", s.binary | s.out };
-	s.write( (char*)&rd, sizeof( rd ) );
-}
+void Shutdown() { /* nothing here */ }
