@@ -33,12 +33,14 @@ THE SOFTWARE.
 // the appropriate using directives, e.g.:
 //	 namespace tinyscene
 //   {
-//     using bvhint2 = math::int2;
-//     using bvhint3 = math::int3;
-//     using bvhuint2 = math::uint2;
-//     using bvhvec2 = math::float2;
-//     using bvhvec3 = math::float3;
-//     using bvhvec4 = math::float4;
+//     using ts_int2 = math::int2;
+//     using ts_int3 = math::int3;
+//     using ts_uint2 = math::uint2;
+//     using ts_uint2 = math::uint3;
+//     using ts_uint2 = math::uint4;
+//     using ts_vec2 = math::float2;
+//     using ts_vec3 = math::float3;
+//     using ts_vec4 = math::float4;
 //   }
 //
 //	 #define TINYSCENE_USE_CUSTOM_VECTOR_TYPES
