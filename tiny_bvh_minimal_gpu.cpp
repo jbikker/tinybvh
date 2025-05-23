@@ -61,12 +61,12 @@ int main()
 	//    If the tree is rebuilt per frame, use gpubvh.allocatedNodes instead.
 	tinyocl::Buffer* gpuNodes = new tinyocl::Buffer( gpubvh.usedNodes * sizeof( BVH_GPU::BVHNode ), gpubvh.bvhNode );
 	// 3. Triangle index data, used in BVH leafs. This is taken from the base BVH.
-	tinyocl::Buffer* idxData = new tinyocl::Buffer( gpubvh.triCount * sizeof( uint32_t ), gpubvh.bvh.primIdx );
+	tinyocl::Buffer* idxData = new tinyocl::Buffer( gpubvh.idxCount * sizeof( uint32_t ), gpubvh.bvh.primIdx );
 	// 4. Ray buffer. We will always trace batches of rays, for efficiency.
 	//    For GPU code, a ray is 64 bytes. On the CPU it has extra data, so copy carefully.
 	tinyocl::Buffer* rayData = new tinyocl::Buffer( 1024 * 64 );
 	unsigned char* hostData = (unsigned char*)rayData->GetHostPtr();
-	for( int i = 0; i < 1024; i++ )
+	for (int i = 0; i < 1024; i++)
 	{
 		bvhvec3 O( 0.5f, 0.5f, -1 );
 		bvhvec3 D( 0.1f, uniform_rand() - 0.5f, 2 );
@@ -85,7 +85,7 @@ int main()
 
 	// Obtain traversal result.
 	rayData->CopyFromDevice();
-	for( int i = 0; i < 1024; i++ )
+	for (int i = 0; i < 1024; i++)
 	{
 		Ray ray;
 		memcpy( &ray, hostData + 64 * i, 64 );
