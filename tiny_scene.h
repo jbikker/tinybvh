@@ -374,6 +374,16 @@ class Mesh
 {
 public:
 	struct Pose { ::std::vector<ts_vec3> positions, normals, tangents; };
+	struct AccStruc
+	{
+		// BVH can be one of two types:
+		// tinybvh::BVH for refittable / rebuildable meshes
+		// tinybvh::BVH8_CPU for static / rigid geometry
+		// Default is dynamic; rigid is restrictive but much faster to trace.
+		enum { BVH_DYNAMIC = 0, BVH_RIGID = 1 };
+		uint32_t bvhType = BVH_DYNAMIC;
+		union { BVH* dynamicBVH = 0; BVH8_CPU* rigidBVH; };
+	};
 	// constructor / destructor
 	Mesh() = default;
 	Mesh( const int triCount );
@@ -405,8 +415,9 @@ public:
 	::std::vector<Pose> poses;			// morph target data
 	bool isAnimated;					// true when this mesh has animation data
 	bool excludeFromNavmesh = false;	// prevents mesh from influencing navmesh generation (e.g. curtains)
-	ts_mat4 transform, invTransform;	// copy of combined transform of parent node, for TLAS construction
+	bool geomChanged = true;			// triangle data was modified; blas update is needed
 	ts_aabb worldBounds;				// mesh bounds transformed by the transform of the parent node, for TLAS builds
+	AccStruc blas;						// bottom-level acceleration structure
 };
 
 //  +-----------------------------------------------------------------------------+
@@ -777,6 +788,7 @@ public:
 	static inline ::std::vector<int> rootNodes;				// root node indices of loaded (or instanced) objects
 	static inline ::std::vector<Node*> nodePool;			// all scene nodes
 	static inline ::std::vector<Mesh*> meshPool;			// all scene meshes
+	static inline ::std::vector<BLASInstance> instPool;		// all scene instances
 	static inline ::std::vector<Skin*> skins;				// all scene skins
 	static inline ::std::vector<Animation*> animations;		// all scene animations
 	static inline ::std::vector<Material*> materials;		// all scene materials
@@ -786,6 +798,7 @@ public:
 	static inline ::std::vector<SpotLight*> spotLights;		// scene spot lights
 	static inline ::std::vector<DirectionalLight*> directionalLights;	// scene directional lights
 	static inline SkyDome* sky;								// HDR skydome
+	static inline BVH* tlas = 0;							// top-level acceleration structure
 };
 
 } // namespace tinyscene
@@ -1767,7 +1780,7 @@ Node::Node( const int meshIdx, const ts_mat4& transform )
 //  +-----------------------------------------------------------------------------+
 Node::~Node()
 {
-	if ((meshID > -1) && hasLights)
+	if (meshID > -1 && hasLights)
 	{
 		// this node is an instance and has emissive materials;
 		// remove the relevant area lights.
@@ -1860,7 +1873,6 @@ void Node::Update( const ts_mat4& T )
 	if (transformed /* true if node was affected by animation channel */)
 	{
 		UpdateTransformFromTRS();
-		transformed = false;
 	}
 	combinedTransform = T * localTransform;
 	// update the combined transforms of the children
@@ -1873,8 +1885,6 @@ void Node::Update( const ts_mat4& T )
 	if (meshID > -1)
 	{
 		Mesh* mesh = Scene::meshPool[meshID];
-		mesh->transform = combinedTransform;
-		mesh->invTransform = combinedTransform.inverted();
 		if (morphed /* true if bone weights were affected by animation channel */)
 		{
 			mesh->SetPose( weights );
@@ -1882,21 +1892,51 @@ void Node::Update( const ts_mat4& T )
 		}
 		if (skinID > -1)
 		{
+			const ts_mat4 invTransform = combinedTransform.inverted();
 			Skin* skin = Scene::skins[skinID];
 			for (int s = (int)skin->joints.size(), j = 0; j < s; j++)
 			{
 				Node* jointNode = Scene::nodePool[skin->joints[j]];
-				skin->jointMat[j] = mesh->invTransform * jointNode->combinedTransform * skin->inverseBindMatrices[j];
+				skin->jointMat[j] = invTransform * jointNode->combinedTransform * skin->inverseBindMatrices[j];
 			}
 			mesh->SetPose( skin ); // TODO: I hope this doesn't overwrite SetPose(weights) ?
 		}
-	#if 0
-		if (mesh->Changed())
+		// update blas
+		if (mesh->geomChanged)
 		{
-			mesh->UpdateWorldBounds();
+			switch (mesh->blas.bvhType)
+			{
+			case Mesh::AccStruc::BVH_DYNAMIC:
+				if (mesh->blas.dynamicBVH == 0) mesh->blas.dynamicBVH = new BVH();
+				mesh->blas.dynamicBVH->Build( mesh->vertices.data(), (unsigned)mesh->triangles.size() );
+				break;
+			case Mesh::AccStruc::BVH_RIGID:
+				if (mesh->blas.rigidBVH == 0) mesh->blas.rigidBVH = new BVH8_CPU();
+				mesh->blas.rigidBVH->BuildHQ( mesh->vertices.data(), (unsigned)mesh->triangles.size() );
+				break;
+			default:
+				// .. invalid bvh type.
+				break;
+			}
+			mesh->geomChanged = false;
 		}
-	#endif
+		// update instance
+		if (instanceID == -1)
+		{
+			instanceID = (int)Scene::instPool.size();
+			Scene::instPool.push_back( BLASInstance( meshID ) );
+			transformed = true;
+		}
+		BLASInstance& instance = Scene::instPool[instanceID];
+		bool transformChanged = false;
+		for (int i = 0; i < 16; i++) if (instance.transform[i] != combinedTransform[i]) transformChanged = true;
+		if (transformChanged)
+		{
+			instance.transform = *(bvhmat4*)&combinedTransform;
+			instance.Update( mesh->blas.dynamicBVH /* type doesn't matter */ );
+		}
 	}
+	transformed = false;
 }
 
 //  +-----------------------------------------------------------------------------+
@@ -3286,6 +3326,17 @@ void Scene::UpdateSceneGraph( const float deltaTime )
 		ts_mat4 T;
 		node->Update( T /* start with an identity matrix */ );
 	}
+	// update tlas
+	static BVHBase** bvhList = 0;
+	static uint32_t bvhListSize = 0;
+	if (bvhListSize != meshPool.size())
+	{
+		delete bvhList;
+		bvhList = new BVHBase * [meshPool.size()];
+		for (int i = 0; i < meshPool.size(); i++) bvhList[i] = meshPool[i]->blas.dynamicBVH;
+	}
+	if (!tlas) tlas = new BVH();
+	tlas->Build( instPool.data(), (uint32_t)instPool.size(), bvhList, bvhListSize );
 }
 
 } // namespace tinyscene

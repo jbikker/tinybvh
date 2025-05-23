@@ -3,10 +3,9 @@
 #define SCRHEIGHT 600
 #include "external/fenster.h" // https://github.com/zserge/fenster
 
-#define NO_DOUBLE_PRECISION_SUPPORT
 #define TINYBVH_IMPLEMENTATION
-#define INST_IDX_BITS 8 // override default; space for 256 instances.
 #include "tiny_bvh.h"
+using namespace tinybvh;
 #include <fstream>
 #include <thread>
 
@@ -24,27 +23,30 @@ using ts_vec3 = tinybvh::bvhvec3;
 using ts_vec4 = tinybvh::bvhvec4;
 }
 #include "tiny_scene.h" // very much in beta.
+using namespace tinyscene;
 
-using namespace tinybvh;
-
-struct Sphere { bvhvec3 pos; float r; };
-
-tinyscene::Scene scene;
+// scene data
+Scene scene;
 BVH8_CPU legocar;
-static std::atomic<int> tileIdx( 0 );
-static unsigned threadCount = std::thread::hardware_concurrency();
 
-// setup view pyramid for a pinhole camera
+// view pyramid for a pinhole camera
 static bvhvec3 eye( -15.24f, 21.5f, 2.54f ), p1, p2, p3;
 static bvhvec3 view = tinybvh_normalize( bvhvec3( 0.826f, -0.438f, -0.356f ) );
 
+// Application start: Initialize scene.
 void Init()
 {
-	int carid = scene.AddMesh( "./testdata/legocar.obj", 20 );
-	tinyscene::Mesh* mesh = scene.meshPool[carid];
-	legocar.Build( mesh->vertices.data(), (unsigned)mesh->triangles.size() );
+	// Load a scene from a GLTF file using tinyscene.
+	scene.AddScene( "./testdata/drone/scene.gltf", ts_mat4::scale( 0.1f ) );
+	// Load camera position / direction from file.
+	std::fstream t = std::fstream{ "camera.bin", t.binary | t.in };
+	if (!t.is_open()) return;
+	t.read( (char*)&eye, sizeof( eye ) );
+	t.read( (char*)&view, sizeof( view ) );
+	t.close();
 }
 
+// Camera interaction: WASD+RF for translation; cursor keys for rotation.
 bool UpdateCamera( float delta_time_s, fenster& f )
 {
 	bvhvec3 right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), view ) ), up = 0.8f * tinybvh_cross( view, right );
@@ -63,46 +65,61 @@ bool UpdateCamera( float delta_time_s, fenster& f )
 	return moved > 0;
 }
 
-void TraceWorkerThread( uint32_t* buf, int threadIdx )
+// Main ray tracing function: Calculates the (floating point) color for a pixel.
+bvhvec3 Trace( Ray& ray )
 {
-	const int xtiles = SCRWIDTH / 20, ytiles = SCRHEIGHT / 20, tiles = xtiles * ytiles;
-	int tile = threadIdx;
-	while (tile < tiles)
-	{
-		const int tx = tile % xtiles, ty = tile / xtiles;
-		const bvhvec3 L = tinybvh_normalize( bvhvec3( 1, 2, 3 ) );
-		for (int y = 0; y < 20; y++) for (int x = 0; x < 20; x++)
-		{
-			// setup primary ray
-			const int pixel_x = tx * 20 + x, pixel_y = ty * 20 + y;
-			const float u = (float)pixel_x / SCRWIDTH, v = (float)pixel_y / SCRHEIGHT;
-			const bvhvec3 D = tinybvh_normalize( p1 + u * (p2 - p1) + v * (p3 - p1) - eye );
-			Ray ray( eye, D );
-			legocar.Intersect( ray );
-			if (ray.hit.t >= 10000) continue;
-			uint32_t primIdx = ray.hit.prim & PRIM_IDX_MASK;
-			tinyscene::FatTri& tri = scene.meshPool[0]->triangles[primIdx];
-			bvhvec3 N( tri.Nx, tri.Ny, tri.Nz );
-			if (tinybvh_dot( N, ray.D ) > 0) N = -N;
-			int c = (int)(255.0f * fabs( N.y ));
-			buf[pixel_x + pixel_y * SCRWIDTH] = c + (c << 8) + (c << 16);
-		}
-		tile = tileIdx++;
-	}
+	Scene::tlas->Intersect( ray );
+	if (ray.hit.t >= 10000) return 0;
+	return ray.hit.t * 0.03f;
+	const uint32_t primIdx = ray.hit.prim & PRIM_IDX_MASK;
+	const FatTri& tri = scene.meshPool[0]->triangles[primIdx];
+	bvhvec3 N( tri.Nx, tri.Ny, tri.Nz );
+	if (tinybvh_dot( N, ray.D ) > 0) N = -N;
+	return (N + 1) * 0.5f;
 }
 
+// Render 20x20 pixel tiles using all cores.
+static std::atomic<int> jobCount( 0 );
+void WorkerThread( uint32_t* buf )
+{
+	int xtiles = SCRWIDTH / 20, ytiles = SCRHEIGHT / 20, tile;
+tileloop:
+	if ((tile = --jobCount) < 0) return; else tile = (xtiles * ytiles - 1) - tile;
+	const int tx = tile % xtiles, ty = tile / xtiles;
+	for (int y = 0; y < 20; y++) for (int x = 0; x < 20; x++) // trace 400 primary rays
+	{
+		const int pixelx = tx * 20 + x, pixely = ty * 20 + y;
+		const float u = (float)pixelx / SCRWIDTH, v = (float)pixely / SCRHEIGHT;
+		const bvhvec3 D = tinybvh_normalize( p1 + u * (p2 - p1) + v * (p3 - p1) - eye );
+		Ray ray( eye, D );
+		const bvhvec3 E = tinybvh_min( Trace( ray ), bvhvec3( 1 ) ) * 255.0f;
+		buf[pixelx + pixely * SCRWIDTH] = (int)E.x + ((int)E.y << 8) + ((int)E.z << 16);
+	}
+	goto tileloop;
+}
+
+// Application Tick, exectuted once per frame.
 void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 {
+	static unsigned threadCount = std::thread::hardware_concurrency();
 	UpdateCamera( delta_time_s, f );
-	for (int i = 0; i < SCRWIDTH * SCRHEIGHT; i++) buf[i] = 0xaaaaff;
-	tileIdx = threadCount;
+	scene.UpdateSceneGraph( delta_time_s );
+	jobCount = SCRWIDTH * SCRHEIGHT / 400;
 	std::vector<std::thread> threads;
 #ifdef _DEBUG
-	for (uint32_t i = 0; i < threadCount; i++) TraceWorkerThread( buf, i );
+	for (unsigned i = 0; i < threadCount; i++) WorkerThread( buf ); // single thread in debug.
 #else
-	for (uint32_t i = 0; i < threadCount; i++) threads.emplace_back( &TraceWorkerThread, buf, i );
+	for (unsigned i = 0; i < threadCount; i++) threads.emplace_back( &WorkerThread, buf );
 #endif
 	for (auto& thread : threads) thread.join();
 }
 
-void Shutdown() { /* nothing here. */ }
+// Application Shutdown.
+void Shutdown()
+{
+	// save camera position / direction to file
+	std::fstream s = std::fstream{ "camera.bin", s.binary | s.out };
+	s.write( (char*)&eye, sizeof( eye ) );
+	s.write( (char*)&view, sizeof( view ) );
+	s.close();
+}
