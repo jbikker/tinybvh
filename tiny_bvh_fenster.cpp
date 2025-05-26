@@ -117,14 +117,6 @@ void Init()
 #ifdef COLOR_DEPTH
 	depths = (int*)tinybvh::malloc64( SCRWIDTH * SCRHEIGHT * sizeof( int ) );
 #endif
-
-	// load camera position / direction from file
-	std::fstream t = std::fstream{ "camera.bin", t.binary | t.in };
-	if (!t.is_open()) return;
-	t.seekp( 0 );
-	t.read( (char*)&eye, sizeof( eye ) );
-	t.read( (char*)&view, sizeof( view ) );
-	t.close();
 }
 
 bool UpdateCamera( float delta_time_s, fenster& f )
@@ -232,13 +224,6 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 
 void Shutdown()
 {
-	// save camera position / direction to file
-	std::fstream s = std::fstream{ "camera.bin", s.binary | s.out };
-	s.seekp( 0 );
-	s.write( (char*)&eye, sizeof( eye ) );
-	s.write( (char*)&view, sizeof( view ) );
-	s.close();
-
 	// delete allocated buffers
 	tinybvh::free64( rays );
 #ifdef COLOR_DEPTH

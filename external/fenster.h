@@ -69,7 +69,7 @@ FENSTER_API void fenster_sleep(int64_t ms);
 FENSTER_API int64_t fenster_time(void);
 #define fenster_pixel(f, x, y) ((f)->buf[((y) * (f)->width) + (x)])
 
-#ifndef FENSTER_HEADER
+#ifdef FENSTER_APP_IMPLEMENTATION
 #if defined(__APPLE__)
 #define msg(r, o, s) ((r(*)(id, SEL))objc_msgSend)(o, sel_getUid(s))
 #define msg1(r, o, s, A, a)                                                    \
@@ -335,28 +335,6 @@ FENSTER_API int fenster_loop(struct fenster *f) {
 }
 #endif
 
-#ifdef _WIN32
-FENSTER_API void fenster_sleep(int64_t ms) { Sleep((DWORD)ms); }
-FENSTER_API int64_t fenster_time() {
-  LARGE_INTEGER freq, count;
-  QueryPerformanceFrequency(&freq);
-  QueryPerformanceCounter(&count);
-  return (int64_t)(count.QuadPart * 1000.0 / freq.QuadPart);
-}
-#else
-FENSTER_API void fenster_sleep(int64_t ms) {
-  struct timespec ts;
-  ts.tv_sec = ms / 1000;
-  ts.tv_nsec = (ms % 1000) * 1000000;
-  nanosleep(&ts, NULL);
-}
-FENSTER_API int64_t fenster_time(void) {
-  struct timespec time;
-  clock_gettime(CLOCK_REALTIME, &time);
-  return time.tv_sec * 1000 + (time.tv_nsec / 1000000);
-}
-#endif
-
 #ifdef __cplusplus
 class Fenster {
   struct fenster f;
@@ -396,6 +374,27 @@ public:
 
 #ifdef FENSTER_APP_IMPLEMENTATION
 
+#ifdef _WIN32
+FENSTER_API void fenster_sleep(int64_t ms) { Sleep((DWORD)ms); }
+FENSTER_API int64_t fenster_time() {
+  LARGE_INTEGER freq, count;
+  QueryPerformanceFrequency(&freq);
+  QueryPerformanceCounter(&count);
+  return (int64_t)(count.QuadPart * 1000.0 / freq.QuadPart);
+}
+#else
+FENSTER_API void fenster_sleep(int64_t ms) {
+  struct timespec ts;
+  ts.tv_sec = ms / 1000;
+  ts.tv_nsec = (ms % 1000) * 1000000;
+  nanosleep(&ts, NULL);
+}
+FENSTER_API int64_t fenster_time(void) {
+  struct timespec time;
+  clock_gettime(CLOCK_REALTIME, &time);
+  return time.tv_sec * 1000 + (time.tv_nsec / 1000000);
+}
+#endif
 
 void fenster_update_title(struct fenster* f, char* new_title) {
 #if defined (__APPLE__) 
@@ -440,6 +439,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
 #else
 int main() { return run(); }
 #endif
+
+#else
+
+void fenster_update_title(struct fenster* f, char* new_title);
 
 #endif /* FENSTER_APP_IMPLEMENTATION */
 
