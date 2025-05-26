@@ -128,14 +128,22 @@ void GetShadingData( const Ray& ray, bvhvec3& albedo, bvhvec3& N, bvhvec3& iN )
 }
 
 // Main ray tracing function: Calculates the (floating point) color for a pixel.
-bvhvec3 Trace( Ray& ray )
+bvhvec3 Trace( Ray& ray, const int depth = 0 )
 {
 	Scene::tlas->Intersect( ray );
 	if (ray.hit.t >= 10000) return SampleSky( ray );
 	bvhvec3 albedo, N, iN;
 	GetShadingData( ray, albedo, N, iN );
 	static bvhvec3 L = tinybvh_normalize( bvhvec3( 2, 4, 5 ) );
-	return albedo * tinybvh_max( 0.2f, tinybvh_dot( iN, L ) );
+	const bvhvec3 R = ray.D - 2 * tinybvh_dot( iN, ray.D ) * iN;
+	bvhvec3 indirect( 0 );
+	if (depth == 0)
+	{
+		const bvhvec3 I = ray.O + ray.D * ray.hit.t;
+		Ray r( I + N * 0.0001f, R );
+		indirect = Trace( r, 1 );
+	}
+	return albedo * (0.5f * indirect + tinybvh_max( 0.2f, tinybvh_dot( iN, L ) ));
 	// return (iN + 1) * 0.5f;
 }
 
