@@ -103,6 +103,9 @@ THE SOFTWARE.
 #define BINTEXFILEVERSION	0x10001001
 #define CACHEIMAGES
 
+#define	BVH_DYNAMIC			0
+#define BVH_RIGID			1
+
 namespace tinyscene
 {
 
@@ -380,9 +383,8 @@ public:
 		// tinybvh::BVH for refittable / rebuildable meshes
 		// tinybvh::BVH8_CPU for static / rigid geometry
 		// Default is dynamic; rigid is restrictive but much faster to trace.
-		enum { BVH_DYNAMIC = 0, BVH_RIGID = 1 };
 		uint32_t bvhType = BVH_DYNAMIC;
-		union { BVH* dynamicBVH = 0; BVH8_CPU* rigidBVH; };
+		union { tinybvh::BVH* dynamicBVH = 0; tinybvh::BVH8_CPU* rigidBVH; };
 	};
 	// constructor / destructor
 	Mesh() = default;
@@ -784,11 +786,12 @@ public:
 	static int AddSpotLight( const ts_vec3 pos, const ts_vec3 direction, const float inner, const float outer, const ts_vec3 radiance );
 	static int AddDirectionalLight( const ts_vec3 direction, const ts_vec3 radiance );
 	static void UpdateSceneGraph( const float deltaTime );
+	static void SetBVHDefault( const uint32_t t ) { defaultBVHType = t; }
 	// data members
 	static inline ::std::vector<int> rootNodes;				// root node indices of loaded (or instanced) objects
 	static inline ::std::vector<Node*> nodePool;			// all scene nodes
 	static inline ::std::vector<Mesh*> meshPool;			// all scene meshes
-	static inline ::std::vector<BLASInstance> instPool;		// all scene instances
+	static inline ::std::vector<tinybvh::BLASInstance> instPool; // all scene instances
 	static inline ::std::vector<Skin*> skins;				// all scene skins
 	static inline ::std::vector<Animation*> animations;		// all scene animations
 	static inline ::std::vector<Material*> materials;		// all scene materials
@@ -798,7 +801,8 @@ public:
 	static inline ::std::vector<SpotLight*> spotLights;		// scene spot lights
 	static inline ::std::vector<DirectionalLight*> directionalLights;	// scene directional lights
 	static inline SkyDome* sky;								// HDR skydome
-	static inline BVH* tlas = 0;							// top-level acceleration structure
+	static inline tinybvh::BVH* tlas = 0;					// top-level acceleration structure
+	static inline uint32_t defaultBVHType = BVH_DYNAMIC;	// BVH_RIGID is faster but more restrictive
 };
 
 } // namespace tinyscene
@@ -1098,16 +1102,19 @@ Mesh::Mesh( const int triCount )
 {
 	triangles.resize( triCount ); // precallocate; to be used for procedural meshes.
 	vertices.resize( triCount * 3 );
+	blas.bvhType = Scene::defaultBVHType;
 }
 
 Mesh::Mesh( const char* file, const char* dir, const float scale, const bool flatShaded )
 {
 	LoadGeometry( file, dir, scale, flatShaded );
+	blas.bvhType = Scene::defaultBVHType;
 }
 
 Mesh::Mesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygltf::Model& gltfModel, const vector<int>& matIdx, const int materialOverride )
 {
 	ConvertFromGTLFMesh( gltfMesh, gltfModel, matIdx, materialOverride );
+	blas.bvhType = Scene::defaultBVHType;
 }
 
 //  +-----------------------------------------------------------------------------+
@@ -1906,12 +1913,12 @@ void Node::Update( const ts_mat4& T )
 		{
 			switch (mesh->blas.bvhType)
 			{
-			case Mesh::AccStruc::BVH_DYNAMIC:
-				if (mesh->blas.dynamicBVH == 0) mesh->blas.dynamicBVH = new BVH();
+			case BVH_DYNAMIC:
+				if (mesh->blas.dynamicBVH == 0) mesh->blas.dynamicBVH = new tinybvh::BVH();
 				mesh->blas.dynamicBVH->Build( mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
-			case Mesh::AccStruc::BVH_RIGID:
-				if (mesh->blas.rigidBVH == 0) mesh->blas.rigidBVH = new BVH8_CPU();
+			case BVH_RIGID:
+				if (mesh->blas.rigidBVH == 0) mesh->blas.rigidBVH = new tinybvh::BVH8_CPU();
 				mesh->blas.rigidBVH->BuildHQ( mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
 			default:
@@ -1924,15 +1931,15 @@ void Node::Update( const ts_mat4& T )
 		if (instanceID == -1)
 		{
 			instanceID = (int)Scene::instPool.size();
-			Scene::instPool.push_back( BLASInstance( meshID ) );
+			Scene::instPool.push_back( tinybvh::BLASInstance( meshID ) );
 			transformed = true;
 		}
-		BLASInstance& instance = Scene::instPool[instanceID];
+		tinybvh::BLASInstance& instance = Scene::instPool[instanceID];
 		bool transformChanged = false;
 		for (int i = 0; i < 16; i++) if (instance.transform[i] != combinedTransform[i]) transformChanged = true;
 		if (transformChanged)
 		{
-			instance.transform = *(bvhmat4*)&combinedTransform;
+			instance.transform = *(tinybvh::bvhmat4*)&combinedTransform;
 			instance.Update( mesh->blas.dynamicBVH /* type doesn't matter */ );
 		}
 	}
@@ -3327,15 +3334,15 @@ void Scene::UpdateSceneGraph( const float deltaTime )
 		node->Update( T /* start with an identity matrix */ );
 	}
 	// update tlas
-	static BVHBase** bvhList = 0;
+	static tinybvh::BVHBase** bvhList = 0;
 	static uint32_t bvhListSize = 0;
 	if (bvhListSize != meshPool.size())
 	{
 		delete bvhList;
-		bvhList = new BVHBase * [meshPool.size()];
+		bvhList = new tinybvh::BVHBase * [meshPool.size()];
 		for (int i = 0; i < meshPool.size(); i++) bvhList[i] = meshPool[i]->blas.dynamicBVH;
 	}
-	if (!tlas) tlas = new BVH();
+	if (!tlas) tlas = new tinybvh::BVH();
 	tlas->Build( instPool.data(), (uint32_t)instPool.size(), bvhList, bvhListSize );
 }
 
