@@ -20,6 +20,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\tiny_bvh_gltf.cpp" />
+    <ClCompile Include="..\tiny_bvh_gltf_lib.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\tiny_bvh.h" />
