@@ -14,7 +14,13 @@
 
 using namespace tinybvh;
 using namespace tinyocl;
+#ifdef GLTF_DEMO
+#define TINYSCENE_IMPLEMENTATION
+#include "tiny_scene.h"
+#include "gltfdemo.h"
+#else
 #include "game.h"
+#endif
 
 using namespace Tmpl8;
 
@@ -147,7 +153,11 @@ int main()
 	// initialize application
 	InitRenderTarget( SCRWIDTH, SCRHEIGHT );
 	Surface* screen = new Surface( SCRWIDTH, SCRHEIGHT );
+#ifdef GLTF_DEMO
+	app = new GLTFDemo();
+#else
 	app = new Game();
+#endif
 	app->screen = screen;
 	app->Init();
 	// done, enter main loop
