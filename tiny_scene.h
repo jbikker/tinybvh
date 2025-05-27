@@ -54,6 +54,21 @@ THE SOFTWARE.
 // #define TINYSCENE_TINYGLTF_ALREADY_IMPLEMENTED
 // #define TINYSCENE_STBIMAGE_ALREADY_IMPLEMENTED
 
+// access syoyo's tiny_obj and tiny_gltf implementations
+#if defined TINYSCENE_IMPLEMENTATION && !defined TINYSCENE_TINYOBJ_AREADY_IMPLEMENTED
+#define TINYOBJLOADER_IMPLEMENTATION
+#endif
+#include "tiny_obj_loader.h"
+#if defined TINYSCENE_IMPLEMENTATION && !defined TINYSCENE_TINYGLTF_ALREADY_IMPLEMENTED
+#define TINYGLTF_IMPLEMENTATION
+#endif
+#define TINYGLTF_NO_STB_IMAGE_WRITE
+#include "tiny_gltf.h"
+#if defined TINYSCENE_IMPLEMENTATION && !defined TINYSCENE_STBIMAGE_ALREADY_IMPLEMENTED
+#define STB_IMAGE_IMPLEMENTATION
+#endif
+#include "stb_image.h"
+
 #ifndef TINY_SCENE_H_
 #define TINY_SCENE_H_
 
@@ -84,27 +99,14 @@ THE SOFTWARE.
 // Scene::RemoveNode exists, but it only removes nodes themselves, not any
 // linked materials or textures.
 
-// access syoyo's tiny_obj and tiny_gltf implementations
-#if defined TINYSCENE_IMPLEMENTATION && !defined TINYSCENE_TINYOBJ_AREADY_IMPLEMENTED
-#define TINYOBJLOADER_IMPLEMENTATION
-#endif
-#include "tiny_obj_loader.h"
-#if defined TINYSCENE_IMPLEMENTATION && !defined TINYSCENE_TINYGLTF_ALREADY_IMPLEMENTED
-#define TINYGLTF_IMPLEMENTATION
-#endif
-#define TINYGLTF_NO_STB_IMAGE_WRITE
-#include "tiny_gltf.h"
-#if defined TINYSCENE_IMPLEMENTATION && !defined TINYSCENE_STBIMAGE_ALREADY_IMPLEMENTED
-#define STB_IMAGE_IMPLEMENTATION
-#endif
-#include "stb_image.h"
-
 #define MIPLEVELCOUNT		5
 #define BINTEXFILEVERSION	0x10001001
 #define CACHEIMAGES
 
-#define	BVH_DYNAMIC			0
-#define BVH_RIGID			1
+#define	BVH_DYNAMIC			0	// BVH will be built as tinybvh::BVH / Build, for fast rebuilds
+#define BVH_RIGID			1	// BVH will be built as tinybvh::BVH8_CPU / BuildHQ, for fast traversal
+#define GPU_DYNAMIC			2	// BVH will be built as tinybvh::BVH_GPU, for fast rebuilds
+#define GPU_RIGID			3	// BVH will be built as tinybvh::BVH8_CWBVH, for fast traversal
 
 namespace tinyscene
 {
@@ -379,12 +381,20 @@ public:
 	struct Pose { ::std::vector<ts_vec3> positions, normals, tangents; };
 	struct AccStruc
 	{
-		// BVH can be one of two types:
+		// BVH can be one of four types:
 		// tinybvh::BVH for refittable / rebuildable meshes
 		// tinybvh::BVH8_CPU for static / rigid geometry
-		// Default is dynamic; rigid is restrictive but much faster to trace.
+		// tinybvh::BVH_GPU for refittable / rebuildable meshes - targetted at GPU rendering
+		// tinybvh::BVH8_CWBVH for static / rigid geometry - targetted at GPU rendering.
+		// Default is dynamic / CPU; rigid is restrictive but much faster to trace.
 		uint32_t bvhType = BVH_DYNAMIC;
-		union { tinybvh::BVH* dynamicBVH = 0; tinybvh::BVH8_CPU* rigidBVH; };
+		union 
+		{ 
+			tinybvh::BVH* dynamicBVH = 0; 
+			tinybvh::BVH8_CPU* rigidBVH; 
+			tinybvh::BVH_GPU* dynamicGPU; 
+			tinybvh::BVH8_CWBVH* rigidGPU; 
+		};
 	};
 	// constructor / destructor
 	Mesh() = default;
@@ -802,10 +812,13 @@ public:
 	static inline ::std::vector<DirectionalLight*> directionalLights;	// scene directional lights
 	static inline SkyDome* sky;								// HDR skydome
 	static inline tinybvh::BVH* tlas = 0;					// top-level acceleration structure
+	static inline tinybvh::BVH_GPU* gpuTlas = 0;			// top-level acceleration structure, gpu version
 	static inline uint32_t defaultBVHType = BVH_DYNAMIC;	// BVH_RIGID is faster but more restrictive
 };
 
 } // namespace tinyscene
+
+#endif // TINY_SCENE_H_
 
 // ============================================================================
 //
@@ -887,8 +900,12 @@ uint16_t ts_float_to_half( const float x )
 		((e < 113) & (e > 101)) * ((((0x007FF000 + m) >> (125 - e)) + 1) >> 1) | (e > 143) * 0x7FFF);
 }
 
-// ts_vec4::ts_vec4( const ts_vec3& a ) { x = a.x, y = a.y, z = a.z, w = 0; }
-// ts_vec4::ts_vec4( const ts_vec3& a, const float b ) { x = a.x, y = a.y, z = a.z, w = b; }
+#ifndef TINYSCENE_USE_CUSTOM_VECTOR_TYPES
+
+ts_vec4::ts_vec4( const ts_vec3& a ) { x = a.x, y = a.y, z = a.z, w = 0; }
+ts_vec4::ts_vec4( const ts_vec3& a, const float b ) { x = a.x, y = a.y, z = a.z, w = b; }
+
+#endif
 
 void ts_aabb::grow( const ts_vec3& p )
 {
@@ -1915,11 +1932,19 @@ void Node::Update( const ts_mat4& T )
 			{
 			case BVH_DYNAMIC:
 				if (mesh->blas.dynamicBVH == 0) mesh->blas.dynamicBVH = new tinybvh::BVH();
-				mesh->blas.dynamicBVH->Build( mesh->vertices.data(), (unsigned)mesh->triangles.size() );
+				mesh->blas.dynamicBVH->Build( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
 			case BVH_RIGID:
 				if (mesh->blas.rigidBVH == 0) mesh->blas.rigidBVH = new tinybvh::BVH8_CPU();
-				mesh->blas.rigidBVH->BuildHQ( mesh->vertices.data(), (unsigned)mesh->triangles.size() );
+				mesh->blas.rigidBVH->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
+				break;
+			case GPU_DYNAMIC:
+				if (mesh->blas.dynamicGPU == 0) mesh->blas.dynamicGPU = new tinybvh::BVH_GPU();
+				mesh->blas.dynamicGPU->Build( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
+				break;
+			case GPU_RIGID:
+				if (mesh->blas.rigidGPU == 0) mesh->blas.rigidGPU = new tinybvh::BVH8_CWBVH();
+				mesh->blas.rigidGPU->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
 			default:
 				// .. invalid bvh type.
@@ -3342,12 +3367,18 @@ void Scene::UpdateSceneGraph( const float deltaTime )
 		bvhList = new tinybvh::BVHBase * [meshPool.size()];
 		for (int i = 0; i < meshPool.size(); i++) bvhList[i] = meshPool[i]->blas.dynamicBVH;
 	}
-	if (!tlas) tlas = new tinybvh::BVH();
-	tlas->Build( instPool.data(), (uint32_t)instPool.size(), bvhList, bvhListSize );
+	if (defaultBVHType == GPU_DYNAMIC || defaultBVHType == GPU_RIGID)
+	{
+		if (!gpuTlas) gpuTlas = new tinybvh::BVH_GPU();
+		gpuTlas->Build( instPool.data(), (uint32_t)instPool.size(), bvhList, bvhListSize );
+	}
+	else
+	{
+		if (!tlas) tlas = new tinybvh::BVH();
+		tlas->Build( instPool.data(), (uint32_t)instPool.size(), bvhList, bvhListSize );
+	}
 }
 
 } // namespace tinyscene
 
 #endif // TINYSCENE_IMPLEMENTATION
-
-#endif // TINY_SCENE_H_

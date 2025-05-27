@@ -22,7 +22,6 @@ using namespace tinyscene;
 
 // scene data
 Scene scene;
-BVH8_CPU legocar;
 
 // useful constants
 #define PI			3.14159265358979323846264f
