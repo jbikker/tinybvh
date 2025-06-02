@@ -58,25 +58,13 @@
     <None Include="..\tools.cl">
       <Filter>kernels</Filter>
     </None>
-    <None Include="..\traverse.cl">
+    <None Include="..\raytracer.cl">
       <Filter>kernels</Filter>
     </None>
     <None Include="..\traverse_bvh2.cl">
       <Filter>kernels</Filter>
     </None>
-    <None Include="..\traverse_bvh4.cl">
-      <Filter>kernels</Filter>
-    </None>
-    <None Include="..\traverse_cwbvh.cl">
-      <Filter>kernels</Filter>
-    </None>
     <None Include="..\traverse_tlas.cl">
-      <Filter>kernels</Filter>
-    </None>
-    <None Include="..\wavefront.cl">
-      <Filter>kernels</Filter>
-    </None>
-    <None Include="..\wavefront2.cl">
       <Filter>kernels</Filter>
     </None>
   </ItemGroup>

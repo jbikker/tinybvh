@@ -146,14 +146,10 @@
     <ClInclude Include="template\tmpl8math.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="..\raytracer.cl" />
     <None Include="..\tools.cl" />
-    <None Include="..\traverse.cl" />
     <None Include="..\traverse_bvh2.cl" />
-    <None Include="..\traverse_bvh4.cl" />
-    <None Include="..\traverse_cwbvh.cl" />
     <None Include="..\traverse_tlas.cl" />
-    <None Include="..\wavefront.cl" />
-    <None Include="..\wavefront2.cl" />
     <None Include="README.md" />
     <None Include="template\LICENSE" />
   </ItemGroup>

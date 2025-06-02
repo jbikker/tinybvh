@@ -5,18 +5,8 @@
 #pragma once
 #pragma warning( disable : 4324 ) // padding warning
 
-#define MAX_BLAS_COUNT	256
-
 namespace Tmpl8
 {
-
-struct RenderData
-{
-	// View pyramid for a pinhole camera
-	float4 eye = float4( 0, 30, 0, 0 );
-	float4 view = float4( -1, 0, 0, 0 );
-	float4 C, p0, p1, p2;
-};
 
 class GLTFDemo : public TheApp
 {
@@ -35,7 +25,9 @@ public:
 	void KeyDown( int ) { /* implement if you want to handle keys */ }
 	// data members
 	int2 mousePos;
-	RenderData rd;
+	bvhvec3 eye = bvhvec3( -15.24f, 21.5f, 2.54f );
+	bvhvec3 view = tinybvh_normalize( bvhvec3( 0.826f, -0.438f, -0.356f ) );
+	bvhvec3 p1, p2, p3;
 	// host-side mesh data
 	tinyscene::Scene scene;
 	// OpenCL kernels
@@ -44,13 +36,14 @@ public:
 	// OpenCL buffers
 	Buffer* pixels = 0;
 	Buffer* instances = 0;
-	Buffer* blasNode[MAX_BLAS_COUNT];
-	Buffer* blasIdx[MAX_BLAS_COUNT];
-	Buffer* blasTri[MAX_BLAS_COUNT];
+	Buffer* blasNode = 0;
+	Buffer* blasIdx = 0;
+	Buffer* blasTri = 0;
+	Buffer* blasFatTri = 0;
+	Buffer* blasOffsets = 0;
 	Buffer* tlasNode = 0;
 	Buffer* tlasIdx = 0;
 	Buffer* materials = 0;
-	Buffer* textures = 0;
 	Buffer* texels = 0;
 	Buffer* skyPixels = 0;
 };
