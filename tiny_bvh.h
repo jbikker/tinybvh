@@ -41,10 +41,13 @@ THE SOFTWARE.
 //     using bvhint2 = math::int2;
 //     using bvhint3 = math::int3;
 //     using bvhuint2 = math::uint2;
+//     using bvhuint3 = math::uint3;
+//     using bvhuint4 = math::uint4;
 //     using bvhvec2 = math::float2;
 //     using bvhvec3 = math::float3;
 //     using bvhvec4 = math::float4;
 //     using bvhdbl3 = math::double3;
+//     using bvhmat4 = math::mat4x4;
 //   }
 //
 //	 #define TINYBVH_USE_CUSTOM_VECTOR_TYPES
@@ -393,15 +396,16 @@ struct bvhuint4
 	union { struct { uint32_t x, y, z, w; }; uint32_t cell[4]; };
 };
 
-#endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
-
-struct bvhmat4
+struct bvhmat4 // exists only so we can use tinybvh types conveniently in tinyscene.
 {
-	bvhmat4() { memset( cell, 0, sizeof( cell ) ); cell[0] = cell[5] = cell[10] = cell[15] = 1; }
+	bvhmat4() = default;
 	float& operator [] ( const int32_t i ) { return cell[i]; }
 	const float& operator [] ( const int32_t i ) const { return cell[i]; }
-	float cell[16];
+	bvhmat4& operator += ( const bvhmat4& a ) { for (int i = 0; i < 16; i++) cell[i] += a.cell[i]; return *this; }
+	float cell[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 };
+
+#endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
 struct ALIGNED( 32 ) bvhaabb
 {
@@ -1524,6 +1528,20 @@ bool BVH_SoA::IsOccluded( const Ray& ) const { BVH_FATAL_ERROR( "BVH_SoA::IsOccl
 
 #ifndef TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
+bvhmat4 operator*( const float s, const bvhmat4& a )
+{
+	bvhmat4 r;
+	for (uint32_t i = 0; i < 16; i++) r[i] = a[i] * s;
+	return r;
+}
+bvhmat4 operator*( const bvhmat4& a, const bvhmat4& b )
+{
+	bvhmat4 r;
+	for (uint32_t i = 0; i < 16; i += 4) for (uint32_t j = 0; j < 4; ++j)
+		r[i + j] = (a[i + 0] * b[j + 0]) + (a[i + 1] * b[j + 4]) +
+		(a[i + 2] * b[j + 8]) + (a[i + 3] * b[j + 12]);
+	return r;
+}
 bvhvec4::bvhvec4( const bvhvec3& a ) { x = a.x; y = a.y; z = a.z; w = 0; }
 bvhvec4::bvhvec4( const bvhvec3& a, float b ) { x = a.x; y = a.y; z = a.z; w = b; }
 
