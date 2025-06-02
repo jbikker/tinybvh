@@ -66,8 +66,8 @@ THE SOFTWARE.
 #include "tiny_gltf.h"
 #if defined TINYSCENE_IMPLEMENTATION && !defined TINYSCENE_STBIMAGE_ALREADY_IMPLEMENTED
 #define STB_IMAGE_IMPLEMENTATION
-#endif
 #include "stb_image.h"
+#endif
 
 #ifndef TINY_SCENE_H_
 #define TINY_SCENE_H_
@@ -222,6 +222,24 @@ struct ts_uint4
 	uint32_t x, y, z, w;
 };
 
+struct ts_mat4
+{
+	ts_mat4() = default;
+	static ts_mat4 scale( const float s ) { ts_mat4 r; r[0] = r[5] = r[10] = s; return r; }
+	static ts_mat4 scale( const ts_vec3 s ) { ts_mat4 r; r[0] = s.x, r[5] = s.y, r[10] = s.z; return r; }
+	static ts_mat4 translate( const ts_vec3 t ) { ts_mat4 r; r[3] = t.x, r[7] = t.y, r[11] = t.z; return r; }
+	float cell[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+	float& operator [] ( const int idx ) { return cell[idx]; }
+	const float& operator [] ( const int idx ) const { return cell[idx]; }
+	float operator()( const int i, const int j ) const { return cell[i * 4 + j]; }
+	float& operator()( const int i, const int j ) { return cell[i * 4 + j]; }
+	ts_mat4& operator += ( const ts_mat4& a )
+	{
+		for (int i = 0; i < 16; i++) cell[i] += a.cell[i];
+		return *this;
+	}
+};
+
 inline ts_vec2 operator-( const ts_vec2& a ) { return ts_vec2( -a.x, -a.y ); }
 inline ts_vec3 operator-( const ts_vec3& a ) { return ts_vec3( -a.x, -a.y, -a.z ); }
 inline ts_vec4 operator-( const ts_vec4& a ) { return ts_vec4( -a.x, -a.y, -a.z, -a.w ); }
@@ -249,6 +267,13 @@ inline ts_vec3 operator/( float b, const ts_vec3& a ) { return ts_vec3( b / a.x,
 inline ts_vec4 operator/( float b, const ts_vec4& a ) { return ts_vec4( b / a.x, b / a.y, b / a.z, b / a.w ); }
 inline void operator*=( ts_vec3& a, const float b ) { a.x *= b; a.y *= b; a.z *= b; }
 
+#ifndef TINYSCENE_IMPLEMENTATION
+
+ts_vec4::ts_vec4( const ts_vec3& a ) { x = a.x, y = a.y, z = a.z, w = 0; }
+ts_vec4::ts_vec4( const ts_vec3& a, const float b ) { x = a.x, y = a.y, z = a.z, w = b; }
+
+#endif
+
 #endif // TINYSCENE_USE_CUSTOM_VECTOR_TYPES
 
 struct ts_uchar4
@@ -257,25 +282,6 @@ struct ts_uchar4
 	ts_uchar4( const uint8_t a, const uint8_t b, const uint8_t c, const uint8_t d ) : x( a ), y( b ), z( c ), w( d ) {}
 	ts_uchar4( const uint8_t a ) : x( a ), y( a ), z( a ), w( a ) {}
 	uint8_t x, y, z, w;
-};
-
-struct ts_mat4
-{
-	ts_mat4() = default;
-	static ts_mat4 scale( const float s ) { ts_mat4 r; r[0] = r[5] = r[10] = s; return r; }
-	static ts_mat4 scale( const ts_vec3 s ) { ts_mat4 r; r[0] = s.x, r[5] = s.y, r[10] = s.z; return r; }
-	static ts_mat4 translate( const ts_vec3 t ) { ts_mat4 r; r[3] = t.x, r[7] = t.y, r[11] = t.z; return r; }
-	float cell[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
-	float& operator [] ( const int idx ) { return cell[idx]; }
-	const float& operator [] ( const int idx ) const { return cell[idx]; }
-	float operator()( const int i, const int j ) const { return cell[i * 4 + j]; }
-	float& operator()( const int i, const int j ) { return cell[i * 4 + j]; }
-	ts_mat4& operator += ( const ts_mat4& a )
-	{
-		for (int i = 0; i < 16; i++) cell[i] += a.cell[i];
-		return *this;
-	}
-	ts_mat4 inverted() const;
 };
 
 struct ts_aabb
@@ -294,7 +300,6 @@ public:
 	ts_quat( float _w, ts_vec3 v ) : w( _w ), x( v.x ), y( v.y ), z( v.z ) {}
 	float magnitude() const { return sqrtf( w * w + x * x + y * y + z * z ); }
 	void ts_normalize() { float m = magnitude(); *this = this->scale( 1 / m ); }
-	ts_mat4 toMatrix() const;
 	static ts_quat slerp( const ts_quat& a, const ts_quat& b, const float t );
 	ts_quat operator + ( const ts_quat& q ) const { return ts_quat( w + q.w, x + q.x, y + q.y, z + q.z ); }
 	ts_quat operator - ( const ts_quat& q ) const { return ts_quat( w - q.w, x - q.x, y - q.y, z - q.z ); }
@@ -388,12 +393,12 @@ public:
 		// tinybvh::BVH8_CWBVH for static / rigid geometry - targetted at GPU rendering.
 		// Default is dynamic / CPU; rigid is restrictive but much faster to trace.
 		uint32_t bvhType = BVH_DYNAMIC;
-		union 
-		{ 
-			tinybvh::BVH* dynamicBVH = 0; 
-			tinybvh::BVH8_CPU* rigidBVH; 
-			tinybvh::BVH_GPU* dynamicGPU; 
-			tinybvh::BVH8_CWBVH* rigidGPU; 
+		union
+		{
+			tinybvh::BVH* dynamicBVH = 0;
+			tinybvh::BVH8_CPU* rigidBVH;
+			tinybvh::BVH_GPU* dynamicGPU;
+			tinybvh::BVH8_CWBVH* rigidGPU;
 		};
 	};
 	// constructor / destructor
@@ -781,6 +786,7 @@ public:
 	static int AddMesh( const char* objFile, const char* dir, const float scale = 1.0f, const bool flatShaded = false );
 	static int AddMesh( const char* objFile, const float scale = 1.0f, const bool flatShaded = false );
 	static int AddScene( const char* sceneFile, const ts_mat4& transform = ts_mat4() );
+	static int AddScene( const char* sceneFile, const float scale );
 	static int AddScene( const char* sceneFile, const char* dir, const ts_mat4& transform );
 	static int AddMesh( const int triCount );
 	static void AddTriToMesh( const int meshId, const ts_vec3& v0, const ts_vec3& v1, const ts_vec3& v2, const int matId );
@@ -842,6 +848,7 @@ public:
 namespace tinyscene {
 
 // basic vector math operations
+#ifndef TINYSCENE_USE_CUSTOM_VECTOR_TYPES
 ts_mat4 operator*( const float s, const ts_mat4& a )
 {
 	ts_mat4 r;
@@ -855,6 +862,33 @@ ts_mat4 operator*( const ts_mat4& a, const ts_mat4& b )
 		r[i + j] = (a[i + 0] * b[j + 0]) + (a[i + 1] * b[j + 4]) +
 		(a[i + 2] * b[j + 8]) + (a[i + 3] * b[j + 12]);
 	return r;
+}
+#endif
+void ts_invert( ts_mat4& T )
+{
+	// from MESA, via http://stackoverflow.com/questions/1148309/inverting-a-4x4-matrix
+	const float inv[16] = {
+		T[5] * T[10] * T[15] - T[5] * T[11] * T[14] - T[9] * T[6] * T[15] + T[9] * T[7] * T[14] + T[13] * T[6] * T[11] - T[13] * T[7] * T[10],
+		-T[1] * T[10] * T[15] + T[1] * T[11] * T[14] + T[9] * T[2] * T[15] - T[9] * T[3] * T[14] - T[13] * T[2] * T[11] + T[13] * T[3] * T[10],
+		T[1] * T[6] * T[15] - T[1] * T[7] * T[14] - T[5] * T[2] * T[15] + T[5] * T[3] * T[14] + T[13] * T[2] * T[7] - T[13] * T[3] * T[6],
+		-T[1] * T[6] * T[11] + T[1] * T[7] * T[10] + T[5] * T[2] * T[11] - T[5] * T[3] * T[10] - T[9] * T[2] * T[7] + T[9] * T[3] * T[6],
+		-T[4] * T[10] * T[15] + T[4] * T[11] * T[14] + T[8] * T[6] * T[15] - T[8] * T[7] * T[14] - T[12] * T[6] * T[11] + T[12] * T[7] * T[10],
+		T[0] * T[10] * T[15] - T[0] * T[11] * T[14] - T[8] * T[2] * T[15] + T[8] * T[3] * T[14] + T[12] * T[2] * T[11] - T[12] * T[3] * T[10],
+		-T[0] * T[6] * T[15] + T[0] * T[7] * T[14] + T[4] * T[2] * T[15] - T[4] * T[3] * T[14] - T[12] * T[2] * T[7] + T[12] * T[3] * T[6],
+		T[0] * T[6] * T[11] - T[0] * T[7] * T[10] - T[4] * T[2] * T[11] + T[4] * T[3] * T[10] + T[8] * T[2] * T[7] - T[8] * T[3] * T[6],
+		T[4] * T[9] * T[15] - T[4] * T[11] * T[13] - T[8] * T[5] * T[15] + T[8] * T[7] * T[13] + T[12] * T[5] * T[11] - T[12] * T[7] * T[9],
+		-T[0] * T[9] * T[15] + T[0] * T[11] * T[13] + T[8] * T[1] * T[15] - T[8] * T[3] * T[13] - T[12] * T[1] * T[11] + T[12] * T[3] * T[9],
+		T[0] * T[5] * T[15] - T[0] * T[7] * T[13] - T[4] * T[1] * T[15] + T[4] * T[3] * T[13] + T[12] * T[1] * T[7] - T[12] * T[3] * T[5],
+		-T[0] * T[5] * T[11] + T[0] * T[7] * T[9] + T[4] * T[1] * T[11] - T[4] * T[3] * T[9] - T[8] * T[1] * T[7] + T[8] * T[3] * T[5],
+		-T[4] * T[9] * T[14] + T[4] * T[10] * T[13] + T[8] * T[5] * T[14] - T[8] * T[6] * T[13] - T[12] * T[5] * T[10] + T[12] * T[6] * T[9],
+		T[0] * T[9] * T[14] - T[0] * T[10] * T[13] - T[8] * T[1] * T[14] + T[8] * T[2] * T[13] + T[12] * T[1] * T[10] - T[12] * T[2] * T[9],
+		-T[0] * T[5] * T[14] + T[0] * T[6] * T[13] + T[4] * T[1] * T[14] - T[4] * T[2] * T[13] - T[12] * T[1] * T[6] + T[12] * T[2] * T[5],
+		T[0] * T[5] * T[10] - T[0] * T[6] * T[9] - T[4] * T[1] * T[10] + T[4] * T[2] * T[9] + T[8] * T[1] * T[6] - T[8] * T[2] * T[5]
+	};
+	const float det = T[0] * inv[0] + T[1] * inv[4] + T[2] * inv[8] + T[3] * inv[12];
+	if (det == 0) return;
+	const float invdet = 1.0f / det;
+	for (int i = 0; i < 16; i++) T[i] = inv[i] * invdet;
 }
 inline float ts_dot( const ts_vec2& a, const ts_vec2& b ) { return a.x * b.x + a.y * b.y; }
 inline float ts_dot( const ts_vec3& a, const ts_vec3& b ) { return a.x * b.x + a.y * b.y + a.z * b.z; }
@@ -900,75 +934,10 @@ uint16_t ts_float_to_half( const float x )
 		((e < 113) & (e > 101)) * ((((0x007FF000 + m) >> (125 - e)) + 1) >> 1) | (e > 143) * 0x7FFF);
 }
 
-#ifndef TINYSCENE_USE_CUSTOM_VECTOR_TYPES
-
-ts_vec4::ts_vec4( const ts_vec3& a ) { x = a.x, y = a.y, z = a.z, w = 0; }
-ts_vec4::ts_vec4( const ts_vec3& a, const float b ) { x = a.x, y = a.y, z = a.z, w = b; }
-
-#endif
-
 void ts_aabb::grow( const ts_vec3& p )
 {
 	bmin = ts_min( bmin, p );
 	bmax = ts_max( bmin, p );
-}
-
-ts_mat4 ts_mat4::inverted() const
-{
-	// from MESA, via http://stackoverflow.com/questions/1148309/inverting-a-4x4-matrix
-	const float inv[16] = {
-		cell[5] * cell[10] * cell[15] - cell[5] * cell[11] * cell[14] - cell[9] * cell[6] * cell[15] +
-		cell[9] * cell[7] * cell[14] + cell[13] * cell[6] * cell[11] - cell[13] * cell[7] * cell[10],
-		-cell[1] * cell[10] * cell[15] + cell[1] * cell[11] * cell[14] + cell[9] * cell[2] * cell[15] -
-		cell[9] * cell[3] * cell[14] - cell[13] * cell[2] * cell[11] + cell[13] * cell[3] * cell[10],
-		cell[1] * cell[6] * cell[15] - cell[1] * cell[7] * cell[14] - cell[5] * cell[2] * cell[15] +
-		cell[5] * cell[3] * cell[14] + cell[13] * cell[2] * cell[7] - cell[13] * cell[3] * cell[6],
-		-cell[1] * cell[6] * cell[11] + cell[1] * cell[7] * cell[10] + cell[5] * cell[2] * cell[11] -
-		cell[5] * cell[3] * cell[10] - cell[9] * cell[2] * cell[7] + cell[9] * cell[3] * cell[6],
-		-cell[4] * cell[10] * cell[15] + cell[4] * cell[11] * cell[14] + cell[8] * cell[6] * cell[15] -
-		cell[8] * cell[7] * cell[14] - cell[12] * cell[6] * cell[11] + cell[12] * cell[7] * cell[10],
-		cell[0] * cell[10] * cell[15] - cell[0] * cell[11] * cell[14] - cell[8] * cell[2] * cell[15] +
-		cell[8] * cell[3] * cell[14] + cell[12] * cell[2] * cell[11] - cell[12] * cell[3] * cell[10],
-		-cell[0] * cell[6] * cell[15] + cell[0] * cell[7] * cell[14] + cell[4] * cell[2] * cell[15] -
-		cell[4] * cell[3] * cell[14] - cell[12] * cell[2] * cell[7] + cell[12] * cell[3] * cell[6],
-		cell[0] * cell[6] * cell[11] - cell[0] * cell[7] * cell[10] - cell[4] * cell[2] * cell[11] +
-		cell[4] * cell[3] * cell[10] + cell[8] * cell[2] * cell[7] - cell[8] * cell[3] * cell[6],
-		cell[4] * cell[9] * cell[15] - cell[4] * cell[11] * cell[13] - cell[8] * cell[5] * cell[15] +
-		cell[8] * cell[7] * cell[13] + cell[12] * cell[5] * cell[11] - cell[12] * cell[7] * cell[9],
-		-cell[0] * cell[9] * cell[15] + cell[0] * cell[11] * cell[13] + cell[8] * cell[1] * cell[15] -
-		cell[8] * cell[3] * cell[13] - cell[12] * cell[1] * cell[11] + cell[12] * cell[3] * cell[9],
-		cell[0] * cell[5] * cell[15] - cell[0] * cell[7] * cell[13] - cell[4] * cell[1] * cell[15] +
-		cell[4] * cell[3] * cell[13] + cell[12] * cell[1] * cell[7] - cell[12] * cell[3] * cell[5],
-		-cell[0] * cell[5] * cell[11] + cell[0] * cell[7] * cell[9] + cell[4] * cell[1] * cell[11] -
-		cell[4] * cell[3] * cell[9] - cell[8] * cell[1] * cell[7] + cell[8] * cell[3] * cell[5],
-		-cell[4] * cell[9] * cell[14] + cell[4] * cell[10] * cell[13] + cell[8] * cell[5] * cell[14] -
-		cell[8] * cell[6] * cell[13] - cell[12] * cell[5] * cell[10] + cell[12] * cell[6] * cell[9],
-		cell[0] * cell[9] * cell[14] - cell[0] * cell[10] * cell[13] - cell[8] * cell[1] * cell[14] +
-		cell[8] * cell[2] * cell[13] + cell[12] * cell[1] * cell[10] - cell[12] * cell[2] * cell[9],
-		-cell[0] * cell[5] * cell[14] + cell[0] * cell[6] * cell[13] + cell[4] * cell[1] * cell[14] -
-		cell[4] * cell[2] * cell[13] - cell[12] * cell[1] * cell[6] + cell[12] * cell[2] * cell[5],
-		cell[0] * cell[5] * cell[10] - cell[0] * cell[6] * cell[9] - cell[4] * cell[1] * cell[10] +
-		cell[4] * cell[2] * cell[9] + cell[8] * cell[1] * cell[6] - cell[8] * cell[2] * cell[5]
-	};
-	const float det = cell[0] * inv[0] + cell[1] * inv[4] + cell[2] * inv[8] + cell[3] * inv[12];
-	ts_mat4 retVal;
-	if (det != 0)
-	{
-		const float invdet = 1.0f / det;
-		for (int i = 0; i < 16; i++) retVal.cell[i] = inv[i] * invdet;
-	}
-	return retVal;
-}
-
-ts_mat4 ts_quat::toMatrix() const
-{
-	ts_mat4 ret;
-	ret.cell[0] = 1 - 2 * y * y - 2 * z * z;
-	ret.cell[1] = 2 * x * y - 2 * w * z, ret.cell[2] = 2 * x * z + 2 * w * y, ret.cell[4] = 2 * x * y + 2 * w * z;
-	ret.cell[5] = 1 - 2 * x * x - 2 * z * z;
-	ret.cell[6] = 2 * y * z - 2 * w * x, ret.cell[8] = 2 * x * z - 2 * w * y, ret.cell[9] = 2 * y * z + 2 * w * x;
-	ret.cell[10] = 1 - 2 * x * x - 2 * y * y;
-	return ret;
 }
 
 ts_quat ts_quat::slerp( const ts_quat& a, const ts_quat& b, const float t )
@@ -1141,7 +1110,8 @@ Mesh::Mesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygltf::Model& gltfModel
 void Mesh::LoadGeometry( const char* file, const char* dir, const float scale, const bool flatShaded )
 {
 	// process supplied file name
-	ts_mat4 T = ts_mat4::scale( scale ); // may include scale, translation, axis exchange
+	ts_mat4 T; // assume these are initialized to identity.
+	T[0] = T[5] = T[10] = scale, T[15] = 1; // scaling matrix
 	string combined = string( dir ) + (dir[strlen( dir ) - 1] == '/' ? "" : "/") + string( file );
 	for (int l = (int)combined.size(), i = 0; i < l; i++) if (combined[i] >= 'A' && combined[i] <= 'Z') combined[i] -= 'Z' - 'z';
 	string extension = (combined.find_last_of( "." ) != string::npos) ? combined.substr( combined.find_last_of( "." ) + 1 ) : "";
@@ -1880,9 +1850,15 @@ void Node::ConvertFromGLTFNode( const tinygltf::Node& gltfNode, const int nodeBa
 //  +-----------------------------------------------------------------------------+
 void Node::UpdateTransformFromTRS()
 {
-	ts_mat4 T = ts_mat4::translate( translation );
-	ts_mat4 R = rotation.toMatrix();
-	ts_mat4 S = ts_mat4::scale( scale );
+	ts_mat4 T, R, S;
+	T[3] = translation.x, T[7] = translation.y, T[11] = translation.z;
+	float rx = rotation.x, ry = rotation.y, rz = rotation.z, rw = rotation.w;
+	R[0] = 1 - 2 * ry * ry - 2 * rz * rz, R[1] = 2 * rx * ry - 2 * rw * rz;
+	R[2] = 2 * rx * rz + 2 * rw * ry, R[4] = 2 * rx * ry + 2 * rw * rz;
+	R[5] = 1 - 2 * rx * rx - 2 * rz * rz, R[6] = 2 * ry * rz - 2 * rw * rx;
+	R[8] = 2 * rx * rz - 2 * rw * ry, R[9] = 2 * ry * rz + 2 * rw * rx;
+	R[10] = 1 - 2 * rx * rx - 2 * ry * ry;
+	S[0] = scale.x, S[5] = scale.y, S[10] = scale.z;
 	localTransform = T * R * S * matrix;
 }
 
@@ -1916,7 +1892,8 @@ void Node::Update( const ts_mat4& T )
 		}
 		if (skinID > -1)
 		{
-			const ts_mat4 invTransform = combinedTransform.inverted();
+			ts_mat4 invTransform = combinedTransform;
+			ts_invert( invTransform );
 			Skin* skin = Scene::skins[skinID];
 			for (int s = (int)skin->joints.size(), j = 0; j < s; j++)
 			{
@@ -2840,6 +2817,12 @@ int Scene::AddScene( const char* sceneFile, const ts_mat4& transform )
 	delete tmp;
 	return retVal;
 }
+int Scene::AddScene( const char* sceneFile, const float scale )
+{
+	ts_mat4 T;
+	T[0] = T[5] = T[10] = scale;
+	return AddScene( sceneFile, T );
+}
 int Scene::AddScene( const char* sceneFile, const char* dir, const ts_mat4& transform )
 {
 	// offsets: if we loaded an object before this one, indices should not start at 0.
@@ -2865,7 +2848,9 @@ int Scene::AddScene( const char* sceneFile, const char* dir, const ts_mat4& tran
 			ts_vec3 scale3( transform.cell[0], transform.cell[5], transform.cell[10] );
 			float scale = (scale3.x == scale3.y && scale3.y == scale3.z) ? scale3.x : 1.0f;
 			uint32_t meshId = AddMesh( sceneFile, dir, scale );
-			AddInstance( AddNode( new Node( meshId, transform * ts_mat4::scale( 1.0f / scale ) ) ) );
+			ts_mat4 S;
+			S[0] = S[5] = S[10] = 1.0f / scale;
+			AddInstance( AddNode( new Node( meshId, transform * S ) ) );
 			return retVal;
 		}
 		else if (extension4.compare( ".gltf" ) == 0)

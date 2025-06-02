@@ -21,5 +21,6 @@ using ts_uint4 = tinybvh::bvhuint4;
 using ts_vec2 = tinybvh::bvhvec2;
 using ts_vec3 = tinybvh::bvhvec3;
 using ts_vec4 = tinybvh::bvhvec4;
+using ts_mat4 = tinybvh::bvhmat4;
 }
 #include "tiny_scene.h" // very much in beta.

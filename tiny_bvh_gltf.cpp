@@ -15,6 +15,7 @@ using ts_uint4 = tinybvh::bvhuint4;
 using ts_vec2 = tinybvh::bvhvec2;
 using ts_vec3 = tinybvh::bvhvec3;
 using ts_vec4 = tinybvh::bvhvec4;
+using ts_mat4 = tinybvh::bvhmat4;
 }
 #include "tiny_scene.h"
 using namespace tinybvh;
@@ -38,7 +39,7 @@ void Init()
 {
 	// Load a scene from a GLTF file using tinyscene.
 	scene.SetBVHDefault( BVH_RIGID );
-	scene.AddScene( "./testdata/drone/scene.gltf", ts_mat4::scale( 0.1f ) );
+	scene.AddScene( "./testdata/drone/scene.gltf", 0.1f );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
 	// Load camera position / direction from file.
 	std::fstream t = std::fstream{ "camera.bin", t.binary | t.in };
