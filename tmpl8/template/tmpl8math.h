@@ -575,6 +575,7 @@ public:
 	mat4() = default;
 	__declspec(align(64)) float cell[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 	float& operator [] ( const int idx ) { return cell[idx]; }
+	const float& operator [] ( const int idx ) const { return cell[idx]; }
 	float operator()( const int i, const int j ) const { return cell[i * 4 + j]; }
 	float& operator()( const int i, const int j ) { return cell[i * 4 + j]; }
 	mat4& operator += ( const mat4& a )

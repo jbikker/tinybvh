@@ -320,11 +320,11 @@ using bvhuint4 = uint4;
 using bvhvec2 = float2;
 using bvhvec3 = float3;
 using bvhvec4 = float4;
+using bvhmat4 = mat4;
 }
 #include "tiny_ocl.h"
 #include "tiny_bvh.h"
 
-#ifndef GLTF_DEMO
 #define TINYSCENE_USE_CUSTOM_VECTOR_TYPES
 namespace tinyscene
 {
@@ -336,8 +336,8 @@ using ts_uint4 = uint4;
 using ts_vec2 = float2;
 using ts_vec3 = float3;
 using ts_vec4 = float4;
+using ts_mat4 = mat4;
 }
-#endif
 #define TINYSCENE_STBIMAGE_ALREADY_IMPLEMENTED
 #include "tiny_scene.h"
 

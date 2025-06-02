@@ -11,11 +11,23 @@
 #include "tiny_ocl.h"
 #define TINYBVH_IMPLEMENTATION
 #include "tiny_bvh.h"
-
 using namespace tinybvh;
 using namespace tinyocl;
 #ifdef GLTF_DEMO
 #define TINYSCENE_IMPLEMENTATION
+#define TINYSCENE_USE_CUSTOM_VECTOR_TYPES
+namespace tinyscene
+{
+using ts_int2 = int2;
+using ts_int3 = int3;
+using ts_uint2 = uint2;
+using ts_uint3 = uint3;
+using ts_uint4 = uint4;
+using ts_vec2 = float2;
+using ts_vec3 = float3;
+using ts_vec4 = float4;
+using ts_mat = mat4;
+}
 #include "tiny_scene.h"
 #include "gltfdemo.h"
 #else

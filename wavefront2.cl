@@ -3,6 +3,7 @@
 
 #pragma OPENCL EXTENSION cl_khr_global_int32_base_atomics : enable
 
+#define DEPRECATED_TLAS_PATH
 #include "traverse.cl"
 #include "tools.cl"
 
@@ -12,7 +13,7 @@
 #define MATERIAL_LIGHT		1	// material emits light - end of path
 #define MATERIAL_SPECULAR	2	// material is pure specular
 
-struct BLASInstance
+struct Instance
 {
 	float transform[16];
 	float invTransform[16];
@@ -29,9 +30,9 @@ global float4* bistroVerts;
 global float4* dragonNodes;
 global float4* dragonTris;
 global float4* dragonVerts;
-global struct BVHNodeAlt* tlasNodes;
-global uint* tlasIndices;
-global struct BLASInstance* instances;
+global struct BVHNode* tlasNodes;
+global uint* tlasIdx;
+global struct Instance* instances;
 global uint* blueNoise;
 global volatile int extendTasks, shadeTasks, connectTasks; // atomic counters
 const float3 lightColor = (float3)(25,25,22);
@@ -70,7 +71,7 @@ void kernel SetRenderData( int _primaryRayCount,
 	float4 _eye, float4 _p0, float4 _p1, float4 _p2, uint _frameIdx, uint _width, uint _height,
 	global float4* _bistroNodes, global float4* _bistroTris, global float4* _bistroVerts, 
 	global float4* _dragonNodes, global float4* _dragonTris, global float4* _dragonVerts, 
-	global struct BVHNodeAlt* _tlasNodes, global uint* _tlasIndices, global struct BLASInstance* _instances, 
+	global struct BVHNode* _tlasNodes, global uint* _tlasIndices, global struct Instance* _instances, 
 	global uint* _blueNoise
 )
 {
@@ -86,7 +87,7 @@ void kernel SetRenderData( int _primaryRayCount,
 	dragonTris = _dragonTris;
 	dragonVerts = _dragonVerts;
 	tlasNodes = _tlasNodes;
-	tlasIndices = _tlasIndices;
+	tlasIdx = _tlasIndices;
 	instances = _instances;
 	blueNoise = _blueNoise;
 	// initialize atomic counters
@@ -131,7 +132,7 @@ void kernel Extend( global struct PathState* raysIn )
 		const float4 O4 = raysIn[pathId].O;
 		const float4 D4 = raysIn[pathId].D;
 		const float4 rD4 = native_recip( D4 );
-		raysIn[pathId].hit = traverse_tlas( tlasNodes, tlasIndices, O4, D4, rD4, 1e30f );
+		raysIn[pathId].hit = traverse_tlas( O4, D4, rD4, 1e30f );
 	}
 }
 
@@ -181,7 +182,7 @@ void kernel Shade( global float4* accumulator,
 		uint instIdx = primIdx >> 24;
 		uint vertIdx = (primIdx & 0xffffff) * 3;
 		const global float4* vdata = instIdx == 0 ? bistroVerts : dragonVerts;
-		const global struct BLASInstance* inst = instances + instIdx;
+		const global struct Instance* inst = instances + instIdx;
 		float4 v0 = vdata[vertIdx];
 		uint materialType = as_uint( v0.w ) >> 24;
 		float brdfPDF = T4.w;
@@ -295,7 +296,7 @@ void kernel Connect( global float4* accumulator, global struct Potential* shadow
 		if (rayId < 0) break;
 		const float4 T4 = shadowIn[rayId].T, O4 = shadowIn[rayId].O, D4 = shadowIn[rayId].D;
 		const float4 rD4 = native_recip( D4 );
-		if (isoccluded_tlas( tlasNodes, tlasIndices, O4, D4, rD4, D4.w )) continue;
+		if (isoccluded_tlas( O4, D4, rD4, D4.w )) continue;
 		accumulator[as_uint( O4.w )] += T4;
 	}
 }

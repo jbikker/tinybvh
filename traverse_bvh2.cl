@@ -4,7 +4,7 @@
 // 
 // ============================================================================
 
-struct BVHNodeAlt
+struct BVHNode
 {
 	float4 lmin; // unsigned left in w
 	float4 lmax; // unsigned right in w
@@ -12,7 +12,7 @@ struct BVHNodeAlt
 	float4 rmax; // unsigned firstTri in w
 };
 
-uint RRScost_ailalaine( global struct BVHNodeAlt* altNode, global unsigned* idx, global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
+uint RRScost_ailalaine( global struct BVHNode* altNode, global unsigned* idx, global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// traverse BVH
 	float4 hit;
@@ -95,7 +95,7 @@ uint RRScost_ailalaine( global struct BVHNodeAlt* altNode, global unsigned* idx,
 	return (uint)cost;
 }
 
-float4 traverse_ailalaine( global struct BVHNodeAlt* altNode, global unsigned* idx, global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
+float4 traverse_ailalaine( global struct BVHNode* altNode, global unsigned* idx, global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// traverse BVH
 	float4 hit;
@@ -175,7 +175,7 @@ float4 traverse_ailalaine( global struct BVHNodeAlt* altNode, global unsigned* i
 	return hit;
 }
 
-bool isoccluded_ailalaine( global struct BVHNodeAlt* altNode, global unsigned* idx, global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
+bool isoccluded_ailalaine( global struct BVHNode* altNode, global unsigned* idx, global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// traverse BVH
 	unsigned node = 0, stack[STACK_SIZE], stackPtr = 0;
@@ -253,7 +253,7 @@ bool isoccluded_ailalaine( global struct BVHNodeAlt* altNode, global unsigned* i
 	return false;
 }
 
-void kernel batch_ailalaine( global struct BVHNodeAlt* altNode, global unsigned* idx, global float4* verts, global struct Ray* rayData )
+void kernel batch_ailalaine( global struct BVHNode* altNode, global unsigned* idx, global float4* verts, global struct Ray* rayData )
 {
 	// fetch ray
 	const unsigned threadId = get_global_id( 0 );
@@ -264,7 +264,7 @@ void kernel batch_ailalaine( global struct BVHNodeAlt* altNode, global unsigned*
 	rayData[threadId].hit = hit;
 }
 
-void kernel batch_ailalaine_rrs( global struct BVHNodeAlt* altNode, global unsigned* idx, global float4* verts, global struct Ray* rayData, global uint* rrsResult )
+void kernel batch_ailalaine_rrs( global struct BVHNode* altNode, global unsigned* idx, global float4* verts, global struct Ray* rayData, global uint* rrsResult )
 {
 	// fetch ray
 	const unsigned threadId = get_global_id( 0 );
