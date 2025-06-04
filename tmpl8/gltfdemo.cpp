@@ -158,6 +158,10 @@ void GLTFDemo::Init()
 	init->SetArguments( tlasNode, tlasIdx, instances, blasNode, blasIdx, blasTri, blasFatTri, blasOffsets,
 		materials, texels, Scene::sky->width, Scene::sky->height, skyPixels );
 	init->Run( 1 );
+
+	// set a suitable camera
+	eye = float3( -4.31f, 2.63f, 19.44f );
+	view = float3( 0.16f, -0.16f, -0.97f );
 }
 
 // -----------------------------------------------------------
@@ -185,7 +189,8 @@ bool GLTFDemo::UpdateCamera( float delta_time_s )
 	right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), view ) );
 	up = 0.8f * tinybvh_cross( view, right );
 	bvhvec3 C = eye + 2.0f * view;
-	p1 = C - right + up, p2 = C + right + up, p3 = C - right - up;
+	float aspect = 1.5f;
+	p1 = C - right * aspect + up, p2 = C + right * aspect + up, p3 = C - right * aspect - up;
 	return moved;
 }
 
