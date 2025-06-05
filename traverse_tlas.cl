@@ -12,9 +12,12 @@
 
 float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const float tmax )
 {
-	// traverse BVH
+	// initialize return data
 	float4 hit;
 	hit.x = tmax;
+	// safety net
+	if (isnan( O4.x + O4.y + O4.z + D4.x + D4.y + D4.z )) return hit;
+	// traverse BVH
 	unsigned node = 0, stack[STACK_SIZE], stackPtr = 0;
 	while (1)
 	{

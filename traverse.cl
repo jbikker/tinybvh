@@ -1,5 +1,13 @@
 // gpu-side code for ray traversal
 
+struct BVHNode
+{
+	float4 lmin; // unsigned left in w
+	float4 lmax; // unsigned right in w
+	float4 rmin; // unsigned triCount in w
+	float4 rmax; // unsigned firstTri in w
+};
+
 struct Ray
 {
 	// data is defined here as 16-byte values to encourage the compilers

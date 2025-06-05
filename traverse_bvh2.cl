@@ -4,15 +4,7 @@
 // 
 // ============================================================================
 
-struct BVHNode
-{
-	float4 lmin; // unsigned left in w
-	float4 lmax; // unsigned right in w
-	float4 rmin; // unsigned triCount in w
-	float4 rmax; // unsigned firstTri in w
-};
-
-uint RRScost_ailalaine( global struct BVHNode* altNode, global unsigned* idx, global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
+uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global unsigned* idx, const global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// traverse BVH
 	float4 hit;
@@ -23,8 +15,8 @@ uint RRScost_ailalaine( global struct BVHNode* altNode, global unsigned* idx, gl
 	{
 		// fetch the node
 		cost += 1.2f; // TODO: obtain somehow via tiny_bvh.h?
-		const float4 lmin = altNode[node].lmin, lmax = altNode[node].lmax;
-		const float4 rmin = altNode[node].rmin, rmax = altNode[node].rmax;
+		const float4 lmin = bvhNode[node].lmin, lmax = bvhNode[node].lmax;
+		const float4 rmin = bvhNode[node].rmin, rmax = bvhNode[node].rmax;
 		const unsigned triCount = as_uint( rmin.w );
 		if (triCount > 0)
 		{
@@ -95,7 +87,7 @@ uint RRScost_ailalaine( global struct BVHNode* altNode, global unsigned* idx, gl
 	return (uint)cost;
 }
 
-float4 traverse_ailalaine( global struct BVHNode* altNode, global unsigned* idx, global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
+float4 traverse_ailalaine( const global struct BVHNode* bvhNode, const global unsigned* idx, const global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// traverse BVH
 	float4 hit;
@@ -104,8 +96,8 @@ float4 traverse_ailalaine( global struct BVHNode* altNode, global unsigned* idx,
 	while (1)
 	{
 		// fetch the node
-		const float4 lmin = altNode[node].lmin, lmax = altNode[node].lmax;
-		const float4 rmin = altNode[node].rmin, rmax = altNode[node].rmax;
+		const float4 lmin = bvhNode[node].lmin, lmax = bvhNode[node].lmax;
+		const float4 rmin = bvhNode[node].rmin, rmax = bvhNode[node].rmax;
 		const unsigned triCount = as_uint( rmin.w );
 		if (triCount > 0)
 		{
@@ -175,15 +167,15 @@ float4 traverse_ailalaine( global struct BVHNode* altNode, global unsigned* idx,
 	return hit;
 }
 
-bool isoccluded_ailalaine( global struct BVHNode* altNode, global unsigned* idx, global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
+bool isoccluded_ailalaine( const global struct BVHNode* bvhNode, const global unsigned* idx, const global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// traverse BVH
 	unsigned node = 0, stack[STACK_SIZE], stackPtr = 0;
 	while (1)
 	{
 		// fetch the node
-		const float4 lmin = altNode[node].lmin, lmax = altNode[node].lmax;
-		const float4 rmin = altNode[node].rmin, rmax = altNode[node].rmax;
+		const float4 lmin = bvhNode[node].lmin, lmax = bvhNode[node].lmax;
+		const float4 rmin = bvhNode[node].rmin, rmax = bvhNode[node].rmax;
 		const unsigned triCount = as_uint( rmin.w );
 		if (triCount > 0)
 		{
@@ -253,23 +245,23 @@ bool isoccluded_ailalaine( global struct BVHNode* altNode, global unsigned* idx,
 	return false;
 }
 
-void kernel batch_ailalaine( global struct BVHNode* altNode, global unsigned* idx, global float4* verts, global struct Ray* rayData )
+void kernel batch_ailalaine( const global struct BVHNode* bvhNode, const global unsigned* idx, const global float4* verts, global struct Ray* rayData )
 {
 	// fetch ray
 	const unsigned threadId = get_global_id( 0 );
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	float4 hit = traverse_ailalaine( altNode, idx, verts, O, D, rD, 1e30f );
+	float4 hit = traverse_ailalaine( bvhNode, idx, verts, O, D, rD, 1e30f );
 	rayData[threadId].hit = hit;
 }
 
-void kernel batch_ailalaine_rrs( global struct BVHNode* altNode, global unsigned* idx, global float4* verts, global struct Ray* rayData, global uint* rrsResult )
+void kernel batch_ailalaine_rrs( const global struct BVHNode* bvhNode, const global unsigned* idx, const global float4* verts, global struct Ray* rayData, global uint* rrsResult )
 {
 	// fetch ray
 	const unsigned threadId = get_global_id( 0 );
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	rrsResult[threadId] = RRScost_ailalaine( altNode, idx, verts, O, D, rD, 1e30f );
+	rrsResult[threadId] = RRScost_ailalaine( bvhNode, idx, verts, O, D, rD, 1e30f );
 }

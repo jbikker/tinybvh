@@ -4,6 +4,14 @@ struct Ray
 	float4 hit; // 16 byte
 };
 
+struct BVHNode
+{
+	float4 lmin; // unsigned left in w
+	float4 lmax; // unsigned right in w
+	float4 rmin; // unsigned triCount in w
+	float4 rmax; // unsigned firstTri in w
+};
+
 struct Instance
 {
 	float transform[16];
@@ -60,7 +68,7 @@ global uint2 skySize;				// sky dome image data size
 global float* skyPixels;			// HDR sky image data, 12 bytes per pixel
 
 // traversal kernels.
-#define STACK_SIZE 64
+#define STACK_SIZE 32
 #include "tools.cl"
 #include "traverse_bvh2.cl"
 #include "traverse_tlas.cl"
@@ -122,7 +130,7 @@ float4 Trace( struct Ray ray )
 		float3 iN = (hit.y * tri->vN1 + hit.z * tri->vN2 + (1 - hit.y - hit.z) * tri->vN0).xyz;
 		float3 N = (float3)( tri->vN0.w, tri->vN1.w, tri->vN2.w );
 		struct Material* material = materials + tri->material;
-		float3 albedo;
+		float3 albedo = (float3)(1);
 		float tu = hit.y * tri->u1 + hit.z * tri->u2 + (1 - hit.y - hit.z) * tri->u0;
 		float tv = hit.y * tri->v1 + hit.z * tri->v2 + (1 - hit.y - hit.z) * tri->v0;
 		tu -= floor( tu ), tv -= floor( tv );
@@ -149,17 +157,15 @@ float4 Trace( struct Ray ray )
 
 		// direct light
 		radiance += albedo * max( 0.2f, dot( iN, L ) );
-
+		
 		// indirect light
-		if (depth == 0)
-		{
-			float3 R = ray.D.xyz - 2 * dot( iN, ray.D.xyz ) * iN;
-			float3 I = ray.O.xyz + ray.D.xyz * ray.hit.x;
-			ray.O = (float4)( I + R * 0.0001f, 1 );
-			ray.D = (float4)( R, 0 );
-			ray.rD = (float4)(1.0f / R.x, 1.0f / R.y, 1.0f / R.z, 1 );
-			throughput *= albedo * dot( R, iN ) * 0.5f;
-		}
+		if (depth == 1) break;
+		float3 R = ray.D.xyz - 2 * dot( iN, ray.D.xyz ) * iN;
+		float3 I = ray.O.xyz + ray.D.xyz * ray.hit.x;
+		ray.O = (float4)( I + R * 0.0001f, 1 );
+		ray.D = (float4)( R, 0 );
+		ray.rD = (float4)(1.0f / R.x, 1.0f / R.y, 1.0f / R.z, 1 );
+		throughput *= albedo * dot( R, iN ) * 0.5f;
 	}
 	return (float4)( radiance, 1.0f );
 }
