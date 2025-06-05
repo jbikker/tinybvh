@@ -37,6 +37,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_minimal_gpu", "vcp
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_gltf_demo", "tmpl8\tiny_bvh_gltf_demo.vcxproj", "{8C3F9DAF-7FEC-4884-957F-DAAA0C42FF17}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_gl_compute", "tmpl8_compute\tiny_bvh_gl_compute.vcxproj", "{D8E00C08-0398-48F6-B92F-A190162C404B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -181,6 +183,14 @@ Global
 		{8C3F9DAF-7FEC-4884-957F-DAAA0C42FF17}.Release|x64.Build.0 = Release|x64
 		{8C3F9DAF-7FEC-4884-957F-DAAA0C42FF17}.Release|x86.ActiveCfg = Release|x64
 		{8C3F9DAF-7FEC-4884-957F-DAAA0C42FF17}.Release|x86.Build.0 = Release|x64
+		{D8E00C08-0398-48F6-B92F-A190162C404B}.Debug|x64.ActiveCfg = Debug|x64
+		{D8E00C08-0398-48F6-B92F-A190162C404B}.Debug|x64.Build.0 = Debug|x64
+		{D8E00C08-0398-48F6-B92F-A190162C404B}.Debug|x86.ActiveCfg = Debug|x64
+		{D8E00C08-0398-48F6-B92F-A190162C404B}.Debug|x86.Build.0 = Debug|x64
+		{D8E00C08-0398-48F6-B92F-A190162C404B}.Release|x64.ActiveCfg = Release|x64
+		{D8E00C08-0398-48F6-B92F-A190162C404B}.Release|x64.Build.0 = Release|x64
+		{D8E00C08-0398-48F6-B92F-A190162C404B}.Release|x86.ActiveCfg = Release|x64
+		{D8E00C08-0398-48F6-B92F-A190162C404B}.Release|x86.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
