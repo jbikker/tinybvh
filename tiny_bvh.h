@@ -6879,8 +6879,8 @@ inline float32x4x2_t _mm256_set1_ps( float v )
 
 inline float32x4x2_t _mm256_and_ps( float32x4x2_t v0, float32x4x2_t v1 )
 {
-	float32x4_t r0 = vandq_s32( v0.val[0], v1.val[0] );
-	float32x4_t r1 = vandq_s32( v0.val[1], v1.val[1] );
+	float32x4_t r0 = vreinterpret_f32_u32( vandq_s32( vreinterpret_u32_f32( v0.val[0] ), vreinterpret_u32_f32( v1.val[0] ) ) );
+	float32x4_t r1 = vreinterpret_f32_u32( vandq_s32( vreinterpret_u32_f32( v0.val[1] ), vreinterpret_u32_f32( v1.val[1] ) ) );
 	return float32x4x2_t{ r0, r1 };
 }
 
@@ -6893,8 +6893,8 @@ inline float32x4x2_t _mm256_max_ps( float32x4x2_t v0, float32x4x2_t v1 )
 
 inline float32x4x2_t _mm256_xor_ps( float32x4x2_t v0, float32x4x2_t v1 )
 {
-	float32x4_t r0 = veorq_s32( v0.val[0], v1.val[0] );
-	float32x4_t r1 = veorq_s32( v0.val[1], v1.val[1] );
+	float32x4_t r0 = vreinterpret_f32_u32( veorq_s32( vreinterpret_u32_f32( v0.val[0] ), vreinterpret_u32_f32( v1.val[0] ) ) );
+	float32x4_t r1 = vreinterpret_f32_u32( veorq_s32( vreinterpret_u32_f32( v0.val[1] ), vreinterpret_u32_f32( v1.val[1] ) ) );
 	return float32x4x2_t{ r0, r1 };
 }
 
