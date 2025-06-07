@@ -117,12 +117,6 @@ using namespace Tmpl8;
 #include <unistd.h>
 #endif
 
-// OpenCL headers
-// #define CL_USE_DEPRECATED_OPENCL_2_0_APIS // safe; see https://stackoverflow.com/a/28500846
-#define CL_TARGET_OPENCL_VERSION 300
-#include "cl/cl.h"
-#include <cl/cl_gl.h>
-
 // GLFW
 #define GLFW_USE_CHDIR 0
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -134,8 +128,7 @@ using namespace Tmpl8;
 // zlib
 #include "zlib.h"
 
-// opencl & opencl
-#include "opencl.h"
+// opencl
 #include "opengl.h"
 
 // fatal error reporting (with a pretty window)

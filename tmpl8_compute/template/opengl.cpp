@@ -21,12 +21,12 @@ void _CheckGL( const char* f, int l )
 	}
 }
 
-GLuint CreateVBO( const GLfloat* data, const uint size )
+GLuint CreateVBO( const GLfloat* d, const uint size )
 {
 	GLuint id;
 	glGenBuffers( 1, &id );
 	glBindBuffer( GL_ARRAY_BUFFER, id );
-	glBufferData( GL_ARRAY_BUFFER, size, data, GL_STATIC_DRAW );
+	glBufferData( GL_ARRAY_BUFFER, size, d, GL_STATIC_DRAW );
 	CheckGL();
 	return id;
 }
@@ -68,7 +68,7 @@ void DrawQuad()
 		static const GLfloat verts[] = { -1, 1, 1, 1, -1, -1, 1, 1, -1, -1, 1, -1 };
 		GLuint vbo = CreateVBO( verts, sizeof( verts ) );
 		glGenVertexArrays( 1, &vao );
-		glBindVertexArray( vbo );
+		glBindVertexArray( vao );
 		glEnableVertexAttribArray( 0 );
 		glBindBuffer( GL_ARRAY_BUFFER, vbo );
 		glVertexAttribPointer( 0, 2, GL_FLOAT, GL_FALSE, 0, NULL );
