@@ -6900,6 +6900,10 @@ inline float32x4x2_t _mm256_xor_ps( float32x4x2_t v0, float32x4x2_t v1 )
 
 void BVH::BuildNEON()
 {
+#if 1
+	// NEON code needs an overhaul.
+	Build();
+#else
 	// aligned data
 	ALIGNED( 64 ) float32x4x2_t binbox[3 * AVXBINS];            // 768 bytes
 	ALIGNED( 64 ) float32x4x2_t binboxOrig[3 * AVXBINS];        // 768 bytes
@@ -7021,6 +7025,7 @@ void BVH::BuildNEON()
 	refittable = true; // not using spatial splits: can refit this BVH
 	may_have_holes = false; // the AVX builder produces a continuous list of nodes
 	usedNodes = newNodePtr;
+#endif
 }
 
 // Traverse the second alternative BVH layout (ALT_SOA).
