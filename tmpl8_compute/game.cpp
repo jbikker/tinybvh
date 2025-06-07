@@ -10,6 +10,8 @@
 // -----------------------------------------------------------
 void Game::Init()
 {
+	// create a sweet compute shader, based on stackoverflow.com/questions/51245319
+	// please note the alternative includes in template.h!
 	int compute = glCreateShader( GL_COMPUTE_SHADER );
 #ifdef BASIC_SHADER
 	const string shaderSource = TextFileRead( "shaders/compute.comp" );
@@ -43,31 +45,36 @@ void Game::Init()
 		printf( "%s\n", log );
 		exit( 0 /* like I said, graceful */ );
 	}
-	// prepare some data for the compute shader
-	uint inputBuffer;
-	uint numbers[10] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-	glGenBuffers( 1, &inputBuffer );
-	glBindBuffer( GL_SHADER_STORAGE_BUFFER, inputBuffer );
-	glBufferData( GL_SHADER_STORAGE_BUFFER, sizeof( uint ) * 10, (void*)numbers, GL_STREAM_COPY );
-	glBindBufferBase( GL_SHADER_STORAGE_BUFFER, 1, inputBuffer );
-	uint outputBuffer;
-	glGenBuffers( 0, &outputBuffer );
-	glBindBuffer( GL_SHADER_STORAGE_BUFFER, outputBuffer );
-	glBindBufferBase( GL_SHADER_STORAGE_BUFFER, 0, outputBuffer );
-	glBufferData( GL_SHADER_STORAGE_BUFFER, sizeof( GLuint ) * 10, nullptr, GL_DYNAMIC_READ );
-	// run the shader
+	// prepare output buffer for voronoi noise computation
 	glUseProgram( computeProgram );
-	glDispatchCompute( 10, 1, 1 );
-	// get the results
-	glMemoryBarrier( GL_SHADER_STORAGE_BARRIER_BIT );
-	uint* results = (uint*)glMapBufferRange( GL_SHADER_STORAGE_BUFFER, 0, sizeof( GLuint ) * 10, GL_MAP_READ_BIT );
-	printf( "First result: %i\n", results[0] );
-	glUnmapBuffer( GL_SHADER_STORAGE_BUFFER );
+	glGenBuffers( 1, &proceduralData );
+	glBindBuffer( GL_SHADER_STORAGE_BUFFER, proceduralData );
+	glBindBufferBase( GL_SHADER_STORAGE_BUFFER, 0, proceduralData );
+	glBufferData( GL_SHADER_STORAGE_BUFFER, SCRWIDTH * SCRHEIGHT * 4, nullptr, GL_DYNAMIC_READ );
+	glUniform2i( glGetUniformLocation( computeProgram, "screenSize" ), SCRWIDTH, SCRHEIGHT );
+	screen->Clear( 0 );
 }
 
 // -----------------------------------------------------------
-// Main application tick function - Executed once per frame
+// Main application tick function
 // -----------------------------------------------------------
-void Game::Tick( float /* deltaTime */ )
+void Game::Tick( float deltaTime )
 {
+	Timer t;
+	t.reset();
+	glUseProgram( computeProgram );
+	glDispatchCompute( SCRWIDTH / 32, SCRHEIGHT, 1 );
+	// get the results
+	glMemoryBarrier( GL_SHADER_STORAGE_BARRIER_BIT );
+	uint* results = (uint*)glMapBufferRange( GL_SHADER_STORAGE_BUFFER, 0, SCRWIDTH * SCRHEIGHT * 4, GL_MAP_READ_BIT );
+	for( int y = 0; y < SCRHEIGHT; y++ )
+	{
+		for( int x = 0; x < SCRWIDTH; x++ )
+		{
+			int v = results[x + y * SCRWIDTH] & 255;
+			screen->pixels[x + y * SCRWIDTH] = v + (v << 8) + (v << 16);
+		}
+	}
+	glUnmapBuffer( GL_SHADER_STORAGE_BUFFER );
+	printf( "Duration: %6.1fms\n", t.elapsed() * 1000.0f );
 }
