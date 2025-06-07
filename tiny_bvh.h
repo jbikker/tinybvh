@@ -6931,7 +6931,7 @@ void BVH::BuildNEON()
 			// find optimal object split
 			const float32x4_t d4 = vbslq_f32( vshrq_n_u32( vreinterpretq_u32_f32( mask3 ), 31 ), vsubq_f32( node4[1], node4[0] ), min1 );
 			const float32x4_t nmin4 = vmulq_f32( vreinterpretq_f32_s32( vandq_s32( vreinterpretq_s32_f32( node4[0] ), vreinterpretq_s32_f32( mask3 ) ) ), two4 );
-			const float32x4_t rpd4 = vandq_s32( vreinterpretq_s32_f32( vdivq_f32( binmul3, d4 ) ), vmvnq_s32( vreinterpretq_s32_u32( vceqq_f32( d4, vdupq_n_f32( 0 ) ) ) ) );
+			const float32x4_t rpd4 = vreinterpretq_f32_s32( vandq_s32( vreinterpretq_s32_f32( vdivq_f32( binmul3, d4 ) ), vmvnq_s32( vreinterpretq_s32_u32( vceqq_f32( d4, vdupq_n_f32( 0 ) ) ) ) ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
 			uint32_t fi = primIdx[node.leftFirst];
