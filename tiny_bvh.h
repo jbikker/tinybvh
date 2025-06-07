@@ -91,7 +91,7 @@ THE SOFTWARE.
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
 #define TINY_BVH_VERSION_MINOR	5
-#define TINY_BVH_VERSION_SUB	6
+#define TINY_BVH_VERSION_SUB	7
 
 // Run-time checks; disabled by default.
 // #define PARANOID // checks out-of-bound access of slices
