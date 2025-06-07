@@ -1483,8 +1483,8 @@ loop: R = bvhvec3( tinybvh_rndfloat( s ) - 0.5f, tinybvh_rndfloat( s ) * 0.5f, t
 
 // Fallbacks to be used in the absence of HW SIMD support.
 #ifndef BVH_USESSE
-int32_t BVH4_CPU::Intersect( Ray& ray ) const { BVH_FATAL_ERROR( "BVH4_CPU::Intersect requires SSE. " ); }
-bool BVH4_CPU::IsOccluded( const Ray& ray ) const { BVH_FATAL_ERROR( "BVH4_CPU::IsOccluded requires SSE. " ); }
+int32_t BVH4_CPU::Intersect( Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::Intersect requires SSE. " ); }
+bool BVH4_CPU::IsOccluded( const Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::IsOccluded requires SSE. " ); }
 #endif
 #if !defined BVH_USEAVX
 void BVH::BuildAVX( const bvhvec4*, const uint32_t ) { BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX." ); }
