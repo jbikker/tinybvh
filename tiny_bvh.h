@@ -6929,7 +6929,7 @@ void BVH::BuildNEON()
 			BVHNode& node = bvhNode[nodeIdx];
 			float32x4_t* node4 = (float32x4_t*)&bvhNode[nodeIdx];
 			// find optimal object split
-			const float32x4_t d4 = vbslq_f32( vshrq_n_s32( vreinterpretq_s32_f32( mask3 ), 31 ), vsubq_f32( node4[1], node4[0] ), min1 );
+			const float32x4_t d4 = vbslq_f32( vshrq_n_u32( vreinterpretq_u32_f32( mask3 ), 31 ), vsubq_f32( node4[1], node4[0] ), min1 );
 			const float32x4_t nmin4 = vmulq_f32( vreinterpretq_f32_s32( vandq_s32( vreinterpretq_s32_f32( node4[0] ), vreinterpretq_s32_f32( mask3 ) ) ), two4 );
 			const float32x4_t rpd4 = vandq_s32( vdivq_f32( binmul3, d4 ), vmvnq_u32( vceqq_f32( d4, vdupq_n_f32( 0 ) ) ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
