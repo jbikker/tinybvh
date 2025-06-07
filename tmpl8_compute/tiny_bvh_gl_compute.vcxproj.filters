@@ -38,6 +38,9 @@
     <ClInclude Include="template\tmpl8math.h">
       <Filter>template</Filter>
     </ClInclude>
+    <ClInclude Include="..\tiny_bvh.h">
+      <Filter>tiny</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="README.md">
@@ -46,10 +49,7 @@
     <None Include="template\LICENSE">
       <Filter>template</Filter>
     </None>
-    <None Include="shaders\compute.comp">
-      <Filter>shaders</Filter>
-    </None>
-    <None Include="shaders\voronoi.comp">
+    <None Include="shaders\traverse.comp">
       <Filter>shaders</Filter>
     </None>
   </ItemGroup>
@@ -59,6 +59,9 @@
     </Filter>
     <Filter Include="shaders">
       <UniqueIdentifier>{ac2183f4-c259-4259-805e-25c3121d7feb}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tiny">
+      <UniqueIdentifier>{769d0bb7-53b6-4091-8dcb-f9171527615d}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

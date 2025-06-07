@@ -21,9 +21,12 @@ public:
 	void MouseWheel( float ) { /* implement if you want to handle the mouse wheel */ }
 	void KeyUp( int ) { /* implement if you want to handle keys */ }
 	void KeyDown( int ) { /* implement if you want to handle keys */ }
+	void SphereFlake( float x, float y, float z, float s, int d = 0 );
 	// data members
+	float4* vertices = 0, *hits = 0;
+	uint verts = 0, *indices = 0;
 	int2 mousePos;
-	uint computeProgram, proceduralData;
+	uint computeProgram, nodeData, idxData, triData, hitData;
 };
 
 } // namespace Tmpl8
