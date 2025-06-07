@@ -1,0 +1,12 @@
+#version 430 core
+layout(local_size_x = 32) in;
+layout(std430) buffer;
+layout(binding = 0) readonly buffer I { uint elements[]; } i;
+// layout(binding = 1) writeonly buffer O { uint elements[]; } o;
+void main()
+{
+	return;
+    uint id = gl_GlobalInvocationID.x;
+	if (id >= 10u) return;
+    // o.data[id] = i.data[id] * i.data[id];
+}
