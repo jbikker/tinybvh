@@ -315,13 +315,30 @@ namespace tinybvh
 using bvhint2 = int2;
 using bvhint3 = int3;
 using bvhuint2 = uint2;
+using bvhuint3 = uint3;
+using bvhuint4 = uint4;
 using bvhvec2 = float2;
 using bvhvec3 = float3;
 using bvhvec4 = float4;
-// using bvhdbl3 = double3;
+using bvhmat4 = mat4;
 }
-
 #include "tiny_ocl.h"
 #include "tiny_bvh.h"
+
+#define TINYSCENE_USE_CUSTOM_VECTOR_TYPES
+namespace tinyscene
+{
+using ts_int2 = int2;
+using ts_int3 = int3;
+using ts_uint2 = uint2;
+using ts_uint3 = uint3;
+using ts_uint4 = uint4;
+using ts_vec2 = float2;
+using ts_vec3 = float3;
+using ts_vec4 = float4;
+using ts_mat4 = mat4;
+}
+#define TINYSCENE_STBIMAGE_ALREADY_IMPLEMENTED
+#include "tiny_scene.h"
 
 // EOF

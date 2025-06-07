@@ -1,16 +1,9 @@
-#define FENSTER_APP_IMPLEMENTATION
 #define SCRWIDTH 800
 #define SCRHEIGHT 600
-#include "external/fenster.h" // https://github.com/zserge/fenster
-
-#define NO_DOUBLE_PRECISION_SUPPORT
-#define TINYBVH_IMPLEMENTATION
-#define INST_IDX_BITS 8 // override default; space for 256 instances.
+#include "external/fenster.h"
 #include "tiny_bvh.h"
 #include <fstream>
 #include <thread>
-
-#define TINYSCENE_IMPLEMENTATION
 #define TINYSCENE_USE_CUSTOM_VECTOR_TYPES
 namespace tinyscene // override tinyscene's vector types with tinybvh's for easier interop
 {
@@ -22,29 +15,41 @@ using ts_uint4 = tinybvh::bvhuint4;
 using ts_vec2 = tinybvh::bvhvec2;
 using ts_vec3 = tinybvh::bvhvec3;
 using ts_vec4 = tinybvh::bvhvec4;
+using ts_mat4 = tinybvh::bvhmat4;
 }
-#include "tiny_scene.h" // very much in beta.
-
+#include "tiny_scene.h"
 using namespace tinybvh;
+using namespace tinyscene;
 
-struct Sphere { bvhvec3 pos; float r; };
+// scene data
+Scene scene;
 
-tinyscene::Scene scene;
-BVH8_CPU legocar;
-static std::atomic<int> tileIdx( 0 );
-static unsigned threadCount = std::thread::hardware_concurrency();
+// useful constants
+#define PI			3.14159265358979323846264f
+#define INVPI		0.31830988618379067153777f
+#define INV2PI		0.15915494309189533576888f
+#define TWOPI		6.28318530717958647692528f
 
-// setup view pyramid for a pinhole camera
+// view pyramid for a pinhole camera
 static bvhvec3 eye( -15.24f, 21.5f, 2.54f ), p1, p2, p3;
 static bvhvec3 view = tinybvh_normalize( bvhvec3( 0.826f, -0.438f, -0.356f ) );
 
+// Application start: Initialize scene.
 void Init()
 {
-	int carid = scene.AddMesh( "./testdata/legocar.obj", 20 );
-	tinyscene::Mesh* mesh = scene.meshPool[carid];
-	legocar.Build( mesh->vertices.data(), (unsigned)mesh->triangles.size() );
+	// Load a scene from a GLTF file using tinyscene.
+	scene.SetBVHDefault( BVH_RIGID );
+	scene.AddScene( "./testdata/drone/scene.gltf", 0.1f );
+	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
+	// Load camera position / direction from file.
+	std::fstream t = std::fstream{ "camera.bin", t.binary | t.in };
+	if (!t.is_open()) return;
+	t.read( (char*)&eye, sizeof( eye ) );
+	t.read( (char*)&view, sizeof( view ) );
+	t.close();
 }
 
+// Camera interaction: WASD+RF for translation; cursor keys for rotation.
 bool UpdateCamera( float delta_time_s, fenster& f )
 {
 	bvhvec3 right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), view ) ), up = 0.8f * tinybvh_cross( view, right );
@@ -63,46 +68,133 @@ bool UpdateCamera( float delta_time_s, fenster& f )
 	return moved > 0;
 }
 
-void TraceWorkerThread( uint32_t* buf, int threadIdx )
+// Helper function to obtain HDR sky sample from the loaded scene.
+bvhvec3 SampleSky( const Ray& ray )
 {
-	const int xtiles = SCRWIDTH / 20, ytiles = SCRHEIGHT / 20, tiles = xtiles * ytiles;
-	int tile = threadIdx;
-	while (tile < tiles)
-	{
-		const int tx = tile % xtiles, ty = tile / xtiles;
-		const bvhvec3 L = tinybvh_normalize( bvhvec3( 1, 2, 3 ) );
-		for (int y = 0; y < 20; y++) for (int x = 0; x < 20; x++)
-		{
-			// setup primary ray
-			const int pixel_x = tx * 20 + x, pixel_y = ty * 20 + y;
-			const float u = (float)pixel_x / SCRWIDTH, v = (float)pixel_y / SCRHEIGHT;
-			const bvhvec3 D = tinybvh_normalize( p1 + u * (p2 - p1) + v * (p3 - p1) - eye );
-			Ray ray( eye, D );
-			legocar.Intersect( ray );
-			if (ray.hit.t >= 10000) continue;
-			uint32_t primIdx = ray.hit.prim & PRIM_IDX_MASK;
-			tinyscene::FatTri& tri = scene.meshPool[0]->triangles[primIdx];
-			bvhvec3 N( tri.Nx, tri.Ny, tri.Nz );
-			if (tinybvh_dot( N, ray.D ) > 0) N = -N;
-			int c = (int)(255.0f * fabs( N.y ));
-			buf[pixel_x + pixel_y * SCRWIDTH] = c + (c << 8) + (c << 16);
-		}
-		tile = tileIdx++;
-	}
+	SkyDome* sky = Scene::sky;
+	if (!sky) return 0;
+	const float p = atan2f( ray.D.z, ray.D.x );
+	const uint32_t u = (uint32_t)(sky->width * (p + (p < 0 ? PI * 2 : 0)) * INV2PI - 0.5f);
+	const uint32_t v = (uint32_t)(sky->height * acosf( ray.D.y ) * INVPI - 0.5f);
+	const uint32_t idx = tinybvh_min( u + v * sky->width, (uint32_t)(sky->width * sky->height - 1) );
+	const bvhvec3 sample = sky->pixels[idx];
+	return bvhvec3( sample.z, sample.y, sample.x );
 }
 
+// Helper function to obtain detailed shading data for the hitpoint.
+void GetShadingData( const Ray& ray, bvhvec3& albedo, bvhvec3& N, bvhvec3& iN )
+{
+	const uint32_t primIdx = ray.hit.prim;
+	const uint32_t instIdx = ray.hit.inst;
+	const BLASInstance& instance = scene.instPool[instIdx];
+	const uint32_t meshIdx = instance.blasIdx;
+	const FatTri& triangle = scene.meshPool[meshIdx]->triangles[primIdx];
+	const uint32_t matIdx = triangle.material;
+	const Material* material = Scene::materials[matIdx];
+	// albedo at hit point - ignoring detail textures and MIP-maps for now.
+	const float u = ray.hit.u, v = ray.hit.v; // barycentrics
+	float tu = u * triangle.u1 + v * triangle.u2 + (1 - u - v) * triangle.u0;
+	float tv = u * triangle.v1 + v * triangle.v2 + (1 - u - v) * triangle.v0;
+	tu -= floorf( tu ), tv -= floorf( tv );
+	if (material->color.textureID == -1) albedo = material->color.value; else
+	{
+		Texture* tex = Scene::textures[material->color.textureID];
+		const int iu = (int)(tu * tex->width);
+		const int iv = (int)(tv * tex->height);
+		if (tex->fdata) /* HDR */ albedo = tex->fdata[iu + iv * tex->width]; else
+		{
+			const ts_uchar4 pixel = tex->idata[iu + iv * tex->width];
+			albedo = bvhvec3( (float)pixel.x, (float)pixel.y, (float)pixel.z ) * (1.0f / 256.0f);
+		}
+	}
+	// geometric normal, transformed to world space
+	N = bvhvec3( triangle.Nx, triangle.Ny, triangle.Nz );
+	N = tinybvh_normalize( tinybvh_transform_vector( N, instance.transform ) );
+	if (tinybvh_dot( N, ray.D ) > 0) N *= -1;
+	// interpolated normal, modified by normal map, transformed to world space
+	iN = u * triangle.vN1 + v * triangle.vN2 + (1 - u - v) * triangle.vN0;
+	if (material->normals.textureID != -1)
+	{
+		Texture* tex = Scene::textures[material->normals.textureID];
+		const int iu = (int)(tu * tex->width);
+		const int iv = (int)(tv * tex->height);
+		const ts_uchar4 pixel = tex->idata[iu + iv * tex->width];
+		bvhvec3 mN( (float)pixel.x, (float)pixel.y, (float)pixel.z );
+		mN *= 1.0f / 128.0f, mN += -1.0f;
+		iN = mN.x * triangle.T + mN.y * triangle.B + mN.z * iN;
+	}
+	iN = tinybvh_normalize( tinybvh_transform_vector( iN, instance.transform ) );
+	if (tinybvh_dot( iN, N ) < 0) iN *= -1;
+}
+
+// Main ray tracing function: Calculates the (floating point) color for a pixel.
+bvhvec3 Trace( Ray& ray, const int depth = 0 )
+{
+	Scene::tlas->Intersect( ray );
+	if (ray.hit.t >= 10000) return SampleSky( ray );
+	bvhvec3 albedo, N, iN;
+	GetShadingData( ray, albedo, N, iN );
+	static bvhvec3 L = tinybvh_normalize( bvhvec3( 2, 4, 5 ) );
+	const bvhvec3 R = ray.D - 2 * tinybvh_dot( iN, ray.D ) * iN;
+	bvhvec3 indirect( 0 );
+	if (depth == 0)
+	{
+		const bvhvec3 I = ray.O + ray.D * ray.hit.t;
+		Ray r( I + N * 0.0001f, R );
+		indirect = Trace( r, 1 );
+	}
+	return albedo * (0.5f * indirect + tinybvh_max( 0.2f, tinybvh_dot( iN, L ) ));
+	// return (iN + 1) * 0.5f;
+}
+
+// Render 20x20 pixel tiles using all cores.
+static std::atomic<int> jobCount( 0 );
+void WorkerThread( uint32_t* buf )
+{
+	int xtiles = SCRWIDTH / 20, ytiles = SCRHEIGHT / 20, tile;
+tileloop:
+	if ((tile = --jobCount) < 0) return; else tile = (xtiles * ytiles - 1) - tile;
+	const int tx = tile % xtiles, ty = tile / xtiles;
+	for (int y = 0; y < 20; y++) for (int x = 0; x < 20; x++) // trace 400 primary rays
+	{
+		const int pixelx = tx * 20 + x, pixely = ty * 20 + y;
+		const float u = (float)pixelx / SCRWIDTH, v = (float)pixely / SCRHEIGHT;
+		const bvhvec3 D = tinybvh_normalize( p1 + u * (p2 - p1) + v * (p3 - p1) - eye );
+		Ray ray( eye, D );
+		const bvhvec3 E = tinybvh_min( Trace( ray ), bvhvec3( 1 ) ) * 255.0f;
+		buf[pixelx + pixely * SCRWIDTH] = (int)E.x + ((int)E.y << 8) + ((int)E.z << 16);
+	}
+	goto tileloop;
+}
+
+// Application Tick, exectuted once per frame.
 void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 {
+	static unsigned threadCount = std::thread::hardware_concurrency();
 	UpdateCamera( delta_time_s, f );
-	for (int i = 0; i < SCRWIDTH * SCRHEIGHT; i++) buf[i] = 0xaaaaff;
-	tileIdx = threadCount;
+	scene.UpdateSceneGraph( delta_time_s );
+	jobCount = SCRWIDTH * SCRHEIGHT / 400;
 	std::vector<std::thread> threads;
 #ifdef _DEBUG
-	for (uint32_t i = 0; i < threadCount; i++) TraceWorkerThread( buf, i );
+	for (unsigned i = 0; i < threadCount; i++) WorkerThread( buf ); // single thread in debug.
 #else
-	for (uint32_t i = 0; i < threadCount; i++) threads.emplace_back( &TraceWorkerThread, buf, i );
+	for (unsigned i = 0; i < threadCount; i++) threads.emplace_back( &WorkerThread, buf );
 #endif
 	for (auto& thread : threads) thread.join();
+	// print frame time / rate in window title
+	char title[50];
+	static float fps = 20;
+	fps = 0.98f * fps + 0.02f * (1.0f / delta_time_s);
+	sprintf( title, "tiny_bvh %.2f Hz", fps );
+	fenster_update_title( &f, title );
 }
 
-void Shutdown() { /* nothing here. */ }
+// Application Shutdown.
+void Shutdown()
+{
+	// save camera position / direction to file
+	std::fstream s = std::fstream{ "camera.bin", s.binary | s.out };
+	s.write( (char*)&eye, sizeof( eye ) );
+	s.write( (char*)&view, sizeof( view ) );
+	s.close();
+}

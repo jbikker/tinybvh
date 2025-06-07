@@ -41,10 +41,13 @@ THE SOFTWARE.
 //     using bvhint2 = math::int2;
 //     using bvhint3 = math::int3;
 //     using bvhuint2 = math::uint2;
+//     using bvhuint3 = math::uint3;
+//     using bvhuint4 = math::uint4;
 //     using bvhvec2 = math::float2;
 //     using bvhvec3 = math::float3;
 //     using bvhvec4 = math::float4;
 //     using bvhdbl3 = math::double3;
+//     using bvhmat4 = math::mat4x4;
 //   }
 //
 //	 #define TINYBVH_USE_CUSTOM_VECTOR_TYPES
@@ -88,7 +91,7 @@ THE SOFTWARE.
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
 #define TINY_BVH_VERSION_MINOR	5
-#define TINY_BVH_VERSION_SUB	5
+#define TINY_BVH_VERSION_SUB	6
 
 // Run-time checks; disabled by default.
 // #define PARANOID // checks out-of-bound access of slices
@@ -349,6 +352,7 @@ struct bvhint3
 	bvhint3( const int32_t a ) : x( a ), y( a ), z( a ) {}
 	bvhint3( const bvhvec3& a ) { x = (int32_t)a.x, y = (int32_t)a.y, z = (int32_t)a.z; }
 	int32_t& operator [] ( const int32_t i ) { return cell[i]; }
+	const int32_t& operator [] ( const int32_t i ) const { return cell[i]; }
 	union { struct { int32_t x, y, z; }; int32_t cell[3]; };
 };
 
@@ -357,7 +361,9 @@ struct bvhint2
 	bvhint2() = default;
 	bvhint2( const int32_t a, const int32_t b ) : x( a ), y( b ) {}
 	bvhint2( const int32_t a ) : x( a ), y( a ) {}
-	int32_t x, y;
+	int32_t& operator [] ( const int32_t i ) { return cell[i]; }
+	const int32_t& operator [] ( const int32_t i ) const { return cell[i]; }
+	union { struct { int32_t x, y; }; int32_t cell[2]; };
 };
 
 struct bvhuint2
@@ -365,7 +371,9 @@ struct bvhuint2
 	bvhuint2() = default;
 	bvhuint2( const uint32_t a, const uint32_t b ) : x( a ), y( b ) {}
 	bvhuint2( const uint32_t a ) : x( a ), y( a ) {}
-	uint32_t x, y;
+	uint32_t& operator [] ( const int32_t i ) { return cell[i]; }
+	const uint32_t& operator [] ( const int32_t i ) const { return cell[i]; }
+	union { struct { uint32_t x, y; }; uint32_t cell[2]; };
 };
 
 struct bvhuint3
@@ -373,7 +381,9 @@ struct bvhuint3
 	bvhuint3() = default;
 	bvhuint3( const uint32_t a, const uint32_t b, const uint32_t c ) : x( a ), y( b ), z( c ) {}
 	bvhuint3( const uint32_t a ) : x( a ), y( a ), z( a ) {}
-	uint32_t x, y, z;
+	uint32_t& operator [] ( const int32_t i ) { return cell[i]; }
+	const uint32_t& operator [] ( const int32_t i ) const { return cell[i]; }
+	union { struct { uint32_t x, y, z; }; uint32_t cell[3]; };
 };
 
 struct bvhuint4
@@ -381,7 +391,18 @@ struct bvhuint4
 	bvhuint4() = default;
 	bvhuint4( const uint32_t a, const uint32_t b, const uint32_t c, const uint32_t d ) : x( a ), y( b ), z( c ), w( d ) {}
 	bvhuint4( const uint32_t a ) : x( a ), y( a ), z( a ), w( a ) {}
-	uint32_t x, y, z, w;
+	uint32_t& operator [] ( const int32_t i ) { return cell[i]; }
+	const uint32_t& operator [] ( const int32_t i ) const { return cell[i]; }
+	union { struct { uint32_t x, y, z, w; }; uint32_t cell[4]; };
+};
+
+struct bvhmat4 // exists only so we can use tinybvh types conveniently in tinyscene.
+{
+	bvhmat4() = default;
+	float& operator [] ( const int32_t i ) { return cell[i]; }
+	const float& operator [] ( const int32_t i ) const { return cell[i]; }
+	bvhmat4& operator += ( const bvhmat4& a ) { for (int i = 0; i < 16; i++) cell[i] += a.cell[i]; return *this; }
+	float cell[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 };
 
 #endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
@@ -476,7 +497,7 @@ inline bvhvec3 tinybvh_normalize( const bvhvec3& a )
 	float l = tinybvh_length( a ), rl = l == 0 ? 0 : (1.0f / l);
 	return a * rl;
 }
-inline bvhvec3 tinybvh_transform_point( const bvhvec3& v, const float* T )
+inline bvhvec3 tinybvh_transform_point( const bvhvec3& v, const bvhmat4& T )
 {
 	const bvhvec3 res(
 		T[0] * v.x + T[1] * v.y + T[2] * v.z + T[3],
@@ -485,7 +506,7 @@ inline bvhvec3 tinybvh_transform_point( const bvhvec3& v, const float* T )
 	const float w = T[12] * v.x + T[13] * v.y + T[14] * v.z + T[15];
 	if (w == 1) return res; else return res * (1.f / w);
 }
-inline bvhvec3 tinybvh_transform_vector( const bvhvec3& v, const float* T )
+inline bvhvec3 tinybvh_transform_vector( const bvhvec3& v, const bvhmat4& T )
 {
 	return bvhvec3( T[0] * v.x + T[1] * v.y + T[2] * v.z, T[4] * v.x +
 		T[5] * v.y + T[6] * v.z, T[8] * v.x + T[9] * v.y + T[10] * v.z );
@@ -1343,8 +1364,8 @@ class ALIGNED( 64 ) BLASInstance
 public:
 	BLASInstance() = default;
 	BLASInstance( uint32_t idx ) : blasIdx( idx ) {}
-	float transform[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }; // identity
-	float invTransform[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }; // identity
+	bvhmat4 transform; // defaults to identity
+	bvhmat4 invTransform; // defaults to identity
 	bvhvec3 aabbMin = bvhvec3( BVH_FAR );
 	uint32_t blasIdx = 0;
 	bvhvec3 aabbMax = bvhvec3( -BVH_FAR );
@@ -1462,8 +1483,8 @@ loop: R = bvhvec3( tinybvh_rndfloat( s ) - 0.5f, tinybvh_rndfloat( s ) * 0.5f, t
 
 // Fallbacks to be used in the absence of HW SIMD support.
 #ifndef BVH_USESSE
-int32_t BVH4_CPU::Intersect( Ray& ray ) const { BVH_FATAL_ERROR( "BVH4_CPU::Intersect requires SSE. " ); }
-bool BVH4_CPU::IsOccluded( const Ray& ray ) const { BVH_FATAL_ERROR( "BVH4_CPU::IsOccluded requires SSE. " ); }
+int32_t BVH4_CPU::Intersect( Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::Intersect requires SSE. " ); }
+bool BVH4_CPU::IsOccluded( const Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::IsOccluded requires SSE. " ); }
 #endif
 #if !defined BVH_USEAVX
 void BVH::BuildAVX( const bvhvec4*, const uint32_t ) { BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX." ); }
@@ -1507,6 +1528,20 @@ bool BVH_SoA::IsOccluded( const Ray& ) const { BVH_FATAL_ERROR( "BVH_SoA::IsOccl
 
 #ifndef TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
+bvhmat4 operator*( const float s, const bvhmat4& a )
+{
+	bvhmat4 r;
+	for (uint32_t i = 0; i < 16; i++) r[i] = a[i] * s;
+	return r;
+}
+bvhmat4 operator*( const bvhmat4& a, const bvhmat4& b )
+{
+	bvhmat4 r;
+	for (uint32_t i = 0; i < 16; i += 4) for (uint32_t j = 0; j < 4; ++j)
+		r[i + j] = (a[i + 0] * b[j + 0]) + (a[i + 1] * b[j + 4]) +
+		(a[i + 2] * b[j + 8]) + (a[i + 3] * b[j + 12]);
+	return r;
+}
 bvhvec4::bvhvec4( const bvhvec3& a ) { x = a.x; y = a.y; z = a.z; w = 0; }
 bvhvec4::bvhvec4( const bvhvec3& a, float b ) { x = a.x; y = a.y; z = a.z; w = b; }
 
@@ -2298,7 +2333,7 @@ void BVH::BuildFullSweep()
 			// partition
 			for (uint32_t i = 0; i < splitPos; i++) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 0; // "left"
 			for (uint32_t i = splitPos; i < node.triCount; i++) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 1; // "right"
-			for (int a = 0; a < 3; a++) if (a != splitAxis)
+			for (uint32_t a = 0; a < 3; a++) if (a != splitAxis)
 			{
 				int p0 = 0, p1 = 0;
 				for (uint32_t i = 0; i < node.triCount; i++)
@@ -2495,7 +2530,7 @@ void BVH::BuildHQTask(
 				bvhvec3 lBMax[MAXHQBINS - 1], rBMax[MAXHQBINS - 1], r1 = BVH_FAR, r2 = -BVH_FAR;
 				float AL[MAXHQBINS - 1], AR[MAXHQBINS - 1];		// left and right area per split plane
 				int NL[MAXHQBINS - 1], NR[MAXHQBINS - 1];		// summed left and right tricount
-				for (uint32_t lN = 0, rN = 0, lP = 0, rP = 0, i = 0; i < hqbvhbins - 1; i++)
+				for (uint32_t lN = 0, rN = 0, i = 0; i < hqbvhbins - 1; i++)
 				{
 					lBMin[i] = l1 = tinybvh_min( l1, binMin[a][i] );
 					rBMin[hqbvhbins - 2 - i] = r1 = tinybvh_min( r1, binMin[a][hqbvhbins - 1 - i] );
@@ -2548,7 +2583,7 @@ void BVH::BuildHQTask(
 							// clip fragment to each bin it overlaps
 							bvhvec3 bmin = node.aabbMin, bmax = node.aabbMax;
 							bmin[a] = nodeMin + planeDist * j;
-							bmax[a] = j == (hqbvhbins - 2) ? node.aabbMax[a] : (bmin[a] + planeDist);
+							bmax[a] = j == (int)(hqbvhbins - 2) ? node.aabbMax[a] : (bmin[a] + planeDist);
 							Fragment orig = fragment[fi];
 							Fragment tmpFrag;
 							if (!ClipFrag( orig, tmpFrag, bmin, bmax, minDim, a )) continue;
@@ -2561,7 +2596,7 @@ void BVH::BuildHQTask(
 					bvhvec3 lBMax[MAXHQBINS - 1], rBMax[MAXHQBINS - 1], r1 = BVH_FAR, r2 = -BVH_FAR;
 					float AL[MAXHQBINS], AR[MAXHQBINS];
 					int NL[MAXHQBINS], NR[MAXHQBINS];
-					for (uint32_t lN = 0, rN = 0, lP = 0, rP = 0, i = 0; i < hqbvhbins - 1; i++)
+					for (uint32_t lN = 0, rN = 0, i = 0; i < hqbvhbins - 1; i++)
 					{
 						lBMin[i] = l1 = tinybvh_min( l1, sbinMin[i] ), rBMin[hqbvhbins - 2 - i] = r1 = tinybvh_min( r1, sbinMin[hqbvhbins - 1 - i] );
 						lBMax[i] = l2 = tinybvh_max( l2, sbinMax[i] ), rBMax[hqbvhbins - 2 - i] = r2 = tinybvh_max( r2, sbinMax[hqbvhbins - 1 - i] );
@@ -2822,15 +2857,15 @@ void BVH::CombineLeafs( const uint32_t nodeIdx )
 	BVHNode& right = bvhNode[node.leftFirst + 1];
 	if (left.isLeaf() && right.isLeaf())
 	{
-		int triCount = left.triCount + right.triCount;
+		int combinedCount = left.triCount + right.triCount;
 		float rAnode = 1.0f / tinybvh_half_area( node.aabbMax - node.aabbMin );
-		float Cnode = c_int * triCount;
+		float Cnode = c_int * combinedCount;
 		float Cleft = c_int * left.triCount * tinybvh_half_area( left.aabbMax - left.aabbMin ) * rAnode;
 		float Cright = c_int * right.triCount * tinybvh_half_area( right.aabbMax - right.aabbMin ) * rAnode;
 		float Csplit = Cleft + Cright + c_trav;
 		if (Cnode < Csplit) if (right.leftFirst == (left.leftFirst + left.triCount))
 			node.leftFirst = left.leftFirst,
-			node.triCount = triCount;
+			node.triCount = combinedCount;
 		return;
 	}
 	CombineLeafs( node.leftFirst );
@@ -5584,10 +5619,10 @@ template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU::Intersect( Ray& ray
 			for (int32_t i = 0; i < stackPtr; i += 4)
 			{
 				__m128i node4 = _mm_load_si128( (__m128i*)(nodeStack + i) );
-				__m128 dist4 = _mm_load_ps( (float*)(distStack + i) );
-				const uint32_t mask = _mm_movemask_ps( _mm_cmple_ps( dist4, t4 ) );
+				__m128 d4 = _mm_load_ps( (float*)(distStack + i) );
+				const uint32_t mask = _mm_movemask_ps( _mm_cmple_ps( d4, t4 ) );
 				const __m128i shfl16 = idxLUT4_[mask];
-				const __m128i dst4 = _mm_shuffle_epi8( _mm_castps_si128( dist4 ), shfl16 );
+				const __m128i dst4 = _mm_shuffle_epi8( _mm_castps_si128( d4 ), shfl16 );
 				node4 = _mm_shuffle_epi8( node4, shfl16 );
 				_mm_storeu_si128( (__m128i*)(distStack + outStackPtr), dst4 );
 				_mm_storeu_si128( (__m128i*)(nodeStack + outStackPtr), node4 );
@@ -7612,7 +7647,7 @@ void BLASInstance::Update( BVHBase* blas )
 void BLASInstance::InvertTransform()
 {
 	// math from MESA, via http://stackoverflow.com/questions/1148309/inverting-a-4x4-matrix
-	const float* T = this->transform;
+	const bvhmat4& T = this->transform;
 	invTransform[0] = T[5] * T[10] * T[15] - T[5] * T[11] * T[14] - T[9] * T[6] * T[15] + T[9] * T[7] * T[14] + T[13] * T[6] * T[11] - T[13] * T[7] * T[10];
 	invTransform[1] = -T[1] * T[10] * T[15] + T[1] * T[11] * T[14] + T[9] * T[2] * T[15] - T[9] * T[3] * T[14] - T[13] * T[2] * T[11] + T[13] * T[3] * T[10];
 	invTransform[2] = T[1] * T[6] * T[15] - T[1] * T[7] * T[14] - T[5] * T[2] * T[15] + T[5] * T[3] * T[14] + T[13] * T[2] * T[7] - T[13] * T[3] * T[6];

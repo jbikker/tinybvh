@@ -2,9 +2,19 @@
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="..\tiny_bvh_gltf.cpp" />
+    <ClCompile Include="..\tiny_bvh_gltf_lib.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\tiny_bvh.h" />
-    <ClInclude Include="..\tiny_scene.h" />
+    <ClInclude Include="..\tiny_bvh.h">
+      <Filter>tiny</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_scene.h">
+      <Filter>tiny</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="tiny">
+      <UniqueIdentifier>{39030eb7-d203-48ad-a65a-d5e47a2d8845}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
 </Project>
