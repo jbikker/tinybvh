@@ -6909,7 +6909,7 @@ void BVH::BuildNEON()
 	static const float32x4_t half4 = vdupq_n_f32( 0.5f );
 	static const float32x4_t two4 = vdupq_n_f32( 2.0f ), min1 = vdupq_n_f32( -1 );
 	static const int32x4_t maxbin4 = vdupq_n_s32( 7 );
-	static const float32x4_t mask3 = vceqq_s32( SIMD_SETRVECS( 0, 0, 0, 1 ), vdupq_n_f32( 0 ) );
+	static const float32x4_t mask3 = vreinterpretq_f32_s32( vceqq_s32( SIMD_SETRVECS( 0, 0, 0, 1 ), vdupq_n_s32( 0 ) ) );
 	static const float32x4_t binmul3 = vdupq_n_f32( AVXBINS * 0.49999f );
 	static const float32x4x2_t max8 = _mm256_set1_ps( -BVH_FAR ), mask6 = { mask3, mask3 };
 	static const float32x4_t signFlip4 = SIMD_SETRVEC( -0.0f, -0.0f, -0.0f, 0.0f );
@@ -6929,8 +6929,8 @@ void BVH::BuildNEON()
 			BVHNode& node = bvhNode[nodeIdx];
 			float32x4_t* node4 = (float32x4_t*)&bvhNode[nodeIdx];
 			// find optimal object split
-			const float32x4_t d4 = vbslq_f32( vshrq_n_s32( mask3, 31 ), vsubq_f32( node4[1], node4[0] ), min1 );
-			const float32x4_t nmin4 = vmulq_f32( vandq_s32( node4[0], mask3 ), two4 );
+			const float32x4_t d4 = vbslq_f32( vshrq_n_s32( vreinterpretq_s32_f32( mask3 ), 31 ), vsubq_f32( node4[1], node4[0] ), min1 );
+			const float32x4_t nmin4 = vmulq_f32( vreinterpretq_f32_s32( vandq_s32( vreinterpretq_s32_f32( node4[0] ), vreinterpretq_s32_f32( mask3 ) ) ), two4 );
 			const float32x4_t rpd4 = vandq_s32( vdivq_f32( binmul3, d4 ), vmvnq_u32( vceqq_f32( d4, vdupq_n_f32( 0 ) ) ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
