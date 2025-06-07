@@ -606,7 +606,7 @@ inline uint32x4_t SIMD_SETRVECU( uint32_t x, uint32_t y, uint32_t z, uint32_t w 
 	ALIGNED( 64 ) uint32_t data[4] = { x, y, z, w };
 	return vld1q_u32( data );
 }
-inline uint32x4_t SIMD_SETRVECS( int32_t x, int32_t y, int32_t z, int32_t w )
+inline int32x4_t SIMD_SETRVECS( int32_t x, int32_t y, int32_t z, int32_t w )
 {
 	ALIGNED( 64 ) int32_t data[4] = { x, y, z, w };
 	return vld1q_s32( data );
