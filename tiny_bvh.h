@@ -91,7 +91,7 @@ THE SOFTWARE.
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
 #define TINY_BVH_VERSION_MINOR	5
-#define TINY_BVH_VERSION_SUB	7
+#define TINY_BVH_VERSION_SUB	8
 
 // Run-time checks; disabled by default.
 // #define PARANOID // checks out-of-bound access of slices
@@ -926,7 +926,7 @@ protected:
 	// Helpers
 	inline float SplitCostSAH( const float rAparent, const float Aleft, const int Nleft, const float Aright, const int Nright ) const;
 	inline float NoSplitCostSAH( const int Nparent ) const;
-	void QuickSort( const float* centroid, uint32_t* primIdx, int first, int last );
+	void QuickSort( const uint32_t axis, uint32_t* primIdx, int first, int last );
 	float EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx = 0 ) const;
 	float PrimArea( const uint32_t p ) const;
 public:
@@ -2251,12 +2251,14 @@ void BVH::Build()
 	usedNodes = newNodePtr;
 }
 
-void BVH::QuickSort( const float* a, uint32_t* q, int f, int l ) // minimal qsort
+void BVH::QuickSort( const uint32_t a, uint32_t* q, int f, int l ) // minimal qsort
 {
-	static int* s = (int*)AlignedAlloc( 4096 * 4 ); // some scenes have weird distributions.
+	static int* s = (int*)AlignedAlloc( 4096 * 4 ); // some scenes have weird distributions...
 	int p = 0, h, i, r;
 start: while (f >= l) { if (p == 0) return; else f = s[--p], l = s[--p]; }
-	for (r = f, i = f + 1; i <= l; i++) if (a[q[i]] < a[q[f]]) h = q[++r], q[r] = q[i], q[i] = h;
+	for (r = f, i = f + 1; i <= l; i++)
+		if (fragment[q[i]].bmin[a] + fragment[q[i]].bmax[a] < fragment[q[f]].bmin[a] + fragment[q[f]].bmax[a])
+			h = q[++r], q[r] = q[i], q[i] = h;
 	h = q[f], q[f] = q[r], q[r] = h, s[p++] = l, s[p++] = r + 1, l = r - 1; goto start;
 }
 
@@ -2266,24 +2268,15 @@ start: while (f >= l) { if (p == 0) return; else f = s[--p], l = s[--p]; }
 // be prevented.
 void BVH::BuildFullSweep()
 {
-	// allocate and calculate fragment centroids, per axis
-	float* centroid[3];
-	for (int a = 0; a < 3; a++) centroid[a] = (float*)AlignedAlloc( triCount * sizeof( float ) );
 	// allocate data for O(N) stable partition
 	uint8_t* flag = (uint8_t*)AlignedAlloc( triCount );
 	uint32_t* tmp = (uint32_t*)AlignedAlloc( triCount * 4 );
-	// prepare per-axis sorted primitive index arrays
-	for (uint32_t i = 0; i < triCount; i++)
-	{
-		const bvhvec3 C = fragment[i].bmin + fragment[i].bmax;
-		centroid[0][i] = C.x, centroid[1][i] = C.y, centroid[2][i] = C.z;
-	}
 	uint32_t* sortedIdx[3];
 	for (int a = 0; a < 3; a++) sortedIdx[a] = (uint32_t*)AlignedAlloc( triCount * 4 );
 	for (uint32_t a = 0; a < 3; a++)
 	{
 		memcpy( sortedIdx[a], primIdx, triCount * 4 );
-		QuickSort( centroid[a], sortedIdx[a], 0, triCount - 1 );
+		QuickSort( a, sortedIdx[a], 0, triCount - 1 );
 	}
 	// allocate space for right sweep
 	float* SAR = (float*)AlignedAlloc( triCount * sizeof( float ) );
@@ -2364,7 +2357,6 @@ void BVH::BuildFullSweep()
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
 	// cleanup allocated buffers
-	for (int a = 0; a < 3; a++) AlignedFree( centroid[a] );
 	for (int a = 0; a < 3; a++) AlignedFree( sortedIdx[a] );
 	AlignedFree( SAR );
 	AlignedFree( flag );
@@ -2683,8 +2675,11 @@ void BVH::BuildHQTask(
 						float splitPos = bestLMax[bestAxis];
 						SplitFrag( fragment[fragIdx], part1, part2, minDim, bestAxis, splitPos, leftOK, rightOK );
 						if (leftOK && rightOK)
+						{
+							uint32_t newFragIdx = atomicNextFrag.fetch_add( 1 );
 							fragment[fragIdx] = part1, idxTmp[A++] = fragIdx,
-							fragment[nextFrag] = part2, idxTmp[--B] = nextFrag++;
+								fragment[newFragIdx] = part2, idxTmp[--B] = newFragIdx;
+						}
 						else // didn't work out; unsplit (rare)
 							if (leftOK) idxTmp[A++] = fragIdx; else idxTmp[--B] = fragIdx;
 					}
@@ -2723,7 +2718,8 @@ void BVH::BuildHQTask(
 				node.aabbMax = tinybvh_max( bestLMax, bestRMax );
 				break;
 			}
-			int32_t leftChildIdx = newNodePtr++, rightChildIdx = newNodePtr++;
+			int32_t leftChildIdx = atomicNewNodePtr.fetch_add( 2 );
+			int32_t rightChildIdx = leftChildIdx + 1;
 			bvhNode[leftChildIdx].aabbMin = bestLMin, bvhNode[leftChildIdx].aabbMax = bestLMax;
 			bvhNode[leftChildIdx].leftFirst = sliceStart, bvhNode[leftChildIdx].triCount = leftCount;
 			bvhNode[rightChildIdx].aabbMin = bestRMin, bvhNode[rightChildIdx].aabbMax = bestRMax;
@@ -2763,11 +2759,12 @@ void BVH::BuildHQ()
 	ALIGNED( 64 ) SubdivTask task[128];
 	uint32_t taskCount = 0, nodeIdx = 0, sliceStart = 0, sliceEnd = triCount + slack, depth = 0;
 	BuildHQTask( nodeIdx, depth, 5, sliceStart, sliceEnd, idxTmp, taskCount, task );
-	for (unsigned i = 0; i < taskCount; i++)
+#pragma omp parallel for schedule(dynamic)
+	for (int i = 0; i < (int)taskCount; i++)
 	{
-		nodeIdx = task[i].node, depth = task[i].depth,
-			sliceStart = task[i].sliceStart, sliceEnd = task[i].sliceEnd;
-		BuildHQTask( nodeIdx, depth, 5, sliceStart, sliceEnd, idxTmp, taskCount, task );
+		nodeIdx = task[i].node, depth = task[i].depth;
+		sliceStart = task[i].sliceStart, sliceEnd = task[i].sliceEnd;
+		BuildHQTask( nodeIdx, depth, 5, sliceStart, sliceEnd, idxTmp, taskCount, 0 );
 	}
 	// all done.
 	AlignedFree( idxTmp );
@@ -3181,13 +3178,13 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				#ifdef BVH_USEAVX2
 					if (blas->layout == LAYOUT_BVH8_AVX2) cost += ((BVH8_CPU*)blas)->Intersect( tmp );
 				#endif
-				}
+			}
 				// 3. Restore ray
 				ray.hit = tmp.hit;
-			}
+		}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
-		}
+	}
 		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
 		float dist1 = BVH_FAR, dist2 = BVH_FAR;
 		SLAB_TEST_TWO_NODES;
@@ -3201,7 +3198,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 			node = child1; /* continue with the nearest */
 			if (dist2 != BVH_FAR) stack[stackPtr++] = child2; /* push far child */
 		}
-	}
+}
 	return (int32_t)cost;
 }
 
@@ -3321,11 +3318,11 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 				#ifdef BVH_USEAVX2
 					if (blas->layout == LAYOUT_BVH8_AVX2) { if (((BVH8_CPU*)blas)->IsOccluded( tmp )) return true; }
 				#endif
-				}
 			}
+		}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
-		}
+	}
 		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
 		float dist1 = BVH_FAR, dist2 = BVH_FAR;
 		SLAB_TEST_TWO_NODES;
@@ -3339,9 +3336,9 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 			node = child1; /* continue with the nearest */
 			if (dist2 != BVH_FAR) stack[stackPtr++] = child2; /* push far child */
 		}
-	}
-	return false;
 }
+	return false;
+	}
 
 // Intersect a WALD_32BYTE BVH with a ray packet.
 // The 256 rays travel together to better utilize the caches and to amortize the cost
