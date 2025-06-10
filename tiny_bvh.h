@@ -1487,18 +1487,18 @@ loop: R = bvhvec3( tinybvh_rndfloat( s ) - 0.5f, tinybvh_rndfloat( s ) * 0.5f, t
 #define BVH_FATAL_ERROR(s) BVH_FATAL_ERROR_IF(1,s)
 
 // Fallbacks to be used in the absence of HW SIMD support.
-#ifndef BVH_USESSE
+#if !defined BVH_USESSE || defined BVH_USENEON
 int32_t BVH4_CPU::Intersect( Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::Intersect requires SSE. " ); }
 bool BVH4_CPU::IsOccluded( const Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::IsOccluded requires SSE. " ); }
 #endif
-#if !defined BVH_USEAVX
+#if !defined BVH_USEAVX || defined BVH_USENEON
 void BVH::BuildAVX( const bvhvec4*, const uint32_t ) { BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX." ); }
 void BVH::BuildAVX( const bvhvec4slice& ) { BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX." ); }
 void BVH::BuildAVX( const bvhvec4*, const uint32_t*, const uint32_t ) { BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX." ); }
 void BVH::BuildAVX( const bvhvec4slice&, const uint32_t*, const uint32_t ) { BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX." ); }
 int32_t BVH8_CWBVH::Intersect( Ray& ) const { BVH_FATAL_ERROR( "BVH8_CWBVH::Intersect requires AVX." ); }
 #endif // BVH_USEAVX
-#if !defined BVH_USEAVX2
+#if !defined BVH_USEAVX2 || defined BVH_USENEON
 int32_t BVH8_CPU::Intersect( Ray& ) const { BVH_FATAL_ERROR( "BVH8_CPU::Intersect requires AVX2 and FMA." ); }
 bool BVH8_CPU::IsOccluded( const Ray& ) const { BVH_FATAL_ERROR( "BVH8_CPU::IsOccluded requires AVX2 and FMA." ); }
 #endif // BVH_USEAVX2
