@@ -142,7 +142,9 @@ THE SOFTWARE.
 #define BVH_DBL_FAR 1e300	// actual valid ieee range: 1.797693134862315E+308
 
 // Threaded BuildAVX
-#define MT_BUILD_THRESHOLD 100'000 // single-threaded builds below this triangle count
+#ifndef MT_BUILD_THRESHOLD
+#define MT_BUILD_THRESHOLD 50'000 // single-threaded builds below this triangle count
+#endif
 
 // Features
 #ifndef NO_DOUBLE_PRECISION_SUPPORT
@@ -905,7 +907,7 @@ public:
 	void Intersect256RaysSSE( Ray* packet ) const; // requires BVH_USEAVX
 	// private:
 	void PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
-	void Build();
+	void Build( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void BuildFullSweep();
 	bool IsOccludedTLAS( const Ray& ray ) const;
 	int32_t IntersectTLAS( Ray& ray ) const;
@@ -1990,7 +1992,7 @@ void BVH::Build( const bvhvec4slice& vertices )
 {
 	// build the BVH from vertices stored in a slice.
 	PrepareBuild( vertices, 0, 0 /* empty index list; primcount is derived from slice */ );
-	Build();
+	if (useFullSweep) BuildFullSweep(); else Build();
 }
 
 void BVH::Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t prims )
@@ -2003,7 +2005,7 @@ void BVH::Build( const bvhvec4slice& vertices, const uint32_t* indices, uint32_t
 {
 	// build the BVH from vertices stored in a slice, indexed by 'indices'.
 	PrepareBuild( vertices, indices, prims );
-	Build();
+	if (useFullSweep) BuildFullSweep(); else Build();
 }
 
 void BVH::Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&), const uint32_t primCount )
@@ -2142,21 +2144,19 @@ void BVH::PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, c
 		}
 	}
 	// reset node pool
-	newNodePtr = 2;
+	atomicNewNodePtr = newNodePtr = 2;
 	bvh_over_indices = indices != nullptr;
 	// all set; actual build happens in BVH::Build.
 }
 
-void BVH::Build()
+void Build_( uint32_t nodeIdx, uint32_t depth, BVH* bvh )
 {
-	// pass control to full sweep builder if requested
-	if (useFullSweep)
-	{
-		BuildFullSweep();
-		return;
-	}
+	bvh->Build( nodeIdx, depth );
+}
+void BVH::Build( uint32_t nodeIdx, uint32_t depth )
+{
 	// subdivide root node recursively
-	uint32_t task[256], taskCount = 0, nodeIdx = 0;
+	uint32_t task[256], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-20f, bestLMin = 0, bestLMax = 0, bestRMin = 0, bestRMax = 0;
 	while (1)
@@ -2233,24 +2233,34 @@ void BVH::Build()
 			// create child nodes
 			uint32_t leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
-			const int32_t lci = newNodePtr++, rci = newNodePtr++;
-			bvhNode[lci].aabbMin = bestLMin, bvhNode[lci].aabbMax = bestLMax;
-			bvhNode[lci].leftFirst = node.leftFirst, bvhNode[lci].triCount = leftCount;
-			bvhNode[rci].aabbMin = bestRMin, bvhNode[rci].aabbMax = bestRMax;
-			bvhNode[rci].leftFirst = j, bvhNode[rci].triCount = rightCount;
-			node.leftFirst = lci, node.triCount = 0;
-			// recurse
-			task[taskCount++] = rci, nodeIdx = lci;
+			const int32_t n = atomicNewNodePtr.fetch_add( 2 );
+			bvhNode[n].aabbMin = bestLMin, bvhNode[n].aabbMax = bestLMax;
+			bvhNode[n].leftFirst = node.leftFirst, bvhNode[n].triCount = leftCount;
+			bvhNode[n + 1].aabbMin = bestRMin, bvhNode[n + 1].aabbMax = bestRMax;
+			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
+			node.leftFirst = n, node.triCount = 0;
+			if (depth < 5)
+			{
+				std::thread t1( &Build_, n, depth + 1, this );
+				std::thread t2( &Build_, n + 1, depth + 1, this );
+				t1.join();
+				t2.join();
+				break;
+			}
+			task[taskCount++] = n + 1, nodeIdx = n;
 		}
 		// fetch subdivision task from stack
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
 	// all done.
-	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
-	refittable = true; // not using spatial splits: can refit this BVH
-	may_have_holes = false; // the reference builder produces a continuous list of nodes
-	bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
-	usedNodes = newNodePtr;
+	if (depth == 0)
+	{
+		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
+		refittable = true; // not using spatial splits: can refit this BVH
+		may_have_holes = false; // the reference builder produces a continuous list of nodes
+		bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
+		usedNodes = newNodePtr = atomicNewNodePtr;
+	}
 }
 
 void BVH::QuickSort( const uint32_t a, uint32_t* q, int f, int l ) // minimal qsort
