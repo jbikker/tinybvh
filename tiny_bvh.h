@@ -187,6 +187,8 @@ THE SOFTWARE.
 #endif
 #include <cstdint>
 #include <atomic> // for SBVH builds
+#include <vector>
+#include <thread> // for threaded builds
 
 // Platform-independent compile-time warnings.
 #define EMIT_COMPILER_WARNING_STRINGIFY0(x) #x
@@ -910,7 +912,7 @@ public:
 	void BuildHQ();
 	void BuildHQTask(
 		uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth, uint32_t sliceStart,
-		uint32_t sliceEnd, uint32_t* triIdxB, uint32_t& taskCount, SubdivTask* task
+		uint32_t sliceEnd, uint32_t* triIdxB, uint32_t* taskCount, SubdivTask* task
 	);
 	bool ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, bvhvec3 minDim, const uint32_t splitAxis ) const;
 	void SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const bvhvec3& minDim, const uint32_t splitAxis, const float splitPos, bool& leftOK, bool& rightOK ) const;
@@ -2475,7 +2477,7 @@ float BVH::NoSplitCostSAH( const int Nparent ) const
 
 void BVH::BuildHQTask(
 	uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth,
-	uint32_t sliceStart, uint32_t sliceEnd, uint32_t* idxTmp, uint32_t& taskCount, SubdivTask* task
+	uint32_t sliceStart, uint32_t sliceEnd, uint32_t* idxTmp, uint32_t* taskCount, SubdivTask* task
 )
 {
 	// SBVH construction uses basic threading:
@@ -2709,7 +2711,7 @@ void BVH::BuildHQTask(
 			memcpy( primIdx + sliceStart, idxTmp + sliceStart, (sliceEnd - sliceStart) * 4 );
 			// create child nodes
 			uint32_t leftCount = A - sliceStart, rightCount = sliceEnd - B;
-			if (leftCount == 0 || rightCount == 0 || taskCount == 1024 /* BVH_NUM_ELEMS( task ) */)
+			if (leftCount == 0 || rightCount == 0 || *taskCount == 1024 /* BVH_NUM_ELEMS( task ) */)
 			{
 				// spatial split failed. We shouldn't get here, but we do sometimes..
 				for (uint32_t i = 0; i < node.triCount; i++)
@@ -2729,10 +2731,12 @@ void BVH::BuildHQTask(
 			if (++depth == maxDepth)
 			{
 				// push the children on the stack, for multithreading
-				task[taskCount].node = rightChildIdx, task[taskCount].depth = depth;
-				task[taskCount].sliceStart = (A + B) >> 1, task[taskCount++].sliceEnd = sliceEnd;
-				task[taskCount].node = leftChildIdx, task[taskCount].depth = depth;
-				task[taskCount].sliceStart = sliceStart, task[taskCount++].sliceEnd = (A + B) >> 1;
+				const uint32_t taskIdx = *taskCount;
+				task[taskIdx].node = rightChildIdx, task[taskIdx].depth = depth;
+				task[taskIdx].sliceStart = (A + B) >> 1, task[taskIdx].sliceEnd = sliceEnd;
+				task[taskIdx + 1].node = leftChildIdx, task[taskIdx + 1].depth = depth;
+				task[taskIdx + 1].sliceStart = sliceStart, task[taskIdx + 1].sliceEnd = (A + B) >> 1;
+				*taskCount += 2;
 				break;
 			}
 			// proceed with left child, push right child on local stack
@@ -2746,6 +2750,11 @@ void BVH::BuildHQTask(
 		sliceStart = localTask[localTasks].sliceStart, sliceEnd = localTask[localTasks].sliceEnd;
 	}
 }
+void BuildHQTask_( uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth,
+	uint32_t sliceStart, uint32_t sliceEnd, uint32_t* idxTmp, uint32_t* taskCount, BVH* bvh )
+{
+	bvh->BuildHQTask( nodeIdx, depth, maxDepth, sliceStart, sliceEnd, idxTmp, taskCount, 0 );
+}
 
 void BVH::BuildHQ()
 {
@@ -2758,14 +2767,15 @@ void BVH::BuildHQ()
 	// subdivide recursively
 	ALIGNED( 64 ) SubdivTask task[128];
 	uint32_t taskCount = 0, nodeIdx = 0, sliceStart = 0, sliceEnd = triCount + slack, depth = 0;
-	BuildHQTask( nodeIdx, depth, 5, sliceStart, sliceEnd, idxTmp, taskCount, task );
-#pragma omp parallel for schedule(dynamic)
-	for (int i = 0; i < (int)taskCount; i++)
+	BuildHQTask( nodeIdx, depth, 5, sliceStart, sliceEnd, idxTmp, &taskCount, task );
+	std::vector<std::thread> threads;
+	for (uint32_t i = 0; i < taskCount; i++)
 	{
 		nodeIdx = task[i].node, depth = task[i].depth;
 		sliceStart = task[i].sliceStart, sliceEnd = task[i].sliceEnd;
-		BuildHQTask( nodeIdx, depth, 5, sliceStart, sliceEnd, idxTmp, taskCount, 0 );
+		threads.emplace_back( &BuildHQTask_, nodeIdx, depth, 5u, sliceStart, sliceEnd, idxTmp, &taskCount, this );
 	}
+	for (auto& thread : threads) thread.join();
 	// all done.
 	AlignedFree( idxTmp );
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
@@ -3178,13 +3188,13 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				#ifdef BVH_USEAVX2
 					if (blas->layout == LAYOUT_BVH8_AVX2) cost += ((BVH8_CPU*)blas)->Intersect( tmp );
 				#endif
-			}
+				}
 				// 3. Restore ray
 				ray.hit = tmp.hit;
-		}
+			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
-	}
+		}
 		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
 		float dist1 = BVH_FAR, dist2 = BVH_FAR;
 		SLAB_TEST_TWO_NODES;
@@ -3198,7 +3208,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 			node = child1; /* continue with the nearest */
 			if (dist2 != BVH_FAR) stack[stackPtr++] = child2; /* push far child */
 		}
-}
+	}
 	return (int32_t)cost;
 }
 
@@ -3318,11 +3328,11 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 				#ifdef BVH_USEAVX2
 					if (blas->layout == LAYOUT_BVH8_AVX2) { if (((BVH8_CPU*)blas)->IsOccluded( tmp )) return true; }
 				#endif
+				}
 			}
-		}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
-	}
+		}
 		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
 		float dist1 = BVH_FAR, dist2 = BVH_FAR;
 		SLAB_TEST_TWO_NODES;
@@ -3336,9 +3346,9 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 			node = child1; /* continue with the nearest */
 			if (dist2 != BVH_FAR) stack[stackPtr++] = child2; /* push far child */
 		}
-}
-	return false;
 	}
+	return false;
+}
 
 // Intersect a WALD_32BYTE BVH with a ray packet.
 // The 256 rays travel together to better utilize the caches and to amortize the cost
