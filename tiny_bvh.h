@@ -910,10 +910,7 @@ public:
 	void BuildAVX();
 	void PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims );
 	void BuildHQ();
-	void BuildHQTask(
-		uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth, uint32_t sliceStart,
-		uint32_t sliceEnd, uint32_t* triIdxB, uint32_t* taskCount, SubdivTask* task
-	);
+	void BuildHQTask( uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* triIdxB );
 	bool ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, bvhvec3 minDim, const uint32_t splitAxis ) const;
 	void SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const bvhvec3& minDim, const uint32_t splitAxis, const float splitPos, bool& leftOK, bool& rightOK ) const;
 protected:
@@ -2475,15 +2472,16 @@ float BVH::NoSplitCostSAH( const int Nparent ) const
 	return (float)(l_quads ? (((Nparent + 3) >> 2) * 4) : Nparent) * c_int;
 }
 
+void BuildHQTask_( uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth,
+	uint32_t sliceStart, uint32_t sliceEnd, uint32_t* idxTmp, BVH* bvh )
+{
+	bvh->BuildHQTask( nodeIdx, depth, maxDepth, sliceStart, sliceEnd, idxTmp );
+}
 void BVH::BuildHQTask(
 	uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth,
-	uint32_t sliceStart, uint32_t sliceEnd, uint32_t* idxTmp, uint32_t* taskCount, SubdivTask* task
+	uint32_t sliceStart, uint32_t sliceEnd, uint32_t* idxTmp
 )
 {
-	// SBVH construction uses basic threading:
-	// - First, 32 subtrees are generated and placed in array SubdivTask* task
-	// - Next, these subtrees are completed in parallel using a local stack.
-	// TODO: Run object and spatial subdivision in stage 1 on multiple threads.
 	ALIGNED( 64 ) SubdivTask localTask[512];
 	uint32_t localTasks = 0;
 	bvhvec3 bestLMin = 0, bestLMax = 0, bestRMin = 0, bestRMax = 0;
@@ -2711,7 +2709,7 @@ void BVH::BuildHQTask(
 			memcpy( primIdx + sliceStart, idxTmp + sliceStart, (sliceEnd - sliceStart) * 4 );
 			// create child nodes
 			uint32_t leftCount = A - sliceStart, rightCount = sliceEnd - B;
-			if (leftCount == 0 || rightCount == 0 || *taskCount == 1024 /* BVH_NUM_ELEMS( task ) */)
+			if (leftCount == 0 || rightCount == 0)
 			{
 				// spatial split failed. We shouldn't get here, but we do sometimes..
 				for (uint32_t i = 0; i < node.triCount; i++)
@@ -2728,15 +2726,13 @@ void BVH::BuildHQTask(
 			bvhNode[rightChildIdx].leftFirst = B, bvhNode[rightChildIdx].triCount = rightCount;
 			node.leftFirst = leftChildIdx, node.triCount = 0;
 			// recurse
-			if (++depth == maxDepth)
+			if (depth < maxDepth)
 			{
-				// push the children on the stack, for multithreading
-				const uint32_t taskIdx = *taskCount;
-				task[taskIdx].node = rightChildIdx, task[taskIdx].depth = depth;
-				task[taskIdx].sliceStart = (A + B) >> 1, task[taskIdx].sliceEnd = sliceEnd;
-				task[taskIdx + 1].node = leftChildIdx, task[taskIdx + 1].depth = depth;
-				task[taskIdx + 1].sliceStart = sliceStart, task[taskIdx + 1].sliceEnd = (A + B) >> 1;
-				*taskCount += 2;
+				// spawn a new thread for the right branch
+				std::thread t1( &BuildHQTask_, rightChildIdx, depth + 1, maxDepth, (A + B) >> 1, sliceEnd, idxTmp, this );
+				std::thread t2( &BuildHQTask_, leftChildIdx, depth + 1, maxDepth, sliceStart, (A + B) >> 1, idxTmp, this );
+				t1.join();
+				t2.join();
 				break;
 			}
 			// proceed with left child, push right child on local stack
@@ -2750,11 +2746,6 @@ void BVH::BuildHQTask(
 		sliceStart = localTask[localTasks].sliceStart, sliceEnd = localTask[localTasks].sliceEnd;
 	}
 }
-void BuildHQTask_( uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth,
-	uint32_t sliceStart, uint32_t sliceEnd, uint32_t* idxTmp, uint32_t* taskCount, BVH* bvh )
-{
-	bvh->BuildHQTask( nodeIdx, depth, maxDepth, sliceStart, sliceEnd, idxTmp, taskCount, 0 );
-}
 
 void BVH::BuildHQ()
 {
@@ -2765,17 +2756,8 @@ void BVH::BuildHQ()
 	atomicNewNodePtr = newNodePtr = 2;
 	atomicNextFrag = nextFrag = triCount;
 	// subdivide recursively
-	ALIGNED( 64 ) SubdivTask task[128];
-	uint32_t taskCount = 0, nodeIdx = 0, sliceStart = 0, sliceEnd = triCount + slack, depth = 0;
-	BuildHQTask( nodeIdx, depth, 5, sliceStart, sliceEnd, idxTmp, &taskCount, task );
-	std::vector<std::thread> threads;
-	for (uint32_t i = 0; i < taskCount; i++)
-	{
-		nodeIdx = task[i].node, depth = task[i].depth;
-		sliceStart = task[i].sliceStart, sliceEnd = task[i].sliceEnd;
-		threads.emplace_back( &BuildHQTask_, nodeIdx, depth, 5u, sliceStart, sliceEnd, idxTmp, &taskCount, this );
-	}
-	for (auto& thread : threads) thread.join();
+	uint32_t nodeIdx = 0, sliceStart = 0, sliceEnd = triCount + slack, depth = 0;
+	BuildHQTask( nodeIdx, depth, 5, sliceStart, sliceEnd, idxTmp );
 	// all done.
 	AlignedFree( idxTmp );
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
