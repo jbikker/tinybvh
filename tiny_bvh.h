@@ -758,8 +758,6 @@ struct BVHContext
 	void* userdata = nullptr;
 };
 
-enum TraceDevice : uint32_t { USE_CPU = 1, USE_GPU };
-
 class BVHBase
 {
 public:
@@ -952,12 +950,13 @@ public:
 	uint32_t nextFrag = 0;			// used during SBVH build to keep track of next free fragment.
 	Fragment* fragment = 0;			// input primitive bounding boxes.
 	bool useFullSweep = false;		// for experiments only; full-sweep SAH builder.
-	// Atomic counters for threaded SBVH build
-	static inline std::atomic<uint32_t> atomicNewNodePtr;
-	static inline std::atomic<uint32_t> atomicNextFrag;
 	// Custom geometry intersection callback
 	bool (*customIntersect)(Ray&, const unsigned) = 0;
 	bool (*customIsOccluded)(const Ray&, const unsigned) = 0;
+private:
+	// Atomic counters for threaded builds
+	std::atomic<uint32_t>* atomicNewNodePtr = 0;
+	std::atomic<uint32_t>* atomicNextFrag = 0;
 };
 
 #ifdef DOUBLE_PRECISION_SUPPORT
@@ -990,7 +989,7 @@ public:
 	void Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Double** blasses, const uint64_t blasCount );
 	void Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&), const uint64_t primCount );
 	void PrepareBuild( const bvhdbl3* vertices, const uint64_t primCount );
-	void Build();
+	void Build( uint64_t nodeIdx = 0, uint32_t depth = 0 );
 	double SAHCost( const uint64_t nodeIdx = 0 ) const;
 	int32_t Intersect( RayEx& ray ) const;
 	bool IsOccluded( const RayEx& ray ) const;
@@ -1013,6 +1012,9 @@ public:
 	// Custom geometry intersection callback
 	bool (*customIntersect)(RayEx&, uint64_t) = 0;
 	bool (*customIsOccluded)(const RayEx&, uint64_t) = 0;
+private:
+	// Atomic counter for threaded builds
+	std::atomic<uint64_t>* atomicNewNodePtr = 0;
 };
 
 #endif // DOUBLE_PRECISION_SUPPORT
@@ -2144,7 +2146,7 @@ void BVH::PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, c
 		}
 	}
 	// reset node pool
-	atomicNewNodePtr = newNodePtr = 2;
+	newNodePtr = 2;
 	bvh_over_indices = indices != nullptr;
 	// all set; actual build happens in BVH::Build.
 }
@@ -2155,6 +2157,10 @@ void Build_( uint32_t nodeIdx, uint32_t depth, BVH* bvh )
 }
 void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 {
+	// initialize atomic counter on first call
+	if (depth == 0) atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
+	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
+	if (triCount < MT_BUILD_THRESHOLD) depth = 999;
 	// subdivide root node recursively
 	uint32_t task[256], taskCount = 0;
 	BVHNode& root = bvhNode[0];
@@ -2233,7 +2239,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 			// create child nodes
 			uint32_t leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
-			const int32_t n = atomicNewNodePtr.fetch_add( 2 );
+			const int32_t n = atomicNewNodePtr->fetch_add( 2 );
 			bvhNode[n].aabbMin = bestLMin, bvhNode[n].aabbMax = bestLMax;
 			bvhNode[n].leftFirst = node.leftFirst, bvhNode[n].triCount = leftCount;
 			bvhNode[n + 1].aabbMin = bestRMin, bvhNode[n + 1].aabbMax = bestRMax;
@@ -2259,7 +2265,8 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 		refittable = true; // not using spatial splits: can refit this BVH
 		may_have_holes = false; // the reference builder produces a continuous list of nodes
 		bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
-		usedNodes = newNodePtr = atomicNewNodePtr;
+		usedNodes = newNodePtr = atomicNewNodePtr->load();
+		delete atomicNewNodePtr;
 	}
 }
 
@@ -2689,7 +2696,7 @@ void BVH::BuildHQTask(
 						SplitFrag( fragment[fragIdx], part1, part2, minDim, bestAxis, splitPos, leftOK, rightOK );
 						if (leftOK && rightOK)
 						{
-							uint32_t newFragIdx = atomicNextFrag.fetch_add( 1 );
+							uint32_t newFragIdx = atomicNextFrag->fetch_add( 1 );
 							fragment[fragIdx] = part1, idxTmp[A++] = fragIdx,
 								fragment[newFragIdx] = part2, idxTmp[--B] = newFragIdx;
 						}
@@ -2731,7 +2738,7 @@ void BVH::BuildHQTask(
 				node.aabbMax = tinybvh_max( bestLMax, bestRMax );
 				break;
 			}
-			int32_t leftChildIdx = atomicNewNodePtr.fetch_add( 2 );
+			int32_t leftChildIdx = atomicNewNodePtr->fetch_add( 2 );
 			int32_t rightChildIdx = leftChildIdx + 1;
 			bvhNode[leftChildIdx].aabbMin = bestLMin, bvhNode[leftChildIdx].aabbMax = bestLMax;
 			bvhNode[leftChildIdx].leftFirst = sliceStart, bvhNode[leftChildIdx].triCount = leftCount;
@@ -2766,8 +2773,8 @@ void BVH::BuildHQ()
 	uint32_t* idxTmp = (uint32_t*)AlignedAlloc( (triCount + slack) * sizeof( uint32_t ) );
 	memset( idxTmp, 0, (triCount + slack) * 4 );
 	// reset node pool
-	atomicNewNodePtr = newNodePtr = 2;
-	atomicNextFrag = nextFrag = triCount;
+	atomicNewNodePtr = new std::atomic<uint32_t>( 2 );
+	atomicNextFrag = new std::atomic<uint32_t>( triCount );
 	// subdivide recursively
 	uint32_t nodeIdx = 0, sliceStart = 0, sliceEnd = triCount + slack, depth = 0;
 	BuildHQTask( nodeIdx, depth, 5, sliceStart, sliceEnd, idxTmp );
@@ -2776,8 +2783,10 @@ void BVH::BuildHQ()
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 	refittable = false; // can't refit an SBVH
 	may_have_holes = false; // there may be holes in the index list, but not in the node list
-	usedNodes = newNodePtr = atomicNewNodePtr;
-	nextFrag = atomicNextFrag;
+	usedNodes = newNodePtr = atomicNewNodePtr->load();
+	nextFrag = atomicNextFrag->load();
+	delete atomicNewNodePtr;
+	delete atomicNextFrag;
 	Compact();
 }
 
@@ -5830,7 +5839,7 @@ void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices
 	verts = vertices; // note: we're not copying this data; don't delete.
 	vertIdx = (uint32_t*)indices;
 	triCount = idxCount = primCount;
-	atomicNewNodePtr = newNodePtr = 2;
+	newNodePtr = 2;
 	struct FragSSE { __m128 bmin4, bmax4; };
 	FragSSE* frag4 = (FragSSE*)fragment;
 	const __m128* verts4 = (__m128*)verts.data; // that's why it must be 16-byte aligned.
@@ -5896,6 +5905,8 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
 	struct FragSSE { __m128 bmin4, bmax4; };
 	FragSSE* frag4 = (FragSSE*)fragment;
 	__m256* frag8 = (__m256*)fragment;
+	// initialize atomic counter on first call
+	if (depth == 0) atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
 	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
 	if (triCount < MT_BUILD_THRESHOLD) depth = 999;
 	// subdivide recursively
@@ -5983,7 +5994,7 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
 				if (bi <= bestPos) fr = primIdx[++src]; else t = fr, fr = primIdx[src] = primIdx[--j], primIdx[j] = t;
 			}
 			// create child nodes and recurse
-			const uint32_t n = atomicNewNodePtr.fetch_add( 2 );
+			const uint32_t n = atomicNewNodePtr->fetch_add( 2 );
 			const uint32_t leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
 			*(__m256*)& bvhNode[n] = _mm256_xor_ps( bestLBox, signFlip8 );
@@ -6011,7 +6022,8 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
 	if (depth == 0)
 	{
 		// tree has been built.
-		usedNodes = newNodePtr = atomicNewNodePtr;
+		usedNodes = newNodePtr = atomicNewNodePtr->load();
+		delete atomicNewNodePtr;
 	}
 }
 #if defined _MSC_VER
@@ -7237,7 +7249,7 @@ void BVH_Double::Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&
 	}
 	// start build
 	newNodePtr = 1;
-	Build(); // or BuildAVX, for large TLAS.
+	Build();
 }
 
 void BVH_Double::Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Double** blasses, const uint64_t bCount )
@@ -7275,7 +7287,7 @@ void BVH_Double::Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Doub
 	}
 	// start build
 	newNodePtr = 1;
-	Build(); // or BuildAVX, for large TLAS.
+	Build();
 }
 
 void BVH_Double::Build( const bvhdbl3* vertices, const uint64_t primCount )
@@ -7317,11 +7329,19 @@ void BVH_Double::PrepareBuild( const bvhdbl3* vertices, const uint64_t primCount
 	// all set; actual build happens in BVH_Double::Build.
 }
 
-void BVH_Double::Build()
+void BuildDouble_( uint64_t nodeIdx, uint32_t depth, BVH_Double* bvh )
 {
+	bvh->Build( nodeIdx, depth );
+}
+void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
+{
+	// initialize atomic counter on first call
+	if (depth == 0) atomicNewNodePtr = new std::atomic<uint64_t>( newNodePtr );
+	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
+	if (triCount < MT_BUILD_THRESHOLD) depth = 999;
 	// subdivide root node recursively
 	BVHNode& root = bvhNode[0];
-	uint64_t task[256], taskCount = 0, nodeIdx = 0;
+	uint64_t task[256], taskCount = 0;
 	bvhdbl3 minDim = (root.aabbMax - root.aabbMin) * 1e-20;
 	bvhdbl3 bestLMin = 0, bestLMax = 0, bestRMin = 0, bestRMax = 0;
 	while (1)
@@ -7394,24 +7414,36 @@ void BVH_Double::Build()
 			// create child nodes
 			uint64_t leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
-			const uint64_t lci = newNodePtr++, rci = newNodePtr++;
-			bvhNode[lci].aabbMin = bestLMin, bvhNode[lci].aabbMax = bestLMax;
-			bvhNode[lci].leftFirst = node.leftFirst, bvhNode[lci].triCount = leftCount;
-			bvhNode[rci].aabbMin = bestRMin, bvhNode[rci].aabbMax = bestRMax;
-			bvhNode[rci].leftFirst = j, bvhNode[rci].triCount = rightCount;
-			node.leftFirst = lci, node.triCount = 0;
+			const uint64_t n = atomicNewNodePtr->fetch_add( 2 );
+			bvhNode[n].aabbMin = bestLMin, bvhNode[n].aabbMax = bestLMax;
+			bvhNode[n].leftFirst = node.leftFirst, bvhNode[n].triCount = leftCount;
+			bvhNode[n + 1].aabbMin = bestRMin, bvhNode[n + 1].aabbMax = bestRMax;
+			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
+			node.leftFirst = n, node.triCount = 0;
+			if (depth < 5)
+			{
+				std::thread t1( &BuildDouble_, n, depth + 1, this );
+				std::thread t2( &BuildDouble_, n + 1, depth + 1, this );
+				t1.join();
+				t2.join();
+				break;
+			}
 			// recurse
-			task[taskCount++] = rci, nodeIdx = lci;
+			task[taskCount++] = n + 1, nodeIdx = n;
 		}
 		// fetch subdivision task from stack
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
-	// all done.
-	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
-	refittable = true; // not using spatial splits: can refit this BVH
-	may_have_holes = false; // the reference builder produces a continuous list of nodes
-	bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
-	usedNodes = newNodePtr;
+	if (depth == 0)
+	{
+		// all done.
+		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
+		refittable = true; // not using spatial splits: can refit this BVH
+		may_have_holes = false; // the reference builder produces a continuous list of nodes
+		bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
+		usedNodes = newNodePtr = atomicNewNodePtr->load();
+		delete atomicNewNodePtr;
+	}
 }
 
 double BVH_Double::BVHNode::SurfaceArea() const
