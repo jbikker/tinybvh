@@ -165,12 +165,12 @@ Plans, ordered by priority:
 
 # platforms
 TinyBVH is a cross-platfrom library and should build on any platform that supports C++20 (the '20' bit is for threading). That being said, several platforms are specifically supported:
-* x86/x64 Windows/Linux: These platforms benefit from highly optimized SSE/AVX/AVX2 traversal kernels.
-* OpenCL: Although TinyBVH does not directly use OpenCL, GPU-specific BVHs can be constructed and example code for BLAS/TLAS traversal in OpenCL is provided.
-* OpenGL: Example compute shader code for BLAS traversal is also provided.
-* ARM/NEON: Efficient BVH construction code is provided for ARM NEON. The ````BVH_SoA```` layout uses NEON intrinsics for fast traversal.
-* Android: This platform benefits from ARM NEON support as well as aligned memory allocation.
-* Apple: This platform benefits from ARM NEON support, dedicated paths in GPU example code and specialized support in TinyBVH itself.
+* ````x86/x64 Windows/Linux````: These platforms benefit from highly optimized SSE/AVX/AVX2 traversal kernels.
+* ````OPENCL````: Although TinyBVH does not directly use OpenCL, GPU-specific BVHs can be constructed and example code for BLAS/TLAS traversal in OpenCL is provided.
+* ````OpenGL/compute````: Example compute shader code for BLAS traversal is also provided.
+* ````ARM_NEON````: Efficient BVH construction code is provided for ARM NEON. The ````BVH_SoA```` layout uses NEON intrinsics for fast traversal.
+* ````ANDROID````: This platform benefits from ARM NEON support as well as aligned memory allocation.
+* ````APPLE````: This platform benefits from ARM NEON support, dedicated paths in GPU example code and specialized support in TinyBVH itself.
   
 # tinybvh in the Wild
 A list of projects using tinybvh:
