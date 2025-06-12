@@ -1,10 +1,10 @@
-# dev
+# tinybvh/dev
 This is the **development branch** for TinyBVH. Changes get tested here first.
 
-# tinybvh
+# TinyBVH
 Single-header BVH construction and traversal library written as "Sane C++" (or "C with classes"). Some C++11 is used, e.g. for threading. The library has no dependencies. 
 
-# tinyocl
+# TinyOCL
 Single-header OpenCL library, which helps you select and initialize a device. It also loads, compiles and runs kernels, with several convenient features:
 * Include-file expansion for AMD devices
 * Multi-argument passing
@@ -163,7 +163,7 @@ Plans, ordered by priority:
   * Robust default origin offset
   * Engine layer
 
-# platforms
+# Platforms
 TinyBVH is a cross-platfrom library and should build on any platform that supports C++20 (the '20' bit is for threading). That being said, several platforms are specifically supported:
 * ````x86/x64 Windows/Linux````: These platforms benefit from highly optimized SSE/AVX/AVX2 traversal kernels.
 * ````OPENCL````: Although TinyBVH does not directly use OpenCL, GPU-specific BVHs can be constructed and example code for BLAS/TLAS traversal in OpenCL is provided.
@@ -172,12 +172,12 @@ TinyBVH is a cross-platfrom library and should build on any platform that suppor
 * ````ANDROID````: This platform benefits from ARM NEON support as well as aligned memory allocation.
 * ````APPLE````: This platform benefits from ARM NEON support, dedicated paths in GPU example code and specialized support in TinyBVH itself.
   
-# tinybvh in the Wild
+# TinyBVH in the Wild
 A list of projects using tinybvh:
 * [unity-tinybvh](https://github.com/andr3wmac/unity-tinybvh): An example implementation for tinybvh in Unity and a foundation for building compute based raytracing solutions, by Andrew MacIntyre.
 * [TrenchBroomBFG](https://github.com/RobertBeckebans/TrenchBroomBFG), by Robert Beckebans. "TinyBVH allows to load bigger glTF 2 maps almost instantly instead of minutes". 
 
-# tinybvh Rust bindings
+# TinyBVH Rust bindings
 The tinybvh library can now also be used from Rust, with the [Rust bindings](https://docs.rs/tinybvh-rs/latest/tinybvh_rs) provided by David Peicho.
 
 Created or know about other projects? [Let me know](mailto:bikker.j@protonmail.com)!
