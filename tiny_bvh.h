@@ -959,6 +959,108 @@ private:
 	std::atomic<uint32_t>* atomicNextFrag = 0;
 };
 
+class VoxelSet : public BVHBase // just so it can be attached conveniently in a TLAS
+{
+public:
+	struct DDAState
+	{
+		uint32_t X, Y, Z;		// 12 bytes
+		float dummy1 = 0;		// 16 bytes
+		bvhvec3 tmax;
+		float dummy2 = 0;		// 16 values, 64 bytes in total
+	};
+	class Cube
+	{
+	public:
+		Cube() = default;
+		float Intersect( const Ray& ray ) const;
+		bool Contains( const bvhvec3& pos ) const;
+		bvhvec3 b[2] = { bvhvec3( 0, 0, 0 ), bvhvec3( 1, 1, 1 ) };
+	};
+	VoxelSet()
+	{
+		grid = (uint32_t*)AlignedAlloc( gridSize * sizeof( uint32_t ) );
+		memset( grid, 0, gridSize * sizeof( uint32_t ) );
+		brick = (uint32_t*)AlignedAlloc( brickSize * brickCount * sizeof( uint32_t ) );
+		topGrid = (uint32_t*)AlignedAlloc( topGridSize / 8 );
+		freeBrickPtr = 1; // first available brick; we'll skip 0
+		// create a dummy object: sphere shell
+		for (int x = 0; x < 256; x++) for (int y = 0; y < 256; y++) for (int z = 0; z < 256; z++)
+		{
+			int d = (x - 128) * (x - 128) + (y - 128) * (y - 128) + (z - 128) * (z - 128);
+			if (d < (124 * 124) && d >( 120 * 120 )) Set( x, y, z, 0xffffff );
+		}
+		UpdateTopGrid();
+	}
+	void Set( const uint32_t x, const uint32_t y, const uint32_t z, const uint32_t v )
+	{
+		// note: not thread-safe.
+		const uint32_t bx = x / brickDim, by = y / brickDim, bz = z / brickDim;
+		const uint32_t gridIdx = bx + by * gridDim + bz * gridDim * gridDim;
+		uint32_t brickIdx = grid[gridIdx];
+		if (!brickIdx)
+		{
+			if (freeBrickPtr == brickCount) // we ran out; reallocate
+			{
+				uint32_t newBrickCount = brickCount + (brickCount >> 2);
+				uint32_t* newBrickPool = (uint32_t*)AlignedAlloc( brickSize * newBrickCount * sizeof( uint32_t ) );
+				memcpy( newBrickPool, brick, brickSize * brickCount * sizeof( uint32_t ) );
+				AlignedFree( brick );
+				brick = newBrickPool, brickCount = newBrickCount;
+			}
+			brickIdx = grid[gridIdx] = freeBrickPtr++;
+		}
+		const uint32_t voxelIdx = (x & (brickDim - 1)) + (y & (brickDim - 1)) * brickDim + (z & (brickDim - 1)) * brickDim * brickDim;
+		brick[brickIdx * brickSize + voxelIdx] = v;
+	}
+	void UpdateTopGrid()
+	{
+		memset( topGrid, 0, topGridSize / 8 );
+		for (int x = 0; x < topGridDim; x++) for (int y = 0; y < topGridDim; y++) for (int z = 0; z < topGridDim; z++)
+		{
+			uint32_t* gridBase = grid + x * groupDim + y * groupDim * gridDim + z * groupDim * gridDim * gridDim;
+			bool hasContent = false;
+			for (int u = 0; u < groupDim; u++) for (int v = 0; v < groupDim; v++) for (int w = 0; w < groupDim; w++)
+				if (gridBase[u + v * gridDim + w * gridDim * gridDim])
+				{
+					hasContent = true;
+					goto break3;
+				}
+		break3:
+			if (!hasContent) continue;
+			uint32_t topIdx = x + y * topGridDim + z * topGridDim * topGridDim;
+			topGrid[topIdx >> 5] |= 1 << (topIdx & 31);
+		}
+	}
+	bool Setup3DDDA_ex( const Ray& ray, const bvhvec3& Dsign, DDAState& state, const bvhint3& step, bvhvec3& tdelta, float& t ) const;
+	int32_t Intersect( Ray& ray ) const;
+	bool IsOccluded( const Ray& ray ) const;
+private:
+	// lowest level: 1 32-bit value per voxel
+	static constexpr int objectDim = 256;
+	static constexpr int objectSize = objectDim * objectDim * objectDim;
+	// grid level: collection of bricks
+	static constexpr int brickDim = 8;
+	static constexpr int brickSize = brickDim * brickDim * brickDim;
+	static constexpr int gridDim = objectDim / brickDim;
+	static constexpr int gridSize = gridDim * gridDim * gridDim;
+	// topgrid level: 1 bit for each group of bricks
+	static constexpr int groupDim = 4;
+	static constexpr int groupSize = groupDim * groupDim * groupDim;
+	static constexpr int topGridDim = gridDim / groupDim;
+	static constexpr int topGridSize = topGridDim * topGridDim * topGridDim;
+	// masks
+	static constexpr uint32_t topResMask = gridDim - groupDim;
+	static constexpr uint32_t superMask = topResMask + topResMask * gridDim + topResMask * gridDim * gridDim;
+	// non-static data
+	uint32_t* grid = 0;
+	uint32_t* brick = 0;
+	uint32_t brickCount = 4096; // will grow as needed
+	uint32_t freeBrickPtr = 1; // skip 1, as 0 denotes an empty brick in the topgrid.
+	uint32_t* topGrid = 0;
+	Cube cube;
+};
+
 #ifdef DOUBLE_PRECISION_SUPPORT
 
 class BLASInstanceEx;
@@ -3603,6 +3705,353 @@ void BVH::Compact()
 	AlignedFree( primIdx );
 	bvhNode = tmp;
 	primIdx = idx;
+}
+
+// VoxelSet implementation
+// ----------------------------------------------------------------------------
+
+bool VoxelSet::Cube::Contains( const bvhvec3& pos ) const
+{
+	return pos.x >= b[0].x && pos.y >= b[0].y && pos.z >= b[0].z &&
+		pos.x <= b[1].x && pos.y <= b[1].y && pos.z <= b[1].z;
+}
+
+float VoxelSet::Cube::Intersect( const Ray& ray ) const
+{
+#if 0
+	// AVX ray/box intersection
+	const __m128 rd = _mm_mul_ps( ray.O4, ray.rD4 );
+	const __m128 t1 = _mm_fmsub_ps( b4[0], ray.rD4, rd );
+	const __m128 t2 = _mm_fmsub_ps( b4[1], ray.rD4, rd );
+	const __m128 vmax4 = _mm_max_ps( t1, t2 ), vmin4 = _mm_min_ps( t1, t2 );
+	const float tmax = min( vmax4.m128_f32[0], min( vmax4.m128_f32[1], vmax4.m128_f32[2] ) );
+	const float tmin = max( vmin4.m128_f32[0], max( vmin4.m128_f32[1], vmin4.m128_f32[2] ) );
+	const bool hit = (tmax > 0 && tmax >= tmin);
+	return hit ? tmin : 1e34f;
+
+	// SIMD ray/box intersection
+	__m128 t1 = _mm_mul_ps( _mm_sub_ps( b4[0], ray.O4 ), ray.rD4 );
+	__m128 t2 = _mm_mul_ps( _mm_sub_ps( b4[1], ray.O4 ), ray.rD4 );
+	__m128 vmax4 = _mm_max_ps( t1, t2 ), vmin4 = _mm_min_ps( t1, t2 );
+	float tmax = min( vmax4.m128_f32[0], min( vmax4.m128_f32[1], vmax4.m128_f32[2] ) );
+	float tmin = max( vmin4.m128_f32[0], max( vmin4.m128_f32[1], vmin4.m128_f32[2] ) );
+	if (tmax >= tmin && tmax > 0) return tmin;
+#endif
+	// scalar ray/box intersection
+	const int signx = ray.D.x < 0, signy = ray.D.y < 0, signz = ray.D.z < 0;
+	float tmin = (b[signx].x - ray.O.x) * ray.rD.x;
+	float tmax = (b[1 - signx].x - ray.O.x) * ray.rD.x;
+	const float tymin = (b[signy].y - ray.O.y) * ray.rD.y;
+	const float tymax = (b[1 - signy].y - ray.O.y) * ray.rD.y;
+	if (tmin > tymax || tymin > tmax) return 1e34f;
+	tmin = tinybvh_max( tmin, tymin ), tmax = tinybvh_min( tmax, tymax );
+	const float tzmin = (b[signz].z - ray.O.z) * ray.rD.z;
+	const float tzmax = (b[1 - signz].z - ray.O.z) * ray.rD.z;
+	if (tmin > tzmax || tzmin > tmax) return 1e34f;
+	if ((tmin = tinybvh_max( tmin, tzmin )) > 0) return tmin;
+	return 1e34f;
+}
+
+bool VoxelSet::Setup3DDDA_ex( const Ray& ray, const bvhvec3& Dsign, DDAState& state, const bvhint3& step, bvhvec3& tdelta, float& t ) const
+{
+	// if ray is not inside the world: advance until it is
+	if (!cube.Contains( ray.O ))
+	{
+		t = cube.Intersect( ray );
+		if (t > 1e33f) return false; // ray misses voxel data entirely
+	}
+	// setup amanatides & woo - assume world is 1x1x1, from (0,0,0) to (1,1,1)
+	static const float cellSize = 1.0f / topGridDim;
+	const bvhvec3 posInGrid = topGridDim * (ray.O + (t + 0.0000025f) * ray.D);
+	const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * cellSize;
+	const bvhint3 P(
+		tinybvh_clamp( (int)posInGrid.x, 0, topGridDim - 1 ),
+		tinybvh_clamp( (int)posInGrid.y, 0, topGridDim - 1 ),
+		tinybvh_clamp( (int)posInGrid.z, 0, topGridDim - 1 )
+	);
+	state.X = P.x, state.Y = P.y, state.Z = P.z;
+	state.tmax = (gridPlanes - ray.O) * ray.rD;
+	tdelta = bvhvec3( (float)step.x, (float)step.y, (float)step.z ) * cellSize * ray.rD;
+	// proceed with traversal
+	return true;
+}
+
+int32_t VoxelSet::Intersect( Ray& ray ) const
+{
+	// setup Amanatides & Woo grid traversal
+	ALIGNED( 64 ) DDAState l1_, l2_;
+	const uint32_t xsign = *(uint32_t*)&ray.D.x >> 31;
+	const uint32_t ysign = *(uint32_t*)&ray.D.y >> 31;
+	const uint32_t zsign = *(uint32_t*)&ray.D.z >> 31;
+	const bvhvec3 Dsign = (bvhvec3( (float)xsign * 2 - 1, (float)ysign * 2 - 1, (float)zsign * 2 - 1 ) + 1.0f) * 0.5f;
+	const bvhint3 step( bvhvec3( 1 ) - Dsign * 2.0f );
+	bvhvec3 tdelta;
+	float t = 0;
+	if (!Setup3DDDA_ex( ray, Dsign, l1_, step, tdelta, t )) return 0;
+	const bvhvec3 l2tdelta = tdelta * (1.0f / groupDim);
+	const bvhvec3 l3tdelta = l2tdelta * (1.0f / brickDim);
+	uint32_t* gridBase = 0;
+	// start stepping:
+	while (1)
+	{
+		const uint32_t tidx = l1_.X + l1_.Y * topGridDim + l1_.Z * topGridDim * topGridDim;
+		const uint32_t cell = topGrid[tidx >> 5] & (1 << (tidx & 31));
+		if (cell)
+		{
+			// setup midlevel traversal
+			const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * gridDim;
+			const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / gridDim);
+			l2_.X = tinybvh_clamp( (int)posInGrid.x, l1_.X * groupDim, l1_.X * groupDim + (groupDim - 1) );
+			l2_.Y = tinybvh_clamp( (int)posInGrid.y, l1_.Y * groupDim, l1_.Y * groupDim + (groupDim - 1) );
+			l2_.Z = tinybvh_clamp( (int)posInGrid.z, l1_.Z * groupDim, l1_.Z * groupDim + (groupDim - 1) );
+			l2_.tmax = (gridPlanes - ray.O) * ray.rD;
+			gridBase = grid + ((l2_.X + l2_.Y * gridDim + l2_.Z * gridDim * gridDim) & superMask);
+			l2_.X &= groupDim - 1, l2_.Y &= groupDim - 1, l2_.Z &= groupDim - 1;
+			// step through midlevel cells
+			while (1)
+			{
+				const uint32_t cell = gridBase[l2_.X + l2_.Y * gridDim + l2_.Z * gridDim * gridDim];
+				if (cell)
+				{
+					// setup 3DDDA for brick traversal
+					uint32_t* brickData = brick + cell * brickSize;
+					const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * objectDim;
+					uint32_t X = tinybvh_clamp( (int)posInGrid.x - (l2_.X + l1_.X * groupDim) * brickDim, 0, brickDim - 1 );
+					uint32_t Y = tinybvh_clamp( (int)posInGrid.y - (l2_.Y + l1_.Y * groupDim) * brickDim, 0, brickDim - 1 );
+					uint32_t Z = tinybvh_clamp( (int)posInGrid.z - (l2_.Z + l1_.Z * groupDim) * brickDim, 0, brickDim - 1 );
+					const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / objectDim);
+					bvhvec3 tmax = (gridPlanes - ray.O) * ray.rD;
+					// step through brick
+					while (1)
+					{
+						const uint32_t v = brickData[X + Y * brickDim + Z * brickDim * brickDim];
+						if (v)
+						{
+							ray.hit.t = t;
+							ray.hit.prim = v;
+							return 0;
+						}
+						if (tmax.x < tmax.y)
+						{
+							if (tmax.x < tmax.z)
+							{
+								if ((X += step.x) >= brickDim) break;
+								t = tmax.x, tmax.x += l3tdelta.x;
+							}
+							else
+							{
+								if ((Z += step.z) >= brickDim) break;
+								t = tmax.z, tmax.z += l3tdelta.z;
+							}
+						}
+						else
+						{
+							if (tmax.y < tmax.z)
+							{
+								if ((Y += step.y) >= brickDim) break;
+								t = tmax.y, tmax.y += l3tdelta.y;
+							}
+							else
+							{
+								if ((Z += step.z) >= brickDim) break;
+								t = tmax.z, tmax.z += l3tdelta.z;
+							}
+						}
+					}
+				}
+				if (l2_.tmax.x < l2_.tmax.y)
+				{
+					if (l2_.tmax.x < l2_.tmax.z)
+					{
+						if ((l2_.X += step.x) >= groupDim) break;
+						t = l2_.tmax.x, l2_.tmax.x += l2tdelta.x;
+					}
+					else
+					{
+						if ((l2_.Z += step.z) >= groupDim) break;
+						t = l2_.tmax.z, l2_.tmax.z += l2tdelta.z;
+					}
+				}
+				else
+				{
+					if (l2_.tmax.y < l2_.tmax.z)
+					{
+						if ((l2_.Y += step.y) >= groupDim) break;
+						t = l2_.tmax.y, l2_.tmax.y += l2tdelta.y;
+					}
+					else
+					{
+						if ((l2_.Z += step.z) >= groupDim) break;
+						t = l2_.tmax.z, l2_.tmax.z += l2tdelta.z;
+					}
+				}
+			}
+		}
+		if (l1_.tmax.x < l1_.tmax.y)
+		{
+			if (l1_.tmax.x < l1_.tmax.z)
+			{
+				if ((l1_.X += step.x) >= topGridDim) break;
+				t = l1_.tmax.x, l1_.tmax.x += tdelta.x;
+			}
+			else
+			{
+				if ((l1_.Z += step.z) >= topGridDim) break;
+				t = l1_.tmax.z, l1_.tmax.z += tdelta.z;
+			}
+		}
+		else
+		{
+			if (l1_.tmax.y < l1_.tmax.z)
+			{
+				if ((l1_.Y += step.y) >= topGridDim) break;
+				t = l1_.tmax.y, l1_.tmax.y += tdelta.y;
+			}
+			else
+			{
+				if ((l1_.Z += step.z) >= topGridDim) break;
+				t = l1_.tmax.z, l1_.tmax.z += tdelta.z;
+			}
+		}
+	}
+	return 0;
+}
+
+bool VoxelSet::IsOccluded( const Ray& ray ) const
+{
+	// setup Amanatides & Woo grid traversal
+	ALIGNED( 64 ) DDAState l1_, l2_;
+	const uint32_t xsign = *(uint32_t*)&ray.D.x >> 31;
+	const uint32_t ysign = *(uint32_t*)&ray.D.y >> 31;
+	const uint32_t zsign = *(uint32_t*)&ray.D.z >> 31;
+	const bvhvec3 Dsign = (bvhvec3( (float)xsign * 2 - 1, (float)ysign * 2 - 1, (float)zsign * 2 - 1 ) + 1.0f) * 0.5f;
+	const bvhint3 step( bvhvec3( 1 ) - Dsign * 2.0f );
+	bvhvec3 tdelta;
+	float t = 0;
+	if (!Setup3DDDA_ex( ray, Dsign, l1_, step, tdelta, t )) return false;
+	const bvhvec3 l2tdelta = tdelta * (1.0f / groupDim);
+	const bvhvec3 l3tdelta = l2tdelta * (1.0f / brickDim);
+	uint32_t* gridBase = 0;
+	// start stepping:
+	while (t < ray.hit.t)
+	{
+		const uint32_t tidx = l1_.X + l1_.Y * topGridDim + l1_.Z * topGridDim * topGridDim;
+		const uint32_t cell = topGrid[tidx >> 5] & (1 << (tidx & 31));
+		if (cell)
+		{
+			// setup midlevel traversal
+			const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * gridDim;
+			const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / gridDim);
+			l2_.X = tinybvh_clamp( (int)posInGrid.x, l1_.X * groupDim, l1_.X * groupDim + (groupDim - 1) );
+			l2_.Y = tinybvh_clamp( (int)posInGrid.y, l1_.Y * groupDim, l1_.Y * groupDim + (groupDim - 1) );
+			l2_.Z = tinybvh_clamp( (int)posInGrid.z, l1_.Z * groupDim, l1_.Z * groupDim + (groupDim - 1) );
+			l2_.tmax = (gridPlanes - ray.O) * ray.rD;
+			gridBase = grid + ((l2_.X + l2_.Y * gridDim + l2_.Z * gridDim * gridDim) & superMask);
+			l2_.X &= groupDim - 1, l2_.Y &= groupDim - 1, l2_.Z &= groupDim - 1;
+			// step through midlevel cells
+			while (1)
+			{
+				const uint32_t cell = gridBase[l2_.X + l2_.Y * gridDim + l2_.Z * gridDim * gridDim];
+				if (cell)
+				{
+					// setup 3DDDA for brick traversal
+					uint32_t* brickData = brick + cell * brickSize;
+					const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * objectDim;
+					uint32_t X = tinybvh_clamp( (int)posInGrid.x - (l2_.X + l1_.X * groupDim) * brickDim, 0u, brickDim - 1 );
+					uint32_t Y = tinybvh_clamp( (int)posInGrid.y - (l2_.Y + l1_.Y * groupDim) * brickDim, 0u, brickDim - 1 );
+					uint32_t Z = tinybvh_clamp( (int)posInGrid.z - (l2_.Z + l1_.Z * groupDim) * brickDim, 0u, brickDim - 1 );
+					const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / objectDim);
+					bvhvec3 tmax = (gridPlanes - ray.O) * ray.rD;
+					// step through brick
+					while (1)
+					{
+						const uint32_t v = brickData[X + Y * brickDim + Z * brickDim * brickDim];
+						if (v) return t < ray.hit.t;
+						if (tmax.x < tmax.y)
+						{
+							if (tmax.x < tmax.z)
+							{
+								if ((X += step.x) >= brickDim) break;
+								t = tmax.x, tmax.x += l3tdelta.x;
+							}
+							else
+							{
+								if ((Z += step.z) >= brickDim) break;
+								t = tmax.z, tmax.z += l3tdelta.z;
+							}
+						}
+						else
+						{
+							if (tmax.y < tmax.z)
+							{
+								if ((Y += step.y) >= brickDim) break;
+								t = tmax.y, tmax.y += l3tdelta.y;
+							}
+							else
+							{
+								if ((Z += step.z) >= brickDim) break;
+								t = tmax.z, tmax.z += l3tdelta.z;
+							}
+						}
+					}
+				}
+				if (l2_.tmax.x < l2_.tmax.y)
+				{
+					if (l2_.tmax.x < l2_.tmax.z)
+					{
+						if ((l2_.X += step.x) >= groupDim) break;
+						t = l2_.tmax.x, l2_.tmax.x += l2tdelta.x;
+					}
+					else
+					{
+						if ((l2_.Z += step.z) >= groupDim) break;
+						t = l2_.tmax.z, l2_.tmax.z += l2tdelta.z;
+					}
+				}
+				else
+				{
+					if (l2_.tmax.y < l2_.tmax.z)
+					{
+						if ((l2_.Y += step.y) >= groupDim) break;
+						t = l2_.tmax.y, l2_.tmax.y += l2tdelta.y;
+					}
+					else
+					{
+						if ((l2_.Z += step.z) >= groupDim) break;
+						t = l2_.tmax.z, l2_.tmax.z += l2tdelta.z;
+					}
+				}
+			}
+		}
+		if (l1_.tmax.x < l1_.tmax.y)
+		{
+			if (l1_.tmax.x < l1_.tmax.z)
+			{
+				if ((l1_.X += step.x) >= topGridDim) break;
+				t = l1_.tmax.x, l1_.tmax.x += tdelta.x;
+			}
+			else
+			{
+				if ((l1_.Z += step.z) >= topGridDim) break;
+				t = l1_.tmax.z, l1_.tmax.z += tdelta.z;
+			}
+		}
+		else
+		{
+			if (l1_.tmax.y < l1_.tmax.z)
+			{
+				if ((l1_.Y += step.y) >= topGridDim) break;
+				t = l1_.tmax.y, l1_.tmax.y += tdelta.y;
+			}
+			else
+			{
+				if ((l1_.Z += step.z) >= topGridDim) break;
+				t = l1_.tmax.z, l1_.tmax.z += tdelta.z;
+			}
+		}
+	}
+	// we shouldn't get here
+	return false;
 }
 
 // BVH_Verbose implementation
