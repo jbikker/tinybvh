@@ -979,13 +979,14 @@ public:
 	};
 	VoxelSet();
 	void Set( const uint32_t x, const uint32_t y, const uint32_t z, const uint32_t v );
-	void UpdateTopGrid();
-	bool Setup3DDDA_ex( const Ray& ray, const bvhvec3& Dsign, DDAState& state, const bvhint3& step, bvhvec3& tdelta, float& t ) const;
+	bvhvec3 GetNormal( const Ray& ray ) const;
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 private:
+	void UpdateTopGrid();
+	bool Setup3DDDA_ex( const Ray& ray, const bvhvec3& Dsign, DDAState& state, const bvhint3& step, bvhvec3& tdelta, float& t ) const;
 	// lowest level: 1 32-bit value per voxel
-	static constexpr int objectDim = 256;
+	static constexpr int objectDim = 64; // 64, 128 or 256.
 	static constexpr int objectSize = objectDim * objectDim * objectDim;
 	// grid level: collection of bricks
 	static constexpr int brickDim = 8;
@@ -1003,7 +1004,7 @@ private:
 	// non-static data
 	uint32_t* grid = 0;
 	uint32_t* brick = 0;
-	uint32_t brickCount = 4096; // will grow as needed
+	uint32_t brickCount = (objectDim * objectDim) / 16; // will grow as needed; scales roughly quadratically with objectDim
 	uint32_t freeBrickPtr = 1; // skip 1, as 0 denotes an empty brick in the topgrid.
 	uint32_t* topGrid = 0;
 	Cube cube;
@@ -3708,10 +3709,11 @@ VoxelSet::VoxelSet()
 	topGrid = (uint32_t*)AlignedAlloc( topGridSize / 8 );
 	freeBrickPtr = 1; // first available brick; we'll skip 0
 	// create a dummy object: sphere shell
-	for (int x = 0; x < 256; x++) for (int y = 0; y < 256; y++) for (int z = 0; z < 256; z++)
+	const uint32_t h = objectDim / 2, r1 = h + 5, r2 = h + 3;
+	for (int x = 0; x < objectDim; x++) for (int y = 0; y < objectDim; y++) for (int z = 0; z < objectDim; z++)
 	{
-		int d = (x - 128) * (x - 128) + (y - 128) * (y - 128) + (z - 128) * (z - 128);
-		if (d < (124 * 124) && d >( 120 * 120 )) Set( x, y, z, 0xffffff );
+		int d = (x - h) * (x - h) + (y - h) * (y - h) + (z - h) * (z - h);
+		if (d < r1 * r1 && d > r2 * r2) Set( x, y, z, 0xffffff );
 	}
 	UpdateTopGrid();
 }
@@ -3780,6 +3782,17 @@ bool VoxelSet::Setup3DDDA_ex( const Ray& ray, const bvhvec3& Dsign, DDAState& st
 	tdelta = bvhvec3( (float)step.x, (float)step.y, (float)step.z ) * cellSize * ray.rD;
 	// proceed with traversal
 	return true;
+}
+
+bvhvec3 VoxelSet::GetNormal( const Ray& ray ) const
+{
+	const bvhvec3 I1 = (ray.O + ray.hit.t * ray.D) * objectDim; // our object is (1,1,1) in object space, so this scales each voxel to (1,1,1)
+	const bvhvec3 fG( I1.x - floorf( I1.x ), I1.y - floorf( I1.y ), I1.z - floorf( I1.z ) );
+	const bvhvec3 d = tinybvh_min( fG, 1.0f - fG );
+	const float mind = tinybvh_min( tinybvh_min( d.x, d.y ), d.z );
+	if (mind == d.x) return bvhvec3( ray.D.x > 0 ? -1 : 1, 0, 0 );
+	else if (mind == d.y) return bvhvec3( 0, ray.D.y > 0 ? -1 : 1, 0 );
+	else return bvhvec3( 0, 0, ray.D.z > 0 ? -1 : 1 );
 }
 
 int32_t VoxelSet::Intersect( Ray& ray ) const
