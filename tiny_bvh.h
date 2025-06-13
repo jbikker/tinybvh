@@ -977,61 +977,9 @@ public:
 		bool Contains( const bvhvec3& pos ) const;
 		bvhvec3 b[2] = { bvhvec3( 0, 0, 0 ), bvhvec3( 1, 1, 1 ) };
 	};
-	VoxelSet()
-	{
-		grid = (uint32_t*)AlignedAlloc( gridSize * sizeof( uint32_t ) );
-		memset( grid, 0, gridSize * sizeof( uint32_t ) );
-		brick = (uint32_t*)AlignedAlloc( brickSize * brickCount * sizeof( uint32_t ) );
-		topGrid = (uint32_t*)AlignedAlloc( topGridSize / 8 );
-		freeBrickPtr = 1; // first available brick; we'll skip 0
-		// create a dummy object: sphere shell
-		for (int x = 0; x < 256; x++) for (int y = 0; y < 256; y++) for (int z = 0; z < 256; z++)
-		{
-			int d = (x - 128) * (x - 128) + (y - 128) * (y - 128) + (z - 128) * (z - 128);
-			if (d < (124 * 124) && d >( 120 * 120 )) Set( x, y, z, 0xffffff );
-		}
-		UpdateTopGrid();
-	}
-	void Set( const uint32_t x, const uint32_t y, const uint32_t z, const uint32_t v )
-	{
-		// note: not thread-safe.
-		const uint32_t bx = x / brickDim, by = y / brickDim, bz = z / brickDim;
-		const uint32_t gridIdx = bx + by * gridDim + bz * gridDim * gridDim;
-		uint32_t brickIdx = grid[gridIdx];
-		if (!brickIdx)
-		{
-			if (freeBrickPtr == brickCount) // we ran out; reallocate
-			{
-				uint32_t newBrickCount = brickCount + (brickCount >> 2);
-				uint32_t* newBrickPool = (uint32_t*)AlignedAlloc( brickSize * newBrickCount * sizeof( uint32_t ) );
-				memcpy( newBrickPool, brick, brickSize * brickCount * sizeof( uint32_t ) );
-				AlignedFree( brick );
-				brick = newBrickPool, brickCount = newBrickCount;
-			}
-			brickIdx = grid[gridIdx] = freeBrickPtr++;
-		}
-		const uint32_t voxelIdx = (x & (brickDim - 1)) + (y & (brickDim - 1)) * brickDim + (z & (brickDim - 1)) * brickDim * brickDim;
-		brick[brickIdx * brickSize + voxelIdx] = v;
-	}
-	void UpdateTopGrid()
-	{
-		memset( topGrid, 0, topGridSize / 8 );
-		for (int x = 0; x < topGridDim; x++) for (int y = 0; y < topGridDim; y++) for (int z = 0; z < topGridDim; z++)
-		{
-			uint32_t* gridBase = grid + x * groupDim + y * groupDim * gridDim + z * groupDim * gridDim * gridDim;
-			bool hasContent = false;
-			for (int u = 0; u < groupDim; u++) for (int v = 0; v < groupDim; v++) for (int w = 0; w < groupDim; w++)
-				if (gridBase[u + v * gridDim + w * gridDim * gridDim])
-				{
-					hasContent = true;
-					goto break3;
-				}
-		break3:
-			if (!hasContent) continue;
-			uint32_t topIdx = x + y * topGridDim + z * topGridDim * topGridDim;
-			topGrid[topIdx >> 5] |= 1 << (topIdx & 31);
-		}
-	}
+	VoxelSet();
+	void Set( const uint32_t x, const uint32_t y, const uint32_t z, const uint32_t v );
+	void UpdateTopGrid();
 	bool Setup3DDDA_ex( const Ray& ray, const bvhvec3& Dsign, DDAState& state, const bvhint3& step, bvhvec3& tdelta, float& t ) const;
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
@@ -3750,6 +3698,64 @@ float VoxelSet::Cube::Intersect( const Ray& ray ) const
 	if (tmin > tzmax || tzmin > tmax) return 1e34f;
 	if ((tmin = tinybvh_max( tmin, tzmin )) > 0) return tmin;
 	return 1e34f;
+}
+
+VoxelSet::VoxelSet()
+{
+	grid = (uint32_t*)AlignedAlloc( gridSize * sizeof( uint32_t ) );
+	memset( grid, 0, gridSize * sizeof( uint32_t ) );
+	brick = (uint32_t*)AlignedAlloc( brickSize * brickCount * sizeof( uint32_t ) );
+	topGrid = (uint32_t*)AlignedAlloc( topGridSize / 8 );
+	freeBrickPtr = 1; // first available brick; we'll skip 0
+	// create a dummy object: sphere shell
+	for (int x = 0; x < 256; x++) for (int y = 0; y < 256; y++) for (int z = 0; z < 256; z++)
+	{
+		int d = (x - 128) * (x - 128) + (y - 128) * (y - 128) + (z - 128) * (z - 128);
+		if (d < (124 * 124) && d >( 120 * 120 )) Set( x, y, z, 0xffffff );
+	}
+	UpdateTopGrid();
+}
+
+void VoxelSet::Set( const uint32_t x, const uint32_t y, const uint32_t z, const uint32_t v )
+{
+	// note: not thread-safe.
+	const uint32_t bx = x / brickDim, by = y / brickDim, bz = z / brickDim;
+	const uint32_t gridIdx = bx + by * gridDim + bz * gridDim * gridDim;
+	uint32_t brickIdx = grid[gridIdx];
+	if (!brickIdx)
+	{
+		if (freeBrickPtr == brickCount) // we ran out; reallocate
+		{
+			uint32_t newBrickCount = brickCount + (brickCount >> 2);
+			uint32_t* newBrickPool = (uint32_t*)AlignedAlloc( brickSize * newBrickCount * sizeof( uint32_t ) );
+			memcpy( newBrickPool, brick, brickSize * brickCount * sizeof( uint32_t ) );
+			AlignedFree( brick );
+			brick = newBrickPool, brickCount = newBrickCount;
+		}
+		brickIdx = grid[gridIdx] = freeBrickPtr++;
+	}
+	const uint32_t voxelIdx = (x & (brickDim - 1)) + (y & (brickDim - 1)) * brickDim + (z & (brickDim - 1)) * brickDim * brickDim;
+	brick[brickIdx * brickSize + voxelIdx] = v;
+}
+
+void VoxelSet::UpdateTopGrid()
+{
+	memset( topGrid, 0, topGridSize / 8 );
+	for (int x = 0; x < topGridDim; x++) for (int y = 0; y < topGridDim; y++) for (int z = 0; z < topGridDim; z++)
+	{
+		uint32_t* gridBase = grid + x * groupDim + y * groupDim * gridDim + z * groupDim * gridDim * gridDim;
+		bool hasContent = false;
+		for (int u = 0; u < groupDim; u++) for (int v = 0; v < groupDim; v++) for (int w = 0; w < groupDim; w++)
+			if (gridBase[u + v * gridDim + w * gridDim * gridDim])
+			{
+				hasContent = true;
+				goto break3;
+			}
+	break3:
+		if (!hasContent) continue;
+		uint32_t topIdx = x + y * topGridDim + z * topGridDim * topGridDim;
+		topGrid[topIdx >> 5] |= 1 << (topIdx & 31);
+	}
 }
 
 bool VoxelSet::Setup3DDDA_ex( const Ray& ray, const bvhvec3& Dsign, DDAState& state, const bvhint3& step, bvhvec3& tdelta, float& t ) const
