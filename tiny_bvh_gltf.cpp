@@ -39,7 +39,11 @@ void Init()
 {
 	// Load a scene from a GLTF file using tinyscene.
 	scene.SetBVHDefault( BVH_RIGID );
-	scene.AddScene( "./testdata/drone/scene.gltf", 0.1f );
+	bvhmat4 Tdrone, Ttree;
+	Tdrone[0] = Tdrone[5] = Tdrone[10] = 0.03f;
+	Ttree[0] = Ttree[5] = Ttree[10] = 2.0f, Ttree[3] = 5.0f, Ttree[7] = -2.9f;
+	scene.AddScene( "./testdata/drone/scene.gltf", Tdrone );
+	scene.AddScene( "./testdata/mangotree/scene.gltf", Ttree );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
 	// Load camera position / direction from file.
 	std::fstream t = std::fstream{ "camera.bin", t.binary | t.in };
@@ -69,20 +73,20 @@ bool UpdateCamera( float delta_time_s, fenster& f )
 }
 
 // Helper function to obtain HDR sky sample from the loaded scene.
-bvhvec3 SampleSky( const Ray& ray )
+bvhvec3 SampleSky( const bvhvec3& D )
 {
 	SkyDome* sky = Scene::sky;
 	if (!sky) return 0;
-	const float p = atan2f( ray.D.z, ray.D.x );
+	const float p = atan2f( D.z, D.x );
 	const uint32_t u = (uint32_t)(sky->width * (p + (p < 0 ? PI * 2 : 0)) * INV2PI - 0.5f);
-	const uint32_t v = (uint32_t)(sky->height * acosf( ray.D.y ) * INVPI - 0.5f);
+	const uint32_t v = (uint32_t)(sky->height * acosf( D.y ) * INVPI - 0.5f);
 	const uint32_t idx = tinybvh_min( u + v * sky->width, (uint32_t)(sky->width * sky->height - 1) );
 	const bvhvec3 sample = sky->pixels[idx];
 	return bvhvec3( sample.z, sample.y, sample.x );
 }
 
 // Helper function to obtain detailed shading data for the hitpoint.
-void GetShadingData( const Ray& ray, bvhvec3& albedo, bvhvec3& N, bvhvec3& iN )
+void GetShadingData( const Ray& ray, bvhvec3& albedo, float& alpha, bvhvec3& N, bvhvec3& iN )
 {
 	const uint32_t primIdx = ray.hit.prim;
 	const uint32_t instIdx = ray.hit.inst;
@@ -96,6 +100,7 @@ void GetShadingData( const Ray& ray, bvhvec3& albedo, bvhvec3& N, bvhvec3& iN )
 	float tu = u * triangle.u1 + v * triangle.u2 + (1 - u - v) * triangle.u0;
 	float tv = u * triangle.v1 + v * triangle.v2 + (1 - u - v) * triangle.v0;
 	tu -= floorf( tu ), tv -= floorf( tv );
+	alpha = 1;
 	if (material->color.textureID == -1) albedo = material->color.value; else
 	{
 		Texture* tex = Scene::textures[material->color.textureID];
@@ -105,6 +110,7 @@ void GetShadingData( const Ray& ray, bvhvec3& albedo, bvhvec3& N, bvhvec3& iN )
 		{
 			const ts_uchar4 pixel = tex->idata[iu + iv * tex->width];
 			albedo = bvhvec3( (float)pixel.x, (float)pixel.y, (float)pixel.z ) * (1.0f / 256.0f);
+			alpha = (pixel.x + pixel.y + pixel.z > 5) ? 1.0f : 0.0f;
 		}
 	}
 	// geometric normal, transformed to world space
@@ -130,19 +136,21 @@ void GetShadingData( const Ray& ray, bvhvec3& albedo, bvhvec3& N, bvhvec3& iN )
 // Main ray tracing function: Calculates the (floating point) color for a pixel.
 bvhvec3 Trace( Ray& ray, const int depth = 0 )
 {
-	Scene::tlas->Intersect( ray );
-	if (ray.hit.t >= 10000) return SampleSky( ray );
-	bvhvec3 albedo, N, iN;
-	GetShadingData( ray, albedo, N, iN );
+	bvhvec3 albedo, N, iN, I;
+	for( int i = 0; i < 8; i++ )
+	{
+		Scene::tlas->Intersect( ray );
+		if (ray.hit.t >= 10000) return SampleSky( ray.D );
+		I = ray.O + ray.D * ray.hit.t;
+		float alpha;
+		GetShadingData( ray, albedo, alpha, N, iN );
+		if (alpha > 0) break;
+		ray.O = I + ray.D * 0.0001f; // we hit an alpha masked pixel, continue
+		ray.hit.t = 1e34f;
+	}
 	static bvhvec3 L = tinybvh_normalize( bvhvec3( 2, 4, 5 ) );
 	const bvhvec3 R = ray.D - 2 * tinybvh_dot( iN, ray.D ) * iN;
-	bvhvec3 indirect( 0 );
-	if (depth == 0)
-	{
-		const bvhvec3 I = ray.O + ray.D * ray.hit.t;
-		Ray r( I + N * 0.0001f, R );
-		indirect = Trace( r, 1 );
-	}
+	bvhvec3 indirect = SampleSky( R );
 	return albedo * (0.5f * indirect + tinybvh_max( 0.2f, tinybvh_dot( iN, L ) ));
 	// return (iN + 1) * 0.5f;
 }
