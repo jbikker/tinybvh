@@ -979,7 +979,9 @@ public:
 private:
 	bool Setup3DDDA( const Ray& ray, const bvhvec3& Dsign, DDAState& state, const bvhint3& step, bvhvec3& tdelta, float& t ) const;
 	// lowest level: 1 32-bit value per voxel
-	static constexpr int objectDim = 128; // 64, 128 or 256.
+public:
+	static constexpr int objectDim = 256; // 64, 128 or 256.
+private:
 	static constexpr int objectSize = objectDim * objectDim * objectDim;
 	// grid level: collection of bricks
 	static constexpr int brickDim = 8;
@@ -2302,7 +2304,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
 	// all done.
-	if (depth == 0)
+	if (depth == 0 || triCount < MT_BUILD_THRESHOLD)
 	{
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = true; // not using spatial splits: can refit this BVH
@@ -3675,7 +3677,7 @@ void VoxelSet::Set( const uint32_t x, const uint32_t y, const uint32_t z, const 
 		if (freeBrickPtr == brickCount) // we ran out; reallocate
 		{
 			uint32_t newBrickCount = brickCount + (brickCount >> 2);
-			uint32_t* newBrickPool = (uint32_t*)AlignedAlloc( brickSize * newBrickCount * sizeof( uint32_t ) );
+			uint32_t* newBrickPool = (uint32_t*)AlignedAlloc( newBrickCount * brickSize * sizeof( uint32_t ) );
 			memcpy( newBrickPool, brick, brickCount * brickSize * sizeof( uint32_t ) );
 			memset( newBrickPool + brickCount * brickSize, (newBrickCount - brickCount) * brickSize * sizeof( uint32_t ), 0 );
 			AlignedFree( brick );
@@ -6448,12 +6450,12 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
 	// all done.
-	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
-	refittable = true; // not using spatial splits: can refit this BVH
-	may_have_holes = false; // the AVX builder produces a continuous list of nodes
-	if (depth == 0)
+	if (depth == 0 || triCount < MT_BUILD_THRESHOLD)
 	{
 		// tree has been built.
+		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
+		refittable = true; // not using spatial splits: can refit this BVH
+		may_have_holes = false; // the AVX builder produces a continuous list of nodes
 		usedNodes = newNodePtr = atomicNewNodePtr->load();
 		delete atomicNewNodePtr;
 	}
@@ -7866,7 +7868,7 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 		// fetch subdivision task from stack
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
-	if (depth == 0)
+	if (depth == 0 || triCount < MT_BUILD_THRESHOLD)
 	{
 		// all done.
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
@@ -7972,9 +7974,7 @@ int32_t BVH_Double::IntersectTLAS( RayEx& ray ) const
 				// BLAS traversal
 				const uint64_t instIdx = primIdx[node->leftFirst + i];
 				BLASInstanceEx& inst = instList[instIdx];
-
 				if (!(inst.mask & ray.mask)) continue;
-
 				BVH_Double* blas = blasList[inst.blasIdx];
 				// 1. Transform ray with the inverse of the instance transform
 				tmp.O = tinybvh_transform_point( ray.O, inst.invTransform );
