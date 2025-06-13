@@ -7,6 +7,7 @@
 #define TINYBVH_IMPLEMENTATION
 #include "tiny_bvh.h"
 #include <fstream>
+#include "zlib.h"
 
 using namespace tinybvh;
 
@@ -24,8 +25,8 @@ int verts = 0, inds = 0;
 
 // setup view pyramid for a pinhole camera:
 // eye, p1 (top-left), p2 (top-right) and p3 (bottom-left)
-static bvhvec3 eye( 0, 0, -3 ), p1, p2, p3;
-static bvhvec3 view = tinybvh_normalize( bvhvec3( 0.0001f, 0.0001f, 1 ) );
+static bvhvec3 eye( 0, 1.154f, -0.375f ), p1, p2, p3;
+static bvhvec3 view( 0.350f, -0.602f, 0.717f );
 
 void Init()
 {
@@ -41,6 +42,21 @@ void Init()
 	s.read( (char*)vertices, verts * 16 );
 	s.close();
 #endif
+	// load voxel object
+	uint32_t* grid = new uint32_t[128 * 128 * 128];
+	gzFile f = gzopen( "./testdata/voxels/legocar.bin", "rb" );
+	bvhint3 size;
+	gzread( f, &size, sizeof( bvhint3 ) );
+	gzread( f, grid, size.x * size.y * size.z * 4 );
+	gzclose( f );
+	// store in VoxelSet instance
+	for (int x = 0; x < 128; x++) for (int y = 0; y < 128; y++) for (int z = 0; z < 128; z++)
+	{
+		uint32_t v = grid[x + y * size.x + z * size.x * size.y];
+		if (v) voxels.Set( x, y, z, v );
+	}
+	voxels.UpdateTopGrid();
+	int w = 0;
 	// allocate buffers
 	rays = (Ray*)tinybvh::malloc64( SCRWIDTH * SCRHEIGHT * 16 * sizeof( Ray ) );
 }
@@ -52,12 +68,12 @@ bool UpdateCamera( float delta_time_s, fenster& f )
 
 	// get camera controls.
 	bool moved = false;
-	if (f.keys['A']) eye += right * -1.0f * delta_time_s * 10, moved = true;
-	if (f.keys['D']) eye += right * delta_time_s * 10, moved = true;
-	if (f.keys['W']) eye += view * delta_time_s * 10, moved = true;
-	if (f.keys['S']) eye += view * -1.0f * delta_time_s * 10, moved = true;
-	if (f.keys['R']) eye += up * delta_time_s * 10, moved = true;
-	if (f.keys['F']) eye += up * -1.0f * delta_time_s * 10, moved = true;
+	if (f.keys['A']) eye += right * -1.0f * delta_time_s * 2, moved = true;
+	if (f.keys['D']) eye += right * delta_time_s * 2, moved = true;
+	if (f.keys['W']) eye += view * delta_time_s * 2, moved = true;
+	if (f.keys['S']) eye += view * -1.0f * delta_time_s * 2, moved = true;
+	if (f.keys['R']) eye += up * delta_time_s * 2, moved = true;
+	if (f.keys['F']) eye += up * -1.0f * delta_time_s * 2, moved = true;
 	if (f.keys[20]) view = tinybvh_normalize( view + right * -1.0f * delta_time_s ), moved = true;
 	if (f.keys[19]) view = tinybvh_normalize( view + right * delta_time_s ), moved = true;
 	if (f.keys[17]) view = tinybvh_normalize( view + up * -1.0f * delta_time_s ), moved = true;
@@ -84,8 +100,7 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 	// clear the screen with a debug-friendly color
 	for (int i = 0; i < SCRWIDTH * SCRHEIGHT; i++) buf[i] = 0xff00ff;
 
-	// generate primary rays in a cacheline-aligned buffer - and, for data locality:
-	// organized in 4x4 pixel tiles, 16 samples per pixel, so 256 rays per tile.
+	// generate primary rays in a cacheline-aligned buffer
 	int N = 0;
 	for (int ty = 0; ty < SCRHEIGHT; ty += 4) for (int tx = 0; tx < SCRWIDTH; tx += 4)
 	{
@@ -109,9 +124,17 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 			int pixel_x = tx * 4 + x, pixel_y = ty * 4 + y, primIdx = rays[i].hit.prim;
 			// get voxel normal
 			bvhvec3 N = voxels.GetNormal( rays[i] );
+			// get voxel color
+			uint32_t color = rays[i].hit.prim;
+			float r = (color >> 16) & 255;
+			float g = (color >> 8) & 255;
+			float b = color & 255;
+			bvhvec3 shaded = bvhvec3( r, g, b ) * (1.0f / 255.0f) * fabs( tinybvh_dot( N, L ) );
 			// final plot
-			int c = (int)(255.9f * fabs( tinybvh_dot( N, L ) ));
-			buf[pixel_x + pixel_y * SCRWIDTH] = c + (c << 8) + (c << 16);
+			int ir = (int)(shaded.x * 255.0f);
+			int ig = (int)(shaded.y * 255.0f);
+			int ib = (int)(shaded.z * 255.0f);
+			buf[pixel_x + pixel_y * SCRWIDTH] = ib + (ig << 8) + (ir << 16);
 		}
 	}
 
