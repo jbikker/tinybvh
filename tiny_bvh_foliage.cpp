@@ -88,7 +88,7 @@ void GetShadingData( const Ray& ray, bvhvec3& albedo, float& alpha, bvhvec3& N, 
 		{
 			const ts_uchar4 pixel = tex->idata[iu + iv * tex->width];
 			albedo = bvhvec3( (float)pixel.x, (float)pixel.y, (float)pixel.z ) * (1.0f / 256.0f);
-			alpha = (pixel.x + pixel.y + pixel.z > 5) ? 1.0f : 0.0f;
+			alpha = pixel.w > 2 ? 1.0f : 0.0f;
 		}
 	}
 	// geometric normal, transformed to world space
@@ -189,6 +189,8 @@ void Init()
 	t.read( (char*)&eye, sizeof( eye ) );
 	t.read( (char*)&view, sizeof( view ) );
 	t.close();
+	// create opacity map for "leaves" node / subtree
+	scene.CreateOpacityMaps( scene.FindNode( "leaves" ) );
 	// convert scene to 128x128x128 voxel object
 	scene.UpdateSceneGraph( 0 );
 	// determine bounding cube
