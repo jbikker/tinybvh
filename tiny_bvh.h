@@ -6051,7 +6051,31 @@ template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU::Intersect( Ray& ray
 		const __m128 mask2 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
 		const __m128 mask3 = _mm_and_ps( _mm_cmplt_ps( ta4, t4 ), _mm_cmpgt_ps( ta4, zero4 ) );
 		__m128 combined = _mm_and_ps( _mm_and_ps( mask1, mask2 ), mask3 );
-		if (_mm_movemask_ps( combined ))
+		uint32_t imask = _mm_movemask_ps( combined );
+		// evaluate opacity map, if present (SSE version).
+		if (opmap) if (imask)
+		{
+			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
+			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
+			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
+			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
+			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) ); 
+			union { uint32_t idx[4]; __m128i idx4; };
+			union { uint32_t omask[4]; __m128 omask4; };
+			idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
+			// proceed with scalar code for gather operation - TODO: better approach?
+			omask[0] = omask[1] = omask[2] = omask[3] = 0;
+			for( int i = 0; i < 4; i++ ) if (imask & (1 << i))
+			{
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
+				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = -1;
+			}
+			// combine
+			combined = _mm_and_ps( combined, omask4 );
+			imask = _mm_movemask_ps( combined );
+		}
+		if (imask)
 		{
 			const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
 			// compute broadcasted horizontal minimum of dist4
@@ -6175,7 +6199,28 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 		const __m128 mask2 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
 		const __m128 mask3 = _mm_and_ps( _mm_cmplt_ps( ta4, t4 ), _mm_cmpgt_ps( ta4, zero4 ) );
 		__m128 combined = _mm_and_ps( _mm_and_ps( mask1, mask2 ), mask3 );
-		if (_mm_movemask_ps( combined )) return true;
+		// evaluate opacity map, if present (SSE version).
+		if (_mm_movemask_ps( combined )) 
+		{
+			if (!opmap) return true;
+			// evaluate opacity map, SSE version.
+			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
+			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
+			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
+			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
+			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) ); 
+			union { uint32_t idx[4]; __m128i idx4; };
+			idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
+			// proceed with scalar code for gather operation - TODO: better approach?
+			const uint32_t imask = _mm_movemask_ps( combined );
+			for( int i = 0; i < 4; i++ ) if (imask & (1 << i))
+			{
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
+				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
+			}
+		}
+		// we continue.
 		if (!stackPtr) return false;
 		nodeIdx = nodeStack[--stackPtr];
 	}

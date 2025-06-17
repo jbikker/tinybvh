@@ -388,7 +388,7 @@ public:
 	{
 		// BVH can be one of four types:
 		// tinybvh::BVH for refittable / rebuildable meshes
-		// tinybvh::BVH8_CPU for static / rigid geometry
+		// tinybvh::BVH8_CPU for static / rigid geometry (other types when AVX2 is not available)
 		// tinybvh::BVH_GPU for refittable / rebuildable meshes - targetted at GPU rendering
 		// tinybvh::BVH8_CWBVH for static / rigid geometry - targetted at GPU rendering.
 		// Default is dynamic / CPU; rigid is restrictive but much faster to trace.
@@ -396,7 +396,13 @@ public:
 		union
 		{
 			tinybvh::BVH* dynamicBVH = 0;
+		#if defined BVH_USEAVX2
 			tinybvh::BVH8_CPU* rigidBVH;
+		#elif defined BVH_USESSE
+			tinybvh::BVH4_CPU* rigidBVH;
+		#else
+			tinybvh::BVH_SoA* rigidBVH;
+		#endif
 			tinybvh::BVH_GPU* dynamicGPU;
 			tinybvh::BVH8_CWBVH* rigidGPU;
 		};
@@ -1977,7 +1983,13 @@ void Node::Update( const ts_mat4& T )
 			case BVH_RIGID:
 				if (mesh->blas.rigidBVH == 0)
 				{
+				#if defined BVH_USEAVX2
 					mesh->blas.rigidBVH = new tinybvh::BVH8_CPU();
+				#elif defined BVH_USESSE
+					mesh->blas.rigidBVH = new tinybvh::BVH4_CPU();
+				#else
+					mesh->blas.rigidBVH = new tinybvh::BVH_SoA();
+				#endif
 					if (mesh->omaps.size() > 0) mesh->blas.rigidBVH->SetOpacityMaps( mesh->omaps.data(), 32 );
 				}
 				mesh->blas.rigidBVH->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
@@ -2748,7 +2760,7 @@ void Texture::BumpToNormalMap( float heightScale )
 {
 	uint8_t* normalMap = new uint8_t[width * height * 4];
 	const float stepZ = 1.0f / 255.0f;
-	for (uint32_t i = 0; i < width* height; i++)
+	for (uint32_t i = 0; i < width * height; i++)
 	{
 		uint32_t xCoord = i % width, yCoord = i / width;
 		float xPrev = xCoord > 0 ? idata[i - 1].x * stepZ : idata[i].x * stepZ;
