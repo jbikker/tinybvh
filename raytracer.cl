@@ -74,12 +74,12 @@ global float* skyPixels;			// HDR sky image data, 12 bytes per pixel
 #include "traverse_bvh2.cl"
 #include "traverse_tlas.cl"
 
-void kernel SetRenderData( 
+void kernel SetRenderData(
 	global struct BVHNode* tlasNodeData, global uint* tlasIdxData,
 	global struct Instance* instanceData,
-	global struct BVHNode* blasNodeData, global uint* blasIdxData, 
+	global struct BVHNode* blasNodeData, global uint* blasIdxData,
 	global float4* blasTriData, global uint* blasOpMapData, global struct FatTri* blasFatTriData, global uint* blasOffsetData,
-	global struct Material* materialData, global uint* texelData, 
+	global struct Material* materialData, global uint* texelData,
 	uint skyWidth, uint skyHeight, global float* skyData
 )
 {
@@ -104,53 +104,75 @@ float3 SampleSky( const float3 D )
 	float p = atan2( D.z, D.x );
 	uint u = (uint)(skySize.x * (p + (p < 0 ? PI * 2 : 0)) * INV2PI - 0.5f);
 	uint v = (uint)(skySize.y * acos( D.y ) * INVPI - 0.5f);
-	uint idx = min( u + v * skySize.x, skySize.x * skySize.y - 1);
-	return (float3)( skyPixels[idx * 3], skyPixels[idx * 3 + 1], skyPixels[idx * 3 + 2] );
+	uint idx = min( u + v * skySize.x, skySize.x * skySize.y - 1 );
+	return (float3)(skyPixels[idx * 3], skyPixels[idx * 3 + 1], skyPixels[idx * 3 + 2]);
 }
 
 float4 Trace( struct Ray ray )
 {
-	float3 radiance = (float3)( 0 );
-	float3 throughput = (float3)( 1 );
-	float3 L = normalize( (float3)( -2, 4, 5 ) ), rL = (float3)( 1.0f / L.x, 1.0f / L.y, 1.0f / L.z );
-	for( int depth = 0; depth < 2; depth++ )
+	// hardcoded directional light.
+	float3 L = normalize( (float3)(-2, 4, 5) );
+	float3 rL = (float3)(1.0f / L.x, 1.0f / L.y, 1.0f / L.z);
+
+	// initialize light transport.
+	float3 radiance = (float3)(0);
+	float3 throughput = (float3)(1);
+	
+	// trace a path of max. 2 segments.
+	for (int depth = 0; depth < 2; depth++)
 	{
-		// extend path
-		float4 hit = traverse_tlas( ray.O, ray.D, ray.rD, 1000.0f );
-		float t = hit.x;
-		if (t == 1000.0f) 
+		// shading data
+		float tu, tv;
+		float4 hit;
+		float3 N, iN, albedo, I;
+		global struct Material* material;
+		global struct FatTri* tri;
+		global struct Instance* inst;
+		uint blasIdx, idxData, primIdx, instIdx;
+
+		// find a non-translucent texel in max. 2 steps.
+		for (int step = 0; step < 2; step++)
 		{
-			float3 sky = SampleSky( ray.D.xyz );
-			radiance += throughput * sky;
-			break;
+			// extend path
+			hit = traverse_tlas( ray.O, ray.D, ray.rD, 1000.0f );
+			if (hit.x == 1000.0f) return (float4)( radiance + throughput * SampleSky( ray.D.xyz ), 1 );
+
+			// gather shading information
+			idxData = as_uint( hit.w ), primIdx = idxData & 0xffffff, instIdx = idxData >> 24;
+			inst = instances + instIdx;
+			blasIdx = as_uint( inst->aabbMin.w );
+			tri = blasFatTris + blasOffsets[blasIdx * 4 + 2] + primIdx;
+			iN = (hit.y * tri->vN1 + hit.z * tri->vN2 + (1 - hit.y - hit.z) * tri->vN0).xyz;
+			N = (float3)(tri->vN0.w, tri->vN1.w, tri->vN2.w);
+			I = ray.O.xyz + ray.D.xyz * hit.x;
+			material = materials + tri->material;
+			albedo = (float3)(1);
+			tu = hit.y * tri->u1 + hit.z * tri->u2 + (1 - hit.y - hit.z) * tri->u0;
+			tv = hit.y * tri->v1 + hit.z * tri->v2 + (1 - hit.y - hit.z) * tri->v0;
+			tu -= floor( tu ), tv -= floor( tv );
+			bool validAlbedo = true;
+			if (material->flags & HAS_TEXTURE)
+			{
+				int iu = (int)(tu * material->width);
+				int iv = (int)(tv * material->height);
+				uint pixel = texels[material->offset + iu + iv * material->width];
+				albedo = (float3)((float)((pixel >> 16) & 255), (float)((pixel >> 8) & 255), (float)(pixel & 255)) * (1.0f / 256.0f);
+				if ((pixel >> 24) < 2) validAlbedo = false;
+			}
+			else albedo = material->albedo.xyz;
+			if (validAlbedo) break;
+
+			// texture pixel was translucent; extend ray.
+			ray.O = (float4)(I, 1) + ray.D * 0.001f;
 		}
 
-		// gather shading information
-		uint idxData = as_uint( hit.w ), primIdx = idxData & 0xffffff, instIdx = idxData >> 24;
-		struct Instance* inst = instances + instIdx;
-		uint blasIdx = as_uint( inst->aabbMin.w );
-		struct FatTri* tri = blasFatTris + blasOffsets[blasIdx * 4 + 2] + primIdx;
-		float3 iN = (hit.y * tri->vN1 + hit.z * tri->vN2 + (1 - hit.y - hit.z) * tri->vN0).xyz;
-		float3 N = (float3)( tri->vN0.w, tri->vN1.w, tri->vN2.w );
-		struct Material* material = materials + tri->material;
-		float3 albedo = (float3)(1);
-		float tu = hit.y * tri->u1 + hit.z * tri->u2 + (1 - hit.y - hit.z) * tri->u0;
-		float tv = hit.y * tri->v1 + hit.z * tri->v2 + (1 - hit.y - hit.z) * tri->v0;
-		tu -= floor( tu ), tv -= floor( tv );
-		if (material->flags & HAS_TEXTURE)
-		{
-			int iu = (int)(tu * material->width);
-			int iv = (int)(tv * material->height);
-			uint pixel = texels[material->offset + iu + iv * material->width];
-			albedo = (float3)( (float)((pixel >> 16) & 255), (float)((pixel >> 8) & 255), (float)(pixel & 255) ) * (1.0f / 256.0f);
-		}
-		else albedo = material->albedo.xyz;
+		// finalize shading
 		if (material->flags & HAS_NMAP)
 		{
 			int iu = (int)(tu * material->wnormal);
 			int iv = (int)(tv * material->hnormal);
 			uint pixel = texels[material->normalOffset + iu + iv * material->wnormal];
-			float3 mN = (float3)( (float)(pixel & 255), (float)((pixel >> 8) & 255), (float)((pixel >> 24) & 255) );
+			float3 mN = (float3)((float)(pixel & 255), (float)((pixel >> 8) & 255), (float)((pixel >> 24) & 255));
 			mN *= 1.0f / 128.0f, mN += -1.0f;
 			iN = mN.x * tri->T.xyz + mN.y * tri->B.xyz + mN.z * iN;
 		}
@@ -159,22 +181,21 @@ float4 Trace( struct Ray ray )
 		if (dot( iN, N ) < 0) iN *= -1;
 
 		// direct light
-		float3 I = ray.O.xyz + ray.D.xyz * t;
-		bool shaded = isoccluded_tlas( (float4)( I + L * 0.001f, 1 ), (float4)( L, 1 ), (float4)( rL, 1 ), 1000 );
+		bool shaded = isoccluded_tlas( (float4)(I + L * 0.001f, 1), (float4)(L, 1), (float4)(rL, 1), 1000 );
 		radiance += albedo * (0.1f + dot( iN, L )) * (shaded ? 0.2f : 1.0f);
-		
+
 		// indirect light
-		if (depth == 1 || (albedo.g / albedo.r > 3)) break;
+		if (depth == 1 || albedo.g > albedo.r * 2) break;
 		float3 R = ray.D.xyz - 2 * dot( iN, ray.D.xyz ) * iN;
-		ray.O = (float4)( I + R * 0.0001f, 1 );
-		ray.D = (float4)( R, 0 );
-		ray.rD = (float4)(1.0f / R.x, 1.0f / R.y, 1.0f / R.z, 1 );
+		ray.O = (float4)(I + R * 0.0001f, 1);
+		ray.D = (float4)(R, 0);
+		ray.rD = (float4)(1.0f / R.x, 1.0f / R.y, 1.0f / R.z, 1);
 		throughput *= albedo * dot( R, iN ) * 0.5f;
 	}
-	return (float4)( radiance, 1.0f );
+	return (float4)(radiance, 1.0f);
 }
 
-void kernel Render( 
+void kernel Render(
 	write_only image2d_t pixels, const uint width, const uint height,
 	const float4 eye, const float4 p1, const float4 p2, const float4 p3
 )
@@ -182,13 +203,13 @@ void kernel Render(
 	// extract pixel coordinates from thread id
 	const uint x = get_global_id( 0 ), y = get_global_id( 1 );
 	const uint pixelIdx = x + y * get_global_size( 0 );
-	
+
 	// create primary ray
 	struct Ray ray;
 	float u = (float)x / width, v = (float)y / height;
 	ray.O = eye;
-	ray.D = (float4)( normalize( (p1 + u * (p2 - p1) + v * (p3 - p1) - eye).xyz ), 1 );
-	ray.rD = (float4)( 1.0f / ray.D.x, 1.0f / ray.D.y, 1.0f / ray.D.z, 1 );
+	ray.D = (float4)(normalize( (p1 + u * (p2 - p1) + v * (p3 - p1) - eye).xyz ), 1);
+	ray.rD = (float4)(1.0f / ray.D.x, 1.0f / ray.D.y, 1.0f / ray.D.z, 1);
 
 	// evaluate light transport
 	write_imagef( pixels, (int2)(x, y), Trace( ray ) );
