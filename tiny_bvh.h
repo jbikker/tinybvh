@@ -135,7 +135,7 @@ THE SOFTWARE.
 #define RDH_MAX_WEIGHT 0.8f
 
 // Triangle intersection: "Watertight"
-#define WATERTIGHT_TRITEST
+// #define WATERTIGHT_TRITEST
 
 // 'Infinity' values
 #define BVH_FAR	1e30f		// actual valid ieee range: 3.40282347E+38
@@ -810,6 +810,11 @@ public:
 	uint32_t hqbvhbins = HQBVHBINS;	// number of bins to use in SBVH construction.
 	bool hqbvhoddeven = false;		// if true, odd levels will use one extra bin during construction.
 	bvhvec3 aabbMin, aabbMax;		// bounds of the root node of the BVH.
+	// Opacity maps support.
+	uint32_t opmapN = 0;			// opacity map subdivision: 0 = no maps.
+	uint32_t* opmap = 0;			// opacity maps; opmapN^2 bits per triangle.
+	bool hasOpacityMaps() const { return opmapN > 0; }
+	void SetOpacityMaps( uint32_t* mapData, uint32_t N ) { opmap = mapData, opmapN = N; }
 	// Custom memory allocation
 	void* AlignedAlloc( size_t size );
 	void AlignedFree( void* ptr );
@@ -6173,7 +6178,7 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 		if (_mm_movemask_ps( combined )) return true;
 		if (!stackPtr) return false;
 		nodeIdx = nodeStack[--stackPtr];
-}
+	}
 }
 
 #endif // BVH_USESSE
@@ -8221,7 +8226,7 @@ float BVHBase::SA( const bvhvec3& aabbMin, const bvhvec3& aabbMax )
 }
 
 // IntersectTri
-void BVHBase::IntersectTri( Ray& ray, const uint32_t idx, const bvhvec4slice& verts, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const
+void BVHBase::IntersectTri( Ray& ray, const uint32_t triIdx, const bvhvec4slice& verts, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const
 {
 #ifdef WATERTIGHT_TRITEST
 	// Woop et al.'s Watertight intersection algorithm.
@@ -8230,9 +8235,9 @@ void BVHBase::IntersectTri( Ray& ray, const uint32_t idx, const bvhvec4slice& ve
 	if (ray.D[kz] < 0) std::swap( kx, ky );
 	const float Sz = ray.rD[kz], Sx = ray.D[kx] * Sz, Sy = ray.D[ky] * Sz;
 	// PART 2 - Intersection
-	const bvhvec3 A = bvhvec3( verts[i0] ) - ray.O;
-	const bvhvec3 B = bvhvec3( verts[i1] ) - ray.O;
-	const bvhvec3 C = bvhvec3( verts[i2] ) - ray.O;
+	const bvhvec3 C = bvhvec3( verts[i0] ) - ray.O;
+	const bvhvec3 A = bvhvec3( verts[i1] ) - ray.O;
+	const bvhvec3 B = bvhvec3( verts[i2] ) - ray.O;
 	const float Ax = A[kx] - Sx * A[kz], Ay = A[ky] - Sy * A[kz];
 	const float Bx = B[kx] - Sx * B[kz], By = B[ky] - Sy * B[kz];
 	const float Cx = C[kx] - Sx * C[kz], Cy = C[ky] - Sy * C[kz];
@@ -8251,12 +8256,21 @@ void BVHBase::IntersectTri( Ray& ray, const uint32_t idx, const bvhvec4slice& ve
 	const bvhvec3 v0 = v0_, e1 = verts[i1] - v0_, e2 = verts[i2] - v0_;
 	MOLLER_TRUMBORE_TEST( ray.hit.t, return );
 #endif
-	// register a hit: ray is shortened to t
+	// evaluate opacity map, if present.
+	if (opmap)
+	{
+		const float fN = (float)opmapN;
+		const int row = int( (u + v) * fN ), diag = int( (1 - u) * fN );
+		const int idx = (row * row) + int( v * fN ) + (diag - (opmapN - 1 - row));
+		uint32_t* om = opmap + triIdx * ((opmapN * opmapN) >> 5);
+		if (!(om[idx >> 5] & (1 << (idx & 31)))) return;
+	}
+	// register a hit: ray is shortened to t.
 	ray.hit.t = t, ray.hit.u = u, ray.hit.v = v;
 #if INST_IDX_BITS == 32
-	ray.hit.prim = idx, ray.hit.inst = ray.instIdx;
+	ray.hit.prim = triIdx, ray.hit.inst = ray.instIdx;
 #else
-	ray.hit.prim = idx + ray.instIdx;
+	ray.hit.prim = triIdx + ray.instIdx;
 #endif
 }
 

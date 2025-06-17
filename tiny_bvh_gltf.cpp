@@ -38,7 +38,7 @@ static bvhvec3 view = tinybvh_normalize( bvhvec3( 0.826f, -0.438f, -0.356f ) );
 void Init()
 {
 	// Load a scene from a GLTF file using tinyscene.
-	scene.SetBVHDefault( BVH_RIGID );
+	// scene.SetBVHDefault( BVH_RIGID );
 	bvhmat4 Tdrone, Ttree;
 	Tdrone[0] = Tdrone[5] = Tdrone[10] = 0.03f;
 	Ttree[0] = Ttree[5] = Ttree[10] = 2.0f, Ttree[3] = 5.0f, Ttree[7] = -2.9f;
@@ -96,9 +96,9 @@ void GetShadingData( const Ray& ray, bvhvec3& albedo, float& alpha, bvhvec3& N, 
 	const uint32_t matIdx = triangle.material;
 	const Material* material = Scene::materials[matIdx];
 	// albedo at hit point - ignoring detail textures and MIP-maps for now.
-	const float u = ray.hit.u, v = ray.hit.v; // barycentrics
-	float tu = u * triangle.u1 + v * triangle.u2 + (1 - u - v) * triangle.u0;
-	float tv = u * triangle.v1 + v * triangle.v2 + (1 - u - v) * triangle.v0;
+	const float u = ray.hit.u, v = ray.hit.v, w = 1 - u - v; // barycentrics
+	float tu = u * triangle.u1 + v * triangle.u2 + w * triangle.u0;
+	float tv = u * triangle.v1 + v * triangle.v2 + w * triangle.v0;
 	tu -= floorf( tu ), tv -= floorf( tv );
 	alpha = 1;
 	if (material->color.textureID == -1) albedo = material->color.value; else
@@ -137,7 +137,7 @@ void GetShadingData( const Ray& ray, bvhvec3& albedo, float& alpha, bvhvec3& N, 
 bvhvec3 Trace( Ray& ray, const int depth = 0 )
 {
 	bvhvec3 albedo, N, iN, I;
-	for( int i = 0; i < 8; i++ )
+	for (int i = 0; i < 8; i++)
 	{
 		Scene::tlas->Intersect( ray );
 		if (ray.hit.t >= 10000) return SampleSky( ray.D );

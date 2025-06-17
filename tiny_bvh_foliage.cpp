@@ -39,13 +39,26 @@ static bvhvec3 view = tinybvh_normalize( bvhvec3( 0.826f, -0.438f, -0.356f ) );
 // Camera interaction: WASD+RF for translation; cursor keys for rotation.
 void UpdateCamera( float delta_time_s, fenster& f )
 {
+	bvhvec3 right, up;
+#if 1
+	right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), view ) ), up = 0.8f * tinybvh_cross( view, right );
+	float moved = 0, spd = 10.0f * delta_time_s;
+	if (f.keys['A'] || f.keys['D']) eye += right * (f.keys['D'] ? spd : -spd), moved = 1;
+	if (f.keys['W'] || f.keys['S']) eye += view * (f.keys['W'] ? spd : -spd), moved = 1;
+	if (f.keys['R'] || f.keys['F']) eye += up * 2.0f * (f.keys['R'] ? spd : -spd), moved = 1;
+	if (f.keys[20]) view = tinybvh_normalize( view + right * -0.1f * spd ), moved = 1;
+	if (f.keys[19]) view = tinybvh_normalize( view + right * 0.1f * spd ), moved = 1;
+	if (f.keys[17]) view = tinybvh_normalize( view + up * -0.1f * spd ), moved = 1;
+	if (f.keys[18]) view = tinybvh_normalize( view + up * 0.1f * spd ), moved = 1;
+#else
 	static float a = 0;
 	a += delta_time_s * 0.02f;
 	if (a > 2 * PI) a -= 2 * PI;
 	eye = bvhvec3( 7 * sinf( 2 * PI - a ) + 3, -2.1f, 6 * cosf( 2 * PI - a ) );
 	bvhvec3 P( 3, 4, 0 );
 	view = tinybvh_normalize( bvhvec3( P - eye ) );
-	bvhvec3 right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), view ) ), up = 0.8f * tinybvh_cross( view, right );
+#endif
+	right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), view ) ), up = 0.8f * tinybvh_cross( view, right );
 	bvhvec3 C = eye + 1.2f * view;
 	p1 = C - right + up, p2 = C + right + up, p3 = C - right - up;
 }
@@ -117,7 +130,7 @@ bvhvec3 Trace( Ray& ray, bool vox, const int depth = 0 )
 	bvhvec3 albedo, N, iN;
 	if (!vox)
 	{
-		for( int i = 0; i < 8; i++ )
+		for (int i = 0; i < 8; i++)
 		{
 			Scene::tlas->Intersect( ray );
 			if (ray.hit.t >= 10000) return SampleSky( ray.D );
@@ -145,9 +158,9 @@ bvhvec3 Trace( Ray& ray, bool vox, const int depth = 0 )
 		albedo = bvhvec3( r, g, b ) * (1.0f / 255.0f);
 	}
 	static bvhvec3 L = tinybvh_normalize( bvhvec3( 2, 4, 5 ) );
-	const bvhvec3 R = ray.D - 2 * tinybvh_dot( iN, ray.D ) * iN;
-	bvhvec3 indirect = SampleSky( R );
-	return albedo * (0.5f * indirect + tinybvh_max( 0.2f, tinybvh_dot( iN, L ) ));
+	// const bvhvec3 R = ray.D - 2 * tinybvh_dot( iN, ray.D ) * iN;
+	// bvhvec3 indirect = SampleSky( R );
+	return albedo * (/* 0.5f * indirect + */ 0.5f + tinybvh_max( 0.2f, tinybvh_dot( iN, L ) ));
 	// return (iN + 1) * 0.5f;
 }
 
@@ -180,9 +193,8 @@ void Init()
 	Tdrone[0] = Tdrone[5] = Tdrone[10] = 0.03f;
 	Ttree[0] = Ttree[5] = Ttree[10] = 2.0f, Ttree[3] = 5.0f, Ttree[7] = -2.9f;
 	// scene.AddScene( "./testdata/drone/scene.gltf", Tdrone );
-	scene.AddScene( "./testdata/mangotree/scene.gltf", Ttree );
+	int root = scene.AddScene( "./testdata/mangotree/scene.gltf", Ttree );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
-	for( auto mesh : scene.meshPool ) mesh->blas.bvhType = BVH_RIGID;
 	// Load camera position / direction from file.
 	std::fstream t = std::fstream{ "camera.bin", t.binary | t.in };
 	if (!t.is_open()) return;
@@ -190,7 +202,10 @@ void Init()
 	t.read( (char*)&view, sizeof( view ) );
 	t.close();
 	// create opacity map for "leaves" node / subtree
-	scene.CreateOpacityMaps( scene.FindNode( "leaves" ) );
+	int leaves = scene.FindNode( "leaves" );
+	scene.CreateOpacityMaps( leaves );
+	scene.SetBVHType( root, BVH_RIGID );
+	scene.SetBVHType( leaves, BVH_DYNAMIC );
 	// convert scene to 128x128x128 voxel object
 	scene.UpdateSceneGraph( 0 );
 	// determine bounding cube
@@ -200,14 +215,14 @@ void Init()
 	if (ext.z > maxSize) maxSize = ext.z;
 	bmin = c - 0.525f * bvhvec3( maxSize ), bmax = c + 0.525f * bvhvec3( maxSize );
 	// spawn rays over xy, yz and xz planes
-	for( int a = 0; a < 3; a++ )
+	for (int a = 0; a < 3; a++)
 	{
 		int u = (a + 1) % 3, v = (a + 2) % 3;
 		float reciDim = 1.0f / (float)VoxelSet::objectDim;
 		float reciExt = 1.0f / ext[a];
 		bvhvec3 D( 0 );
 		D[a] = 1;
-		for( int x = 0; x < VoxelSet::objectDim; x++ ) for( int y = 0; y < VoxelSet::objectDim; y++ )
+		for (int x = 0; x < VoxelSet::objectDim; x++) for (int y = 0; y < VoxelSet::objectDim; y++)
 		{
 			float fx = (float)x * reciDim, fy = (float)y * reciDim;
 			bvhvec3 O;
