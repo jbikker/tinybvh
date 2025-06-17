@@ -158,9 +158,10 @@ bvhvec3 Trace( Ray& ray, bool vox, const int depth = 0 )
 		albedo = bvhvec3( r, g, b ) * (1.0f / 255.0f);
 	}
 	static bvhvec3 L = tinybvh_normalize( bvhvec3( 2, 4, 5 ) );
-	// const bvhvec3 R = ray.D - 2 * tinybvh_dot( iN, ray.D ) * iN;
-	// bvhvec3 indirect = SampleSky( R );
-	return albedo * (/* 0.5f * indirect + */ 0.5f + tinybvh_max( 0.2f, tinybvh_dot( iN, L ) ));
+	bvhvec3 I = ray.O + ray.D * ray.hit.t;
+	Ray s( I + L * 0.001f, L, 1000 );
+	bool shaded = Scene::tlas->IsOccluded( s );
+	return albedo * (shaded ? 0.3f : 1.0f) * (0.25f + tinybvh_max( 0.2f, tinybvh_dot( iN, L ) ));
 	// return (iN + 1) * 0.5f;
 }
 
@@ -204,8 +205,6 @@ void Init()
 	// create opacity map for "leaves" node / subtree
 	int leaves = scene.FindNode( "leaves" );
 	scene.CreateOpacityMaps( leaves );
-	scene.SetBVHType( root, BVH_RIGID );
-	scene.SetBVHType( leaves, BVH_DYNAMIC );
 	// convert scene to 128x128x128 voxel object
 	scene.UpdateSceneGraph( 0 );
 	// determine bounding cube

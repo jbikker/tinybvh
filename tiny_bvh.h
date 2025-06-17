@@ -823,7 +823,7 @@ public:
 protected:
 	~BVHBase() {}
 	__FORCEINLINE void IntersectTri( Ray& ray, const uint32_t idx, const bvhvec4slice& verts, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
-	__FORCEINLINE bool TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
+	__FORCEINLINE bool TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t triIdx, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
 	static void PrecomputeTriangle( const bvhvec4slice& vert, const uint32_t ti0, const uint32_t ti1, const uint32_t ti2, float* T );
 	static float SA( const bvhvec3& aabbMin, const bvhvec3& aabbMax );
 };
@@ -3221,7 +3221,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				tmp.rD = tinybvh_rcp( tmp.D );
 				// 2. Traverse BLAS with the transformed ray
 				// Note: Valid BVH layout options for BLASses are the regular BVH layout,
-				// the AVX-optimized BVH_SOA layout and the wide BVH4_CPU layout. If all
+				// the AVX-optimized BVH_SOA layout and the wide BVH4_CPU layout. When all
 				// BLASses are of the same layout this reduces to nearly zero cost for
 				// a small set of predictable branches.
 				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH4_CPU ||
@@ -3305,9 +3305,9 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccluded( const Ray& ray 
 		{
 			if (indexedEnabled && vertIdx != 0) for (uint32_t i = 0; i < node->triCount; i++)
 			{
-				const uint32_t pi = primIdx[node->leftFirst + i] * 3;
-				const uint32_t i0 = vertIdx[pi], i1 = vertIdx[pi + 1], i2 = vertIdx[pi + 2];
-				if (TriOccludes( ray, verts, i0, i1, i2 )) return true;
+				const uint32_t pi = primIdx[node->leftFirst + i], vi0 = pi * 3;
+				const uint32_t i0 = vertIdx[vi0], i1 = vertIdx[vi0 + 1], i2 = vertIdx[vi0 + 2];
+				if (TriOccludes( ray, verts, pi, i0, i1, i2 )) return true;
 			}
 			else if (customEnabled && customIsOccluded != 0)
 			{
@@ -3316,8 +3316,8 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccluded( const Ray& ray 
 			}
 			else for (uint32_t i = 0; i < node->triCount; i++)
 			{
-				const uint32_t pi = primIdx[node->leftFirst + i] * 3;
-				if (TriOccludes( ray, verts, pi, pi + 1, pi + 2 )) return true;
+				const uint32_t pi = primIdx[node->leftFirst + i], vi0 = pi * 3;
+				if (TriOccludes( ray, verts, pi, vi0, vi0 + 1, vi0 + 2 )) return true;
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
@@ -6764,14 +6764,14 @@ bool BVH_SoA::IsOccluded( const Ray& ray ) const
 		{
 			if (indexedEnabled && bvh.vertIdx != 0) for (uint32_t i = 0; i < node->triCount; i++)
 			{
-				const uint32_t pi = primIdx[node->firstTri + i] * 3;
-				const uint32_t i0 = bvh.vertIdx[pi], i1 = bvh.vertIdx[pi + 1], i2 = bvh.vertIdx[pi + 2];
-				if (TriOccludes( ray, verts, i0, i1, i2 )) return true;
+				const uint32_t pi = primIdx[node->firstTri + i], vi0 = pi * 3;
+				const uint32_t i0 = bvh.vertIdx[vi0], i1 = bvh.vertIdx[vi0 + 1], i2 = bvh.vertIdx[vi0 + 2];
+				if (TriOccludes( ray, verts, pi, i0, i1, i2 )) return true;
 			}
 			else for (uint32_t i = 0; i < node->triCount; i++)
 			{
-				const uint32_t pi = primIdx[node->firstTri + i] * 3;
-				if (TriOccludes( ray, verts, pi, pi + 1, pi + 2 )) return true;
+				const uint32_t pi = primIdx[node->firstTri + i], vi0 = pi * 3;
+				if (TriOccludes( ray, verts, pi, vi0, vi0 + 1, vi0 + 2 )) return true;
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
@@ -7016,7 +7016,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 	const __m256 rz8 = _mm256_set1_ps( ray.O.z * ray.rD.z ), rdz8 = _mm256_set1_ps( ray.rD.z );
 	const __m128 ox4 = _mm_set1_ps( ray.O.x ), oy4 = _mm_set1_ps( ray.O.y ), oz4 = _mm_set1_ps( ray.O.z );
 	const __m128 dx4 = _mm_set1_ps( ray.D.x ), dy4 = _mm_set1_ps( ray.D.y ), dz4 = _mm_set1_ps( ray.D.z );
-	const __m128 one4 = _mm_set1_ps( 1 ), inf4 = _mm_set1_ps( 1e34f );
+	const __m128 one4 = _mm_set1_ps( 1 ), inf4 = _mm_set1_ps( 1e34f ), half4 = _mm_set1_ps( 0.5f );
 #ifdef _DEBUG
 	// sorry, not even this can be tolerated in this function. Only in debug.
 	uint32_t steps = 0;
@@ -7086,11 +7086,35 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 		const __m128 mask3 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
 		const __m128 mask4 = _mm_cmpgt_ps( ta4, _mm_setzero_ps() );
 		const __m128 mask5 = _mm_cmplt_ps( ta4, _mm256_extractf128_ps( t8, 0 ) );
-		const __m128 combined = _mm_and_ps( _mm_and_ps( _mm_and_ps( mask1, mask2 ), _mm_and_ps( mask3, mask4 ) ), mask5 );
-		if (_mm_movemask_ps( combined ))
+		__m128 combined = _mm_and_ps( _mm_and_ps( _mm_and_ps( mask1, mask2 ), _mm_and_ps( mask3, mask4 ) ), mask5 );
+		uint32_t imask = _mm_movemask_ps( combined );
+		// evaluate opacity map, if present (SSE version).
+		if (opmap) if (imask)
 		{
-			const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
+			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
+			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
+			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
+			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
+			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) ); 
+			union { uint32_t idx[4]; __m128i idx4; };
+			union { uint32_t omask[4]; __m128 omask4; };
+			idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
+			// proceed with scalar code for gather operation - TODO: better approach?
+			omask[0] = omask[1] = omask[2] = omask[3] = 0;
+			for( int i = 0; i < 4; i++ ) if (imask & (1 << i))
+			{
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
+				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = -1;
+			}
+			// combine
+			combined = _mm_and_ps( combined, omask4 );
+			imask = _mm_movemask_ps( combined );
+		}
+		if (imask)
+		{
 			// compute broadcasted horizontal minimum of dist4
+			const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
 			const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
 			const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
 			const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
@@ -7216,7 +7240,27 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 		const __m128 mask4 = _mm_cmplt_ps( ta4, t4 );
 		const __m128 mask5 = _mm_cmpgt_ps( ta4, zero4 );
 		__m128 combined = _mm_and_ps( _mm_and_ps( _mm_and_ps( mask1, mask2 ), _mm_and_ps( mask3, mask4 ) ), mask5 );
-		if (_mm_movemask_ps( combined )) return true;
+		if (_mm_movemask_ps( combined )) 
+		{
+			if (!opmap) return true;
+			// evaluate opacity map, SSE version.
+			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
+			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
+			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
+			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
+			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) ); 
+			union { uint32_t idx[4]; __m128i idx4; };
+			idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
+			// proceed with scalar code for gather operation - TODO: better approach?
+			const uint32_t imask = _mm_movemask_ps( combined );
+			for( int i = 0; i < 4; i++ ) if (imask & (1 << i))
+			{
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
+				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
+			}
+		}
+		// continue
 		if (!stackPtr) return false;
 		nodeIdx = nodeStack[--stackPtr];
 	}
@@ -8275,7 +8319,7 @@ void BVHBase::IntersectTri( Ray& ray, const uint32_t triIdx, const bvhvec4slice&
 }
 
 // TriOccludes
-bool BVHBase::TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const
+bool BVHBase::TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t triIdx, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const
 {
 #ifdef WATERTIGHT_TRITEST
 	// Woop et al.'s Watertight intersection algorithm.
@@ -8304,6 +8348,16 @@ bool BVHBase::TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint
 	const bvhvec3 v0 = v0_, e1 = verts[i1] - v0_, e2 = verts[i2] - v0_;
 	MOLLER_TRUMBORE_TEST( ray.hit.t, return false );
 #endif
+	// evaluate opacity map, if present.
+	if (opmap)
+	{
+		const float fN = (float)opmapN;
+		const int row = int( (u + v) * fN ), diag = int( (1 - u) * fN );
+		const int idx = (row * row) + int( v * fN ) + (diag - (opmapN - 1 - row));
+		uint32_t* om = opmap + triIdx * ((opmapN * opmapN) >> 5);
+		if (!(om[idx >> 5] & (1 << (idx & 31)))) return false;
+	}
+	// occluded.
 	return true;
 }
 
