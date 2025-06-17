@@ -39,6 +39,7 @@ public:
 	Buffer* blasNode = 0;
 	Buffer* blasIdx = 0;
 	Buffer* blasTri = 0;
+	Buffer* blasOpMap = 0;
 	Buffer* blasFatTri = 0;
 	Buffer* blasOffsets = 0;
 	Buffer* tlasNode = 0;

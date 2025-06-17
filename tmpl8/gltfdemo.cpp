@@ -31,8 +31,11 @@ void GLTFDemo::Init()
 {
 	// load gltf scene
 	scene.SetBVHDefault( GPU_DYNAMIC );
-	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Scale( 0.1f ) );
+	scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -2.9f, 0 ) * mat4::Scale( 2 ) );
+	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Scale( 0.03f ) );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
+	int leaves = scene.FindNode( "leaves" );
+	scene.CreateOpacityMaps( leaves );
 	scene.UpdateSceneGraph( 0 ); // this will build the BLASses and TLAS.
 
 	// create OpenCL kernels
@@ -43,7 +46,6 @@ void GLTFDemo::Init()
 	// create OpenCL buffers
 
 	// 1. pixel buffer: We will render to this. Synced with template OpenGL render target.
-	int N = SCRWIDTH * SCRHEIGHT;
 	pixels = new Buffer( GetRenderTarget()->ID, 0, Buffer::TARGET );
 
 	// 2. instance buffer: For the BLASInstances.
@@ -54,7 +56,7 @@ void GLTFDemo::Init()
 	// Complication: OpenCL does not let us pass device-side pointers, let alone arrays
 	// of them. So, we make a single large buffer for all BLAS nodes, and use offsets
 	// within it for the individual BLASses. Same for indices and triangles.
-	uint nodeCount = 0, indexCount = 0, triCount = 0;
+	uint nodeCount = 0, indexCount = 0, triCount = 0, opmapOffset = 0;
 	blasOffsets = new Buffer( (int)Scene::meshPool.size() * 16 );
 	for (int i = 0; i < Scene::meshPool.size(); i++)
 	{
@@ -62,14 +64,16 @@ void GLTFDemo::Init()
 		blasOffsets->GetHostPtr()[i * 4 + 0] = nodeCount;
 		blasOffsets->GetHostPtr()[i * 4 + 1] = indexCount;
 		blasOffsets->GetHostPtr()[i * 4 + 2] = triCount;
-		blasOffsets->GetHostPtr()[i * 4 + 3] = triCount;
+		blasOffsets->GetHostPtr()[i * 4 + 3] = gpubvh->opmap ? opmapOffset : 0x99999999;
 		nodeCount += gpubvh->usedNodes, indexCount += gpubvh->idxCount, triCount += gpubvh->triCount;
+		if (gpubvh->opmap) opmapOffset += gpubvh->triCount * 32; // for N=32: 128 bytes = 32uints
 	}
 	blasNode = new Buffer( nodeCount * sizeof( BVH_GPU::BVHNode ) );
 	blasIdx = new Buffer( indexCount * sizeof( uint ) );
 	blasTri = new Buffer( triCount * sizeof( float4 ) * 3 );
+	blasOpMap = new Buffer( (opmapOffset > 0 ? opmapOffset : 32) * 4 );
 	blasFatTri = new Buffer( triCount * sizeof( FatTri ) );
-	nodeCount = 0, indexCount = 0, triCount = 0;
+	nodeCount = 0, indexCount = 0, triCount = 0, opmapOffset = 0;
 	for (int i = 0; i < Scene::meshPool.size(); i++)
 	{
 		// a BLAS needs BVH nodes, triangle indices and the actual triangle data.
@@ -77,12 +81,15 @@ void GLTFDemo::Init()
 		memcpy( (BVH_GPU::BVHNode*)blasNode->GetHostPtr() + nodeCount, gpubvh->bvhNode, gpubvh->usedNodes * sizeof( BVH_GPU::BVHNode ) );
 		memcpy( (uint*)blasIdx->GetHostPtr() + indexCount, gpubvh->bvh.primIdx, gpubvh->idxCount * sizeof( uint ) );
 		memcpy( (float4*)blasTri->GetHostPtr() + triCount * 3, gpubvh->bvh.verts.data, gpubvh->triCount * sizeof( float4 ) * 3 );
+		if (gpubvh->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset * 32, gpubvh->opmap, gpubvh->triCount * 128 );
 		memcpy( (FatTri*)blasFatTri->GetHostPtr() + triCount, Scene::meshPool[i]->triangles.data(), gpubvh->triCount * sizeof( FatTri ) );
 		nodeCount += gpubvh->usedNodes, indexCount += gpubvh->idxCount, triCount += gpubvh->triCount;
+		if (gpubvh->opmap) opmapOffset += gpubvh->triCount * 32; // for N=32: 128 bytes = 32uints
 	}
 	blasNode->CopyToDevice();
 	blasIdx->CopyToDevice();
 	blasTri->CopyToDevice();
+	blasOpMap->CopyToDevice();
 	blasFatTri->CopyToDevice();
 	blasOffsets->CopyToDevice();
 
@@ -155,7 +162,7 @@ void GLTFDemo::Init()
 	skyPixels->CopyToDevice();
 
 	// pass all static data to the Init function.
-	init->SetArguments( tlasNode, tlasIdx, instances, blasNode, blasIdx, blasTri, blasFatTri, blasOffsets,
+	init->SetArguments( tlasNode, tlasIdx, instances, blasNode, blasIdx, blasTri, blasOpMap, blasFatTri, blasOffsets,
 		materials, texels, Scene::sky->width, Scene::sky->height, skyPixels );
 	init->Run( 1 );
 

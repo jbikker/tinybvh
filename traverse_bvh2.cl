@@ -87,7 +87,10 @@ uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global unsig
 	return (uint)cost;
 }
 
-float4 traverse_ailalaine( const global struct BVHNode* bvhNode, const global unsigned* idx, const global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
+float4 traverse_ailalaine( 
+	const global struct BVHNode* bvhNode, 
+	const global unsigned* idx, const global float4* verts, const global uint* opmap,
+	const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// traverse BVH
 	float4 hit;
@@ -106,22 +109,16 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode, const global un
 			for (unsigned i = 0; i < triCount; i++)
 			{
 				const unsigned triIdx = idx[firstTri + i];
-#ifdef ISAPPLE
+			#ifdef ISAPPLE
 				// FIX error: initializing 'const __private float4 *__private' with an expression of type '__global float4 *' changes address space of pointer
-				const float4 tri[3] = 
-				{
-					verts[3 * triIdx],
-					verts[3 * triIdx + 1],
-					verts[3 * triIdx + 2],
-				};
-#else
-				const float4* tri = verts + 3 * triIdx;
-#endif
-				// triangle intersection - M�ller-Trumbore
+				const float4 tri[3] = { verts[3 * triIdx], verts[3 * triIdx + 1], verts[3 * triIdx + 2] };
+			#else
+				const global float4* tri = verts + 3 * triIdx;
+			#endif
+				// triangle intersection - Moeller-Trumbore
 				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
 				const float3 h = cross( D, edge2.xyz );
 				const float a = dot( edge1.xyz, h );
-				if (fabs( a ) < 0.0000001f) continue;
 				const float f = 1 / a;
 				const float3 s = O - tri[0].xyz;
 				const float u = f * dot( s, h );
@@ -129,7 +126,14 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode, const global un
 				const float v = f * dot( D, q );
 				if (u < 0 || v < 0 || u + v > 1) continue;
 				const float d = f * dot( edge2.xyz, q );
-				if (d > 0.0f && d < hit.x) hit = (float4)(d, u, v, as_float( triIdx ));
+				if (d <= 0.0f || d >= hit.x) continue;
+				if (opmap)
+				{
+					const int row = (int)( (u + v) * 32.0f ), diag = (int)( (1 - u) * 32.0f );
+					const int idx = (row * row) + (int)( v * 32.0f ) + (diag - (31 - row));
+					if (!(opmap[triIdx * 32 + (idx >> 5)] & (1 << (idx & 31)))) continue;
+				}
+				hit = (float4)(d, u, v, as_float( triIdx ));
 			}
 			if (stackPtr == 0) break;
 			node = stack[--stackPtr];
@@ -167,7 +171,10 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode, const global un
 	return hit;
 }
 
-bool isoccluded_ailalaine( const global struct BVHNode* bvhNode, const global unsigned* idx, const global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
+bool isoccluded_ailalaine( 
+	const global struct BVHNode* bvhNode, 
+	const global unsigned* idx, const global float4* verts, const global* opmap, 
+	const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// traverse BVH
 	unsigned node = 0, stack[STACK_SIZE], stackPtr = 0;
@@ -184,17 +191,12 @@ bool isoccluded_ailalaine( const global struct BVHNode* bvhNode, const global un
 			for (unsigned i = 0; i < triCount; i++)
 			{
 				const unsigned triIdx = idx[firstTri + i];
-#ifdef ISAPPLE
+			#ifdef ISAPPLE
 				// FIX error: initializing 'const __private float4 *__private' with an expression of type '__global float4 *' changes address space of pointer
-				const float4 tri[3] = 
-				{
-					verts[3 * triIdx],
-					verts[3 * triIdx + 1],
-					verts[3 * triIdx + 2],
-				};
-#else
-				const float4* tri = verts + 3 * triIdx;
-#endif
+				const float4 tri[3] = { verts[3 * triIdx], verts[3 * triIdx + 1], verts[3 * triIdx + 2] };
+			#else
+				const global float4* tri = verts + 3 * triIdx;
+			#endif
 				// triangle intersection - M�ller-Trumbore
 				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
 				const float3 h = cross( D, edge2.xyz );
@@ -207,7 +209,14 @@ bool isoccluded_ailalaine( const global struct BVHNode* bvhNode, const global un
 				const float v = f * dot( D, q );
 				if (u < 0 || v < 0 || u + v > 1) continue;
 				const float d = f * dot( edge2.xyz, q );
-				if (d > 0.0f && d < tmax) return true;
+				if (d <= 0.0f || d >= tmax) continue;
+				if (opmap)
+				{
+					const int row = (int)( (u + v) * 32.0f ), diag = (int)( (1 - u) * 32.0f );
+					const int idx = (row * row) + (int)( v * 32.0f ) + (diag - (31 - row));
+					if (!(opmap[triIdx * 32 + (idx >> 5)] & (1 << (idx & 31)))) continue;
+				}
+				return true;
 			}
 			if (stackPtr == 0) break;
 			node = stack[--stackPtr];
@@ -252,7 +261,7 @@ void kernel batch_ailalaine( const global struct BVHNode* bvhNode, const global 
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	float4 hit = traverse_ailalaine( bvhNode, idx, verts, O, D, rD, 1e30f );
+	float4 hit = traverse_ailalaine( bvhNode, idx, 0, verts, O, D, rD, 1e30f );
 	rayData[threadId].hit = hit;
 }
 

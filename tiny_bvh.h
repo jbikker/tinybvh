@@ -3731,7 +3731,7 @@ bool VoxelSet::Setup3DDDA( const Ray& ray, const bvhvec3& Dsign, DDAState& state
 	}
 	// setup amanatides & woo - assume object size is 1x1x1, from (0,0,0) to (1,1,1)
 	static const float cellSize = 1.0f / topGridDim;
-	const bvhvec3 posInGrid = topGridDim * (ray.O + (t + 0.0000025f) * ray.D);
+	const bvhvec3 posInGrid = (ray.O + ray.D * (t + 0.0000025f)) * (float)topGridDim;
 	const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * cellSize;
 	const bvhint3 P(
 		tinybvh_clamp( (int)posInGrid.x, 0, topGridDim - 1 ),
@@ -3747,7 +3747,7 @@ bool VoxelSet::Setup3DDDA( const Ray& ray, const bvhvec3& Dsign, DDAState& state
 
 bvhvec3 VoxelSet::GetNormal( const Ray& ray ) const
 {
-	const bvhvec3 I1 = (ray.O + ray.hit.t * ray.D) * objectDim; // our object is (1,1,1) in object space, so this scales each voxel to (1,1,1)
+	const bvhvec3 I1 = (ray.O + ray.hit.t * ray.D) * (float)objectDim; // our object is (1,1,1) in object space, so this scales each voxel to (1,1,1)
 	const bvhvec3 fG( I1.x - floorf( I1.x ), I1.y - floorf( I1.y ), I1.z - floorf( I1.z ) );
 	const bvhvec3 d = tinybvh_min( fG, 1.0f - fG );
 	const float mind = tinybvh_min( tinybvh_min( d.x, d.y ), d.z );
@@ -3780,7 +3780,7 @@ int32_t VoxelSet::Intersect( Ray& ray ) const
 		if (cell)
 		{
 			// setup midlevel traversal
-			const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * gridDim;
+			const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * (float)gridDim;
 			const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / gridDim);
 			l2_.X = tinybvh_clamp( (int)posInGrid.x, l1_.X * groupDim, l1_.X * groupDim + (groupDim - 1) );
 			l2_.Y = tinybvh_clamp( (int)posInGrid.y, l1_.Y * groupDim, l1_.Y * groupDim + (groupDim - 1) );
@@ -3796,12 +3796,12 @@ int32_t VoxelSet::Intersect( Ray& ray ) const
 				{
 					// setup 3DDDA for brick traversal
 					uint32_t* brickData = brick + brickCell * brickSize;
-					const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * objectDim;
-					uint32_t X = tinybvh_clamp( (int)posInGrid.x - (l2_.X + l1_.X * groupDim) * brickDim, 0, brickDim - 1 );
-					uint32_t Y = tinybvh_clamp( (int)posInGrid.y - (l2_.Y + l1_.Y * groupDim) * brickDim, 0, brickDim - 1 );
-					uint32_t Z = tinybvh_clamp( (int)posInGrid.z - (l2_.Z + l1_.Z * groupDim) * brickDim, 0, brickDim - 1 );
-					const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / objectDim);
-					bvhvec3 tmax = (gridPlanes - ray.O) * ray.rD;
+					const bvhvec3 posInBrick = (ray.O + (t + 0.0000025f) * ray.D) * (float)objectDim;
+					uint32_t X = tinybvh_clamp( (int)posInBrick.x - (l2_.X + l1_.X * groupDim) * brickDim, 0, brickDim - 1 );
+					uint32_t Y = tinybvh_clamp( (int)posInBrick.y - (l2_.Y + l1_.Y * groupDim) * brickDim, 0, brickDim - 1 );
+					uint32_t Z = tinybvh_clamp( (int)posInBrick.z - (l2_.Z + l1_.Z * groupDim) * brickDim, 0, brickDim - 1 );
+					const bvhvec3 brickPlanes = (bvhvec3( ceilf( posInBrick.x ), ceilf( posInBrick.y ), ceilf( posInBrick.z ) ) - Dsign) * (1.0f / objectDim);
+					bvhvec3 tmax = (brickPlanes - ray.O) * ray.rD;
 					// step through brick
 					while (1)
 					{
@@ -3930,7 +3930,7 @@ bool VoxelSet::IsOccluded( const Ray& ray ) const
 		if (cell)
 		{
 			// setup midlevel traversal
-			const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * gridDim;
+			const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * (float)gridDim;
 			const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / gridDim);
 			l2_.X = tinybvh_clamp( (int)posInGrid.x, l1_.X * groupDim, l1_.X * groupDim + (groupDim - 1) );
 			l2_.Y = tinybvh_clamp( (int)posInGrid.y, l1_.Y * groupDim, l1_.Y * groupDim + (groupDim - 1) );
@@ -3946,12 +3946,12 @@ bool VoxelSet::IsOccluded( const Ray& ray ) const
 				{
 					// setup 3DDDA for brick traversal
 					uint32_t* brickData = brick + brickCell * brickSize;
-					const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * objectDim;
-					uint32_t X = tinybvh_clamp( (int)posInGrid.x - (l2_.X + l1_.X * groupDim) * brickDim, 0u, brickDim - 1 );
-					uint32_t Y = tinybvh_clamp( (int)posInGrid.y - (l2_.Y + l1_.Y * groupDim) * brickDim, 0u, brickDim - 1 );
-					uint32_t Z = tinybvh_clamp( (int)posInGrid.z - (l2_.Z + l1_.Z * groupDim) * brickDim, 0u, brickDim - 1 );
-					const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / objectDim);
-					bvhvec3 tmax = (gridPlanes - ray.O) * ray.rD;
+					const bvhvec3 posInBrick = (ray.O + (t + 0.0000025f) * ray.D) * (float)objectDim;
+					uint32_t X = tinybvh_clamp( (int)posInBrick.x - (l2_.X + l1_.X * groupDim) * brickDim, 0u, brickDim - 1 );
+					uint32_t Y = tinybvh_clamp( (int)posInBrick.y - (l2_.Y + l1_.Y * groupDim) * brickDim, 0u, brickDim - 1 );
+					uint32_t Z = tinybvh_clamp( (int)posInBrick.z - (l2_.Z + l1_.Z * groupDim) * brickDim, 0u, brickDim - 1 );
+					const bvhvec3 brickPlanes = (bvhvec3( ceilf( posInBrick.x ), ceilf( posInBrick.y ), ceilf( posInBrick.z ) ) - Dsign) * (1.0f / objectDim);
+					bvhvec3 tmax = (brickPlanes - ray.O) * ray.rD;
 					// step through brick
 					while (1)
 					{
@@ -6069,7 +6069,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU::Intersect( Ray& ray
 			for( int i = 0; i < 4; i++ ) if (imask & (1 << i))
 			{
 				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = -1;
+				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
 			}
 			// combine
 			combined = _mm_and_ps( combined, omask4 );
@@ -7150,7 +7150,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 			for( int i = 0; i < 4; i++ ) if (imask & (1 << i))
 			{
 				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = -1;
+				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
 			}
 			// combine
 			combined = _mm_and_ps( combined, omask4 );

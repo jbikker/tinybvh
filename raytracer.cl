@@ -60,6 +60,7 @@ global struct Instance* instances;	// instances
 global struct BVHNode* blasNodes;	// bottom-level acceleration structure node data
 global uint* blasIdx;				// blas index data
 global float4* blasTris;			// blas primitive data for intersection: vertices only
+global uint* blasOpMap;				// opacity maps for BVHs with alpha mapped textures
 global struct FatTri* blasFatTris;	// blas primitive data for shading: full data
 global uint* blasOffsets;			// position of individual blas chunks in larger arrays
 global struct Material* materials;	// GPUMaterial data, referenced from FatTris
@@ -77,7 +78,7 @@ void kernel SetRenderData(
 	global struct BVHNode* tlasNodeData, global uint* tlasIdxData,
 	global struct Instance* instanceData,
 	global struct BVHNode* blasNodeData, global uint* blasIdxData, 
-	global float4* blasTriData, global struct FatTri* blasFatTriData, global uint* blasOffsetData,
+	global float4* blasTriData, global uint* blasOpMapData, global struct FatTri* blasFatTriData, global uint* blasOffsetData,
 	global struct Material* materialData, global uint* texelData, 
 	uint skyWidth, uint skyHeight, global float* skyData
 )
@@ -88,6 +89,7 @@ void kernel SetRenderData(
 	blasNodes = blasNodeData;
 	blasIdx = blasIdxData;
 	blasTris = blasTriData;
+	blasOpMap = blasOpMapData;
 	blasFatTris = blasFatTriData;
 	blasOffsets = blasOffsetData;
 	materials = materialData;
@@ -110,12 +112,13 @@ float4 Trace( struct Ray ray )
 {
 	float3 radiance = (float3)( 0 );
 	float3 throughput = (float3)( 1 );
-	float3 L = normalize( (float3)( 2, 4, 5 ) );
+	float3 L = normalize( (float3)( -2, 4, 5 ) ), rL = (float3)( 1.0f / L.x, 1.0f / L.y, 1.0f / L.z );
 	for( int depth = 0; depth < 2; depth++ )
 	{
 		// extend path
-		float4 hit = traverse_tlas( ray.O, ray.D, ray.rD, 1e30f );
-		if (hit.x == 1e30f) 
+		float4 hit = traverse_tlas( ray.O, ray.D, ray.rD, 1000.0f );
+		float t = hit.x;
+		if (t == 1000.0f) 
 		{
 			float3 sky = SampleSky( ray.D.xyz );
 			radiance += throughput * sky;
@@ -156,12 +159,13 @@ float4 Trace( struct Ray ray )
 		if (dot( iN, N ) < 0) iN *= -1;
 
 		// direct light
-		radiance += albedo * max( 0.2f, dot( iN, L ) );
+		float3 I = ray.O.xyz + ray.D.xyz * t;
+		bool shaded = isoccluded_tlas( (float4)( I + L * 0.001f, 1 ), (float4)( L, 1 ), (float4)( rL, 1 ), 1000 );
+		radiance += albedo * (0.1f + dot( iN, L )) * (shaded ? 0.2f : 1.0f);
 		
 		// indirect light
 		if (depth == 1) break;
 		float3 R = ray.D.xyz - 2 * dot( iN, ray.D.xyz ) * iN;
-		float3 I = ray.O.xyz + ray.D.xyz * ray.hit.x;
 		ray.O = (float4)( I + R * 0.0001f, 1 );
 		ray.D = (float4)( R, 0 );
 		ray.rD = (float4)(1.0f / R.x, 1.0f / R.y, 1.0f / R.z, 1 );

@@ -13,8 +13,7 @@
 float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const float tmax )
 {
 	// initialize return data
-	float4 hit;
-	hit.x = tmax;
+	float4 hit = (float4)( tmax, 0, 0, 0 );
 	// safety net
 	if (isnan( O4.x + O4.y + O4.z + D4.x + D4.y + D4.z )) return hit;
 	// traverse BVH
@@ -51,7 +50,9 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 				const global struct BVHNode* nodes = blasNodes + blasOffsets[blas * 4 + 0];
 				const global uint* idx = blasIdx + blasOffsets[blas * 4 + 1];
 				const global float4* tris = blasTris + blasOffsets[blas * 4 + 2] * 3;
-				const float4 blasHit = traverse_ailalaine( nodes, idx, tris, Oblas, Dblas, rDblas, hit.x );
+				const uint opmapOffs = blasOffsets[blas * 4 + 3];
+				const global uint* opmap = opmapOffs == 0x99999999 ? 0 : (blasOpMap + opmapOffs);
+				const float4 blasHit = traverse_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, hit.x );
 			#endif
 				if (blasHit.x < hit.x) 
 				{
@@ -91,6 +92,9 @@ bool isoccluded_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 {
 	// traverse BVH
 	unsigned node = 0, stack[STACK_SIZE], stackPtr = 0;
+	// safety net
+	if (isnan( O4.x + O4.y + O4.z + D4.x + D4.y + D4.z )) return true;
+	// traverse
 	while (1)
 	{
 		// fetch the node
@@ -123,7 +127,9 @@ bool isoccluded_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 				const global struct BVHNode* nodes = blasNodes + blasOffsets[blas * 4 + 0];
 				const global uint* idx = blasIdx + blasOffsets[blas * 4 + 1];
 				const global float4* tris = blasTris + blasOffsets[blas * 4 + 2] * 3;
-				if (isoccluded_ailalaine( nodes, idx, tris, Oblas, Dblas, rDblas, D4.w )) return true;
+				const uint opmapOffs = blasOffsets[blas * 4 + 3];
+				const global uint* opmap = opmapOffs == 0x99999999 ? 0 : (blasOpMap + opmapOffs);
+				if (isoccluded_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, tmax )) return true;
 			#endif
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
