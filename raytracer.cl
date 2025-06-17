@@ -164,7 +164,7 @@ float4 Trace( struct Ray ray )
 		radiance += albedo * (0.1f + dot( iN, L )) * (shaded ? 0.2f : 1.0f);
 		
 		// indirect light
-		if (depth == 1) break;
+		if (depth == 1 || (albedo.g / albedo.r > 3)) break;
 		float3 R = ray.D.xyz - 2 * dot( iN, ray.D.xyz ) * iN;
 		ray.O = (float4)( I + R * 0.0001f, 1 );
 		ray.D = (float4)( R, 0 );
