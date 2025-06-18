@@ -222,8 +222,8 @@ void GLTFDemo::Init()
 	init->Run( 1 );
 
 	// set a suitable camera
-	eye = float3( -4.31f, 2.63f, 19.44f );
-	view = float3( 0.16f, -0.16f, -0.97f );
+	eye = float3( -3.55f, 13.89f, -21.51f );
+	view = normalize( float3( 1, -1, 1 ) );
 }
 
 // -----------------------------------------------------------
