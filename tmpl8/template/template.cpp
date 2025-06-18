@@ -7,14 +7,18 @@
 #pragma comment( linker, "/subsystem:windows /ENTRY:mainCRTStartup" )
 
 #define TINY_OCL_GLINTEROP
+#ifndef GLTF_DEMO
 #define TINY_OCL_IMPLEMENTATION
+#endif
 #include "tiny_ocl.h"
+#ifndef GLTF_DEMO
 #define TINYBVH_IMPLEMENTATION
+#endif
 #include "tiny_bvh.h"
 using namespace tinybvh;
 using namespace tinyocl;
 #ifdef GLTF_DEMO
-#define TINYSCENE_IMPLEMENTATION
+// #define TINYSCENE_IMPLEMENTATION
 #define TINYSCENE_USE_CUSTOM_VECTOR_TYPES
 namespace tinyscene
 {

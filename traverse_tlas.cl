@@ -52,7 +52,16 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 				const global float4* tris = blasTris + blasDesc[blas].triOffset * 3;
 				const uint opmapOffs = blasDesc[blas].opmapOffset;
 				const global uint* opmap = opmapOffs == 0x99999999 ? 0 : (blasOpMap + opmapOffs);
-				const float4 blasHit = traverse_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, hit.x );
+				const uint blasType = blasDesc[blas].blasType;
+				float4 blasHit;
+				if (blasType == 2)
+				{
+					blasHit = traverse_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, hit.x );
+				}
+				else // if (blasType == 3)
+				{
+					return hit; // TODO
+				}
 			#endif
 				if (blasHit.x < hit.x) 
 				{
@@ -129,7 +138,15 @@ bool isoccluded_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 				const global float4* tris = blasTris + blasDesc[blas].triOffset * 3;
 				const uint opmapOffs = blasDesc[blas].opmapOffset;
 				const global uint* opmap = opmapOffs == 0x99999999 ? 0 : (blasOpMap + opmapOffs);
-				if (isoccluded_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, tmax )) return true;
+				const uint blasType = blasDesc[blas].blasType;
+				if (blasType == 2)
+				{
+					if (isoccluded_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, tmax )) return true;
+				}
+				else if (blasType == 3)
+				{
+					return false; // TODO
+				}
 			#endif
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];

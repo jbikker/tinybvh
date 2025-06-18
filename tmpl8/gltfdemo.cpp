@@ -44,12 +44,14 @@ void GLTFDemo::Init()
 {
 	// load gltf scene
 	scene.SetBVHDefault( GPU_DYNAMIC );
-	scene.AddScene( "./testdata/cratercity/scene.gltf", mat4::Translate( 0, -18.9f, 0 ) * mat4::RotateY( 1 ) );
+	int terrain = scene.AddScene( "./testdata/cratercity/scene.gltf", mat4::Translate( 0, -18.9f, 0 ) * mat4::RotateY( 1 ) );
 	scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
 	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 21.5f, -1.75f, -7 ) * mat4::Scale( 0.03f ) * mat4::RotateY( PI * 1.5f ) );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
 	int leaves = scene.FindNode( "leaves" );
-	scene.CreateOpacityMicroMaps( leaves );
+	if (leaves > -1) scene.CreateOpacityMicroMaps( leaves );
+	// scene.meshPool[0]->blas.bvhType = GPU_RIGID; // ->SetBVHType( terrain, GPU_RIGID );
+	scene.CollapseMeshes( terrain ); // combine the meshes into a single mesh; may yield a better BVH.
 	scene.UpdateSceneGraph( 0 ); // this will build the BLASses and TLAS.
 
 	// create OpenCL kernels
@@ -74,16 +76,17 @@ void GLTFDemo::Init()
 	blasDesc = new Buffer( (int)Scene::meshPool.size() * sizeof( BLASDesc ) );
 	for (int i = 0; i < Scene::meshPool.size(); i++)
 	{
-		BVH_GPU* gpubvh2 = Scene::meshPool[i]->blas.dynamicGPU;
-		BVH8_CWBVH* gpubvh8 = Scene::meshPool[i]->blas.rigidGPU;
+		Mesh* mesh = Scene::meshPool[i];
+		if (!mesh) continue;
 		BLASDesc& desc = ((BLASDesc*)blasDesc->GetHostPtr())[i];
 		desc.indexOffset = indexCount;
 		desc.triOffset = triCount;
-		if (gpubvh2)
+		desc.blasType = GPU_DYNAMIC;
+		if (mesh->blas.bvhType == GPU_DYNAMIC)
 		{
+			BVH_GPU* gpubvh2 = mesh->blas.dynamicGPU;
 			desc.nodeOffset = node2Count;
 			desc.opmapOffset = gpubvh2->opmap ? opmapOffset : 0x99999999;
-			desc.blasType = 0;
 			node2Count += gpubvh2->usedNodes;
 			indexCount += gpubvh2->idxCount;
 			triCount += gpubvh2->triCount;
@@ -91,9 +94,11 @@ void GLTFDemo::Init()
 		}
 		else
 		{
+			BVH8_CWBVH* gpubvh8 = mesh->blas.rigidGPU;
 			desc.node8Offset = node8Count;
+			desc.tri8Offset = tri8Count;
 			desc.opmapOffset = gpubvh8->opmap ? opmapOffset : 0x99999999;
-			desc.blasType = 1;
+			desc.blasType = GPU_RIGID;
 			node8Count += gpubvh8->usedNodes;
 			tri8Count += gpubvh8->idxCount; // not triCount; we must account for spatial splits.
 			if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
@@ -110,23 +115,25 @@ void GLTFDemo::Init()
 	for (int i = 0; i < Scene::meshPool.size(); i++)
 	{
 		// a BLAS needs BVH nodes, triangle indices and the actual triangle data.
-		BVH_GPU* gpubvh2 = Scene::meshPool[i]->blas.dynamicGPU;
-		BVH8_CWBVH* gpubvh8 = Scene::meshPool[i]->blas.rigidGPU;
-		if (gpubvh2)
+		Mesh* mesh = Scene::meshPool[i];
+		if (!mesh) continue;
+		if (mesh->blas.bvhType == GPU_DYNAMIC)
 		{
+			BVH_GPU* gpubvh2 = mesh->blas.dynamicGPU;
 			memcpy( (BVH_GPU::BVHNode*)blasNode2->GetHostPtr() + node2Count, gpubvh2->bvhNode, gpubvh2->usedNodes * sizeof( BVH_GPU::BVHNode ) );
 			memcpy( (uint*)blasIdx->GetHostPtr() + indexCount, gpubvh2->bvh.primIdx, gpubvh2->idxCount * sizeof( uint ) );
 			memcpy( (float4*)blasTri->GetHostPtr() + triCount * 3, gpubvh2->bvh.verts.data, gpubvh2->triCount * sizeof( float4 ) * 3 );
-			memcpy( (FatTri*)blasFatTri->GetHostPtr() + triCount, Scene::meshPool[i]->triangles.data(), gpubvh2->triCount * sizeof( FatTri ) );
+			memcpy( (FatTri*)blasFatTri->GetHostPtr() + triCount, mesh->triangles.data(), gpubvh2->triCount * sizeof( FatTri ) );
 			if (gpubvh2->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset * 32, gpubvh2->opmap, gpubvh2->triCount * 128 );
 			node2Count += gpubvh2->usedNodes, indexCount += gpubvh2->idxCount, triCount += gpubvh2->triCount;
 			if (gpubvh2->opmap) opmapOffset += gpubvh2->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 		else
 		{
+			BVH8_CWBVH* gpubvh8 = mesh->blas.rigidGPU;
 			memcpy( (bvhvec4*)blasNode8->GetHostPtr() + node8Count * 5, gpubvh8->bvh8Data, gpubvh8->usedNodes * sizeof( BVH_GPU::BVHNode ) );
 			memcpy( (float*)blasTri8->GetHostPtr() + tri8Count * 16, gpubvh8->bvh8Tris, gpubvh8->idxCount * 64 );
-			memcpy( (FatTri*)blasFatTri->GetHostPtr() + triCount, Scene::meshPool[i]->triangles.data(), gpubvh8->triCount * sizeof( FatTri ) );
+			memcpy( (FatTri*)blasFatTri->GetHostPtr() + triCount, mesh->triangles.data(), gpubvh8->triCount * sizeof( FatTri ) );
 			if (gpubvh8->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset * 32, gpubvh8->opmap, gpubvh8->triCount * 128 );
 			node8Count += gpubvh8->usedNodes, tri8Count + gpubvh8->idxCount;
 			if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
