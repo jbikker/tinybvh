@@ -17,6 +17,7 @@
     <ClCompile Include="template\tmpl8math.cpp">
       <Filter>template</Filter>
     </ClCompile>
+    <ClCompile Include="gltfdemo_lib.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="gltfdemo.h" />

@@ -122,6 +122,7 @@
   <!-- END Custom section -->
   <ItemGroup>
     <ClCompile Include="gltfdemo.cpp" />
+    <ClCompile Include="gltfdemo_lib.cpp" />
     <ClCompile Include="template\opengl.cpp" />
     <ClCompile Include="template\sprite.cpp" />
     <ClCompile Include="template\surface.cpp" />
