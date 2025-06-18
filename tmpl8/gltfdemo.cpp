@@ -44,9 +44,9 @@ void GLTFDemo::Init()
 {
 	// load gltf scene
 	scene.SetBVHDefault( GPU_DYNAMIC );
-	scene.AddScene( "./testdata/cratercity/scene.gltf", mat4::Translate( 0, -18.9f, 0 ) );
-	scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -2.9f, 0 ) * mat4::Scale( 2 ) );
-	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 13.9f, -1.9f, 11.8f ) * mat4::Scale( 0.03f ) );
+	scene.AddScene( "./testdata/cratercity/scene.gltf", mat4::Translate( 0, -18.9f, 0 ) * mat4::RotateY( 1 ) );
+	scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
+	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 21.5f, -1.75f, -7 ) * mat4::Scale( 0.03f ) * mat4::RotateY( PI * 1.5f ) );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
 	int leaves = scene.FindNode( "leaves" );
 	scene.CreateOpacityMicroMaps( leaves );
