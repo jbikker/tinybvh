@@ -111,7 +111,7 @@ float3 SampleSky( const float3 D )
 float4 Trace( struct Ray ray )
 {
 	// hardcoded directional light.
-	float3 L = normalize( (float3)(-2, 4, 5) );
+	float3 L = normalize( (float3)(-5, 1.5f, -1) );
 	float3 rL = (float3)(1.0f / L.x, 1.0f / L.y, 1.0f / L.z);
 
 	// initialize light transport.
@@ -182,7 +182,7 @@ float4 Trace( struct Ray ray )
 
 		// direct light
 		bool shaded = isoccluded_tlas( (float4)(I + L * 0.001f, 1), (float4)(L, 1), (float4)(rL, 1), 1000 );
-		radiance += albedo * (0.1f + dot( iN, L )) * (shaded ? 0.2f : 1.0f);
+		radiance += albedo * (0.1f + dot( iN, L )) * (shaded ? 0.5f : 1.0f);
 
 		// indirect light
 		break; // no
