@@ -431,20 +431,17 @@ public:
 	::std::string name = "unnamed";		// name for the mesh
 	int ID = -1;						// unique ID for the mesh: position in mesh array
 	::std::vector<ts_vec4> vertices;	// model vertices, always 3 per triangle: vertices are *not* indexed.
+	::std::vector<FatTri> triangles;	// full triangles, to be used for shading
 	uint32_t* omaps = 0;				// at N=32: 1024 bit / 128 byte per triangle
 	::std::vector<ts_vec3> vertexNormals;	// vertex normals, 1 per vertex
+	::std::vector<int> materialList;	// list of materials used by the mesh; used to efficiently track light changes
 	::std::vector<ts_vec4> original;	// skinning: base pose; will be transformed into vector vertices
 	::std::vector<ts_vec3> origNormal;	// skinning: base pose normals
-	::std::vector<FatTri> triangles;	// full triangles, to be used for shading
-	::std::vector<int> materialList;	// list of materials used by the mesh; used to efficiently track light changes
 	::std::vector<ts_uint4> joints;		// skinning: joints
 	::std::vector<ts_vec4> weights;		// skinning: joint weights
 	::std::vector<Pose> poses;			// morph target data
-	bool isAnimated;					// true when this mesh has animation data
-	bool excludeFromNavmesh = false;	// prevents mesh from influencing navmesh generation (e.g. curtains)
 	bool geomChanged = true;			// triangle data was modified; blas update is needed
 	bool hasOpacityMicroMaps = false;	// if true, 5 vec4's per triangle are passed to tinybvh.
-	ts_aabb worldBounds;				// mesh bounds transformed by the transform of the parent node, for TLAS builds
 	AccStruc blas;						// bottom-level acceleration structure
 };
 
@@ -787,6 +784,7 @@ public:
 	static int FindMaterialIDByOrigin( const char* name );
 	static int FindNextMaterialID( const char* name, const int matID );
 	static int FindNode( const char* name );
+	static void CollapseMeshes( const int nodeId );
 	static void CreateOpacityMicroMaps( const int nodeId );
 	static void SetBVHType( const int nodeId, const int t );
 	static void SetNodeTransform( const int nodeId, const ts_mat4& transform );
@@ -3328,6 +3326,77 @@ void Scene::SetBVHType( const int nodeId, const int t )
 }
 
 //  +-----------------------------------------------------------------------------+
+//  |  Scene::CollapseMeshes                                                      |
+//  |  Combine all meshes in this subtree into a single one.                LH2'25|
+//  +-----------------------------------------------------------------------------+
+void Scene::CollapseMeshes( const int subtreeRoot )
+{
+	// count triangles in subtree
+	int triCount = 0, firstMesh = -1, firstNode = -1, stack[128], stackPtr = 0;
+	bool badMesh = false;
+	int nodeId = subtreeRoot;
+	while (1)
+	{
+		Node* node = nodePool[nodeId];
+		int m = node->meshID;
+		if (m > -1)
+		{
+			if (meshPool[m]->joints.size() > 0 || meshPool[m]->omaps != 0)
+			{
+				// can't collapse animation / meshes with opacity micromaps
+				badMesh = true;
+				break;
+			}
+			triCount += (int)meshPool[m]->triangles.size();
+			if (firstMesh == -1) firstMesh = m, firstNode = nodeId;
+		}
+		for (int id : node->childIdx) stack[stackPtr++] = id;
+		if (stackPtr == 0) break;
+		nodeId = stack[--stackPtr];
+	}
+	// safety net
+	if (triCount == 0 /* no meshes in subtree */ || badMesh /* issues */) return;
+	// make room for extra data in 'firstMesh'
+	Mesh* first = meshPool[firstMesh];
+	first->vertices.resize( triCount * 3 );
+	first->triangles.resize( triCount );
+	// append data from all meshes in subtree and delete them.
+	nodeId = subtreeRoot;
+	while (1)
+	{
+		Node* node = nodePool[nodeId];
+		int m = node->meshID;
+		if (m > -1 && m != firstMesh)
+		{
+			Mesh* second = meshPool[m];
+			first->vertices.insert( first->vertices.end(), second->vertices.begin(), second->vertices.end() );
+			first->triangles.insert( first->triangles.end(), second->triangles.begin(), second->triangles.end() );
+			second->ID = -1; // mesh will not be included in BVH builds.
+			node->meshID = -1;
+			// erase storage of second node
+			second->vertices.clear();
+			second->triangles.clear();
+			second->materialList.clear();
+			meshPool[m] = 0;
+		#if 0
+			// erasing it from the meshPool messes up our administration..
+			meshPool.erase( std::find( meshPool.begin(), meshPool.end(), second ) );
+		#endif
+		}
+		for (int id : node->childIdx) stack[stackPtr++] = id;
+		if (stackPtr == 0) break;
+		nodeId = stack[--stackPtr];
+	}
+	// renumber mesh 'first'
+	for (int i = 0; i < (int)meshPool.size(); i++) if (meshPool[i] == first)
+	{
+		first->ID = i;
+		nodePool[firstNode]->meshID = i;
+	}
+	// all done!
+}
+
+//  +-----------------------------------------------------------------------------+
 //  |  Scene::SetNodeTransform                                                    |
 //  |  Set the local transform for the specified node.                      LH2'25|
 //  +-----------------------------------------------------------------------------+
@@ -3475,7 +3544,9 @@ void Scene::UpdateSceneGraph( const float deltaTime )
 	{
 		delete bvhList;
 		bvhList = new tinybvh::BVHBase * [meshPool.size()];
-		for (int i = 0; i < meshPool.size(); i++) bvhList[i] = meshPool[i]->blas.dynamicBVH;
+		for (int i = 0; i < meshPool.size(); i++) if (meshPool[i])
+			bvhList[i] = meshPool[i]->blas.dynamicBVH;
+		bvhListSize = (uint32_t)meshPool.size();
 	}
 	if (defaultBVHType == GPU_DYNAMIC || defaultBVHType == GPU_RIGID)
 	{
