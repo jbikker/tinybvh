@@ -53,6 +53,16 @@ struct Material
 	uint dummy;						// padding; struct size must be a multiple of 16 bytes.
 };
 
+struct BlasDesc
+{
+	uint nodeOffset;				// position of blas node data in global blasNodes array
+	uint indexOffset;				// position of blas index data in global blasIdx array
+	uint triOffset;					// position of blas triangle and FatTri data in global arrays
+	uint opmapOffset;				// position of opacity micromap data in global arrays
+	uint blasType;					// blas type: 0 = BVH_GPU, 1 = BVH8_CWBVH
+	uint dummy1, dummy2, dummy3;	// padding
+};
+
 // buffers - most data will be accessed as 128-bit values for efficiency.
 global struct BVHNode* tlasNodes;	// top-level acceleration structure node data
 global uint* tlasIdx;				// tlas index data
@@ -62,7 +72,7 @@ global uint* blasIdx;				// blas index data
 global float4* blasTris;			// blas primitive data for intersection: vertices only
 global uint* blasOpMap;				// opacity maps for BVHs with alpha mapped textures
 global struct FatTri* blasFatTris;	// blas primitive data for shading: full data
-global uint* blasOffsets;			// position of individual blas chunks in larger arrays
+global struct BlasDesc* blasDesc;	// blas descriptor data: blas type & position of chunks in larger arrays
 global struct Material* materials;	// GPUMaterial data, referenced from FatTris
 global uint* texels;				// texture data
 global uint2 skySize;				// sky dome image data size
@@ -78,7 +88,7 @@ void kernel SetRenderData(
 	global struct BVHNode* tlasNodeData, global uint* tlasIdxData,
 	global struct Instance* instanceData,
 	global struct BVHNode* blasNodeData, global uint* blasIdxData,
-	global float4* blasTriData, global uint* blasOpMapData, global struct FatTri* blasFatTriData, global uint* blasOffsetData,
+	global float4* blasTriData, global uint* blasOpMapData, global struct FatTri* blasFatTriData, global struct BlasDesc* blasDescData,
 	global struct Material* materialData, global uint* texelData,
 	uint skyWidth, uint skyHeight, global float* skyData
 )
@@ -91,7 +101,7 @@ void kernel SetRenderData(
 	blasTris = blasTriData;
 	blasOpMap = blasOpMapData;
 	blasFatTris = blasFatTriData;
-	blasOffsets = blasOffsetData;
+	blasDesc = blasDescData;
 	materials = materialData;
 	texels = texelData;
 	skySize.x = skyWidth;
@@ -141,7 +151,7 @@ float4 Trace( struct Ray ray )
 			idxData = as_uint( hit.w ), primIdx = idxData & 0xffffff, instIdx = idxData >> 24;
 			inst = instances + instIdx;
 			blasIdx = as_uint( inst->aabbMin.w );
-			tri = blasFatTris + blasOffsets[blasIdx * 4 + 2] + primIdx;
+			tri = blasFatTris + blasDesc[blasIdx].triOffset + primIdx;
 			iN = (hit.y * tri->vN1 + hit.z * tri->vN2 + (1 - hit.y - hit.z) * tri->vN0).xyz;
 			N = (float3)(tri->vN0.w, tri->vN1.w, tri->vN2.w);
 			I = ray.O.xyz + ray.D.xyz * hit.x;

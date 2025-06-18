@@ -58,14 +58,14 @@ void GLTFDemo::Init()
 	// of them. So, we make a single large buffer for all BLAS nodes, and use offsets
 	// within it for the individual BLASses. Same for indices and triangles.
 	uint nodeCount = 0, indexCount = 0, triCount = 0, opmapOffset = 0;
-	blasOffsets = new Buffer( (int)Scene::meshPool.size() * 16 );
+	blasDesc = new Buffer( (int)Scene::meshPool.size() * 32 );
 	for (int i = 0; i < Scene::meshPool.size(); i++)
 	{
 		BVH_GPU* gpubvh = Scene::meshPool[i]->blas.dynamicGPU;
-		blasOffsets->GetHostPtr()[i * 4 + 0] = nodeCount;
-		blasOffsets->GetHostPtr()[i * 4 + 1] = indexCount;
-		blasOffsets->GetHostPtr()[i * 4 + 2] = triCount;
-		blasOffsets->GetHostPtr()[i * 4 + 3] = gpubvh->opmap ? opmapOffset : 0x99999999;
+		blasDesc->GetHostPtr()[i * 8 + 0] = nodeCount;
+		blasDesc->GetHostPtr()[i * 8 + 1] = indexCount;
+		blasDesc->GetHostPtr()[i * 8 + 2] = triCount;
+		blasDesc->GetHostPtr()[i * 8 + 3] = gpubvh->opmap ? opmapOffset : 0x99999999;
 		nodeCount += gpubvh->usedNodes, indexCount += gpubvh->idxCount, triCount += gpubvh->triCount;
 		if (gpubvh->opmap) opmapOffset += gpubvh->triCount * 32; // for N=32: 128 bytes = 32uints
 	}
@@ -92,7 +92,7 @@ void GLTFDemo::Init()
 	blasTri->CopyToDevice();
 	blasOpMap->CopyToDevice();
 	blasFatTri->CopyToDevice();
-	blasOffsets->CopyToDevice();
+	blasDesc->CopyToDevice();
 
 	// 4. TLAS buffer. The TLAS references the BLASInstances.
 	// Note: The TLAS is rebuilt per frame. By syncing 'allocatedNodes' rather than
@@ -163,7 +163,7 @@ void GLTFDemo::Init()
 	skyPixels->CopyToDevice();
 
 	// pass all static data to the Init function.
-	init->SetArguments( tlasNode, tlasIdx, instances, blasNode, blasIdx, blasTri, blasOpMap, blasFatTri, blasOffsets,
+	init->SetArguments( tlasNode, tlasIdx, instances, blasNode, blasIdx, blasTri, blasOpMap, blasFatTri, blasDesc,
 		materials, texels, Scene::sky->width, Scene::sky->height, skyPixels );
 	init->Run( 1 );
 

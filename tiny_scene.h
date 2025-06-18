@@ -431,7 +431,7 @@ public:
 	::std::string name = "unnamed";		// name for the mesh
 	int ID = -1;						// unique ID for the mesh: position in mesh array
 	::std::vector<ts_vec4> vertices;	// model vertices, always 3 per triangle: vertices are *not* indexed.
-	uint32_t* omaps = 0;				// 256bit / 32byte per triangle
+	uint32_t* omaps = 0;				// at N=32: 1024 bit / 128 byte per triangle
 	::std::vector<ts_vec3> vertexNormals;	// vertex normals, 1 per vertex
 	::std::vector<ts_vec4> original;	// skinning: base pose; will be transformed into vector vertices
 	::std::vector<ts_vec3> origNormal;	// skinning: base pose normals

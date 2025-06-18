@@ -47,10 +47,10 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 			#else
 				// this code handles arbitrary tlas/blas scenes.
 				const uint blas = as_uint( inst->aabbMin.w );
-				const global struct BVHNode* nodes = blasNodes + blasOffsets[blas * 4 + 0];
-				const global uint* idx = blasIdx + blasOffsets[blas * 4 + 1];
-				const global float4* tris = blasTris + blasOffsets[blas * 4 + 2] * 3;
-				const uint opmapOffs = blasOffsets[blas * 4 + 3];
+				const global struct BVHNode* nodes = blasNodes + blasDesc[blas].nodeOffset; // TODO: read offset data as uint4
+				const global uint* idx = blasIdx + blasDesc[blas].indexOffset;
+				const global float4* tris = blasTris + blasDesc[blas].triOffset * 3;
+				const uint opmapOffs = blasDesc[blas].opmapOffset;
 				const global uint* opmap = opmapOffs == 0x99999999 ? 0 : (blasOpMap + opmapOffs);
 				const float4 blasHit = traverse_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, hit.x );
 			#endif
@@ -124,10 +124,10 @@ bool isoccluded_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 			#else
 				// this code handles arbitrary tlas/blas scenes.
 				const uint blas = as_uint( inst->aabbMin.w );
-				const global struct BVHNode* nodes = blasNodes + blasOffsets[blas * 4 + 0];
-				const global uint* idx = blasIdx + blasOffsets[blas * 4 + 1];
-				const global float4* tris = blasTris + blasOffsets[blas * 4 + 2] * 3;
-				const uint opmapOffs = blasOffsets[blas * 4 + 3];
+				const global struct BVHNode* nodes = blasNodes + blasDesc[blas].nodeOffset; // TODO: read offset data as uint4
+				const global uint* idx = blasIdx + blasDesc[blas].indexOffset;
+				const global float4* tris = blasTris + blasDesc[blas].triOffset * 3;
+				const uint opmapOffs = blasDesc[blas].opmapOffset;
 				const global uint* opmap = opmapOffs == 0x99999999 ? 0 : (blasOpMap + opmapOffs);
 				if (isoccluded_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, tmax )) return true;
 			#endif
