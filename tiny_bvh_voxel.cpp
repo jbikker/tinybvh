@@ -126,9 +126,9 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 			bvhvec3 N = voxels.GetNormal( rays[i] );
 			// get voxel color
 			uint32_t color = rays[i].hit.prim;
-			float r = (color >> 16) & 255;
-			float g = (color >> 8) & 255;
-			float b = color & 255;
+			float r = (float)((color >> 16) & 255);
+			float g = (float)((color >> 8) & 255);
+			float b = (float)(color & 255);
 			bvhvec3 shaded = bvhvec3( r, g, b ) * (1.0f / 255.0f) * fabs( tinybvh_dot( N, L ) );
 			// final plot
 			int ir = (int)(shaded.x * 255.0f);

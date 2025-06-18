@@ -204,7 +204,7 @@ void Init()
 	t.close();
 	// create opacity map for "leaves" node / subtree
 	int leaves = scene.FindNode( "leaves" );
-	scene.CreateOpacityMaps( leaves );
+	scene.CreateOpacityMicroMaps( leaves );
 	// convert scene to 128x128x128 voxel object
 	scene.UpdateSceneGraph( 0 );
 	// determine bounding cube

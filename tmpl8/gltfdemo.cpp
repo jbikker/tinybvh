@@ -31,11 +31,12 @@ void GLTFDemo::Init()
 {
 	// load gltf scene
 	scene.SetBVHDefault( GPU_DYNAMIC );
+	scene.AddScene( "./testdata/cratercity/scene.gltf", mat4::Translate( 0, -18.9f, 0 ) );
 	scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -2.9f, 0 ) * mat4::Scale( 2 ) );
-	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Scale( 0.03f ) );
+	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 13.9f, -1.9f, 11.8f ) * mat4::Scale( 0.03f ) );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
 	int leaves = scene.FindNode( "leaves" );
-	scene.CreateOpacityMaps( leaves );
+	scene.CreateOpacityMicroMaps( leaves );
 	scene.UpdateSceneGraph( 0 ); // this will build the BLASses and TLAS.
 
 	// create OpenCL kernels
@@ -218,4 +219,12 @@ void GLTFDemo::Tick( float delta_time )
 	// start device-side rendering.
 	render->SetArguments( pixels, SCRWIDTH, SCRHEIGHT, eye, p1, p2, p3 );
 	render->Run2D( oclint2( SCRWIDTH, SCRHEIGHT ) );
+
+	// print camera aim pos
+	static int delay = 10;
+	if (--delay == 0)
+	{
+		printf( "x = %.2f, y = %.2f, z = %.2f)\n", eye.x, eye.y, eye.z );
+		delay = 10;
+	}
 }

@@ -424,7 +424,7 @@ public:
 		const ::std::vector<ts_vec4>& tmpTs, const ::std::vector<Pose>& tmpPoses,
 		const ::std::vector<ts_uint4>& tmpJoints, const ::std::vector<ts_vec4>& tmpWeights, const int materialIdx );
 	void BuildMaterialList();
-	void CreateOpacityMaps();
+	void CreateOpacityMicroMaps();
 	void SetPose( const ::std::vector<float>& weights );
 	void SetPose( const Skin* skin );
 	// data members
@@ -443,7 +443,7 @@ public:
 	bool isAnimated;					// true when this mesh has animation data
 	bool excludeFromNavmesh = false;	// prevents mesh from influencing navmesh generation (e.g. curtains)
 	bool geomChanged = true;			// triangle data was modified; blas update is needed
-	bool hasOpacityMaps = false;		// if true, 5 vec4's per triangle are passed to tinybvh.
+	bool hasOpacityMicroMaps = false;	// if true, 5 vec4's per triangle are passed to tinybvh.
 	ts_aabb worldBounds;				// mesh bounds transformed by the transform of the parent node, for TLAS builds
 	AccStruc blas;						// bottom-level acceleration structure
 };
@@ -787,7 +787,7 @@ public:
 	static int FindMaterialIDByOrigin( const char* name );
 	static int FindNextMaterialID( const char* name, const int matID );
 	static int FindNode( const char* name );
-	static void CreateOpacityMaps( const int nodeId );
+	static void CreateOpacityMicroMaps( const int nodeId );
 	static void SetBVHType( const int nodeId, const int t );
 	static void SetNodeTransform( const int nodeId, const ts_mat4& transform );
 	static const ts_mat4& GetNodeTransform( const int nodeId );
@@ -851,11 +851,11 @@ public:
 #define SCENE_FATAL_ERROR(s) { SCENE_FATAL_ERROR_IF(1,(s)) }
 #ifdef _WINDOWS_ // windows.h has been included
 #define SCENE_FATAL_ERROR_IF(c,s) { if (c) { char t[512]; sprintf( t, \
-	"Fatal error in tiny_bvh.h, line %i:\n%s\n", __LINE__, s ); \
+	"Fatal error in tiny_scene.h, line %i:\n%s\n", __LINE__, s ); \
 	MessageBox( NULL, t, "Fatal error", MB_OK ); exit( 1 ); } }
 #else
 #define SCENE_FATAL_ERROR_IF(c,s) if (c) { fprintf( stderr, \
-	"Fatal error in tiny_bvh.h, line %i:\n%s\n", __LINE__, s ); exit( 1 ); }
+	"Fatal error in tiny_scene.h, line %i:\n%s\n", __LINE__, s ); exit( 1 ); }
 #endif
 
 namespace tinyscene {
@@ -1670,10 +1670,10 @@ void Mesh::BuildMaterialList()
 }
 
 //  +-----------------------------------------------------------------------------+
-//  |  Mesh::CreateOpacityMaps                                                    |
-//  |  Fill the opacity maps vector.                                        LH2'25|
+//  |  Mesh::CreateOpacityMicroMaps                                               |
+//  |  Fill the opacity micro maps vector.                                  LH2'25|
 //  +-----------------------------------------------------------------------------+
-void CreateOpacityMap( Mesh* mesh, const int N, const int first, const int last )
+void CreateOpacityMicroMap( Mesh* mesh, const int N, const int first, const int last )
 {
 	const float fN = (float)N;
 	const float rN = 1.0f / fN;
@@ -1714,7 +1714,7 @@ void CreateOpacityMap( Mesh* mesh, const int N, const int first, const int last 
 		}
 	}
 }
-void Mesh::CreateOpacityMaps()
+void Mesh::CreateOpacityMicroMaps()
 {
 	// fill the opacity maps: WIP, we simply take one texture sample.
 	const int N = 32; // i.e.: 32 * 32 = 1024bits = 128 bytes = 32 uints per tri.
@@ -1727,10 +1727,10 @@ void Mesh::CreateOpacityMaps()
 	{
 		const int first = i * slice;
 		const int last = (i == (slices - 1)) ? (int)triangles.size() : (first + slice);
-		jobs.emplace_back( std::thread( &CreateOpacityMap, this, N, first, last ) );
+		jobs.emplace_back( std::thread( &CreateOpacityMicroMap, this, N, first, last ) );
 	}
 	for (int i = 0; i < slices; i++) jobs[i].join();
-	hasOpacityMaps = true;
+	hasOpacityMicroMaps = true;
 }
 
 //  +-----------------------------------------------------------------------------+
@@ -1989,7 +1989,7 @@ void Node::Update( const ts_mat4& T )
 				if (mesh->blas.dynamicBVH == 0)
 				{
 					mesh->blas.dynamicBVH = new tinybvh::BVH();
-					if (mesh->omaps) mesh->blas.dynamicBVH->SetOpacityMaps( mesh->omaps, 32 );
+					if (mesh->omaps) mesh->blas.dynamicBVH->SetOpacityMicroMaps( mesh->omaps, 32 );
 				}
 				mesh->blas.dynamicBVH->Build( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
@@ -2003,7 +2003,7 @@ void Node::Update( const ts_mat4& T )
 				#else
 					mesh->blas.rigidBVH = new tinybvh::BVH_SoA();
 				#endif
-					if (mesh->omaps) mesh->blas.rigidBVH->SetOpacityMaps( mesh->omaps, 32 );
+					if (mesh->omaps) mesh->blas.rigidBVH->SetOpacityMicroMaps( mesh->omaps, 32 );
 				}
 				mesh->blas.rigidBVH->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
@@ -2011,7 +2011,7 @@ void Node::Update( const ts_mat4& T )
 				if (mesh->blas.dynamicGPU == 0)
 				{
 					mesh->blas.dynamicGPU = new tinybvh::BVH_GPU();
-					if (mesh->omaps) mesh->blas.dynamicGPU->SetOpacityMaps( mesh->omaps, 32 );
+					if (mesh->omaps) mesh->blas.dynamicGPU->SetOpacityMicroMaps( mesh->omaps, 32 );
 				}
 				mesh->blas.dynamicGPU->Build( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
@@ -2019,7 +2019,7 @@ void Node::Update( const ts_mat4& T )
 				if (mesh->blas.rigidGPU == 0)
 				{
 					mesh->blas.rigidGPU = new tinybvh::BVH8_CWBVH();
-					if (mesh->omaps) mesh->blas.rigidGPU->SetOpacityMaps( mesh->omaps, 32 );
+					if (mesh->omaps) mesh->blas.rigidGPU->SetOpacityMicroMaps( mesh->omaps, 32 );
 				}
 				mesh->blas.rigidGPU->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
@@ -3303,16 +3303,16 @@ int Scene::FindNode( const char* name )
 }
 
 //  +-----------------------------------------------------------------------------+
-//  |  Scene::CreateOpacityMaps                                                   |
+//  |  Scene::CreateOpacityMicroMaps                                              |
 //  |  process all meshes in the specified subtree and produce opacity            |
 //  |  maps for them.                                                       LH2'25|
 //  +-----------------------------------------------------------------------------+
-void Scene::CreateOpacityMaps( const int nodeId )
+void Scene::CreateOpacityMicroMaps( const int nodeId )
 {
 	Node* node = nodePool[nodeId];
 	int m = node->meshID;
-	if (m > -1) meshPool[m]->CreateOpacityMaps();
-	for (int id : node->childIdx) CreateOpacityMaps( id );
+	if (m > -1) meshPool[m]->CreateOpacityMicroMaps();
+	for (int id : node->childIdx) CreateOpacityMicroMaps( id );
 }
 
 //  +-----------------------------------------------------------------------------+

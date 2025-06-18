@@ -156,7 +156,7 @@ float4 Trace( struct Ray ray )
 				int iu = (int)(tu * material->width);
 				int iv = (int)(tv * material->height);
 				uint pixel = texels[material->offset + iu + iv * material->width];
-				albedo = (float3)((float)((pixel >> 16) & 255), (float)((pixel >> 8) & 255), (float)(pixel & 255)) * (1.0f / 256.0f);
+				albedo = (float3)((float)(pixel & 255), (float)((pixel >> 8) & 255), (float)((pixel >> 16) & 255)) * (1.0f / 256.0f);
 				if ((pixel >> 24) < 2) validAlbedo = false;
 			}
 			else albedo = material->albedo.xyz;
@@ -185,12 +185,15 @@ float4 Trace( struct Ray ray )
 		radiance += albedo * (0.1f + dot( iN, L )) * (shaded ? 0.2f : 1.0f);
 
 		// indirect light
+		break; // no
+	#if 0
 		if (depth == 1 || albedo.g > albedo.r * 2) break;
 		float3 R = ray.D.xyz - 2 * dot( iN, ray.D.xyz ) * iN;
 		ray.O = (float4)(I + R * 0.0001f, 1);
 		ray.D = (float4)(R, 0);
 		ray.rD = (float4)(1.0f / R.x, 1.0f / R.y, 1.0f / R.z, 1);
 		throughput *= albedo * dot( R, iN ) * 0.5f;
+	#endif
 	}
 	return (float4)(radiance, 1.0f);
 }
