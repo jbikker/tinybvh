@@ -70,7 +70,7 @@ void GLTFDemo::Init()
 	// Complication: OpenCL does not let us pass device-side pointers, let alone arrays
 	// of them. So, we make a single large buffer for all BLAS nodes, and use offsets
 	// within it for the individual BLASses. Same for indices and triangles.
-	uint node2Count = 0, node8Count = 0, indexCount = 0, triCount = 0, opmapOffset = 0;
+	uint node2Count = 0, node8Count = 0, indexCount = 0, triCount = 0, tri8Count = 0, opmapOffset = 0;
 	blasDesc = new Buffer( (int)Scene::meshPool.size() * sizeof( BLASDesc ) );
 	for (int i = 0; i < Scene::meshPool.size(); i++)
 	{
@@ -95,16 +95,18 @@ void GLTFDemo::Init()
 			desc.opmapOffset = gpubvh8->opmap ? opmapOffset : 0x99999999;
 			desc.blasType = 1;
 			node8Count += gpubvh8->usedNodes;
+			tri8Count += gpubvh8->idxCount; // not triCount; we must account for spatial splits.
 			if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 	}
 	blasNode2 = new Buffer( node2Count * sizeof( BVH_GPU::BVHNode ) );
-	blasNode8 = new Buffer( node8Count * 80 );
 	blasIdx = new Buffer( indexCount * sizeof( uint ) );
 	blasTri = new Buffer( triCount * sizeof( float4 ) * 3 );
+	blasNode8 = new Buffer( node8Count * 80 );
+	blasTri8 = new Buffer( tri8Count * 64 );
 	blasOpMap = new Buffer( (opmapOffset > 0 ? opmapOffset : 32) * 4 );
 	blasFatTri = new Buffer( triCount * sizeof( FatTri ) );
-	node2Count = 0, node8Count = 0, indexCount = 0, triCount = 0, opmapOffset = 0;
+	node2Count = 0, node8Count = 0, indexCount = 0, triCount = 0, tri8Count = 0, opmapOffset = 0;
 	for (int i = 0; i < Scene::meshPool.size(); i++)
 	{
 		// a BLAS needs BVH nodes, triangle indices and the actual triangle data.
@@ -115,24 +117,26 @@ void GLTFDemo::Init()
 			memcpy( (BVH_GPU::BVHNode*)blasNode2->GetHostPtr() + node2Count, gpubvh2->bvhNode, gpubvh2->usedNodes * sizeof( BVH_GPU::BVHNode ) );
 			memcpy( (uint*)blasIdx->GetHostPtr() + indexCount, gpubvh2->bvh.primIdx, gpubvh2->idxCount * sizeof( uint ) );
 			memcpy( (float4*)blasTri->GetHostPtr() + triCount * 3, gpubvh2->bvh.verts.data, gpubvh2->triCount * sizeof( float4 ) * 3 );
-			if (gpubvh2->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset * 32, gpubvh2->opmap, gpubvh2->triCount * 128 );
 			memcpy( (FatTri*)blasFatTri->GetHostPtr() + triCount, Scene::meshPool[i]->triangles.data(), gpubvh2->triCount * sizeof( FatTri ) );
+			if (gpubvh2->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset * 32, gpubvh2->opmap, gpubvh2->triCount * 128 );
 			node2Count += gpubvh2->usedNodes, indexCount += gpubvh2->idxCount, triCount += gpubvh2->triCount;
 			if (gpubvh2->opmap) opmapOffset += gpubvh2->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 		else
 		{
 			memcpy( (bvhvec4*)blasNode8->GetHostPtr() + node8Count * 5, gpubvh8->bvh8Data, gpubvh8->usedNodes * sizeof( BVH_GPU::BVHNode ) );
-			if (gpubvh8->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset * 32, gpubvh8->opmap, gpubvh8->triCount * 128 );
+			memcpy( (float*)blasTri8->GetHostPtr() + tri8Count * 16, gpubvh8->bvh8Tris, gpubvh8->idxCount * 64 );
 			memcpy( (FatTri*)blasFatTri->GetHostPtr() + triCount, Scene::meshPool[i]->triangles.data(), gpubvh8->triCount * sizeof( FatTri ) );
-			node8Count += gpubvh8->usedNodes;
+			if (gpubvh8->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset * 32, gpubvh8->opmap, gpubvh8->triCount * 128 );
+			node8Count += gpubvh8->usedNodes, tri8Count + gpubvh8->idxCount;
 			if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 	}
 	blasNode2->CopyToDevice();
-	blasNode8->CopyToDevice();
 	blasIdx->CopyToDevice();
 	blasTri->CopyToDevice();
+	blasNode8->CopyToDevice();
+	blasTri8->CopyToDevice();
 	blasOpMap->CopyToDevice();
 	blasFatTri->CopyToDevice();
 	blasDesc->CopyToDevice();
@@ -206,7 +210,7 @@ void GLTFDemo::Init()
 	skyPixels->CopyToDevice();
 
 	// pass all static data to the Init function.
-	init->SetArguments( tlasNode, tlasIdx, instances, blasNode2, blasNode8, blasIdx, blasTri, blasOpMap,
+	init->SetArguments( tlasNode, tlasIdx, instances, blasNode2, blasIdx, blasTri, blasNode8, blasTri8, blasOpMap,
 		blasFatTri, blasDesc, materials, texels, Scene::sky->width, Scene::sky->height, skyPixels );
 	init->Run( 1 );
 
