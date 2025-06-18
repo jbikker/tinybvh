@@ -276,6 +276,8 @@ ts_vec4::ts_vec4( const ts_vec3& a, const float b ) { x = a.x, y = a.y, z = a.z,
 
 #endif // TINYSCENE_USE_CUSTOM_VECTOR_TYPES
 
+#include <vector>
+
 struct ts_uchar4
 {
 	ts_uchar4() = default;
@@ -429,7 +431,7 @@ public:
 	::std::string name = "unnamed";		// name for the mesh
 	int ID = -1;						// unique ID for the mesh: position in mesh array
 	::std::vector<ts_vec4> vertices;	// model vertices, always 3 per triangle: vertices are *not* indexed.
-	::std::vector<uint32_t> omaps;		// 256bit / 32byte per triangle
+	uint32_t* omaps = 0;				// 256bit / 32byte per triangle
 	::std::vector<ts_vec3> vertexNormals;	// vertex normals, 1 per vertex
 	::std::vector<ts_vec4> original;	// skinning: base pose; will be transformed into vector vertices
 	::std::vector<ts_vec3> origNormal;	// skinning: base pose normals
@@ -1001,6 +1003,7 @@ void RenderMaterial::SetTransmittance( ts_vec3 t )
 #elif
 #include <unistd.h>
 #endif
+#include <thread>
 
 // 'declaration of x hides previous local declaration'
 #pragma warning( disable: 4456)
@@ -1670,18 +1673,14 @@ void Mesh::BuildMaterialList()
 //  |  Mesh::CreateOpacityMaps                                                    |
 //  |  Fill the opacity maps vector.                                        LH2'25|
 //  +-----------------------------------------------------------------------------+
-void Mesh::CreateOpacityMaps()
+void CreateOpacityMap( Mesh* mesh, const int N, const int first, const int last )
 {
-	hasOpacityMaps = true;
-	// fill the opacity maps: WIP, we simply take one texture sample.
-	constexpr int N = 32; // i.e.: 32 * 32 = 1024bits = 128 bytes = 32 uints per tri.
-	constexpr float fN = (float)N;
-	constexpr float rN = 1.0f / fN;
-	uint32_t map[N * N / 32];
-	omaps.reserve( triangles.size() * N * N / 32 );
-	for (int i = 0; i < triangles.size(); i++) // TODO: Threaded CPU & GPU versions.
+	const float fN = (float)N;
+	const float rN = 1.0f / fN;
+	for (int i = first; i < last; i++)
 	{
-		FatTri& tri = triangles[i];
+		uint32_t* map = mesh->omaps + i * ((N * N) / 32);
+		FatTri& tri = mesh->triangles[i];
 		const uint32_t matIdx = tri.material;
 		const Material* material = Scene::materials[matIdx];
 		Texture* tex = 0;
@@ -1690,34 +1689,48 @@ void Mesh::CreateOpacityMaps()
 			tex = Scene::textures[material->color.textureID];
 			if (!tex->idata) tex = 0; // can't use hdr textures for now.
 		}
-		if (!tex) /* opaque */ memset( map, 255, N * N / 8 ); else
+		if (!tex) { memset( map, 255, N * N / 8 ); continue; }
+		memset( map, 0, N * N / 8 );
+		const float u0 = tri.u0, u1 = tri.u1, u2 = tri.u2, w = (float)tex->width;
+		const float v0 = tri.v0, v1 = tri.v1, v2 = tri.v2, h = (float)tex->height;
+		const int iw = tex->width;
+		for (int y = 0; y < N * 4; y++)
 		{
-			memset( map, 0, N * N / 8 );
-			const float u0 = tri.u0, u1 = tri.u1, u2 = tri.u2, w = (float)tex->width;
-			const float v0 = tri.v0, v1 = tri.v1, v2 = tri.v2, h = (float)tex->height;
-			const int iw = tex->width;
-			for (int y = 0; y < N * 4; y++)
+			float v = ((float)y + 0.5f) * 0.25f * rN, u = 0.125f / fN;
+			for (int x = 0; x < N * 4; x++, u += 0.25f / fN)
 			{
-				float v = ((float)y + 0.5f) * 0.25f * rN, u = 0.125f / fN;
-				for (int x = 0; x < N * 4; x++, u += 0.25f / fN)
-				{
-					if (u + v >= 1) break;
-					// formula from the paper: Sub-triangle opacity masks for faster ray
-					// tracing of transparent objects, Gruen et al., 2020
-					const int row = int( (u + v) * fN ), diag = int( (1 - u) * fN );
-					const int idx = (row * row) + int( v * fN ) + (diag - (N - 1 - row));
-					const float tu = u * u1 + v * u2 + (1 - u - v) * u0;
-					const float tv = u * v1 + v * v2 + (1 - u - v) * v0;
-					const int iu = (int)((tu - floorf( tu )) * w);
-					const int iv = (int)((tv - floorf( tv )) * h);
-					const uint32_t pixel = ((uint32_t*)tex->idata)[iu + iv * iw];
-					if ((pixel >> 24) > 2) map[idx >> 5] |= 1 << (idx & 31);
-				}
+				if (u + v >= 1) break;
+				// formula from the paper: Sub-triangle opacity masks for faster ray
+				// tracing of transparent objects, Gruen et al., 2020
+				const int row = int( (u + v) * fN ), diag = int( (1 - u) * fN );
+				const int idx = (row * row) + int( v * fN ) + (diag - (N - 1 - row));
+				const float tu = u * u1 + v * u2 + (1 - u - v) * u0;
+				const float tv = u * v1 + v * v2 + (1 - u - v) * v0;
+				const int iu = (int)((tu - floorf( tu )) * w);
+				const int iv = (int)((tv - floorf( tv )) * h);
+				const uint32_t pixel = ((uint32_t*)tex->idata)[iu + iv * iw];
+				if ((pixel >> 24) > 2) map[idx >> 5] |= 1 << (idx & 31);
 			}
 		}
-		// store data
-		for (int j = 0; j < N * N / 32; j++) omaps.push_back( map[j] );
 	}
+}
+void Mesh::CreateOpacityMaps()
+{
+	// fill the opacity maps: WIP, we simply take one texture sample.
+	const int N = 32; // i.e.: 32 * 32 = 1024bits = 128 bytes = 32 uints per tri.
+	free64( omaps );
+	omaps = (uint32_t*)malloc64( triangles.size() * N * N / 8 );
+	constexpr int slices = 32;
+	const int slice = (int)triangles.size() / slices;
+	vector<thread> jobs;
+	for (int i = 0; i < slices; i++)
+	{
+		const int first = i * slice;
+		const int last = (i == (slices - 1)) ? (int)triangles.size() : (first + slice);
+		jobs.emplace_back( std::thread( &CreateOpacityMap, this, N, first, last ) );
+	}
+	for (int i = 0; i < slices; i++) jobs[i].join();
+	hasOpacityMaps = true;
 }
 
 //  +-----------------------------------------------------------------------------+
@@ -1976,7 +1989,7 @@ void Node::Update( const ts_mat4& T )
 				if (mesh->blas.dynamicBVH == 0)
 				{
 					mesh->blas.dynamicBVH = new tinybvh::BVH();
-					if (mesh->omaps.size() > 0) mesh->blas.dynamicBVH->SetOpacityMaps( mesh->omaps.data(), 32 );
+					if (mesh->omaps) mesh->blas.dynamicBVH->SetOpacityMaps( mesh->omaps, 32 );
 				}
 				mesh->blas.dynamicBVH->Build( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
@@ -1990,7 +2003,7 @@ void Node::Update( const ts_mat4& T )
 				#else
 					mesh->blas.rigidBVH = new tinybvh::BVH_SoA();
 				#endif
-					if (mesh->omaps.size() > 0) mesh->blas.rigidBVH->SetOpacityMaps( mesh->omaps.data(), 32 );
+					if (mesh->omaps) mesh->blas.rigidBVH->SetOpacityMaps( mesh->omaps, 32 );
 				}
 				mesh->blas.rigidBVH->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
@@ -1998,7 +2011,7 @@ void Node::Update( const ts_mat4& T )
 				if (mesh->blas.dynamicGPU == 0)
 				{
 					mesh->blas.dynamicGPU = new tinybvh::BVH_GPU();
-					if (mesh->omaps.size() > 0) mesh->blas.dynamicGPU->SetOpacityMaps( mesh->omaps.data(), 32 );
+					if (mesh->omaps) mesh->blas.dynamicGPU->SetOpacityMaps( mesh->omaps, 32 );
 				}
 				mesh->blas.dynamicGPU->Build( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
@@ -2006,7 +2019,7 @@ void Node::Update( const ts_mat4& T )
 				if (mesh->blas.rigidGPU == 0)
 				{
 					mesh->blas.rigidGPU = new tinybvh::BVH8_CWBVH();
-					if (mesh->omaps.size() > 0) mesh->blas.rigidGPU->SetOpacityMaps( mesh->omaps.data(), 32 );
+					if (mesh->omaps) mesh->blas.rigidGPU->SetOpacityMaps( mesh->omaps, 32 );
 				}
 				mesh->blas.rigidGPU->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
@@ -2760,7 +2773,7 @@ void Texture::BumpToNormalMap( float heightScale )
 {
 	uint8_t* normalMap = new uint8_t[width * height * 4];
 	const float stepZ = 1.0f / 255.0f;
-	for (uint32_t i = 0; i < width * height; i++)
+	for (uint32_t i = 0; i < width* height; i++)
 	{
 		uint32_t xCoord = i % width, yCoord = i / width;
 		float xPrev = xCoord > 0 ? idata[i - 1].x * stepZ : idata[i].x * stepZ;
