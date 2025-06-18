@@ -24,6 +24,19 @@ struct GPUMaterial
 	uint dummy;					// padding; struct size must be a multiple of 16 bytes.
 };
 
+// BLAS descriptor.
+struct BLASDesc
+{
+	uint nodeOffset;			// position of blas node data in global blasNodes array
+	uint indexOffset;			// position of blas index data in global blasIdx array
+	uint triOffset;				// position of blas triangle and FatTri data in global arrays
+	uint opmapOffset;			// position of opacity micromap data in global arrays
+	uint node8Offset;			// position of CWBVH nodes in global array
+	uint tri8Offset;			// position of CWBVH triangle data in global array
+	uint blasType;				// blas type: 0 = BVH_GPU, 1 = BVH8_CWBVH
+	uint dummy;					// padding
+};
+
 // -----------------------------------------------------------
 // Initialize the application
 // -----------------------------------------------------------
@@ -57,19 +70,20 @@ void GLTFDemo::Init()
 	// Complication: OpenCL does not let us pass device-side pointers, let alone arrays
 	// of them. So, we make a single large buffer for all BLAS nodes, and use offsets
 	// within it for the individual BLASses. Same for indices and triangles.
-	uint node2Count = 0, node8Count, indexCount = 0, triCount = 0, opmapOffset = 0;
-	blasDesc = new Buffer( (int)Scene::meshPool.size() * 32 );
+	uint node2Count = 0, node8Count = 0, indexCount = 0, triCount = 0, opmapOffset = 0;
+	blasDesc = new Buffer( (int)Scene::meshPool.size() * sizeof( BLASDesc ) );
 	for (int i = 0; i < Scene::meshPool.size(); i++)
 	{
 		BVH_GPU* gpubvh2 = Scene::meshPool[i]->blas.dynamicGPU;
 		BVH8_CWBVH* gpubvh8 = Scene::meshPool[i]->blas.rigidGPU;
-		blasDesc->GetHostPtr()[i * 8 + 1] = indexCount;
-		blasDesc->GetHostPtr()[i * 8 + 2] = triCount;
+		BLASDesc& desc = ((BLASDesc*)blasDesc->GetHostPtr())[i];
+		desc.indexOffset = indexCount;
+		desc.triOffset = triCount;
 		if (gpubvh2)
 		{
-			blasDesc->GetHostPtr()[i * 8 + 0] = node2Count;
-			blasDesc->GetHostPtr()[i * 8 + 3] = gpubvh2->opmap ? opmapOffset : 0x99999999;
-			blasDesc->GetHostPtr()[i * 8 + 5] = 0;
+			desc.nodeOffset = node2Count;
+			desc.opmapOffset = gpubvh2->opmap ? opmapOffset : 0x99999999;
+			desc.blasType = 0;
 			node2Count += gpubvh2->usedNodes;
 			indexCount += gpubvh2->idxCount;
 			triCount += gpubvh2->triCount;
@@ -77,9 +91,9 @@ void GLTFDemo::Init()
 		}
 		else
 		{
-			blasDesc->GetHostPtr()[i * 8 + 0] = node8Count;
-			blasDesc->GetHostPtr()[i * 8 + 3] = gpubvh8->opmap ? opmapOffset : 0x99999999;
-			blasDesc->GetHostPtr()[i * 8 + 5] = 1;
+			desc.node8Offset = node8Count;
+			desc.opmapOffset = gpubvh8->opmap ? opmapOffset : 0x99999999;
+			desc.blasType = 1;
 			node8Count += gpubvh8->usedNodes;
 			if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
 		}

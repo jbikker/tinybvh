@@ -53,14 +53,16 @@ struct Material
 	uint dummy;						// padding; struct size must be a multiple of 16 bytes.
 };
 
-struct BlasDesc
+struct BLASDesc
 {
 	uint nodeOffset;				// position of blas node data in global blasNodes array
 	uint indexOffset;				// position of blas index data in global blasIdx array
 	uint triOffset;					// position of blas triangle and FatTri data in global arrays
 	uint opmapOffset;				// position of opacity micromap data in global arrays
+	uint node8Offset;				// position of CWBVH nodes in global array
+	uint tri8Offset;				// position of CWBVH triangle data in global array
 	uint blasType;					// blas type: 0 = BVH_GPU, 1 = BVH8_CWBVH
-	uint dummy1, dummy2, dummy3;	// padding
+	uint dummy;						// padding
 };
 
 // buffers - most data will be accessed as 128-bit values for efficiency.
@@ -73,7 +75,7 @@ global uint* blasIdx;				// blas index data
 global float4* blasTris;			// blas primitive data for intersection: vertices only
 global uint* blasOpMap;				// opacity maps for BVHs with alpha mapped textures
 global struct FatTri* blasFatTris;	// blas primitive data for shading: full data
-global struct BlasDesc* blasDesc;	// blas descriptor data: blas type & position of chunks in larger arrays
+global struct BLASDesc* blasDesc;	// blas descriptor data: blas type & position of chunks in larger arrays
 global struct Material* materials;	// GPUMaterial data, referenced from FatTris
 global uint* texels;				// texture data
 global uint2 skySize;				// sky dome image data size
@@ -89,7 +91,7 @@ void kernel SetRenderData(
 	global struct BVHNode* tlasNodeData, global uint* tlasIdxData,
 	global struct Instance* instanceData,
 	global struct BVHNode* blasNodeData, global float4* blasCWNodeData, global uint* blasIdxData,
-	global float4* blasTriData, global uint* blasOpMapData, global struct FatTri* blasFatTriData, global struct BlasDesc* blasDescData,
+	global float4* blasTriData, global uint* blasOpMapData, global struct FatTri* blasFatTriData, global struct BLASDesc* blasDescData,
 	global struct Material* materialData, global uint* texelData,
 	uint skyWidth, uint skyHeight, global float* skyData
 )
