@@ -36,7 +36,8 @@ public:
 	// OpenCL buffers
 	Buffer* pixels = 0;
 	Buffer* instances = 0;
-	Buffer* blasNode = 0;
+	Buffer* blasNode2 = 0;
+	Buffer* blasNode8 = 0;
 	Buffer* blasIdx = 0;
 	Buffer* blasTri = 0;
 	Buffer* blasOpMap = 0;

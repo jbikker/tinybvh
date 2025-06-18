@@ -68,6 +68,7 @@ global struct BVHNode* tlasNodes;	// top-level acceleration structure node data
 global uint* tlasIdx;				// tlas index data
 global struct Instance* instances;	// instances
 global struct BVHNode* blasNodes;	// bottom-level acceleration structure node data
+global float4* blasCWNodes;			// CWBVH blas node data
 global uint* blasIdx;				// blas index data
 global float4* blasTris;			// blas primitive data for intersection: vertices only
 global uint* blasOpMap;				// opacity maps for BVHs with alpha mapped textures
@@ -87,7 +88,7 @@ global float* skyPixels;			// HDR sky image data, 12 bytes per pixel
 void kernel SetRenderData(
 	global struct BVHNode* tlasNodeData, global uint* tlasIdxData,
 	global struct Instance* instanceData,
-	global struct BVHNode* blasNodeData, global uint* blasIdxData,
+	global struct BVHNode* blasNodeData, global float4* blasCWNodeData, global uint* blasIdxData,
 	global float4* blasTriData, global uint* blasOpMapData, global struct FatTri* blasFatTriData, global struct BlasDesc* blasDescData,
 	global struct Material* materialData, global uint* texelData,
 	uint skyWidth, uint skyHeight, global float* skyData
@@ -97,6 +98,7 @@ void kernel SetRenderData(
 	tlasIdx = tlasIdxData;
 	instances = instanceData;
 	blasNodes = blasNodeData;
+	blasCWNodes = blasCWNodeData;
 	blasIdx = blasIdxData;
 	blasTris = blasTriData;
 	blasOpMap = blasOpMapData;
