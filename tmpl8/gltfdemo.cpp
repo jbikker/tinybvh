@@ -45,11 +45,16 @@ void GLTFDemo::Init()
 	// load gltf scene
 	scene.SetBVHDefault( GPU_DYNAMIC );
 	int terrain = scene.AddScene( "./testdata/cratercity/scene.gltf", mat4::Translate( 0, -18.9f, 0 ) * mat4::RotateY( 1 ) );
-	scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
+	int tree = scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
 	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 21.5f, -1.75f, -7 ) * mat4::Scale( 0.03f ) * mat4::RotateY( PI * 1.5f ) );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
+#if 1
+	scene.CollapseMeshes( tree );
+	scene.CreateOpacityMicroMaps( tree );
+#else
 	int leaves = scene.FindNode( "leaves" );
 	if (leaves > -1) scene.CreateOpacityMicroMaps( leaves );
+#endif
 	// scene.meshPool[0]->blas.bvhType = GPU_RIGID; // ->SetBVHType( terrain, GPU_RIGID );
 	scene.CollapseMeshes( terrain ); // combine the meshes into a single mesh; may yield a better BVH.
 	scene.SetBVHType( terrain, GPU_RIGID );
