@@ -214,7 +214,9 @@ float4 Trace( struct Ray ray )
 		if (dot( iN, N ) < 0) iN *= -1;
 
 		// direct light
-		bool shaded = isoccluded_tlas( (float4)(I + L * 0.001f, 1), (float4)(L, 1), (float4)(rL, 1), 1000 );
+		bool shaded = false;
+		if (dot( rL, iN ) > 0) 
+			shaded = isoccluded_tlas( (float4)(I + L * 0.001f, 1), (float4)(L, 1), (float4)(rL, 1), 1000 );
 		radiance += albedo * (0.1f + dot( iN, L )) * (shaded ? 0.5f : 1.0f);
 
 		// indirect light
