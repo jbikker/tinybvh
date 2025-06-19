@@ -29,12 +29,12 @@ struct BLASDesc
 {
 	uint nodeOffset;			// position of blas node data in global blasNodes array
 	uint indexOffset;			// position of blas index data in global blasIdx array
-	uint triOffset;				// position of blas triangle and FatTri data in global arrays
+	uint triOffset;				// position of blas triangle data in global array
+	uint fatTriOffset;			// position of blas FatTri data in global array
 	uint opmapOffset;			// position of opacity micromap data in global arrays
 	uint node8Offset;			// position of CWBVH nodes in global array
 	uint tri8Offset;			// position of CWBVH triangle data in global array
 	uint blasType;				// blas type: 0 = BVH_GPU, 1 = BVH8_CWBVH
-	uint dummy;					// padding
 };
 
 // -----------------------------------------------------------
@@ -52,6 +52,7 @@ void GLTFDemo::Init()
 	if (leaves > -1) scene.CreateOpacityMicroMaps( leaves );
 	// scene.meshPool[0]->blas.bvhType = GPU_RIGID; // ->SetBVHType( terrain, GPU_RIGID );
 	scene.CollapseMeshes( terrain ); // combine the meshes into a single mesh; may yield a better BVH.
+	scene.SetBVHType( terrain, GPU_RIGID );
 	scene.UpdateSceneGraph( 0 ); // this will build the BLASses and TLAS.
 
 	// create OpenCL kernels
@@ -72,7 +73,7 @@ void GLTFDemo::Init()
 	// Complication: OpenCL does not let us pass device-side pointers, let alone arrays
 	// of them. So, we make a single large buffer for all BLAS nodes, and use offsets
 	// within it for the individual BLASses. Same for indices and triangles.
-	uint node2Count = 0, node8Count = 0, indexCount = 0, triCount = 0, tri8Count = 0, opmapOffset = 0;
+	uint node2Count = 0, block8Count = 0, indexCount = 0, triCount = 0, fatTriCount = 0, tri8Count = 0, opmapOffset = 0;
 	blasDesc = new Buffer( (int)Scene::meshPool.size() * sizeof( BLASDesc ) );
 	for (int i = 0; i < Scene::meshPool.size(); i++)
 	{
@@ -81,6 +82,7 @@ void GLTFDemo::Init()
 		BLASDesc& desc = ((BLASDesc*)blasDesc->GetHostPtr())[i];
 		desc.indexOffset = indexCount;
 		desc.triOffset = triCount;
+		desc.fatTriOffset = fatTriCount;
 		desc.blasType = GPU_DYNAMIC;
 		if (mesh->blas.bvhType == GPU_DYNAMIC)
 		{
@@ -89,29 +91,31 @@ void GLTFDemo::Init()
 			desc.opmapOffset = gpubvh2->opmap ? opmapOffset : 0x99999999;
 			node2Count += gpubvh2->usedNodes;
 			indexCount += gpubvh2->idxCount;
-			triCount += gpubvh2->triCount;
+			triCount += gpubvh2->idxCount;
+			fatTriCount += gpubvh2->triCount;
 			if (gpubvh2->opmap) opmapOffset += gpubvh2->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 		else
 		{
 			BVH8_CWBVH* gpubvh8 = mesh->blas.rigidGPU;
-			desc.node8Offset = node8Count;
+			desc.node8Offset = block8Count;
 			desc.tri8Offset = tri8Count;
 			desc.opmapOffset = gpubvh8->opmap ? opmapOffset : 0x99999999;
 			desc.blasType = GPU_RIGID;
-			node8Count += gpubvh8->usedNodes;
+			block8Count += gpubvh8->usedBlocks;
 			tri8Count += gpubvh8->idxCount; // not triCount; we must account for spatial splits.
+			fatTriCount += gpubvh8->triCount;
 			if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 	}
 	blasNode2 = new Buffer( node2Count * sizeof( BVH_GPU::BVHNode ) );
 	blasIdx = new Buffer( indexCount * sizeof( uint ) );
 	blasTri = new Buffer( triCount * sizeof( float4 ) * 3 );
-	blasNode8 = new Buffer( node8Count * 80 );
+	blasNode8 = new Buffer( block8Count * 16 );
 	blasTri8 = new Buffer( tri8Count * 64 );
 	blasOpMap = new Buffer( (opmapOffset > 0 ? opmapOffset : 32) * 4 );
-	blasFatTri = new Buffer( triCount * sizeof( FatTri ) );
-	node2Count = 0, node8Count = 0, indexCount = 0, triCount = 0, tri8Count = 0, opmapOffset = 0;
+	blasFatTri = new Buffer( fatTriCount * sizeof( FatTri ) );
+	node2Count = 0, block8Count = 0, indexCount = 0, triCount = 0, tri8Count = 0, fatTriCount = 0, opmapOffset = 0;
 	for (int i = 0; i < Scene::meshPool.size(); i++)
 	{
 		// a BLAS needs BVH nodes, triangle indices and the actual triangle data.
@@ -122,20 +126,20 @@ void GLTFDemo::Init()
 			BVH_GPU* gpubvh2 = mesh->blas.dynamicGPU;
 			memcpy( (BVH_GPU::BVHNode*)blasNode2->GetHostPtr() + node2Count, gpubvh2->bvhNode, gpubvh2->usedNodes * sizeof( BVH_GPU::BVHNode ) );
 			memcpy( (uint*)blasIdx->GetHostPtr() + indexCount, gpubvh2->bvh.primIdx, gpubvh2->idxCount * sizeof( uint ) );
-			memcpy( (float4*)blasTri->GetHostPtr() + triCount * 3, gpubvh2->bvh.verts.data, gpubvh2->triCount * sizeof( float4 ) * 3 );
-			memcpy( (FatTri*)blasFatTri->GetHostPtr() + triCount, mesh->triangles.data(), gpubvh2->triCount * sizeof( FatTri ) );
+			memcpy( (float4*)blasTri->GetHostPtr() + triCount * 3, gpubvh2->bvh.verts.data, gpubvh2->idxCount * sizeof( float4 ) * 3 );
+			memcpy( (FatTri*)blasFatTri->GetHostPtr() + fatTriCount, mesh->triangles.data(), gpubvh2->triCount * sizeof( FatTri ) );
 			if (gpubvh2->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset * 32, gpubvh2->opmap, gpubvh2->triCount * 128 );
-			node2Count += gpubvh2->usedNodes, indexCount += gpubvh2->idxCount, triCount += gpubvh2->triCount;
+			node2Count += gpubvh2->usedNodes, indexCount += gpubvh2->idxCount, triCount += gpubvh2->idxCount, fatTriCount += gpubvh2->triCount;
 			if (gpubvh2->opmap) opmapOffset += gpubvh2->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 		else
 		{
 			BVH8_CWBVH* gpubvh8 = mesh->blas.rigidGPU;
-			memcpy( (bvhvec4*)blasNode8->GetHostPtr() + node8Count * 5, gpubvh8->bvh8Data, gpubvh8->usedNodes * sizeof( BVH_GPU::BVHNode ) );
+			memcpy( (bvhvec4*)blasNode8->GetHostPtr() + block8Count, gpubvh8->bvh8Data, gpubvh8->usedBlocks * 16 );
 			memcpy( (float*)blasTri8->GetHostPtr() + tri8Count * 16, gpubvh8->bvh8Tris, gpubvh8->idxCount * 64 );
-			memcpy( (FatTri*)blasFatTri->GetHostPtr() + triCount, mesh->triangles.data(), gpubvh8->triCount * sizeof( FatTri ) );
+			memcpy( (FatTri*)blasFatTri->GetHostPtr() + fatTriCount, mesh->triangles.data(), gpubvh8->triCount * sizeof( FatTri ) );
 			if (gpubvh8->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset * 32, gpubvh8->opmap, gpubvh8->triCount * 128 );
-			node8Count += gpubvh8->usedNodes, tri8Count + gpubvh8->idxCount;
+			block8Count += gpubvh8->usedBlocks, tri8Count + gpubvh8->idxCount, fatTriCount += gpubvh8->triCount;
 			if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 	}

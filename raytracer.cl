@@ -57,12 +57,12 @@ struct BLASDesc
 {
 	uint nodeOffset;				// position of blas node data in global blasNodes array
 	uint indexOffset;				// position of blas index data in global blasIdx array
-	uint triOffset;					// position of blas triangle and FatTri data in global arrays
+	uint triOffset;					// position of blas triangle data in global array
+	uint fatTriOffset;				// position of blas FatTri data in global array
 	uint opmapOffset;				// position of opacity micromap data in global arrays
 	uint node8Offset;				// position of CWBVH nodes in global array
 	uint tri8Offset;				// position of CWBVH triangle data in global array
 	uint blasType;					// blas type: 0 = BVH_GPU, 1 = BVH8_CWBVH
-	uint dummy;						// padding
 };
 
 // buffers - most data will be accessed as 128-bit values for efficiency.
@@ -82,11 +82,27 @@ global uint* texels;				// texture data
 global uint2 skySize;				// sky dome image data size
 global float* skyPixels;			// HDR sky image data, 12 bytes per pixel
 
+// Low-level CWBVH traversal optimizations for specific platforms
+#ifdef ISINTEL // Iris Xe, Arc, ..
+// #define USE_VLOAD_VSTORE
+#define SIMD_AABBTEST
+#elif defined ISNVIDIA // 2080, 3080, 4080, ..
+#define USE_VLOAD_VSTORE
+// #define SIMD_AABBTEST
+#elif defined ISAMD
+#define USE_VLOAD_VSTORE
+// #define SIMD_AABBTEST
+#else // unkown GPU
+// #define USE_VLOAD_VSTORE
+#define SIMD_AABBTEST
+#endif
+
 // traversal kernels.
 #define STACK_SIZE 32
 #include "tools.cl"
 #include "traverse_bvh2.cl"
-#include "traverse_tlas.cl"
+#include "traverse_cwbvh.cl"
+ #include "traverse_tlas.cl"
 
 void kernel SetRenderData(
 	global struct BVHNode* tlasNodeData, global uint* tlasIdxData,
@@ -152,13 +168,13 @@ float4 Trace( struct Ray ray )
 		{
 			// extend path
 			hit = traverse_tlas( ray.O, ray.D, ray.rD, 1000.0f );
-			if (hit.x == 1000.0f) return (float4)( radiance + throughput * SampleSky( ray.D.xyz ), 1 );
+			if (hit.x > 999) return (float4)( radiance + throughput * SampleSky( ray.D.xyz ), 1 );
 
 			// gather shading information
 			idxData = as_uint( hit.w ), primIdx = idxData & 0xffffff, instIdx = idxData >> 24;
 			inst = instances + instIdx;
 			blasIdx = as_uint( inst->aabbMin.w );
-			tri = blasFatTris + blasDesc[blasIdx].triOffset + primIdx;
+			tri = blasFatTris + blasDesc[blasIdx].fatTriOffset + primIdx;
 			iN = (hit.y * tri->vN1 + hit.z * tri->vN2 + (1 - hit.y - hit.z) * tri->vN0).xyz;
 			N = (float3)(tri->vN0.w, tri->vN1.w, tri->vN2.w);
 			I = ray.O.xyz + ray.D.xyz * hit.x;

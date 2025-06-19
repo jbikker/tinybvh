@@ -128,8 +128,7 @@ float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwb
 {
 	// initialize ray
 	const unsigned threadId = get_global_id( 0 );
-	float4 hit;
-	hit.x = t; // not fetching this from ray data to avoid one memory operation.
+	float4 hit = (float4)( t, 0, 0, 0 ); // not fetching t from ray data to avoid one memory operation.
 	// prepare traversal
 	uint2 stack[STACK_SIZE];
 	uint hitAddr, stackPtr = 0;

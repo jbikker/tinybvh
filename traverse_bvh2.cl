@@ -87,7 +87,7 @@ uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global unsig
 	return (uint)cost;
 }
 
-// #define NO_TEMPLATED_INTERSECT
+#define NO_TEMPLATED_INTERSECT // TODO: see if this helps for primary rays.
 #define XYZDIR (0|0|0)
 float4 traverse_ailalaine_000(
 #include "traverse_bvh2_int.inc"
@@ -124,18 +124,18 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 		if (D.y > 0)
 		{
 			if (D.x > 0) return traverse_ailalaine_111( bvhNode, idx, verts, opmap, O, D, rD, tmax );
-			else return traverse_ailalaine_011( bvhNode, idx, verts, opmap, O, D, rD, tmax );
+			return traverse_ailalaine_011( bvhNode, idx, verts, opmap, O, D, rD, tmax );
 		}
 		if (D.x > 0) return traverse_ailalaine_101( bvhNode, idx, verts, opmap, O, D, rD, tmax );
-		else return traverse_ailalaine_001( bvhNode, idx, verts, opmap, O, D, rD, tmax );
+		return traverse_ailalaine_001( bvhNode, idx, verts, opmap, O, D, rD, tmax );
 	}
 	if (D.y > 0)
 	{
 		if (D.x > 0) return traverse_ailalaine_110( bvhNode, idx, verts, opmap, O, D, rD, tmax );
-		else return traverse_ailalaine_010( bvhNode, idx, verts, opmap, O, D, rD, tmax );
+		return traverse_ailalaine_010( bvhNode, idx, verts, opmap, O, D, rD, tmax );
 	}
 	if (D.x > 0) return traverse_ailalaine_100( bvhNode, idx, verts, opmap, O, D, rD, tmax );
-	else return traverse_ailalaine_000( bvhNode, idx, verts, opmap, O, D, rD, tmax );
+	return traverse_ailalaine_000( bvhNode, idx, verts, opmap, O, D, rD, tmax );
 #endif
 }
 
