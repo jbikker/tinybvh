@@ -1,0 +1,11 @@
+Model Information:
+* title:	Pine Tree [Game-ready]
+* source:	https://sketchfab.com/3d-models/pine-tree-game-ready-dc3fbd9205cf4027a4455d1f415e0478
+* author:	Oskar "K1TT3N" Adamczyk (https://sketchfab.com/K1TT3N)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Pine Tree [Game-ready]" (https://sketchfab.com/3d-models/pine-tree-game-ready-dc3fbd9205cf4027a4455d1f415e0478) by Oskar "K1TT3N" Adamczyk (https://sketchfab.com/K1TT3N) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

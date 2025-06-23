@@ -49,6 +49,7 @@ public:
 	Buffer* materials = 0;
 	Buffer* texels = 0;
 	Buffer* skyPixels = 0;
+	Buffer* IBL = 0;
 };
 
 } // namespace Tmpl8

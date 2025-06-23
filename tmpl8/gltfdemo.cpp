@@ -8,6 +8,28 @@ using namespace tinyocl;
 using namespace tinyscene;
 #include "gltfdemo.h"
 
+float3 DiffuseReflection( float3 N )
+{
+	float3 R;
+	do { R = (float3)(RandomFloat() * 2 - 1, RandomFloat() * 2 - 1, RandomFloat() * 2 - 1); } while (dot( R, R ) > 1);
+	return normalize( dot( R, N ) > 0 ? R : -R );
+}
+float3 CosWeightedDiffReflection( const float3 N )
+{
+	float r1 = RandomFloat(), r0 = RandomFloat();
+	const float r = sqrt( 1 - r1 * r1 ), phi = 4 * PI * r0;
+	const float3 R = (float3)(cos( phi ) * r, sin( phi ) * r, r1);
+	return normalize( N + R );
+}
+float3 SampleSky( const float3 D )
+{
+	float p = atan2( D.z, D.x );
+	uint u = (uint)(Scene::sky->width * (p + (p < 0 ? PI * 2 : 0)) * INV2PI - 0.5f);
+	uint v = (uint)(Scene::sky->height * acos( D.y ) * INVPI - 0.5f);
+	uint idx = min( u + v * Scene::sky->width, (uint)(Scene::sky->width * Scene::sky->height - 1) );
+	return Scene::sky->pixels[idx];
+}
+
 // The material description in tinyscene is very elaborate. Instead of sending it
 // directly to the GPU we convert it to a limited and more convenient layout.
 // Later this will also allow us to optimize it for a specific device.
@@ -45,17 +67,20 @@ void GLTFDemo::Init()
 	// load gltf scene
 	scene.SetBVHDefault( GPU_DYNAMIC );
 	int terrain = scene.AddScene( "./testdata/cratercity/scene.gltf", mat4::Translate( 0, -18.9f, 0 ) * mat4::RotateY( 1 ) );
-	int tree = scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
+	int tree1 = scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
+	int tree2 = scene.AddScene( "./testdata/smallpine/scene.gltf", mat4::Translate( 35, 1.5f, -11 ) * mat4::Scale( 0.03f ) );
+	int balloon = scene.AddScene( "./testdata/balloon/scene.gltf", mat4::Translate( 10, 10.5f, 20 ) * mat4::Scale( 3 ) );
 	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 21.5f, -1.75f, -7 ) * mat4::Scale( 0.03f ) * mat4::RotateY( PI * 1.5f ) );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
 #if 1
-	scene.CollapseMeshes( tree );
-	scene.CreateOpacityMicroMaps( tree );
+	scene.CollapseMeshes( tree1 );
+	scene.CreateOpacityMicroMaps( tree1 );
+	scene.CollapseMeshes( tree2 );
+	scene.CreateOpacityMicroMaps( tree2 );
 #else
 	int leaves = scene.FindNode( "leaves" );
 	if (leaves > -1) scene.CreateOpacityMicroMaps( leaves );
 #endif
-	// scene.meshPool[0]->blas.bvhType = GPU_RIGID; // ->SetBVHType( terrain, GPU_RIGID );
 	scene.CollapseMeshes( terrain ); // combine the meshes into a single mesh; may yield a better BVH.
 	scene.SetBVHType( terrain, GPU_RIGID );
 	scene.UpdateSceneGraph( 0 ); // this will build the BLASses and TLAS.
@@ -110,7 +135,7 @@ void GLTFDemo::Init()
 			block8Count += gpubvh8->usedBlocks;
 			tri8Count += gpubvh8->idxCount; // not triCount; we must account for spatial splits.
 			fatTriCount += gpubvh8->triCount;
-			if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
+			// if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 	}
 	blasNode2 = new Buffer( node2Count * sizeof( BVH_GPU::BVHNode ) );
@@ -133,7 +158,7 @@ void GLTFDemo::Init()
 			memcpy( (uint*)blasIdx->GetHostPtr() + indexCount, gpubvh2->bvh.primIdx, gpubvh2->idxCount * sizeof( uint ) );
 			memcpy( (float4*)blasTri->GetHostPtr() + triCount * 3, gpubvh2->bvh.verts.data, gpubvh2->idxCount * sizeof( float4 ) * 3 );
 			memcpy( (FatTri*)blasFatTri->GetHostPtr() + fatTriCount, mesh->triangles.data(), gpubvh2->triCount * sizeof( FatTri ) );
-			if (gpubvh2->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset * 32, gpubvh2->opmap, gpubvh2->triCount * 128 );
+			if (gpubvh2->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset, gpubvh2->opmap, gpubvh2->triCount * 128 );
 			node2Count += gpubvh2->usedNodes, indexCount += gpubvh2->idxCount, triCount += gpubvh2->idxCount, fatTriCount += gpubvh2->triCount;
 			if (gpubvh2->opmap) opmapOffset += gpubvh2->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
@@ -143,9 +168,9 @@ void GLTFDemo::Init()
 			memcpy( (bvhvec4*)blasNode8->GetHostPtr() + block8Count, gpubvh8->bvh8Data, gpubvh8->usedBlocks * 16 );
 			memcpy( (float*)blasTri8->GetHostPtr() + tri8Count * 16, gpubvh8->bvh8Tris, gpubvh8->idxCount * 64 );
 			memcpy( (FatTri*)blasFatTri->GetHostPtr() + fatTriCount, mesh->triangles.data(), gpubvh8->triCount * sizeof( FatTri ) );
-			if (gpubvh8->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset * 32, gpubvh8->opmap, gpubvh8->triCount * 128 );
+			// if (gpubvh8->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset, gpubvh8->opmap, gpubvh8->triCount * 128 );
 			block8Count += gpubvh8->usedBlocks, tri8Count + gpubvh8->idxCount, fatTriCount += gpubvh8->triCount;
-			if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
+			// if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 	}
 	blasNode2->CopyToDevice();
@@ -225,9 +250,40 @@ void GLTFDemo::Init()
 	skyPixels = new Buffer( Scene::sky->width * Scene::sky->height * 12, Scene::sky->pixels );
 	skyPixels->CopyToDevice();
 
+	// 8. IBL data.
+	IBL = new Buffer( 16 * 16 * 16 * sizeof( float4 ) );
+	FILE* f = fopen( "ibl.dat", "rb" );
+	if (f) fread( IBL->GetHostPtr(), 1, 16 * 16 * 16 * 16, f ); else
+	{
+		for (int z = 0; z < 16; z++)
+		{
+			float fz = z - 7.5f;
+			for (int y = 0; y < 16; y++)
+			{
+				float fy = y - 7.5f;
+				for (int x = 0; x < 16; x++)
+				{
+					float fx = x - 7.5f;
+					float3 D = normalize( float3( fx, fy, fz ) );
+					float3 sum( 0 );
+					for (int i = 0; i < 128; i++)
+					{
+						float3 R = CosWeightedDiffReflection( D );
+						sum += SampleSky( R );
+					}
+					((float4*)IBL->GetHostPtr())[x + y * 16 + z * 256] = float4( sum * 1.0f / 128, 1 );
+				}
+			}
+		}
+		f = fopen( "ibl.dat", "wb" );
+		fwrite( IBL->GetHostPtr(), 1, 16 * 16 * 16 * 16, f );
+	}
+	fclose( f );
+	IBL->CopyToDevice();
+
 	// pass all static data to the Init function.
 	init->SetArguments( tlasNode, tlasIdx, instances, blasNode2, blasIdx, blasTri, blasNode8, blasTri8, blasOpMap,
-		blasFatTri, blasDesc, materials, texels, Scene::sky->width, Scene::sky->height, skyPixels );
+		blasFatTri, blasDesc, materials, texels, Scene::sky->width, Scene::sky->height, skyPixels, IBL );
 	init->Run( 1 );
 
 	// set a suitable camera

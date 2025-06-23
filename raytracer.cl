@@ -81,6 +81,7 @@ global struct Material* materials;	// GPUMaterial data, referenced from FatTris
 global uint* texels;				// texture data
 global uint2 skySize;				// sky dome image data size
 global float* skyPixels;			// HDR sky image data, 12 bytes per pixel
+global float4* IBL;					// IBL data
 
 // Low-level CWBVH traversal optimizations for specific platforms
 #ifdef ISINTEL // Iris Xe, Arc, ..
@@ -111,7 +112,7 @@ void kernel SetRenderData(
 	global float4* blasCWNodeData, global float4* blasTri8Data,
 	global uint* blasOpMapData, global struct FatTri* blasFatTriData, global struct BLASDesc* blasDescData,
 	global struct Material* materialData, global uint* texelData,
-	uint skyWidth, uint skyHeight, global float* skyData
+	uint skyWidth, uint skyHeight, global float* skyData, global float4* IBLData
 )
 {
 	tlasNodes = tlasNodeData;
@@ -130,6 +131,7 @@ void kernel SetRenderData(
 	skySize.x = skyWidth;
 	skySize.y = skyHeight;
 	skyPixels = skyData;
+	IBL = IBLData;
 }
 
 float3 SampleSky( const float3 D )
@@ -141,10 +143,24 @@ float3 SampleSky( const float3 D )
 	return (float3)(skyPixels[idx * 3], skyPixels[idx * 3 + 1], skyPixels[idx * 3 + 2]);
 }
 
+float3 SampleIBL( const float3 D )
+{
+	// diffuse IBL: sample precalculated cosine-weighted hemisphere integral as an 
+	// approximation of the light from the skydome reflected by a fragment with normal D.
+	// TODO: bilerp?
+	float x = (D.x + 1) * 7.49f; //, fx = x - floor( x );
+	float y = (D.y + 1) * 7.49f; // , fy = y - floor( y );
+	float z = (D.z + 1) * 7.49f; // , fz = z - floor( z );
+	int ix = (int)x, iy = (int)y, iz = (int)z;
+	float4 p0 = IBL[ix + iy * 16 + iz * 16 * 16];
+	return p0.xyz;
+}
+
 float4 Trace( struct Ray ray )
 {
 	// hardcoded directional light.
 	float3 L = normalize( (float3)(-5, 1.5f, -1) );
+	float3 suncol = (float3)( 1.1f, 1.1f, 1.0f );
 	float3 rL = (float3)(1.0f / L.x, 1.0f / L.y, 1.0f / L.z);
 
 	// initialize light transport.
@@ -152,7 +168,7 @@ float4 Trace( struct Ray ray )
 	float3 throughput = (float3)(1);
 	
 	// trace a path of max. 2 segments.
-	for (int depth = 0; depth < 2; depth++)
+	// for (int depth = 0; depth < 2; depth++)
 	{
 		// shading data
 		float tu, tv;
@@ -209,19 +225,21 @@ float4 Trace( struct Ray ray )
 			mN *= 1.0f / 128.0f, mN += -1.0f;
 			iN = mN.x * tri->T.xyz + mN.y * tri->B.xyz + mN.z * iN;
 		}
-		iN = normalize( TransformVector( iN, inst->transform ) );
 		N = normalize( TransformVector( N, inst->transform ) );
+		if (dot( N, ray.D.xyz ) > 0) N *= -1;
+		iN = normalize( TransformVector( iN, inst->transform ) );
 		if (dot( iN, N ) < 0) iN *= -1;
 
 		// direct light
 		bool shaded = false;
 		if (dot( rL, iN ) > 0) 
 			shaded = isoccluded_tlas( (float4)(I + L * 0.001f, 1), (float4)(L, 1), (float4)(rL, 1), 1000 );
-		radiance += albedo * (0.1f + dot( iN, L )) * (shaded ? 0.5f : 1.0f);
+		float3 ibl = SampleIBL( iN );
+		radiance += albedo * ibl * 0.7f;
+		if (!shaded) radiance += albedo * 0.7f * max( 0.0f, dot( iN, L ) ) * suncol;
 
-		// indirect light
-		break; // no
 	#if 0
+		// indirect light
 		if (depth == 1 || albedo.g > albedo.r * 2) break;
 		float3 R = ray.D.xyz - 2 * dot( iN, ray.D.xyz ) * iN;
 		ray.O = (float4)(I + R * 0.0001f, 1);
@@ -250,5 +268,7 @@ void kernel Render(
 	ray.rD = (float4)(1.0f / ray.D.x, 1.0f / ray.D.y, 1.0f / ray.D.z, 1);
 
 	// evaluate light transport
-	write_imagef( pixels, (int2)(x, y), Trace( ray ) );
+	float4 E = Trace( ray );
+	float3 A = aces( E.xyz );
+	write_imagef( pixels, (int2)(x, y), (float4)( A, 1 ) );
 }

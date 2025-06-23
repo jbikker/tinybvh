@@ -1,0 +1,11 @@
+Model Information:
+* title:	Viva Balloon
+* source:	https://sketchfab.com/3d-models/viva-balloon-ab7a88ee339a4a1b9c36ddbae44ae4a2
+* author:	KevinAz61 (https://sketchfab.com/KevinAz61)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Viva Balloon" (https://sketchfab.com/3d-models/viva-balloon-ab7a88ee339a4a1b9c36ddbae44ae4a2) by KevinAz61 (https://sketchfab.com/KevinAz61) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
