@@ -1053,8 +1053,7 @@ void SkyDome::Load( const char* filename, const ts_vec3 scale )
 		fclose( f );
 	}
 	// cache does not include scale so we can change it later
-	if (scale.x != 1.f || scale.y != 1.f || scale.z != 1.f)
-		for (int p = 0; p < width * height; ++p) pixels[p] = pixels[p] * scale;
+	for (int p = 0; p < width * height; ++p) pixels[p] = pixels[p] * pixels[p] * scale;
 }
 
 //  +-----------------------------------------------------------------------------+
