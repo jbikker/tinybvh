@@ -2010,7 +2010,7 @@ void Node::Update( const ts_mat4& T )
 					mesh->blas.dynamicGPU = new tinybvh::BVH_GPU();
 					if (mesh->omaps) mesh->blas.dynamicGPU->SetOpacityMicroMaps( mesh->omaps, 32 );
 				}
-				mesh->blas.dynamicGPU->Build( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
+				mesh->blas.dynamicGPU->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
 			case GPU_RIGID:
 				if (mesh->blas.rigidGPU == 0)
