@@ -121,8 +121,7 @@ void GLTFDemo::Init()
 			desc.opmapOffset = gpubvh2->opmap ? opmapOffset : 0x99999999;
 			node2Count += gpubvh2->usedNodes;
 			indexCount += gpubvh2->idxCount;
-			triCount += gpubvh2->idxCount;
-			fatTriCount += gpubvh2->triCount;
+			triCount += gpubvh2->triCount;
 			if (gpubvh2->opmap) opmapOffset += gpubvh2->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 		else
@@ -133,10 +132,10 @@ void GLTFDemo::Init()
 			desc.opmapOffset = gpubvh8->opmap ? opmapOffset : 0x99999999;
 			desc.blasType = GPU_RIGID;
 			block8Count += gpubvh8->usedBlocks;
-			tri8Count += gpubvh8->idxCount; // not triCount; we must account for spatial splits.
-			fatTriCount += gpubvh8->triCount;
+			tri8Count += gpubvh8->idxCount; // not triCount; leafs store tris by value and we may have spatial splits.
 			// if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
+		fatTriCount += mesh->triangles.size();
 	}
 	blasNode2 = new Buffer( node2Count * sizeof( BVH_GPU::BVHNode ) );
 	blasIdx = new Buffer( indexCount * sizeof( uint ) );
@@ -156,10 +155,10 @@ void GLTFDemo::Init()
 			BVH_GPU* gpubvh2 = mesh->blas.dynamicGPU;
 			memcpy( (BVH_GPU::BVHNode*)blasNode2->GetHostPtr() + node2Count, gpubvh2->bvhNode, gpubvh2->usedNodes * sizeof( BVH_GPU::BVHNode ) );
 			memcpy( (uint*)blasIdx->GetHostPtr() + indexCount, gpubvh2->bvh.primIdx, gpubvh2->idxCount * sizeof( uint ) );
-			memcpy( (float4*)blasTri->GetHostPtr() + triCount * 3, gpubvh2->bvh.verts.data, gpubvh2->idxCount * sizeof( float4 ) * 3 );
-			memcpy( (FatTri*)blasFatTri->GetHostPtr() + fatTriCount, mesh->triangles.data(), gpubvh2->triCount * sizeof( FatTri ) );
+			memcpy( (float4*)blasTri->GetHostPtr() + triCount * 3, gpubvh2->bvh.verts.data, gpubvh2->triCount * sizeof( float4 ) * 3 );
+			memcpy( (FatTri*)blasFatTri->GetHostPtr() + fatTriCount, mesh->triangles.data(), mesh->triangles.size() * sizeof( FatTri ) );
 			if (gpubvh2->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset, gpubvh2->opmap, gpubvh2->triCount * 128 );
-			node2Count += gpubvh2->usedNodes, indexCount += gpubvh2->idxCount, triCount += gpubvh2->idxCount, fatTriCount += gpubvh2->triCount;
+			node2Count += gpubvh2->usedNodes, indexCount += gpubvh2->idxCount, triCount += gpubvh2->triCount;
 			if (gpubvh2->opmap) opmapOffset += gpubvh2->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 		else
@@ -167,11 +166,12 @@ void GLTFDemo::Init()
 			BVH8_CWBVH* gpubvh8 = mesh->blas.rigidGPU;
 			memcpy( (bvhvec4*)blasNode8->GetHostPtr() + block8Count, gpubvh8->bvh8Data, gpubvh8->usedBlocks * 16 );
 			memcpy( (float*)blasTri8->GetHostPtr() + tri8Count * 16, gpubvh8->bvh8Tris, gpubvh8->idxCount * 64 );
-			memcpy( (FatTri*)blasFatTri->GetHostPtr() + fatTriCount, mesh->triangles.data(), gpubvh8->triCount * sizeof( FatTri ) );
+			memcpy( (FatTri*)blasFatTri->GetHostPtr() + fatTriCount, mesh->triangles.data(), mesh->triangles.size() * sizeof( FatTri ) );
 			// if (gpubvh8->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset, gpubvh8->opmap, gpubvh8->triCount * 128 );
-			block8Count += gpubvh8->usedBlocks, tri8Count + gpubvh8->idxCount, fatTriCount += gpubvh8->triCount;
+			block8Count += gpubvh8->usedBlocks, tri8Count + gpubvh8->idxCount;
 			// if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
+		fatTriCount += mesh->triangles.size();
 	}
 	blasNode2->CopyToDevice();
 	blasIdx->CopyToDevice();
