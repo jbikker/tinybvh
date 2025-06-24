@@ -66,10 +66,11 @@ void GLTFDemo::Init()
 {
 	// load gltf scene
 	scene.SetBVHDefault( GPU_RIGID ); // even the drone does not use BVH rebuilds.
+	scene.CacheBVHs(); // BVHs will be saved to disk for faster loading and optimization.
 	int terrain = scene.AddScene( "./testdata/cratercity/scene.gltf", mat4::Translate( 0, -18.9f, 0 ) * mat4::RotateY( 1 ) );
 	int tree1 = scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
 	int tree2 = scene.AddScene( "./testdata/smallpine/scene.gltf", mat4::Translate( 35, 1.5f, -11 ) * mat4::Scale( 0.03f ) );
-	int balloon = scene.AddScene( "./testdata/balloon/scene.gltf", mat4::Translate( 10, 10.5f, 20 ) * mat4::Scale( 3 ) );
+	scene.AddScene( "./testdata/balloon/scene.gltf", mat4::Translate( 10, 10.5f, 20 ) * mat4::Scale( 3 ) );
 	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 21.5f, -1.75f, -7 ) * mat4::Scale( 0.03f ) * mat4::RotateY( PI * 1.5f ) );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
 #if 1
@@ -134,7 +135,7 @@ void GLTFDemo::Init()
 			tri8Count += gpubvh8->idxCount; // not triCount; leafs store tris by value and we may have spatial splits.
 			// if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
-		fatTriCount += mesh->triangles.size();
+		fatTriCount += (int)mesh->triangles.size();
 	}
 	blasNode2 = new Buffer( node2Count * sizeof( BVH_GPU::BVHNode ) );
 	blasIdx = new Buffer( indexCount * sizeof( uint ) );
@@ -170,7 +171,7 @@ void GLTFDemo::Init()
 			block8Count += gpubvh8->usedBlocks, tri8Count + gpubvh8->idxCount;
 			// if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
-		fatTriCount += mesh->triangles.size();
+		fatTriCount += (int)mesh->triangles.size();
 	}
 	blasNode2->CopyToDevice();
 	blasIdx->CopyToDevice();

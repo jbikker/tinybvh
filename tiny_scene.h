@@ -431,6 +431,7 @@ public:
 	void SetPose( const Skin* skin );
 	// data members
 	::std::string name = "unnamed";		// name for the mesh
+	::std::string fileName = "";		// file from which the mesh was loaded
 	int ID = -1;						// unique ID for the mesh: position in mesh array
 	::std::vector<ts_vec4> vertices;	// model vertices, always 3 per triangle: vertices are *not* indexed.
 	::std::vector<FatTri> triangles;	// full triangles, to be used for shading
@@ -816,6 +817,7 @@ public:
 	static int AddDirectionalLight( const ts_vec3 direction, const ts_vec3 radiance );
 	static void UpdateSceneGraph( const float deltaTime );
 	static void SetBVHDefault( const uint32_t t ) { defaultBVHType = t; }
+	static void CacheBVHs( bool v = true ) { bvhCaching = v; }
 	// data members
 	static inline ::std::vector<int> rootNodes;				// root node indices of loaded (or instanced) objects
 	static inline ::std::vector<Node*> nodePool;			// all scene nodes
@@ -833,6 +835,7 @@ public:
 	static inline tinybvh::BVH* tlas = 0;					// top-level acceleration structure
 	static inline tinybvh::BVH_GPU* gpuTlas = 0;			// top-level acceleration structure, gpu version
 	static inline uint32_t defaultBVHType = BVH_DYNAMIC;	// BVH_RIGID is faster but more restrictive
+	static inline bool bvhCaching = false;					// caching for acceleration structures
 };
 
 } // namespace tinyscene
@@ -1033,6 +1036,7 @@ void SkyDome::Load( const char* filename, const ts_vec3 scale )
 		pixels = (ts_vec3*)malloc64( width * height * sizeof( ts_vec3 ) );
 		fread( pixels, 1, sizeof( ts_vec3 ) * width * height, f );
 		fclose( f );
+		printf( "done.\n" );
 	}
 	if (!pixels)
 	{
@@ -1136,7 +1140,7 @@ void Mesh::LoadGeometry( const char* file, const char* dir, const float scale, c
 //  |  Mesh::LoadGeometryFromObj                                                  |
 //  |  Load an obj file using tinyobj.                                      LH2'25|
 //  +-----------------------------------------------------------------------------+
-void Mesh::LoadGeometryFromOBJ( const string& fileName, const char* directory, const ts_mat4& T, const bool flatShaded )
+void Mesh::LoadGeometryFromOBJ( const string& file, const char* directory, const ts_mat4& T, const bool flatShaded )
 {
 	// load obj file
 	::tinyobj::attrib_t attrib;
@@ -1144,8 +1148,8 @@ void Mesh::LoadGeometryFromOBJ( const string& fileName, const char* directory, c
 	vector<::tinyobj::material_t> materials;
 	map<string, uint32_t> textures;
 	string err, warn;
-	::tinyobj::LoadObj( &attrib, &shapes, &materials, &err, &warn, fileName.c_str(), directory );
-	SCENE_FATAL_ERROR_IF( err.size() > 0 || shapes.size() == 0, "tinyobj failed to load obj" /* , fileName.c_str(), err.c_str() */ );
+	::tinyobj::LoadObj( &attrib, &shapes, &materials, &err, &warn, file.c_str(), directory );
+	SCENE_FATAL_ERROR_IF( err.size() > 0 || shapes.size() == 0, "tinyobj failed to load obj" /* , file.c_str(), err.c_str() */ );
 	// material offset: if we loaded an object before this one, material indices should not start at 0.
 	int matIdxOffset = (int)Scene::materials.size();
 	// process materials
@@ -1159,7 +1163,7 @@ void Mesh::LoadGeometryFromOBJ( const string& fileName, const char* directory, c
 		// initialize
 		Material* material = new Material();
 		material->ID = (int)Scene::materials.size();
-		material->origin = fileName;
+		material->origin = file;
 		material->ConvertFrom( mtl );
 		material->flags |= Material::FROM_MTL;
 		Scene::materials.push_back( material );
@@ -1716,6 +1720,7 @@ void CreateOpacityMicroMap( Mesh* mesh, const int N, const int first, const int 
 void Mesh::CreateOpacityMicroMaps()
 {
 	// fill the opacity maps: WIP, we simply take one texture sample.
+	printf( "creating opacity micromaps... " );
 	const int N = 32; // i.e.: 32 * 32 = 1024bits = 128 bytes = 32 uints per tri.
 	free64( omaps );
 	omaps = (uint32_t*)malloc64( triangles.size() * N * N / 8 );
@@ -1730,6 +1735,7 @@ void Mesh::CreateOpacityMicroMaps()
 	}
 	for (int i = 0; i < slices; i++) jobs[i].join();
 	hasOpacityMicroMaps = true;
+	printf( "done.\n" );
 }
 
 //  +-----------------------------------------------------------------------------+
@@ -2023,13 +2029,50 @@ void Node::Update( const ts_mat4& T )
 				mesh->blas.rigidGPU->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
 			case GPU_STATIC:
+			{
 				if (mesh->blas.staticGPU == 0)
 				{
 					mesh->blas.staticGPU = new tinybvh::BVH8_CWBVH();
 					if (mesh->omaps) mesh->blas.staticGPU->SetOpacityMicroMaps( mesh->omaps, 32 );
 				}
-				mesh->blas.staticGPU->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
-				break;
+				// attempt to load cached BVH
+				bool loaded = false;
+				char t[265] = { 0 }, b[265] = { 0 };
+				if (Scene::bvhCaching)
+				{
+					printf( "attempt to load cached bvh... " );
+					strcpy( t, mesh->fileName.c_str() );
+					strcpy( b, mesh->fileName.c_str() );
+					strcat( t, ".tri" );
+					strcat( b, ".bvh" );
+					tinybvh::BVH& bvh = mesh->blas.staticGPU->bvh8.bvh;
+					if (bvh.Load( b, (tinybvh::bvhvec4*)mesh->vertices.data(), (uint)mesh->triangles.size() ))
+					{
+						printf( "done. Finalizing... " );
+						loaded = true;
+						bvh.SplitLeafs( 3 );
+						mesh->blas.staticGPU->bvh8.ConvertFrom( bvh, true );
+						mesh->blas.staticGPU->ConvertFrom( mesh->blas.staticGPU->bvh8, true );
+						printf( "done.\n" );
+					}
+				}
+				if (!loaded)
+				{
+					mesh->blas.staticGPU->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
+					if (Scene::bvhCaching)
+					{
+						printf( "not found: building... " );
+						FILE* f = fopen( t, "wb" );
+						unsigned count = (unsigned)mesh->triangles.size();
+						fwrite( &count, 1, 4, f );
+						fwrite( mesh->vertices.data(), 16 * 3, count, f );
+						fclose( f );
+						mesh->blas.staticGPU->bvh8.bvh.Save( b );
+						printf( "done.\n" );
+					}
+				}
+			}
+			break;
 			default:
 				// .. invalid bvh type.
 				break;
@@ -2961,9 +3004,13 @@ int Scene::AddScene( const char* sceneFile, const char* dir, const ts_mat4& tran
 			return retVal;
 		}
 		else if (extension4.compare( ".gltf" ) == 0)
+		{
 			ret = loader.LoadASCIIFromFile( &gltfModel, &err, &warn, cleanFileName.c_str() );
+		}
 		else if (extension3.compare( ".bin" ) == 0 || extension3.compare( ".glb" ) == 0)
+		{
 			ret = loader.LoadBinaryFromFile( &gltfModel, &err, &warn, cleanFileName.c_str() );
+		}
 	}
 	if (!warn.empty()) printf( "Warn: %s\n", warn.c_str() );
 	if (!err.empty()) printf( "Err: %s\n", err.c_str() );
@@ -3031,6 +3078,17 @@ int Scene::AddScene( const char* sceneFile, const char* dir, const ts_mat4& tran
 		tinygltf::Mesh& gltfMesh = gltfModel.meshes[i];
 		Mesh* newMesh = new Mesh( gltfMesh, gltfModel, matIdx, gltfModel.materials.size() == 0 ? 0 : -1 );
 		newMesh->ID = (int)i + meshBase;
+		// prepare file name ID for mesh
+		char fileID[256];
+		strcpy( fileID, sceneFile );
+		if (strlen( fileID ) > 4)
+		{
+			if (fileID[strlen( fileID ) - 4] == '.') fileID[strlen( fileID ) - 4] = 0;
+			if (fileID[strlen( fileID ) - 5] == '.') fileID[strlen( fileID ) - 5] = 0;
+		}
+		strcat( fileID, "_9999" );
+		for (int d = 1000, i = 0; i < 4; i++, d /= 10) fileID[strlen( fileID ) - 4 + i] = (newMesh->ID / d) % 10 + '0';
+		newMesh->fileName = string( fileID );
 		meshPool.push_back( newMesh );
 	}
 	// push an extra node that holds a transform for the gltf scene
@@ -3344,6 +3402,7 @@ void Scene::CollapseMeshes( const int subtreeRoot )
 	int triCount = 0, firstMesh = -1, firstNode = -1, stack[128], stackPtr = 0;
 	bool badMesh = false;
 	int nodeId = subtreeRoot;
+	printf( "collapsing subtree into single mesh... " );
 	while (1)
 	{
 		Node* node = nodePool[nodeId];
@@ -3403,6 +3462,7 @@ void Scene::CollapseMeshes( const int subtreeRoot )
 		nodePool[firstNode]->meshID = i;
 	}
 	// all done!
+	printf( "done.\n" );
 }
 
 //  +-----------------------------------------------------------------------------+
