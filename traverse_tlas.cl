@@ -51,14 +51,7 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 				const global uint* opmap = opmapOffs == 0x99999999 ? 0 : (blasOpMap + opmapOffs);
 				const uint blasType = blasDesc[blas].blasType;
 				float4 blasHit;
-				if (blasType == 2)
-				{
-					const global struct BVHNode* nodes = blasNodes + blasDesc[blas].nodeOffset; // TODO: read offset data as uint4
-					const global uint* idx = blasIdx + blasDesc[blas].indexOffset;
-					const global float4* tris = blasTris + blasDesc[blas].triOffset * 3;
-					blasHit = traverse_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, hit.x );
-				}
-				else // if (blasType == 3)
+				if (blasType == 4 /* GPU_STATIC */)
 				{
 					const global float4* nodes = blasCWNodes + blasDesc[blas].node8Offset * 5;
 					const global float4* tris = blasTri8 + blasDesc[blas].tri8Offset * 4;
@@ -67,6 +60,13 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 				#else
 					blasHit = traverse_cwbvh( nodes, tris, Oblas, Dblas, rDblas, hit.x );
 				#endif
+				}
+				else // if (blasType == 2 || blasType == 3 /* GPU_DYNAMIC or GPU_RIGID */)
+				{
+					const global struct BVHNode* nodes = blasNodes + blasDesc[blas].nodeOffset; // TODO: read offset data as uint4
+					const global uint* idx = blasIdx + blasDesc[blas].indexOffset;
+					const global float4* tris = blasTris + blasDesc[blas].triOffset * 3;
+					blasHit = traverse_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, hit.x );
 				}
 			#endif
 				if (blasHit.x < hit.x)
@@ -142,14 +142,7 @@ bool isoccluded_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 				const uint opmapOffs = blasDesc[blas].opmapOffset;
 				const global uint* opmap = opmapOffs == 0x99999999 ? 0 : (blasOpMap + opmapOffs);
 				const uint blasType = blasDesc[blas].blasType;
-				if (blasType == 2)
-				{
-					const global struct BVHNode* nodes = blasNodes + blasDesc[blas].nodeOffset; // TODO: read offset data as uint4
-					const global uint* idx = blasIdx + blasDesc[blas].indexOffset;
-					const global float4* tris = blasTris + blasDesc[blas].triOffset * 3;
-					if (isoccluded_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, tmax )) return true;
-				}
-				else if (blasType == 3)
+				if (blasType == 4 /* GPU_STATIC */)
 				{
 					const global float4* nodes = blasCWNodes + blasDesc[blas].node8Offset * 5;
 					const global float4* tris = blasTri8 + blasDesc[blas].tri8Offset * 4;
@@ -158,6 +151,13 @@ bool isoccluded_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 				#else
 					if (isoccluded_cwbvh( nodes, tris, Oblas, Dblas, rDblas, tmax )) return true;
 				#endif
+				}
+				else // if (blasType == 2 || blasType == 3 /* GPU_DYNAMIC or GPU_RIGID */)
+				{
+					const global struct BVHNode* nodes = blasNodes + blasDesc[blas].nodeOffset; // TODO: read offset data as uint4
+					const global uint* idx = blasIdx + blasDesc[blas].indexOffset;
+					const global float4* tris = blasTris + blasDesc[blas].triOffset * 3;
+					if (isoccluded_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, tmax )) return true;
 				}
 			#endif
 			}

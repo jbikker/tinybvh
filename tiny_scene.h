@@ -105,8 +105,9 @@ THE SOFTWARE.
 
 #define	BVH_DYNAMIC			0	// BVH will be built as tinybvh::BVH / Build, for fast rebuilds
 #define BVH_RIGID			1	// BVH will be built as tinybvh::BVH8_CPU / BuildHQ, for fast traversal
-#define GPU_DYNAMIC			2	// BVH will be built as tinybvh::BVH_GPU, for fast rebuilds
-#define GPU_RIGID			3	// BVH will be built as tinybvh::BVH8_CWBVH, for fast traversal
+#define GPU_DYNAMIC			2	// BVH will be built with tinybvh::BVH_GPU::Build(..) - for refits/rebuilds
+#define GPU_RIGID			3	// BVH will be built as tinybvh::BVH8_GPU::BuildHQ(..) - for opacity maps
+#define GPU_STATIC			4	// BVH will be built as tinybvh::BVH8_CWBVH::BuildHQ(..) - for fast traversal
 
 namespace tinyscene
 {
@@ -406,7 +407,8 @@ public:
 			tinybvh::BVH_SoA* rigidBVH;
 		#endif
 			tinybvh::BVH_GPU* dynamicGPU;
-			tinybvh::BVH8_CWBVH* rigidGPU;
+			tinybvh::BVH_GPU* rigidGPU;
+			tinybvh::BVH8_CWBVH* staticGPU;
 		};
 	};
 	// constructor / destructor
@@ -2010,15 +2012,23 @@ void Node::Update( const ts_mat4& T )
 					mesh->blas.dynamicGPU = new tinybvh::BVH_GPU();
 					if (mesh->omaps) mesh->blas.dynamicGPU->SetOpacityMicroMaps( mesh->omaps, 32 );
 				}
-				mesh->blas.dynamicGPU->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
+				mesh->blas.dynamicGPU->Build( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
 			case GPU_RIGID:
 				if (mesh->blas.rigidGPU == 0)
 				{
-					mesh->blas.rigidGPU = new tinybvh::BVH8_CWBVH();
+					mesh->blas.rigidGPU = new tinybvh::BVH_GPU();
 					if (mesh->omaps) mesh->blas.rigidGPU->SetOpacityMicroMaps( mesh->omaps, 32 );
 				}
 				mesh->blas.rigidGPU->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
+				break;
+			case GPU_STATIC:
+				if (mesh->blas.staticGPU == 0)
+				{
+					mesh->blas.staticGPU = new tinybvh::BVH8_CWBVH();
+					if (mesh->omaps) mesh->blas.staticGPU->SetOpacityMicroMaps( mesh->omaps, 32 );
+				}
+				mesh->blas.staticGPU->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
 			default:
 				// .. invalid bvh type.
@@ -3547,7 +3557,7 @@ void Scene::UpdateSceneGraph( const float deltaTime )
 			bvhList[i] = meshPool[i]->blas.dynamicBVH;
 		bvhListSize = (uint32_t)meshPool.size();
 	}
-	if (defaultBVHType == GPU_DYNAMIC || defaultBVHType == GPU_RIGID)
+	if (defaultBVHType == GPU_DYNAMIC || defaultBVHType == GPU_RIGID || defaultBVHType == GPU_STATIC)
 	{
 		if (!gpuTlas) gpuTlas = new tinybvh::BVH_GPU();
 		gpuTlas->Build( instPool.data(), (uint32_t)instPool.size(), bvhList, bvhListSize );

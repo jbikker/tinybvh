@@ -65,7 +65,7 @@ struct BLASDesc
 void GLTFDemo::Init()
 {
 	// load gltf scene
-	scene.SetBVHDefault( GPU_DYNAMIC );
+	scene.SetBVHDefault( GPU_RIGID ); // even the drone does not use BVH rebuilds.
 	int terrain = scene.AddScene( "./testdata/cratercity/scene.gltf", mat4::Translate( 0, -18.9f, 0 ) * mat4::RotateY( 1 ) );
 	int tree1 = scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
 	int tree2 = scene.AddScene( "./testdata/smallpine/scene.gltf", mat4::Translate( 35, 1.5f, -11 ) * mat4::Scale( 0.03f ) );
@@ -82,7 +82,7 @@ void GLTFDemo::Init()
 	if (leaves > -1) scene.CreateOpacityMicroMaps( leaves );
 #endif
 	scene.CollapseMeshes( terrain ); // combine the meshes into a single mesh; may yield a better BVH.
-	scene.SetBVHType( terrain, GPU_RIGID );
+	scene.SetBVHType( terrain, GPU_STATIC );
 	scene.UpdateSceneGraph( 0 ); // this will build the BLASses and TLAS.
 
 	// create OpenCL kernels
@@ -113,8 +113,8 @@ void GLTFDemo::Init()
 		desc.indexOffset = indexCount;
 		desc.triOffset = triCount;
 		desc.fatTriOffset = fatTriCount;
-		desc.blasType = GPU_DYNAMIC;
-		if (mesh->blas.bvhType == GPU_DYNAMIC)
+		desc.blasType = mesh->blas.bvhType;
+		if (mesh->blas.bvhType == GPU_DYNAMIC || mesh->blas.bvhType == GPU_RIGID)
 		{
 			BVH_GPU* gpubvh2 = mesh->blas.dynamicGPU;
 			desc.nodeOffset = node2Count;
@@ -126,11 +126,10 @@ void GLTFDemo::Init()
 		}
 		else
 		{
-			BVH8_CWBVH* gpubvh8 = mesh->blas.rigidGPU;
+			BVH8_CWBVH* gpubvh8 = mesh->blas.staticGPU;
 			desc.node8Offset = block8Count;
 			desc.tri8Offset = tri8Count;
 			desc.opmapOffset = gpubvh8->opmap ? opmapOffset : 0x99999999;
-			desc.blasType = GPU_RIGID;
 			block8Count += gpubvh8->usedBlocks;
 			tri8Count += gpubvh8->idxCount; // not triCount; leafs store tris by value and we may have spatial splits.
 			// if (gpubvh8->opmap) opmapOffset += gpubvh8->triCount * 32; // for N=32: 128 bytes = 32uints
@@ -150,7 +149,7 @@ void GLTFDemo::Init()
 		// a BLAS needs BVH nodes, triangle indices and the actual triangle data.
 		Mesh* mesh = Scene::meshPool[i];
 		if (!mesh) continue;
-		if (mesh->blas.bvhType == GPU_DYNAMIC)
+		if (mesh->blas.bvhType == GPU_DYNAMIC || mesh->blas.bvhType == GPU_RIGID)
 		{
 			BVH_GPU* gpubvh2 = mesh->blas.dynamicGPU;
 			memcpy( (BVH_GPU::BVHNode*)blasNode2->GetHostPtr() + node2Count, gpubvh2->bvhNode, gpubvh2->usedNodes * sizeof( BVH_GPU::BVHNode ) );
@@ -163,7 +162,7 @@ void GLTFDemo::Init()
 		}
 		else
 		{
-			BVH8_CWBVH* gpubvh8 = mesh->blas.rigidGPU;
+			BVH8_CWBVH* gpubvh8 = mesh->blas.staticGPU;
 			memcpy( (bvhvec4*)blasNode8->GetHostPtr() + block8Count, gpubvh8->bvh8Data, gpubvh8->usedBlocks * 16 );
 			memcpy( (float*)blasTri8->GetHostPtr() + tri8Count * 16, gpubvh8->bvh8Tris, gpubvh8->idxCount * 64 );
 			memcpy( (FatTri*)blasFatTri->GetHostPtr() + fatTriCount, mesh->triangles.data(), mesh->triangles.size() * sizeof( FatTri ) );
