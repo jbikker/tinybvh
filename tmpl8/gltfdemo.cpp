@@ -110,6 +110,7 @@ void GLTFDemo::InitScene()
 	// create OpenCL kernels
 	init = new Kernel( "raytracer.cl", "SetRenderData" );
 	render = new Kernel( "raytracer.cl", "Render" );
+	renderNormals = new Kernel( "raytracer.cl", "RenderNormals" );
 	screen = 0; // this tells the template to not overwrite the render target.
 
 	// create OpenCL buffers
@@ -376,9 +377,27 @@ void GLTFDemo::Tick( float delta_time )
 	instances->CopyToDevice();
 
 	// start device-side rendering.
-	render->SetArguments( pixels, SCRWIDTH, SCRHEIGHT, eye, p1, p2, p3 );
-	render->Run2D( oclint2( SCRWIDTH, SCRHEIGHT ) );
+	static bool altDown = false;
+	static int mode = 0;
+	if (!GetAsyncKeyState( VK_TAB )) altDown = false; else
+	{
+		if (!altDown) altDown = false, mode = (mode + 1) % 2;
+		altDown = true;
+	}
+	if (mode == 0)
+	{
+		// full rendering
+		render->SetArguments( pixels, SCRWIDTH, SCRHEIGHT, eye, p1, p2, p3 );
+		render->Run2D( oclint2( SCRWIDTH, SCRHEIGHT ) );
+	}
+	else
+	{
+		// only normals
+		renderNormals->SetArguments( pixels, SCRWIDTH, SCRHEIGHT, eye, p1, p2, p3 );
+		renderNormals->Run2D( oclint2( SCRWIDTH, SCRHEIGHT ) );
+	}
 
+#if 0
 	// print camera aim pos
 	static int delay = 10;
 	if (--delay == 0)
@@ -386,4 +405,5 @@ void GLTFDemo::Tick( float delta_time )
 		printf( "x = %.2f, y = %.2f, z = %.2f)\n", eye.x, eye.y, eye.z );
 		delay = 10;
 	}
+#endif
 }
