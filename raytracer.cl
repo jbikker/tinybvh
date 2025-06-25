@@ -147,13 +147,19 @@ float3 SampleIBL( const float3 D )
 {
 	// diffuse IBL: sample precalculated cosine-weighted hemisphere integral as an 
 	// approximation of the light from the skydome reflected by a fragment with normal D.
-	// TODO: bilerp?
-	float x = (D.x + 1) * 7.49f; //, fx = x - floor( x );
-	float y = (D.y + 1) * 7.49f; // , fy = y - floor( y );
-	float z = (D.z + 1) * 7.49f; // , fz = z - floor( z );
-	int ix = (int)x, iy = (int)y, iz = (int)z;
-	float4 p0 = IBL[ix + iy * 16 + iz * 16 * 16];
-	return p0.xyz;
+	float x = (D.x + 1) * 7.49f, fx = x - floor( x );
+	float y = (D.y + 1) * 7.49f, fy = y - floor( y );
+	float z = (D.z + 1) * 7.49f, fz = z - floor( z );
+	int ix0 = (int)x, iy0 = (int)y, iz0 = (int)z;
+	int ix1 = (ix0 + 1) & 15, iy1 = (iy0 + 1) & 15, iz1 = (iz0 + 1) & 15;
+	float4 p0 = IBL[ix0 + iy0 * 16 + iz0 * 16 * 16], p1 = IBL[ix1 + iy0 * 16 + iz0 * 16 * 16];
+	float4 p2 = IBL[ix0 + iy1 * 16 + iz0 * 16 * 16], p3 = IBL[ix1 + iy1 * 16 + iz0 * 16 * 16];
+	float4 p4 = IBL[ix0 + iy0 * 16 + iz1 * 16 * 16], p5 = IBL[ix1 + iy0 * 16 + iz1 * 16 * 16];
+	float4 p6 = IBL[ix0 + iy1 * 16 + iz1 * 16 * 16], p7 = IBL[ix1 + iy1 * 16 + iz1 * 16 * 16];
+	float w0 = (1 - fx) * (1 - fy), w1 = fx * (1 - fy), w2 = (1 - fx) * fy, w3 = 1 - (w0 + w1 + w2);
+	float4 pa = p0 * w0 + p1 * w1 + p2 * w2 + p3 * w3;
+	float4 pb = p4 * w0 + p5 * w1 + p6 * w2 + p7 * w3;
+	return ((1 - fz) * pa + fz * pb).xyz;
 }
 
 float4 Trace( struct Ray ray )
