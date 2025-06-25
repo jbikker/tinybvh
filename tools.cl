@@ -94,3 +94,14 @@ float3 aces(float3 x)
     const float e = 0.14f;
     return (x * (a * x + b)) / (x * (c * x + d) + e);
 }
+
+float3 inferno_quintic( float x ) // https://www.shadertoy.com/view/XtGGzG
+{
+	x = min( 1.0f, x );
+	float4 x1 = (float4)( 1, x, x * x, x * x * x ), x2 = x1 * x1.w * x;
+	return (float3)(
+		dot( x1, (float4)( -0.027780558, +1.228188385, +0.278906882, +3.892783760 ) ) + dot( x2.xy, (float2)( -8.490712758, +4.069046086 ) ),
+		dot( x1, (float4)( +0.014065206, +0.015360518, +1.605395918, -4.821108251 ) ) + dot( x2.xy, (float2)( +8.389314011, -4.193858954 ) ),
+		dot( x1, (float4)( -0.019628385, +3.122510347, -5.893222355, +2.798380308 ) ) + dot( x2.xy, (float2)( -3.608884658, +4.324996022 ) ) 
+	);
+}

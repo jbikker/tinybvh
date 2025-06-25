@@ -114,10 +114,10 @@ float4 traverse_ailalaine_111(
 #include "traverse_bvh2_int.inc"
 float4 traverse_ailalaine( const global struct BVHNode* bvhNode, 
 	const global unsigned* idx, const global float4* verts, const global uint* opmap,
-	const float3 O, const float3 D, const float3 rD, const float tmax )
+	const float3 O, const float3 D, const float3 rD, const float tmax, uint* stepCount )
 {
 #ifdef NO_TEMPLATED_INTERSECT
-	return traverse_ailalaine_000( bvhNode, idx, verts, opmap, O, D, rD, tmax );
+	return traverse_ailalaine_000( bvhNode, idx, verts, opmap, O, D, rD, tmax, stepCount );
 #else
 	if (D.z > 0)
 	{
@@ -208,7 +208,7 @@ void kernel batch_ailalaine( const global struct BVHNode* bvhNode, const global 
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	float4 hit = traverse_ailalaine( bvhNode, idx, 0, verts, O, D, rD, 1e30f );
+	float4 hit = traverse_ailalaine( bvhNode, idx, 0, verts, O, D, rD, 1e30f, 0 );
 	rayData[threadId].hit = hit;
 }
 

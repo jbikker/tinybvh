@@ -1,6 +1,6 @@
 	const global struct BVHNode* bvhNode, 
 	const global unsigned* idx, const global float4* verts, const global uint* opmap,
-	const float3 O, const float3 D, const float3 rD, const float tmax )
+	const float3 O, const float3 D, const float3 rD, const float tmax, uint* stepCount )
 {
 	// prepare slab test
 #ifdef NO_TEMPLATED_INTERSECT
@@ -12,9 +12,10 @@
 #endif
 	// traverse BVH
 	float4 hit = (float4)( tmax, 0, 0, 0 );
-	unsigned node = 0, stack[STACK_SIZE], stackPtr = 0;
+	unsigned node = 0, stack[STACK_SIZE], stackPtr = 0, steps = 0;
 	while (1)
 	{
+		steps++;
 		const float4 lmin = bvhNode[node].lmin, lmax = bvhNode[node].lmax;
 		const float4 rmin = bvhNode[node].rmin, rmax = bvhNode[node].rmax;
 		const unsigned triCount = as_uint( rmin.w );
@@ -104,5 +105,6 @@
 		if (dist1 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
 		else { node = left; if (dist2 != 1e30f) stack[stackPtr++] = right; }
 	}
+	if (stepCount) *stepCount += steps;
 	return hit;
 }

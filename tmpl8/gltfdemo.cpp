@@ -111,6 +111,7 @@ void GLTFDemo::InitScene()
 	init = new Kernel( "raytracer.cl", "SetRenderData" );
 	render = new Kernel( "raytracer.cl", "Render" );
 	renderNormals = new Kernel( "raytracer.cl", "RenderNormals" );
+	renderDepth = new Kernel( "raytracer.cl", "RenderDepth" );
 	screen = 0; // this tells the template to not overwrite the render target.
 
 	// create OpenCL buffers
@@ -381,7 +382,7 @@ void GLTFDemo::Tick( float delta_time )
 	static int mode = 0;
 	if (!GetAsyncKeyState( VK_TAB )) altDown = false; else
 	{
-		if (!altDown) altDown = false, mode = (mode + 1) % 2;
+		if (!altDown) altDown = false, mode = (mode + 1) % 3;
 		altDown = true;
 	}
 	if (mode == 0)
@@ -390,11 +391,17 @@ void GLTFDemo::Tick( float delta_time )
 		render->SetArguments( pixels, SCRWIDTH, SCRHEIGHT, eye, p1, p2, p3 );
 		render->Run2D( oclint2( SCRWIDTH, SCRHEIGHT ) );
 	}
-	else
+	else if (mode == 1)
 	{
 		// only normals
 		renderNormals->SetArguments( pixels, SCRWIDTH, SCRHEIGHT, eye, p1, p2, p3 );
 		renderNormals->Run2D( oclint2( SCRWIDTH, SCRHEIGHT ) );
+	}
+	else // if (mode == 2)
+	{
+		// BVH structure
+		renderDepth->SetArguments( pixels, SCRWIDTH, SCRHEIGHT, eye, p1, p2, p3 );
+		renderDepth->Run2D( oclint2( SCRWIDTH, SCRHEIGHT ) );
 	}
 
 #if 0

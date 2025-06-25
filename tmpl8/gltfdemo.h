@@ -36,6 +36,7 @@ public:
 	Kernel* init = 0;
 	Kernel* render = 0;
 	Kernel* renderNormals = 0;
+	Kernel* renderDepth = 0;
 	// OpenCL buffers
 	Buffer* pixels = 0;
 	Buffer* instances = 0;

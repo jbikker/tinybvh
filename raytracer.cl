@@ -182,7 +182,7 @@ float4 Trace( struct Ray ray )
 	for (int step = 0; step < 2; step++)
 	{
 		// extend path
-		hit = traverse_tlas( ray.O, ray.D, ray.rD, 1000.0f );
+		hit = traverse_tlas( ray.O, ray.D, ray.rD, 1000.0f, 0 );
 		if (hit.x > 999) return (float4)( SampleSky( ray.D.xyz ), 1 );
 
 		// gather shading information
@@ -269,7 +269,7 @@ float4 TraceNormals( struct Ray ray )
 	for (int step = 0; step < 2; step++)
 	{
 		// extend path
-		hit = traverse_tlas( ray.O, ray.D, ray.rD, 1000.0f );
+		hit = traverse_tlas( ray.O, ray.D, ray.rD, 1000.0f, 0 );
 		if (hit.x > 999) return (float4)( 0 );
 
 		// gather shading information
@@ -319,6 +319,13 @@ float4 TraceNormals( struct Ray ray )
 	return (float4)( iN, 1 );
 }
 
+uint TraceDepth( struct Ray ray )
+{
+	uint steps;
+	float4 hit = traverse_tlas( ray.O, ray.D, ray.rD, 1000.0f, &steps );
+	return steps;
+}
+
 void kernel Render(
 	write_only image2d_t pixels, const uint width, const uint height,
 	const float4 eye, const float4 p1, const float4 p2, const float4 p3
@@ -363,4 +370,23 @@ void kernel RenderNormals(
 	ray.D = (float4)(normalize( (p1 + u * (p2 - p1) + v * (p3 - p1) - eye).xyz ), 1);
 	ray.rD = (float4)(1.0f / ray.D.x, 1.0f / ray.D.y, 1.0f / ray.D.z, 1);
 	write_imagef( pixels, (int2)(x, y), TraceNormals( ray ) );
+}
+
+void kernel RenderDepth(
+	write_only image2d_t pixels, const uint width, const uint height,
+	const float4 eye, const float4 p1, const float4 p2, const float4 p3
+)
+{
+	// extract pixel coordinates from thread id
+	const uint x = get_global_id( 0 ), y = get_global_id( 1 );
+	const uint pixelIdx = x + y * get_global_size( 0 );
+
+	// create primary ray and trace
+	struct Ray ray;
+	float u = (float)x / width, v = (float)y / height;
+	ray.O = eye;
+	ray.D = (float4)(normalize( (p1 + u * (p2 - p1) + v * (p3 - p1) - eye).xyz ), 1);
+	ray.rD = (float4)(1.0f / ray.D.x, 1.0f / ray.D.y, 1.0f / ray.D.z, 1);
+	uint steps = TraceDepth( ray );
+	write_imagef( pixels, (int2)(x, y), (float4)( inferno_quintic( (float)steps * 0.006f ), 1 ) );
 }

@@ -10,16 +10,18 @@
 // For scenes with lots of BLAS nodes you may want to use a wider BVH, e.g.
 // BVH4_GPU.
 
-float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const float tmax )
+float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const float tmax, uint* stepCount )
 {
 	// initialize return data
 	float4 hit = (float4)(tmax, 0, 0, 0);
 	// safety net
 	if (isnan( O4.x + O4.y + O4.z + D4.x + D4.y + D4.z )) return hit;
 	// traverse BVH
-	unsigned node = 0, stack[STACK_SIZE], stackPtr = 0;
+	unsigned node = 0, stack[STACK_SIZE], stackPtr = 0, steps = 0;
+	if (stepCount) *stepCount = 0;
 	while (1)
 	{
+		steps++;
 		// fetch the node
 		const float4 lmin = tlasNodes[node].lmin, lmax = tlasNodes[node].lmax;
 		const float4 rmin = tlasNodes[node].rmin, rmax = tlasNodes[node].rmax;
@@ -40,9 +42,9 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 				const global float4* blasNodes = instIdx == 0 ? bistroNodes : dragonNodes;
 				const global float4* blasTris = instIdx == 0 ? bistroTris : dragonTris;
 			#ifdef SIMD_AABBTEST
-				const float4 blasHit = traverse_cwbvh( blasNodes, blasTris, (float4)(Oblas, 1), (float4)(Dblas, 0), (float4)(rDblas, 1), hit.x );
+				const float4 blasHit = traverse_cwbvh( blasNodes, blasTris, (float4)(Oblas, 1), (float4)(Dblas, 0), (float4)(rDblas, 1), hit.x, stepCount );
 			#else
-				const float4 blasHit = traverse_cwbvh( blasNodes, blasTris, Oblas, Dblas, rDblas, hit.x );
+				const float4 blasHit = traverse_cwbvh( blasNodes, blasTris, Oblas, Dblas, rDblas, hit.x, stepCount );
 			#endif
 			#else
 				// this code handles arbitrary tlas/blas scenes.
@@ -56,9 +58,9 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 					const global float4* nodes = blasCWNodes + blasDesc[blas].node8Offset * 5;
 					const global float4* tris = blasTri8 + blasDesc[blas].tri8Offset * 4;
 				#ifdef SIMD_AABBTEST
-					blasHit = traverse_cwbvh( nodes, tris, (float4)(Oblas, 1), (float4)(Dblas, 0), (float4)(rDblas, 1), hit.x );
+					blasHit = traverse_cwbvh( nodes, tris, (float4)(Oblas, 1), (float4)(Dblas, 0), (float4)(rDblas, 1), hit.x, stepCount );
 				#else
-					blasHit = traverse_cwbvh( nodes, tris, Oblas, Dblas, rDblas, hit.x );
+					blasHit = traverse_cwbvh( nodes, tris, Oblas, Dblas, rDblas, hit.x, stepCount );
 				#endif
 				}
 				else // if (blasType == 2 || blasType == 3 /* GPU_DYNAMIC or GPU_RIGID */)
@@ -66,7 +68,7 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 					const global struct BVHNode* nodes = blasNodes + blasDesc[blas].nodeOffset; // TODO: read offset data as uint4
 					const global uint* idx = blasIdx + blasDesc[blas].indexOffset;
 					const global float4* tris = blasTris + blasDesc[blas].triOffset * 3;
-					blasHit = traverse_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, hit.x );
+					blasHit = traverse_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, hit.x, stepCount );
 				}
 			#endif
 				if (blasHit.x < hit.x)
@@ -100,6 +102,7 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 		else { node = left; if (dist2 != 1e30f) stack[stackPtr++] = right; }
 	}
 	// write back intersection result
+	if (stepCount) *stepCount += steps;
 	return hit;
 }
 
