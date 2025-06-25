@@ -64,26 +64,47 @@ struct BLASDesc
 // -----------------------------------------------------------
 void GLTFDemo::Init()
 {
+
+}
+
+// -----------------------------------------------------------
+// Init stage 2: Scene loading
+// -----------------------------------------------------------
+void GLTFDemo::InitScene()
+{
 	// load gltf scene
 	scene.SetBVHDefault( GPU_RIGID ); // even the drone does not use BVH rebuilds.
 	scene.CacheBVHs(); // BVHs will be saved to disk for faster loading and optimization.
 	int terrain = scene.AddScene( "./testdata/cratercity/scene.gltf", mat4::Translate( 0, -18.9f, 0 ) * mat4::RotateY( 1 ) );
 	int tree1 = scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
-	int tree2 = scene.AddScene( "./testdata/smallpine/scene.gltf", mat4::Translate( 35, 1.5f, -11 ) * mat4::Scale( 0.03f ) );
-	scene.AddScene( "./testdata/balloon/scene.gltf", mat4::Translate( 10, 10.5f, 20 ) * mat4::Scale( 3 ) );
+	int tree2 = scene.AddScene( "./testdata/smallpine/scene.gltf", mat4::Translate( 0, 0, 0 ) * mat4::Scale( 0.03f ) );
+	balloon = scene.AddScene( "./testdata/balloon/scene.gltf", mat4::Translate( 10, 10, 10 ) * mat4::Scale( 18 ) );
 	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 21.5f, -1.75f, -7 ) * mat4::Scale( 0.03f ) * mat4::RotateY( PI * 1.5f ) );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
-#if 1
 	scene.CollapseMeshes( tree1 );
 	scene.CreateOpacityMicroMaps( tree1 );
-	scene.CollapseMeshes( tree2 );
+	int treeMesh = scene.CollapseMeshes( tree2 );
 	scene.CreateOpacityMicroMaps( tree2 );
-#else
-	int leaves = scene.FindNode( "leaves" );
-	if (leaves > -1) scene.CreateOpacityMicroMaps( leaves );
-#endif
-	scene.CollapseMeshes( terrain ); // combine the meshes into a single mesh; may yield a better BVH.
+	int terrainMesh = scene.CollapseMeshes( terrain ); // combine the meshes into a single mesh; may yield a better BVH.
+	int terrainNode = scene.FindMeshNode( terrain /* possibly a hierarchy */, terrainMesh );
 	scene.SetBVHType( terrain, GPU_STATIC );
+	scene.UpdateSceneGraph( 0 ); // this will build the BLASses and TLAS.
+	// place a rough circle of trees
+	mat4 invTerrain = scene.nodePool[terrainNode]->combinedTransform.Inverted();
+	for (float a = 0; a < 2 * PI; a += 0.045f + RandomFloat() * 0.03f)
+	{
+		int nodeId = scene.AddNode( new tinyscene::Node( treeMesh, mat4::Identity() ) );
+		mat4 T1 = mat4::Translate( (30 + 2 * RandomFloat()) * sinf( a ), 0, (30 + 2 * RandomFloat()) * cosf( a ) );
+		float3 O( T1[3], 20, T1[11] ), D( 0, -1, 0 );
+		Ray r( float4( O, 1 ) * invTerrain, float4( D, 0 ) * invTerrain );
+		scene.meshPool[terrainMesh]->blas.staticGPU->bvh8.bvh.Intersect( r );
+		T1[7] = (O + D * r.hit.t * 0.1f /* erm... why 0.1? */).y - 0.2f;
+		float hsize = 0.03f + RandomFloat() * 0.025f, vsize = 0.03f + RandomFloat() * 0.015f;
+		mat4 T2 = mat4::Scale( float3( hsize, vsize, hsize ) );
+		mat4 T3 = mat4::RotateY( RandomFloat() * TWOPI ) * mat4::RotateX( PI * 1.5f );
+		scene.SetNodeTransform( nodeId, T1 * T2 * T3 );
+		scene.AddInstance( nodeId );
+	}
 	scene.UpdateSceneGraph( 0 ); // this will build the BLASses and TLAS.
 
 	// create OpenCL kernels
@@ -326,8 +347,27 @@ bool GLTFDemo::UpdateCamera( float delta_time_s )
 // -----------------------------------------------------------
 void GLTFDemo::Tick( float delta_time )
 {
+	// initialize: show logo first
+	static int initseq = 0;
+	if (initseq < 6)
+	{
+		if (initseq < 5)
+		{
+			screen->Clear( 0 );
+			static Surface s( "testdata/tinybvh.png" );
+			s.CopyTo( screen, (SCRWIDTH - s.width) / 2, (SCRHEIGHT - s.height) / 2 - 20 );
+		}
+		else InitScene();
+		initseq++;
+		return;
+	}
+
 	// handle user input and update camera.
 	UpdateCamera( delta_time * 0.001f );
+	static float a = 4;
+	scene.SetNodeTransform( balloon, mat4::Translate( 17 * sinf( a ), 7 + 2 * sinf( a ), 21 * cosf( a ) ) * mat4::Scale( 18 ) ); // mat4::Translate( float3( sinf( a ), 10, cosf( a ) ) * 20.f ) * mat4::Scale( 18 ) );
+	a += 0.00003f * delta_time;
+	if (a > TWOPI) a -= TWOPI;
 	scene.UpdateSceneGraph( delta_time * 0.001f );
 
 	// sync tlas - TODO: would be better if this could be a single copy.
