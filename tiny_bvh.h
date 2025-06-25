@@ -2796,7 +2796,7 @@ void BVH::BuildHQTask(
 			bvhNode[rightChildIdx].leftFirst = B, bvhNode[rightChildIdx].triCount = rightCount;
 			node.leftFirst = leftChildIdx, node.triCount = 0;
 			// recurse
-			if (depth < maxDepth)
+			if (0) if (depth < maxDepth)
 			{
 				// spawn a new thread for the right branch
 				std::thread t1( &BuildHQTask_, rightChildIdx, depth + 1, maxDepth, (A + B) >> 1, sliceEnd, idxTmp, this );
