@@ -169,91 +169,88 @@ float4 Trace( struct Ray ray )
 	float3 suncol = (float3)( 1.1f, 1.1f, 1.0f );
 	float3 rL = (float3)(1.0f / L.x, 1.0f / L.y, 1.0f / L.z);
 
-	// initialize light transport.
-	float3 radiance = (float3)(0);
-	float3 throughput = (float3)(1);
-	
-	// trace a path of max. 2 segments.
-	// for (int depth = 0; depth < 2; depth++)
+	// shading data
+	float tu, tv;
+	float4 hit;
+	float3 N, iN, albedo, I;
+	global struct Material* material;
+	global struct FatTri* tri;
+	global struct Instance* inst;
+	uint blasIdx, idxData, primIdx, instIdx;
+
+	// find a non-translucent texel in max. 2 steps.
+	for (int step = 0; step < 2; step++)
 	{
-		// shading data
-		float tu, tv;
-		float4 hit;
-		float3 N, iN, albedo, I;
-		global struct Material* material;
-		global struct FatTri* tri;
-		global struct Instance* inst;
-		uint blasIdx, idxData, primIdx, instIdx;
+		// extend path
+		hit = traverse_tlas( ray.O, ray.D, ray.rD, 1000.0f );
+		if (hit.x > 999) return (float4)( SampleSky( ray.D.xyz ), 1 );
 
-		// find a non-translucent texel in max. 2 steps.
-		for (int step = 0; step < 2; step++)
+		// gather shading information
+		idxData = as_uint( hit.w ), primIdx = idxData & 0xffffff, instIdx = idxData >> 24;
+		inst = instances + instIdx;
+		blasIdx = as_uint( inst->aabbMin.w );
+		tri = blasFatTris + blasDesc[blasIdx].fatTriOffset + primIdx;
+		iN = (hit.y * tri->vN1 + hit.z * tri->vN2 + (1 - hit.y - hit.z) * tri->vN0).xyz;
+		N = (float3)(tri->vN0.w, tri->vN1.w, tri->vN2.w);
+		I = ray.O.xyz + ray.D.xyz * hit.x;
+		material = materials + tri->material;
+		albedo = (float3)(1);
+		tu = hit.y * tri->u1 + hit.z * tri->u2 + (1 - hit.y - hit.z) * tri->u0;
+		tv = hit.y * tri->v1 + hit.z * tri->v2 + (1 - hit.y - hit.z) * tri->v0;
+		tu -= floor( tu ), tv -= floor( tv );
+		bool validAlbedo = true;
+		if (material->flags & HAS_TEXTURE)
 		{
-			// extend path
-			hit = traverse_tlas( ray.O, ray.D, ray.rD, 1000.0f );
-			if (hit.x > 999) return (float4)( radiance + throughput * SampleSky( ray.D.xyz ), 1 );
-
-			// gather shading information
-			idxData = as_uint( hit.w ), primIdx = idxData & 0xffffff, instIdx = idxData >> 24;
-			inst = instances + instIdx;
-			blasIdx = as_uint( inst->aabbMin.w );
-			tri = blasFatTris + blasDesc[blasIdx].fatTriOffset + primIdx;
-			iN = (hit.y * tri->vN1 + hit.z * tri->vN2 + (1 - hit.y - hit.z) * tri->vN0).xyz;
-			N = (float3)(tri->vN0.w, tri->vN1.w, tri->vN2.w);
-			I = ray.O.xyz + ray.D.xyz * hit.x;
-			material = materials + tri->material;
-			albedo = (float3)(1);
-			tu = hit.y * tri->u1 + hit.z * tri->u2 + (1 - hit.y - hit.z) * tri->u0;
-			tv = hit.y * tri->v1 + hit.z * tri->v2 + (1 - hit.y - hit.z) * tri->v0;
-			tu -= floor( tu ), tv -= floor( tv );
-			bool validAlbedo = true;
-			if (material->flags & HAS_TEXTURE)
-			{
-				int iu = (int)(tu * material->width);
-				int iv = (int)(tv * material->height);
-				uint pixel = texels[material->offset + iu + iv * material->width];
-				albedo = (float3)((float)(pixel & 255), (float)((pixel >> 8) & 255), (float)((pixel >> 16) & 255)) * (1.0f / 256.0f);
-				if ((pixel >> 24) < 2) validAlbedo = false;
-			}
-			else albedo = material->albedo.xyz;
-			if (validAlbedo) break;
-
-			// texture pixel was translucent; extend ray.
-			ray.O = (float4)(I, 1) + ray.D * 0.001f;
+			int iu = (int)(tu * material->width);
+			int iv = (int)(tv * material->height);
+			uint pixel = texels[material->offset + iu + iv * material->width];
+			albedo = (float3)((float)(pixel & 255), (float)((pixel >> 8) & 255), (float)((pixel >> 16) & 255)) * (1.0f / 256.0f);
+			if ((pixel >> 24) < 2) validAlbedo = false;
 		}
+		else albedo = material->albedo.xyz;
+		if (validAlbedo) break;
 
-		// finalize shading
-		if (material->flags & HAS_NMAP)
-		{
-			int iu = (int)(tu * material->wnormal);
-			int iv = (int)(tv * material->hnormal);
-			uint pixel = texels[material->normalOffset + iu + iv * material->wnormal];
-			float3 mN = (float3)((float)(pixel & 255), (float)((pixel >> 8) & 255), (float)((pixel >> 24) & 255));
-			mN *= 1.0f / 128.0f, mN += -1.0f;
-			iN = mN.x * tri->T.xyz + mN.y * tri->B.xyz + mN.z * iN;
-		}
-		N = normalize( TransformVector( N, inst->transform ) );
-		if (dot( N, ray.D.xyz ) > 0) N *= -1;
-		iN = normalize( TransformVector( iN, inst->transform ) );
-		if (dot( iN, N ) < 0) iN *= -1;
-
-		// direct light
-		bool shaded = false;
-		if (dot( rL, iN ) > 0) 
-			shaded = isoccluded_tlas( (float4)(I + L * 0.001f, 1), (float4)(L, 1), (float4)(rL, 1), 1000 );
-		float3 ibl = SampleIBL( iN );
-		radiance += albedo * ibl * 0.7f;
-		if (!shaded) radiance += albedo * 0.7f * max( 0.0f, dot( iN, L ) ) * suncol;
-
-	#if 0
-		// indirect light
-		if (depth == 1 || albedo.g > albedo.r * 2) break;
-		float3 R = ray.D.xyz - 2 * dot( iN, ray.D.xyz ) * iN;
-		ray.O = (float4)(I + R * 0.0001f, 1);
-		ray.D = (float4)(R, 0);
-		ray.rD = (float4)(1.0f / R.x, 1.0f / R.y, 1.0f / R.z, 1);
-		throughput *= albedo * dot( R, iN ) * 0.5f;
-	#endif
+		// texture pixel was translucent; extend ray.
+		ray.O = (float4)(I, 1) + ray.D * 0.001f;
 	}
+
+	// fog layer
+	float3 fogColor = (float3)( 0.6f, 0.52f, 0.35f );
+	float fog = 0, layer = -1.5f;
+	float t = (layer - ray.O.y) * ray.rD.y;
+	if (ray.O.y > layer)
+	{
+		if (t > 0 && t < hit.x) fog = 1 - exp( (t - hit.x) * 0.04f );
+	}
+	else
+	{
+		if (t > 0) t = min( hit.x, t ); else t = hit.x;
+		fog = 1 - exp( -t * 0.03f );
+	}
+	
+	// finalize shading
+	if (material->flags & HAS_NMAP)
+	{
+		int iu = (int)(tu * material->wnormal);
+		int iv = (int)(tv * material->hnormal);
+		uint pixel = texels[material->normalOffset + iu + iv * material->wnormal];
+		float3 mN = (float3)((float)(pixel & 255), (float)((pixel >> 8) & 255), (float)((pixel >> 24) & 255));
+		mN *= 1.0f / 128.0f, mN += -1.0f;
+		iN = mN.x * tri->T.xyz + mN.y * tri->B.xyz + mN.z * iN;
+	}
+	N = normalize( TransformVector( N, inst->transform ) );
+	if (dot( N, ray.D.xyz ) > 0) N *= -1;
+	iN = normalize( TransformVector( iN, inst->transform ) );
+	if (dot( iN, N ) < 0) iN *= -1;
+
+	// direct light
+	bool shaded = false;
+	if (dot( rL, iN ) > 0) 
+		shaded = isoccluded_tlas( (float4)(I + L * 0.001f, 1), (float4)(L, 1), (float4)(rL, 1), 1000 );
+	float3 ibl = SampleIBL( iN );
+	float3 irr = ibl * 0.7f;
+	if (!shaded) irr += 0.7f * max( 0.0f, dot( iN, L ) ) * suncol;
+	float3 radiance = (1 - fog) * albedo * irr + fog * fogColor;		
 	return (float4)(radiance, 1.0f);
 }
 
@@ -275,6 +272,11 @@ void kernel Render(
 
 	// evaluate light transport
 	float4 E = Trace( ray );
+
+	// postprocessing
 	float3 A = aces( E.xyz );
-	write_imagef( pixels, (int2)(x, y), (float4)( A, 1 ) );
+	float2 uv = (float2)( u * (1 - u), v * (1 - v) );
+    float vig = 0.75f + 0.25f * pow( uv.x * uv.y * 15, 0.15f );
+
+	write_imagef( pixels, (int2)(x, y), (float4)( vig * A, 1 ) );
 }

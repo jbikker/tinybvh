@@ -79,7 +79,7 @@ void GLTFDemo::InitScene()
 	int tree1 = scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
 	int tree2 = scene.AddScene( "./testdata/smallpine/scene.gltf", mat4::Translate( 0, 0, 0 ) * mat4::Scale( 0.03f ) );
 	balloon = scene.AddScene( "./testdata/balloon/scene.gltf", mat4::Translate( 10, 10, 10 ) * mat4::Scale( 18 ) );
-	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 21.5f, -1.75f, -7 ) * mat4::Scale( 0.03f ) * mat4::RotateY( PI * 1.5f ) );
+	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 21.5f, -1.87f, -7 ) * mat4::Scale( 0.03f ) * mat4::RotateY( PI * 1.5f ) );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
 	scene.CollapseMeshes( tree1 );
 	scene.CreateOpacityMicroMaps( tree1 );
