@@ -2021,13 +2021,48 @@ void Node::Update( const ts_mat4& T )
 				mesh->blas.dynamicGPU->Build( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
 			case GPU_RIGID:
+			{
 				if (mesh->blas.rigidGPU == 0)
 				{
 					mesh->blas.rigidGPU = new tinybvh::BVH_GPU();
 					if (mesh->omaps) mesh->blas.rigidGPU->SetOpacityMicroMaps( mesh->omaps, 32 );
 				}
-				mesh->blas.rigidGPU->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
-				break;
+				// attempt to load cached BVH
+				bool loaded = false;
+				char t[265] = { 0 }, b[265] = { 0 };
+				if (Scene::bvhCaching && mesh->triangles.size() > 50'000)
+				{
+					printf( "attempt to load cached bvh... " );
+					strcpy( t, mesh->fileName.c_str() );
+					strcpy( b, mesh->fileName.c_str() );
+					strcat( t, ".tri" );
+					strcat( b, ".bvh" );
+					tinybvh::BVH& bvh = mesh->blas.rigidGPU->bvh;
+					if (bvh.Load( b, (tinybvh::bvhvec4*)mesh->vertices.data(), (uint)mesh->triangles.size() ))
+					{
+						printf( "done. Finalizing... " );
+						mesh->blas.rigidGPU->ConvertFrom( bvh, true );
+						loaded = true;
+						printf( "done.\n" );
+					}
+				}
+				if (!loaded)
+				{
+					mesh->blas.rigidGPU->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
+					if (Scene::bvhCaching && mesh->triangles.size() > 50'000)
+					{
+						printf( "not found: building... " );
+						FILE* f = fopen( t, "wb" );
+						unsigned count = (unsigned)mesh->triangles.size();
+						fwrite( &count, 1, 4, f );
+						fwrite( mesh->vertices.data(), 16 * 3, count, f );
+						fclose( f );
+						mesh->blas.rigidGPU->bvh.Save( b );
+						printf( "done.\n" );
+					}
+				}
+			}
+			break;
 			case GPU_STATIC:
 			{
 				if (mesh->blas.staticGPU == 0)
