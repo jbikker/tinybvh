@@ -787,7 +787,8 @@ public:
 	static int FindMaterialIDByOrigin( const char* name );
 	static int FindNextMaterialID( const char* name, const int matID );
 	static int FindNode( const char* name );
-	static void CollapseMeshes( const int nodeId );
+	static int FindMeshNode( const int nodeId, const int meshId );
+	static int CollapseMeshes( const int nodeId );
 	static void CreateOpacityMicroMaps( const int nodeId );
 	static void SetBVHType( const int nodeId, const int t );
 	static void SetNodeTransform( const int nodeId, const ts_mat4& transform );
@@ -3428,10 +3429,27 @@ void Scene::SetBVHType( const int nodeId, const int t )
 }
 
 //  +-----------------------------------------------------------------------------+
-//  |  Scene::CollapseMeshes                                                      |
-//  |  Combine all meshes in this subtree into a single one.                LH2'25|
+//  |  Scene::FindMeshNode                                                        |
+//  |  Find in a subtree the node that references the specified mesh.       LH2'25|
 //  +-----------------------------------------------------------------------------+
-void Scene::CollapseMeshes( const int subtreeRoot )
+int Scene::FindMeshNode( const int nodeId, const int meshId )
+{
+	Node* node = nodePool[nodeId];
+	if (node->meshID == meshId) return nodeId;
+	for (int id : node->childIdx)
+	{
+		int r = FindMeshNode( id, meshId );
+		if (r != -1) return r;
+	}
+	return -1;
+}
+
+//  +-----------------------------------------------------------------------------+
+//  |  Scene::CollapseMeshes                                                      |
+//  |  Combine all meshes in this subtree into a single one.                      |
+//  |  Returns the node index of the mesh.                                  LH2'25|
+//  +-----------------------------------------------------------------------------+
+int Scene::CollapseMeshes( const int subtreeRoot )
 {
 	// count triangles in subtree
 	int triCount = 0, firstMesh = -1, firstNode = -1, stack[128], stackPtr = 0;
@@ -3458,7 +3476,7 @@ void Scene::CollapseMeshes( const int subtreeRoot )
 		nodeId = stack[--stackPtr];
 	}
 	// safety net
-	if (triCount == 0 /* no meshes in subtree */ || badMesh /* issues */) return;
+	if (triCount == 0 /* no meshes in subtree */ || badMesh /* issues */) return 0;
 	// make room for extra data in 'firstMesh'
 	Mesh* first = meshPool[firstMesh];
 	first->vertices.resize( triCount * 3 );
@@ -3498,6 +3516,7 @@ void Scene::CollapseMeshes( const int subtreeRoot )
 	}
 	// all done!
 	printf( "done.\n" );
+	return firstMesh;
 }
 
 //  +-----------------------------------------------------------------------------+
