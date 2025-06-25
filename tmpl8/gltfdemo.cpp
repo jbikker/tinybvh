@@ -252,7 +252,7 @@ void GLTFDemo::Init()
 
 	// 8. IBL data.
 	IBL = new Buffer( 16 * 16 * 16 * sizeof( float4 ) );
-	FILE* f = fopen( "ibl.dat", "rb" );
+	FILE* f = fopen( "./cache/ibl.dat", "rb" );
 	if (f) fread( IBL->GetHostPtr(), 1, 16 * 16 * 16 * 16, f ); else
 	{
 		for (int z = 0; z < 16; z++)
@@ -275,7 +275,7 @@ void GLTFDemo::Init()
 				}
 			}
 		}
-		f = fopen( "ibl.dat", "wb" );
+		f = fopen( "./cache/ibl.dat", "wb" );
 		fwrite( IBL->GetHostPtr(), 1, 16 * 16 * 16 * 16, f );
 	}
 	fclose( f );
