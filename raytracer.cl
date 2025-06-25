@@ -388,5 +388,5 @@ void kernel RenderDepth(
 	ray.D = (float4)(normalize( (p1 + u * (p2 - p1) + v * (p3 - p1) - eye).xyz ), 1);
 	ray.rD = (float4)(1.0f / ray.D.x, 1.0f / ray.D.y, 1.0f / ray.D.z, 1);
 	uint steps = TraceDepth( ray );
-	write_imagef( pixels, (int2)(x, y), (float4)( inferno_quintic( (float)steps * 0.006f ), 1 ) );
+	write_imagef( pixels, (int2)(x, y), (float4)( plasma_quintic( (float)steps * 0.006f ), 1 ) );
 }
