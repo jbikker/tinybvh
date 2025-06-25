@@ -2029,12 +2029,12 @@ void Node::Update( const ts_mat4& T )
 				}
 				// attempt to load cached BVH
 				bool loaded = false;
-				char t[265] = { 0 }, b[265] = { 0 };
+				char t[265] = "./cache/", b[265] = "./cache/";
 				if (Scene::bvhCaching && mesh->triangles.size() > 50'000)
 				{
 					printf( "attempt to load cached bvh... " );
-					strcpy( t, mesh->fileName.c_str() );
-					strcpy( b, mesh->fileName.c_str() );
+					strcat( t, mesh->fileName.c_str() );
+					strcat( b, mesh->fileName.c_str() );
 					strcat( t, ".tri" );
 					strcat( b, ".bvh" );
 					tinybvh::BVH& bvh = mesh->blas.rigidGPU->bvh;
@@ -2072,12 +2072,12 @@ void Node::Update( const ts_mat4& T )
 				}
 				// attempt to load cached BVH
 				bool loaded = false;
-				char t[265] = { 0 }, b[265] = { 0 };
+				char t[265] = "./cache/", b[265] = "./cache/";
 				if (Scene::bvhCaching)
 				{
 					printf( "attempt to load cached bvh... " );
-					strcpy( t, mesh->fileName.c_str() );
-					strcpy( b, mesh->fileName.c_str() );
+					strcat( t, mesh->fileName.c_str() );
+					strcat( b, mesh->fileName.c_str() );
 					strcat( t, ".tri" );
 					strcat( b, ".bvh" );
 					tinybvh::BVH& bvh = mesh->blas.staticGPU->bvh8.bvh;
