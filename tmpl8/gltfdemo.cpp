@@ -79,17 +79,22 @@ void GLTFDemo::InitScene()
 	int tree1 = scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
 	int tree2 = scene.AddScene( "./testdata/smallpine/scene.gltf", mat4::Translate( 0, 0, 0 ) * mat4::Scale( 0.03f ) );
 	balloon = scene.AddScene( "./testdata/balloon/scene.gltf", mat4::Translate( 10, 10, 10 ) * mat4::Scale( 18 ) );
-	scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 21.5f, -1.87f, -7 ) * mat4::Scale( 0.03f ) * mat4::RotateY( PI * 1.5f ) );
+	int drone = scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 21.5f, -1.87f, -7 ) * mat4::Scale( 0.03f ) * mat4::RotateY( PI * 1.5f ) );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
 	scene.CollapseMeshes( tree1 );
+	scene.CollapseMeshes( balloon );
 	scene.CreateOpacityMicroMaps( tree1 );
 	int treeMesh = scene.CollapseMeshes( tree2 );
 	scene.CreateOpacityMicroMaps( tree2 );
 	int terrainMesh = scene.CollapseMeshes( terrain ); // combine the meshes into a single mesh; may yield a better BVH.
 	int terrainNode = scene.FindMeshNode( terrain /* possibly a hierarchy */, terrainMesh );
+	scene.SetBVHType( drone, GPU_DYNAMIC );
 	scene.SetBVHType( terrain, GPU_STATIC );
+	printf( "building BVHs...\n" );
 	scene.UpdateSceneGraph( 0 ); // this will build the BLASses and TLAS.
+	printf( "all done.\n" );
 	// place a rough circle of trees
+	printf( "populating terrain... " );
 	mat4 invTerrain = scene.nodePool[terrainNode]->combinedTransform.Inverted();
 	for (float a = 0; a < 2 * PI; a += 0.045f + RandomFloat() * 0.03f)
 	{
@@ -105,7 +110,9 @@ void GLTFDemo::InitScene()
 		scene.SetNodeTransform( nodeId, T1 * T2 * T3 );
 		scene.AddInstance( nodeId );
 	}
+	printf( "done. Updating TLAS... " );
 	scene.UpdateSceneGraph( 0 ); // this will build the BLASses and TLAS.
+	printf( "done.\n" );
 
 	// create OpenCL kernels
 	init = new Kernel( "raytracer.cl", "SetRenderData" );
