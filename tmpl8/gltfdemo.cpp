@@ -70,17 +70,24 @@ void GLTFDemo::Init()
 // -----------------------------------------------------------
 // Init stage 2: Scene loading
 // -----------------------------------------------------------
-void GLTFDemo::InitScene()
+void GLTFDemo::InitScene1()
 {
 	// load gltf scene
 	scene.SetBVHDefault( GPU_RIGID ); // even the drone does not use BVH rebuilds.
 	scene.CacheBVHs(); // BVHs will be saved to disk for faster loading and optimization.
-	int terrain = scene.AddScene( "./testdata/cratercity/scene.gltf", mat4::Translate( 0, -18.9f, 0 ) * mat4::RotateY( 1 ) );
-	int tree1 = scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
-	int tree2 = scene.AddScene( "./testdata/smallpine/scene.gltf", mat4::Translate( 0, 0, 0 ) * mat4::Scale( 0.03f ) );
+	terrain = scene.AddScene( "./testdata/cratercity/scene.gltf", mat4::Translate( 0, -18.9f, 0 ) * mat4::RotateY( 1 ) );
+	tree1 = scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
+	tree2 = scene.AddScene( "./testdata/smallpine/scene.gltf", mat4::Translate( 0, 0, 0 ) * mat4::Scale( 0.03f ) );
 	balloon = scene.AddScene( "./testdata/balloon/scene.gltf", mat4::Translate( 10, 10, 10 ) * mat4::Scale( 18 ) );
-	int drone = scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 21.5f, -1.87f, -7 ) * mat4::Scale( 0.03f ) * mat4::RotateY( PI * 1.5f ) );
+	drone = scene.AddScene( "./testdata/drone/scene.gltf", mat4::Translate( 21.5f, -1.87f, -7 ) * mat4::Scale( 0.03f ) * mat4::RotateY( PI * 1.5f ) );
 	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
+};
+
+// -----------------------------------------------------------
+// Init stage 2: Scene processing
+// -----------------------------------------------------------
+void GLTFDemo::InitScene2()
+{
 	scene.CollapseMeshes( tree1 );
 	scene.CollapseMeshes( balloon );
 	scene.CreateOpacityMicroMaps( tree1 );
@@ -119,7 +126,6 @@ void GLTFDemo::InitScene()
 	render = new Kernel( "raytracer.cl", "Render" );
 	renderNormals = new Kernel( "raytracer.cl", "RenderNormals" );
 	renderDepth = new Kernel( "raytracer.cl", "RenderDepth" );
-	screen = 0; // this tells the template to not overwrite the render target.
 
 	// create OpenCL buffers
 
@@ -322,6 +328,13 @@ void GLTFDemo::InitScene()
 }
 
 // -----------------------------------------------------------
+// Init stage 2: Scene finalizing
+// -----------------------------------------------------------
+void GLTFDemo::InitScene3()
+{
+}
+
+// -----------------------------------------------------------
 // Update camera
 // -----------------------------------------------------------
 bool GLTFDemo::UpdateCamera( float delta_time_s )
@@ -358,15 +371,25 @@ void GLTFDemo::Tick( float delta_time )
 {
 	// initialize: show logo first
 	static int initseq = 0;
-	if (initseq < 6)
+	if (initseq < 4) 
 	{
-		if (initseq < 5)
+		static Surface s( "testdata/tinybvh.png" );
+		switch (initseq)
 		{
+		case 0:
 			screen->Clear( 0 );
-			static Surface s( "testdata/tinybvh.png" );
+			break;
+		case 1:
+			InitScene1();
+			break;
+		case 2:
 			s.CopyTo( screen, (SCRWIDTH - s.width) / 2, (SCRHEIGHT - s.height) / 2 - 20 );
+			break;
+		case 3:
+			screen = 0; // this tells the template to not overwrite the render target.
+			InitScene2();
+			break;
 		}
-		else InitScene();
 		initseq++;
 		return;
 	}
