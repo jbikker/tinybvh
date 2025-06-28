@@ -59,6 +59,33 @@ struct BLASDesc
 	uint blasType;				// blas type: 0 = BVH_GPU, 1 = BVH8_CWBVH
 };
 
+// camera path.
+static float3 cam[] = {
+	float3( 48.42, 3.94, -11.66 ), float3( 47.43, 3.79, -11.55 ),
+	float3( 36.81, 2.14, -12.36 ), float3( 35.84, 1.99, -12.17 ),
+	float3( 19.47, 0.67, -12.98 ), float3( 18.50, 0.51, -12.78 ),
+	float3( -1.78, -0.80, -8.88 ), float3( -2.76, -0.93, -8.76 ),
+	float3( -33.32, 2.16, -2.20 ), float3( -32.43, 1.93, -1.80 ),
+	float3( -33.22, 4.81, 9.82 ), float3( -32.26, 4.58, 9.66 ),
+	float3( -26.91, 4.81, 17.93 ), float3( -26.55, 4.59, 17.02 ),
+	float3( -2.19, 4.81, 19.07 ), float3( -2.19, 4.59, 18.10 ),
+	float3( 21.82, 4.81, 15.33 ), float3( 21.57, 4.59, 14.39 ),
+	float3( 40.44, 4.81, -5.08 ), float3( 39.57, 4.34, -5.02 ),
+	float3( 33.39, 4.81, -17.78 ), float3( 32.86, 4.29, -17.11 ),
+	float3( 28.13, 3.45, -18.17 ), float3( 27.95, 2.93, -17.33 ),
+	float3( 20.24, 3.45, -17.62 ), float3( 20.39, 2.94, -16.78 ),
+	float3( 15.61, 1.06, -8.83 ), float3( 16.44, 0.60, -8.50 ),
+	float3( 17.39, 0.52, -3.10 ), float3( 18.07, 0.12, -3.72 ),
+	float3( 29.60, 2.18, -4.33 ), float3( 30.20, 1.71, -4.98 ),
+	float3( 32.83, 18.25, -5.91 ), float3( 33.32, 17.55, -6.44 ),
+	float3( 62.90, 28.35, -21.68 ), float3( 62.26, 27.67, -21.32 ),
+	float3( 40.17, 34.49, -53.01 ), float3( 39.84, 33.82, -52.35 ),
+	float3( -1.97, 31.37, -52.33 ), float3( -1.89, 30.71, -51.59 ),
+	float3( -32.71, 22.84, -23.49 ), float3( -32.05, 22.21, -23.10 ),
+	float3( -30.08, 9.19, -3.13 ), float3( -29.19, 8.74, -3.28 ),
+};
+static float st = 1;
+
 // -----------------------------------------------------------
 // Initialize the application
 // -----------------------------------------------------------
@@ -341,9 +368,9 @@ bool GLTFDemo::UpdateCamera( float delta_time_s )
 {
 	bvhvec3 right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), view ) );
 	bvhvec3 up = 0.8f * tinybvh_cross( view, right );
-
-	// get camera controls.
 	bool moved = false;
+#if 0
+	// get camera controls.
 	if (GetAsyncKeyState( 'A' )) eye += right * -1.0f * delta_time_s * 10.0f, moved = true;
 	if (GetAsyncKeyState( 'D' )) eye += right * delta_time_s * 10.0f, moved = true;
 	if (GetAsyncKeyState( 'W' )) eye += view * delta_time_s * 10.0f, moved = true;
@@ -354,7 +381,36 @@ bool GLTFDemo::UpdateCamera( float delta_time_s )
 	if (GetAsyncKeyState( VK_RIGHT )) view = tinybvh_normalize( view + right * delta_time_s ), moved = true;
 	if (GetAsyncKeyState( VK_UP )) view = tinybvh_normalize( view + up * -1.0f * delta_time_s ), moved = true;
 	if (GetAsyncKeyState( VK_DOWN )) view = tinybvh_normalize( view + up * delta_time_s ), moved = true;
-
+	static bool Pdown = false;
+	if (!GetAsyncKeyState( 'P' )) Pdown = false; else
+	{
+		if (!Pdown) // save point for path.
+		{
+			FILE* f = fopen( "spline.txt", "a" );
+			float3 P = eye + view;
+			fprintf( f, "	float3( %.2f, %.2f, %.2f ), float3( %.2f, %.2f, %.2f ),\n", eye.x, eye.y, eye.z, P.x, P.y, P.z );
+			fclose( f );
+		}
+		Pdown = true;
+	}
+#else
+	// update position on spline path.
+	st += delta_time_s * 0.2f;
+	if (st > sizeof( cam ) / 24 - 3) st = 1;
+	float t = st;
+	static int ps = 0;
+	int s = (uint)t;
+	if (s != ps) printf( "%i\n", s );
+	ps = s;
+	t -= (float)s, s *= 2;
+	const float3 Pp = cam[s - 2], Qp = cam[s], Rp = cam[s + 2], Sp = cam[s + 4];
+	const float3 Pt = cam[s - 1], Qt = cam[s + 1], Rt = cam[s + 3], St = cam[s + 5];
+	float3 a = 2.0f * Qp, b = Rp - Pp, c = 2.0f * Pp - 5.0f * Qp + 4.0f * Rp - Sp;
+	eye = 0.5f * (a + (b * t) + (c * t * t) + ((3.0f * Qp - 3.0f * Rp + Sp - Pp) * t * t * t));
+	a = 2.0f * Qt, b = Rt - Pt, c = 2.0f * Pt - 5.0f * Qt + 4.0f * Rt - St;
+	float3 target = 0.5f * (a + (b * t) + (c * t * t) + ((3.0f * Qt - 3.0f * Rt + St - Pt) * t * t * t));
+	view = normalize( target - float3( eye ) );
+#endif
 	// recalculate right, up
 	right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), view ) );
 	up = 0.8f * tinybvh_cross( view, right );
@@ -404,6 +460,11 @@ void GLTFDemo::Tick( float delta_time )
 	a += 0.00003f * delta_time;
 	if (a > TWOPI) a -= TWOPI;
 	scene.UpdateSceneGraph( delta_time * 0.001f );
+
+	// reset animation at keyframe 7.
+	static int rt = 0;
+	int it = (int)st;
+	if (it != 7 && it != 16 && it != 1) rt = 0; else { if (rt != it) scene.ResetAnimations(); rt = it; }
 
 	// sync tlas - TODO: would be better if this could be a single copy.
 	tlasNode->CopyToDevice();

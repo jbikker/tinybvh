@@ -794,6 +794,7 @@ public:
 	static void SetNodeTransform( const int nodeId, const ts_mat4& transform );
 	static const ts_mat4& GetNodeTransform( const int nodeId );
 	static void ResetAnimation( const int animId );
+	static void ResetAnimations();
 	static void UpdateAnimation( const int animId, const float dt );
 	static int AnimationCount() { return (int)animations.size(); }
 	// scene construction / maintenance
@@ -3548,6 +3549,15 @@ void Scene::ResetAnimation( const int animId )
 {
 	if (animId < 0 || animId >= animations.size()) return;
 	animations[animId]->Reset();
+}
+
+//  +-----------------------------------------------------------------------------+
+//  |  Scene::ResetAnimations                                                     |
+//  |  Reset all animations.                                                LH2'25|
+//  +-----------------------------------------------------------------------------+
+void Scene::ResetAnimations()
+{
+	for (auto a : animations) a->Reset();
 }
 
 //  +-----------------------------------------------------------------------------+
