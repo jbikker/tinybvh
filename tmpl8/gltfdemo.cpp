@@ -371,21 +371,24 @@ void GLTFDemo::Tick( float delta_time )
 {
 	// initialize: show logo first
 	static int initseq = 0;
-	if (initseq < 4) 
+	if (initseq < 5)
+	{
+		screen->Clear( 0 );
+		initseq++;
+		return;
+	}
+	else if (initseq < 8)
 	{
 		static Surface s( "testdata/tinybvh.png" );
 		switch (initseq)
 		{
-		case 0:
-			screen->Clear( 0 );
-			break;
-		case 1:
+		case 5:
 			InitScene1();
 			break;
-		case 2:
+		case 6:
 			s.CopyTo( screen, (SCRWIDTH - s.width) / 2, (SCRHEIGHT - s.height) / 2 - 20 );
 			break;
-		case 3:
+		case 7:
 			screen = 0; // this tells the template to not overwrite the render target.
 			InitScene2();
 			break;

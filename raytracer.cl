@@ -162,6 +162,31 @@ float3 SampleIBL( const float3 D )
 	return ((1 - fz) * pa + fz * pb).xyz;
 }
 
+float3 RayTarget( const float u, const float v, const float distortion,
+	const float3 p1, const float3 p2, const float3 p3,
+	const uint width, const uint height ) // From LH2
+{
+	float3 posOnPixel;
+#if 0
+	// no Panini
+	posOnPixel = p1 + u * (p2 - p1) + v * (p3 - p1);
+#else
+	// Panini projection
+	const float tx = u - 0.499f, ty = v - 0.499f;
+	const float rr = tx * tx + ty * ty;
+	const float rq = sqrt( rr ) * (1.0f + distortion * rr + distortion * rr * rr);
+	const float theta = atan2( tx, ty );
+	const float bx = (sin( theta ) * rq + 0.5f) * width;
+	const float by = (cos( theta ) * rq + 0.5f) * height;
+	// posOnPixel = p1 + (bx + r0) * (right / (float)scrSize.x) + (by + r1) * (up / (float)scrSize.y);
+	float r0 = 0, r1 = 0;
+	float3 right = p2 - p1;
+	float3 up = p3 - p1;
+	posOnPixel = p1 + (bx + r0) * (right / width) + (by + r1) * (up / height);
+#endif
+	return posOnPixel;
+}
+
 float4 Trace( struct Ray ray )
 {
 	// hardcoded directional light.
@@ -339,7 +364,7 @@ void kernel Render(
 	struct Ray ray;
 	float u = (float)x / width, v = (float)y / height;
 	ray.O = eye;
-	ray.D = (float4)(normalize( (p1 + u * (p2 - p1) + v * (p3 - p1) - eye).xyz ), 1);
+	ray.D = (float4)( RayTarget( u, v, 0.15f, p1.xyz, p2.xyz, p3.xyz, width, height ) - eye.xyz, 1 );
 	ray.rD = (float4)(1.0f / ray.D.x, 1.0f / ray.D.y, 1.0f / ray.D.z, 1);
 
 	// evaluate light transport
@@ -367,7 +392,7 @@ void kernel RenderNormals(
 	struct Ray ray;
 	float u = (float)x / width, v = (float)y / height;
 	ray.O = eye;
-	ray.D = (float4)(normalize( (p1 + u * (p2 - p1) + v * (p3 - p1) - eye).xyz ), 1);
+	ray.D = (float4)( RayTarget( u, v, 0.15f, p1.xyz, p2.xyz, p3.xyz, width, height ) - eye.xyz, 1 );
 	ray.rD = (float4)(1.0f / ray.D.x, 1.0f / ray.D.y, 1.0f / ray.D.z, 1);
 	write_imagef( pixels, (int2)(x, y), TraceNormals( ray ) );
 }
@@ -385,7 +410,7 @@ void kernel RenderDepth(
 	struct Ray ray;
 	float u = (float)x / width, v = (float)y / height;
 	ray.O = eye;
-	ray.D = (float4)(normalize( (p1 + u * (p2 - p1) + v * (p3 - p1) - eye).xyz ), 1);
+	ray.D = (float4)( RayTarget( u, v, 0.15f, p1.xyz, p2.xyz, p3.xyz, width, height ) - eye.xyz, 1 );
 	ray.rD = (float4)(1.0f / ray.D.x, 1.0f / ray.D.y, 1.0f / ray.D.z, 1);
 	uint steps = TraceDepth( ray );
 	write_imagef( pixels, (int2)(x, y), (float4)( plasma_quintic( (float)steps * 0.006f ), 1 ) );
