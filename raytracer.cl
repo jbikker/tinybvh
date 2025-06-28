@@ -171,7 +171,7 @@ float3 RayTarget( const float u, const float v, const float distortion,
 	// no Panini
 	posOnPixel = p1 + u * (p2 - p1) + v * (p3 - p1);
 #else
-	// Panini projection
+	// Panini projection, from: https://www.shadertoy.com/view/Wt3fzB
 	const float tx = u - 0.499f, ty = v - 0.499f;
 	const float rr = tx * tx + ty * ty;
 	const float rq = sqrt( rr ) * (1.0f + distortion * rr + distortion * rr * rr);
