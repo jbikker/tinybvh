@@ -400,7 +400,7 @@ bool GLTFDemo::UpdateCamera( float delta_time_s )
 	float t = st;
 	static int ps = 0;
 	int s = (uint)t;
-	if (s != ps) printf( "%i\n", s );
+	// if (s != ps) printf( "%i\n", s );
 	ps = s;
 	t -= (float)s, s *= 2;
 	const float3 Pp = cam[s - 2], Qp = cam[s], Rp = cam[s + 2], Sp = cam[s + 4];
@@ -455,8 +455,8 @@ void GLTFDemo::Tick( float delta_time )
 
 	// handle user input and update camera.
 	UpdateCamera( delta_time * 0.001f );
-	static float a = 4;
-	scene.SetNodeTransform( balloon, mat4::Translate( 17 * sinf( a ), 7 + 2 * sinf( a ), 21 * cosf( a ) ) * mat4::Scale( 18 ) ); // mat4::Translate( float3( sinf( a ), 10, cosf( a ) ) * 20.f ) * mat4::Scale( 18 ) );
+	static float a = 2;
+	scene.SetNodeTransform( balloon, mat4::Translate( 17 * sinf( a ), 2 - 2 * sinf( a ), 21 * cosf( a ) ) * mat4::Scale( 18 ) ); // mat4::Translate( float3( sinf( a ), 10, cosf( a ) ) * 20.f ) * mat4::Scale( 18 ) );
 	a += 0.00003f * delta_time;
 	if (a > TWOPI) a -= TWOPI;
 	scene.UpdateSceneGraph( delta_time * 0.001f );
