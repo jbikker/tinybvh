@@ -85,6 +85,7 @@ static float3 cam[] = {
 	float3( -30.08, 9.19, -3.13 ), float3( -29.19, 8.74, -3.28 ),
 };
 static float st = 1;
+static int mode = 0;
 
 // -----------------------------------------------------------
 // Initialize the application
@@ -396,11 +397,11 @@ bool GLTFDemo::UpdateCamera( float delta_time_s )
 #else
 	// update position on spline path.
 	st += delta_time_s * 0.2f;
-	if (st > sizeof( cam ) / 24 - 3) st = 1;
+	if (st > sizeof( cam ) / 24 - 3) st = 1, mode = 0;
 	float t = st;
 	static int ps = 0;
 	int s = (uint)t;
-	// if (s != ps) printf( "%i\n", s );
+	if (s != ps) printf( "%i\n", s );
 	ps = s;
 	t -= (float)s, s *= 2;
 	const float3 Pp = cam[s - 2], Qp = cam[s], Rp = cam[s + 2], Sp = cam[s + 4];
@@ -462,9 +463,15 @@ void GLTFDemo::Tick( float delta_time )
 	scene.UpdateSceneGraph( delta_time * 0.001f );
 
 	// reset animation at keyframe 7.
-	static int rt = 0;
+	static int rt = 0, mt = 0;
 	int it = (int)st;
 	if (it != 7 && it != 16 && it != 1) rt = 0; else { if (rt != it) scene.ResetAnimations(); rt = it; }
+	if (it != 8 && it != 9 && it != 10 && it != 17 && it != 18 && it != 19) mt = 0; else if (mt != it)
+	{
+		mode = (mode + 1) % 3;
+		if (it == 10) scene.ResetAnimations();
+		mt = it;
+	}
 
 	// sync tlas - TODO: would be better if this could be a single copy.
 	tlasNode->CopyToDevice();
@@ -473,7 +480,6 @@ void GLTFDemo::Tick( float delta_time )
 
 	// start device-side rendering.
 	static bool altDown = false;
-	static int mode = 0;
 	if (!GetAsyncKeyState( VK_TAB )) altDown = false; else
 	{
 		if (!altDown) altDown = false, mode = (mode + 1) % 3;
@@ -487,15 +493,15 @@ void GLTFDemo::Tick( float delta_time )
 	}
 	else if (mode == 1)
 	{
-		// only normals
-		renderNormals->SetArguments( pixels, SCRWIDTH, SCRHEIGHT, eye, p1, p2, p3 );
-		renderNormals->Run2D( oclint2( SCRWIDTH, SCRHEIGHT ) );
-	}
-	else // if (mode == 2)
-	{
 		// BVH structure
 		renderDepth->SetArguments( pixels, SCRWIDTH, SCRHEIGHT, eye, p1, p2, p3 );
 		renderDepth->Run2D( oclint2( SCRWIDTH, SCRHEIGHT ) );
+	}
+	else // if (mode == 2)
+	{
+		// only normals
+		renderNormals->SetArguments( pixels, SCRWIDTH, SCRHEIGHT, eye, p1, p2, p3 );
+		renderNormals->Run2D( oclint2( SCRWIDTH, SCRHEIGHT ) );
 	}
 
 #if 0
