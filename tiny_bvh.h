@@ -90,8 +90,8 @@ THE SOFTWARE.
 
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
-#define TINY_BVH_VERSION_MINOR	5
-#define TINY_BVH_VERSION_SUB	7
+#define TINY_BVH_VERSION_MINOR	6
+#define TINY_BVH_VERSION_SUB	0
 
 // Run-time checks; disabled by default.
 // #define PARANOID // checks out-of-bound access of slices
@@ -135,11 +135,16 @@ THE SOFTWARE.
 #define RDH_MAX_WEIGHT 0.8f
 
 // Triangle intersection: "Watertight"
-#define WATERTIGHT_TRITEST
+// #define WATERTIGHT_TRITEST
 
 // 'Infinity' values
 #define BVH_FAR	1e30f		// actual valid ieee range: 3.40282347E+38
 #define BVH_DBL_FAR 1e300	// actual valid ieee range: 1.797693134862315E+308
+
+// Threaded BuildAVX
+#ifndef MT_BUILD_THRESHOLD
+#define MT_BUILD_THRESHOLD 50'000 // single-threaded builds below this triangle count
+#endif
 
 // Features
 #ifndef NO_DOUBLE_PRECISION_SUPPORT
@@ -187,6 +192,8 @@ THE SOFTWARE.
 #endif
 #include <cstdint>
 #include <atomic> // for SBVH builds
+#include <vector>
+#include <thread> // for threaded builds
 
 // Platform-independent compile-time warnings.
 #define EMIT_COMPILER_WARNING_STRINGIFY0(x) #x
@@ -751,8 +758,6 @@ struct BVHContext
 	void* userdata = nullptr;
 };
 
-enum TraceDevice : uint32_t { USE_CPU = 1, USE_GPU };
-
 class BVHBase
 {
 public:
@@ -772,7 +777,8 @@ public:
 		LAYOUT_BVH4_GPU,
 		LAYOUT_MBVH8,
 		LAYOUT_CWBVH,
-		LAYOUT_BVH8_AVX2
+		LAYOUT_BVH8_AVX2,
+		LAYOUT_VOXELSET
 	};
 	struct ALIGNED( 32 ) Fragment
 	{
@@ -804,6 +810,11 @@ public:
 	uint32_t hqbvhbins = HQBVHBINS;	// number of bins to use in SBVH construction.
 	bool hqbvhoddeven = false;		// if true, odd levels will use one extra bin during construction.
 	bvhvec3 aabbMin, aabbMax;		// bounds of the root node of the BVH.
+	// Opacity maps support.
+	uint32_t opmapN = 0;			// opacity micro map subdivision: 0 = no maps.
+	uint32_t* opmap = 0;			// opacity micro maps; opmapN^2 bits per triangle.
+	bool hasOpacityMicroMaps() const { return opmapN > 0; }
+	void SetOpacityMicroMaps( uint32_t* mapData, uint32_t N ) { opmap = mapData, opmapN = N; }
 	// Custom memory allocation
 	void* AlignedAlloc( size_t size );
 	void AlignedFree( void* ptr );
@@ -812,7 +823,7 @@ public:
 protected:
 	~BVHBase() {}
 	__FORCEINLINE void IntersectTri( Ray& ray, const uint32_t idx, const bvhvec4slice& verts, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
-	__FORCEINLINE bool TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
+	__FORCEINLINE bool TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t triIdx, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
 	static void PrecomputeTriangle( const bvhvec4slice& vert, const uint32_t ti0, const uint32_t ti1, const uint32_t ti2, float* T );
 	static float SA( const bvhvec3& aabbMin, const bvhvec3& aabbMax );
 };
@@ -900,18 +911,15 @@ public:
 	void Intersect256RaysSSE( Ray* packet ) const; // requires BVH_USEAVX
 	// private:
 	void PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
-	void Build();
+	void Build( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void BuildFullSweep();
 	bool IsOccludedTLAS( const Ray& ray ) const;
 	int32_t IntersectTLAS( Ray& ray ) const;
 	void PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
-	void BuildAVX();
+	void BuildAVX( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims );
 	void BuildHQ();
-	void BuildHQTask(
-		uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth, uint32_t sliceStart,
-		uint32_t sliceEnd, uint32_t* triIdxB, uint32_t& taskCount, SubdivTask* task
-	);
+	void BuildHQTask( uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* triIdxB );
 	bool ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, bvhvec3 minDim, const uint32_t splitAxis ) const;
 	void SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const bvhvec3& minDim, const uint32_t splitAxis, const float splitPos, bool& leftOK, bool& rightOK ) const;
 protected:
@@ -926,7 +934,7 @@ protected:
 	// Helpers
 	inline float SplitCostSAH( const float rAparent, const float Aleft, const int Nleft, const float Aright, const int Nright ) const;
 	inline float NoSplitCostSAH( const int Nparent ) const;
-	void QuickSort( const float* centroid, uint32_t* primIdx, int first, int last );
+	void QuickSort( const uint32_t axis, uint32_t* primIdx, int first, int last );
 	float EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx = 0 ) const;
 	float PrimArea( const uint32_t p ) const;
 public:
@@ -948,12 +956,57 @@ public:
 	uint32_t nextFrag = 0;			// used during SBVH build to keep track of next free fragment.
 	Fragment* fragment = 0;			// input primitive bounding boxes.
 	bool useFullSweep = false;		// for experiments only; full-sweep SAH builder.
-	// Atomic counters for threaded SBVH build
-	static inline std::atomic<uint32_t> atomicNewNodePtr;
-	static inline std::atomic<uint32_t> atomicNextFrag;
 	// Custom geometry intersection callback
 	bool (*customIntersect)(Ray&, const unsigned) = 0;
 	bool (*customIsOccluded)(const Ray&, const unsigned) = 0;
+private:
+	// Atomic counters for threaded builds
+	std::atomic<uint32_t>* atomicNewNodePtr = 0;
+	std::atomic<uint32_t>* atomicNextFrag = 0;
+};
+
+class VoxelSet : public BVHBase // just so it can be attached conveniently in a TLAS
+{
+public:
+	struct DDAState
+	{
+		uint32_t X, Y, Z;		// 12 bytes
+		float dummy1 = 0;		// 16 bytes
+		bvhvec3 tmax;
+		float dummy2 = 0;		// 16 values, 64 bytes in total
+	};
+	VoxelSet();
+	void Set( const uint32_t x, const uint32_t y, const uint32_t z, const uint32_t v );
+	void UpdateTopGrid();
+	bvhvec3 GetNormal( const Ray& ray ) const;
+	int32_t Intersect( Ray& ray ) const;
+	bool IsOccluded( const Ray& ray ) const;
+private:
+	bool Setup3DDDA( const Ray& ray, const bvhvec3& Dsign, DDAState& state, const bvhint3& step, bvhvec3& tdelta, float& t ) const;
+	// lowest level: 1 32-bit value per voxel
+public:
+	static constexpr int objectDim = 256; // 64, 128 or 256.
+private:
+	static constexpr int objectSize = objectDim * objectDim * objectDim;
+	// grid level: collection of bricks
+	static constexpr int brickDim = 8;
+	static constexpr int brickSize = brickDim * brickDim * brickDim;
+	static constexpr int gridDim = objectDim / brickDim;
+	static constexpr int gridSize = gridDim * gridDim * gridDim;
+	// topgrid level: 1 bit for each group of bricks
+	static constexpr int groupDim = 4;
+	static constexpr int groupSize = groupDim * groupDim * groupDim;
+	static constexpr int topGridDim = gridDim / groupDim;
+	static constexpr int topGridSize = topGridDim * topGridDim * topGridDim;
+	// masks
+	static constexpr uint32_t topResMask = gridDim - groupDim;
+	static constexpr uint32_t superMask = topResMask + topResMask * gridDim + topResMask * gridDim * gridDim;
+	// non-static data
+	uint32_t* grid = 0;
+	uint32_t* brick = 0;
+	uint32_t brickCount = (objectDim * objectDim) / 16; // will grow as needed; scales roughly quadratically with objectDim
+	uint32_t freeBrickPtr = 1; // skip 1, as 0 denotes an empty brick in the topgrid.
+	uint32_t* topGrid = 0;
 };
 
 #ifdef DOUBLE_PRECISION_SUPPORT
@@ -986,7 +1039,7 @@ public:
 	void Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Double** blasses, const uint64_t blasCount );
 	void Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&), const uint64_t primCount );
 	void PrepareBuild( const bvhdbl3* vertices, const uint64_t primCount );
-	void Build();
+	void Build( uint64_t nodeIdx = 0, uint32_t depth = 0 );
 	double SAHCost( const uint64_t nodeIdx = 0 ) const;
 	int32_t Intersect( RayEx& ray ) const;
 	bool IsOccluded( const RayEx& ray ) const;
@@ -1009,6 +1062,9 @@ public:
 	// Custom geometry intersection callback
 	bool (*customIntersect)(RayEx&, uint64_t) = 0;
 	bool (*customIsOccluded)(const RayEx&, uint64_t) = 0;
+private:
+	// Atomic counter for threaded builds
+	std::atomic<uint64_t>* atomicNewNodePtr = 0;
 };
 
 #endif // DOUBLE_PRECISION_SUPPORT
@@ -1487,18 +1543,18 @@ loop: R = bvhvec3( tinybvh_rndfloat( s ) - 0.5f, tinybvh_rndfloat( s ) * 0.5f, t
 #define BVH_FATAL_ERROR(s) BVH_FATAL_ERROR_IF(1,s)
 
 // Fallbacks to be used in the absence of HW SIMD support.
-#ifndef BVH_USESSE
+#if !defined BVH_USESSE || defined BVH_USENEON
 int32_t BVH4_CPU::Intersect( Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::Intersect requires SSE. " ); }
 bool BVH4_CPU::IsOccluded( const Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::IsOccluded requires SSE. " ); }
 #endif
-#if !defined BVH_USEAVX
+#if !defined BVH_USEAVX || defined BVH_USENEON
 void BVH::BuildAVX( const bvhvec4*, const uint32_t ) { BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX." ); }
 void BVH::BuildAVX( const bvhvec4slice& ) { BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX." ); }
 void BVH::BuildAVX( const bvhvec4*, const uint32_t*, const uint32_t ) { BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX." ); }
 void BVH::BuildAVX( const bvhvec4slice&, const uint32_t*, const uint32_t ) { BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX." ); }
 int32_t BVH8_CWBVH::Intersect( Ray& ) const { BVH_FATAL_ERROR( "BVH8_CWBVH::Intersect requires AVX." ); }
 #endif // BVH_USEAVX
-#if !defined BVH_USEAVX2
+#if !defined BVH_USEAVX2 || defined BVH_USENEON
 int32_t BVH8_CPU::Intersect( Ray& ) const { BVH_FATAL_ERROR( "BVH8_CPU::Intersect requires AVX2 and FMA." ); }
 bool BVH8_CPU::IsOccluded( const Ray& ) const { BVH_FATAL_ERROR( "BVH8_CPU::IsOccluded requires AVX2 and FMA." ); }
 #endif // BVH_USEAVX2
@@ -1988,7 +2044,7 @@ void BVH::Build( const bvhvec4slice& vertices )
 {
 	// build the BVH from vertices stored in a slice.
 	PrepareBuild( vertices, 0, 0 /* empty index list; primcount is derived from slice */ );
-	Build();
+	if (useFullSweep) BuildFullSweep(); else Build();
 }
 
 void BVH::Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t prims )
@@ -2001,7 +2057,7 @@ void BVH::Build( const bvhvec4slice& vertices, const uint32_t* indices, uint32_t
 {
 	// build the BVH from vertices stored in a slice, indexed by 'indices'.
 	PrepareBuild( vertices, indices, prims );
-	Build();
+	if (useFullSweep) BuildFullSweep(); else Build();
 }
 
 void BVH::Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&), const uint32_t primCount )
@@ -2145,16 +2201,18 @@ void BVH::PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, c
 	// all set; actual build happens in BVH::Build.
 }
 
-void BVH::Build()
+void Build_( uint32_t nodeIdx, uint32_t depth, BVH* bvh )
 {
-	// pass control to full sweep builder if requested
-	if (useFullSweep)
-	{
-		BuildFullSweep();
-		return;
-	}
+	bvh->Build( nodeIdx, depth );
+}
+void BVH::Build( uint32_t nodeIdx, uint32_t depth )
+{
+	// initialize atomic counter on first call
+	if (depth == 0) atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
+	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
+	if (triCount < MT_BUILD_THRESHOLD) depth = 999;
 	// subdivide root node recursively
-	uint32_t task[256], taskCount = 0, nodeIdx = 0;
+	uint32_t task[256], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-20f, bestLMin = 0, bestLMax = 0, bestRMin = 0, bestRMax = 0;
 	while (1)
@@ -2231,32 +2289,45 @@ void BVH::Build()
 			// create child nodes
 			uint32_t leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
-			const int32_t lci = newNodePtr++, rci = newNodePtr++;
-			bvhNode[lci].aabbMin = bestLMin, bvhNode[lci].aabbMax = bestLMax;
-			bvhNode[lci].leftFirst = node.leftFirst, bvhNode[lci].triCount = leftCount;
-			bvhNode[rci].aabbMin = bestRMin, bvhNode[rci].aabbMax = bestRMax;
-			bvhNode[rci].leftFirst = j, bvhNode[rci].triCount = rightCount;
-			node.leftFirst = lci, node.triCount = 0;
-			// recurse
-			task[taskCount++] = rci, nodeIdx = lci;
+			const int32_t n = atomicNewNodePtr->fetch_add( 2 );
+			bvhNode[n].aabbMin = bestLMin, bvhNode[n].aabbMax = bestLMax;
+			bvhNode[n].leftFirst = node.leftFirst, bvhNode[n].triCount = leftCount;
+			bvhNode[n + 1].aabbMin = bestRMin, bvhNode[n + 1].aabbMax = bestRMax;
+			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
+			node.leftFirst = n, node.triCount = 0;
+			if (depth < 5)
+			{
+				std::thread t1( &Build_, n, depth + 1, this );
+				std::thread t2( &Build_, n + 1, depth + 1, this );
+				t1.join();
+				t2.join();
+				break;
+			}
+			task[taskCount++] = n + 1, nodeIdx = n;
 		}
 		// fetch subdivision task from stack
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
 	// all done.
-	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
-	refittable = true; // not using spatial splits: can refit this BVH
-	may_have_holes = false; // the reference builder produces a continuous list of nodes
-	bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
-	usedNodes = newNodePtr;
+	if (depth == 0 || triCount < MT_BUILD_THRESHOLD)
+	{
+		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
+		refittable = true; // not using spatial splits: can refit this BVH
+		may_have_holes = false; // the reference builder produces a continuous list of nodes
+		bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
+		usedNodes = newNodePtr = atomicNewNodePtr->load();
+		delete atomicNewNodePtr;
+	}
 }
 
-void BVH::QuickSort( const float* a, uint32_t* q, int f, int l ) // minimal qsort
+void BVH::QuickSort( const uint32_t a, uint32_t* q, int f, int l ) // minimal qsort
 {
-	static int* s = (int*)AlignedAlloc( 4096 * 4 ); // some scenes have weird distributions.
+	static int* s = (int*)AlignedAlloc( 4096 * 4 ); // some scenes have weird distributions...
 	int p = 0, h, i, r;
 start: while (f >= l) { if (p == 0) return; else f = s[--p], l = s[--p]; }
-	for (r = f, i = f + 1; i <= l; i++) if (a[q[i]] < a[q[f]]) h = q[++r], q[r] = q[i], q[i] = h;
+	for (r = f, i = f + 1; i <= l; i++)
+		if (fragment[q[i]].bmin[a] + fragment[q[i]].bmax[a] < fragment[q[f]].bmin[a] + fragment[q[f]].bmax[a])
+			h = q[++r], q[r] = q[i], q[i] = h;
 	h = q[f], q[f] = q[r], q[r] = h, s[p++] = l, s[p++] = r + 1, l = r - 1; goto start;
 }
 
@@ -2266,24 +2337,15 @@ start: while (f >= l) { if (p == 0) return; else f = s[--p], l = s[--p]; }
 // be prevented.
 void BVH::BuildFullSweep()
 {
-	// allocate and calculate fragment centroids, per axis
-	float* centroid[3];
-	for (int a = 0; a < 3; a++) centroid[a] = (float*)AlignedAlloc( triCount * sizeof( float ) );
 	// allocate data for O(N) stable partition
 	uint8_t* flag = (uint8_t*)AlignedAlloc( triCount );
 	uint32_t* tmp = (uint32_t*)AlignedAlloc( triCount * 4 );
-	// prepare per-axis sorted primitive index arrays
-	for (uint32_t i = 0; i < triCount; i++)
-	{
-		const bvhvec3 C = fragment[i].bmin + fragment[i].bmax;
-		centroid[0][i] = C.x, centroid[1][i] = C.y, centroid[2][i] = C.z;
-	}
 	uint32_t* sortedIdx[3];
 	for (int a = 0; a < 3; a++) sortedIdx[a] = (uint32_t*)AlignedAlloc( triCount * 4 );
 	for (uint32_t a = 0; a < 3; a++)
 	{
 		memcpy( sortedIdx[a], primIdx, triCount * 4 );
-		QuickSort( centroid[a], sortedIdx[a], 0, triCount - 1 );
+		QuickSort( a, sortedIdx[a], 0, triCount - 1 );
 	}
 	// allocate space for right sweep
 	float* SAR = (float*)AlignedAlloc( triCount * sizeof( float ) );
@@ -2364,7 +2426,6 @@ void BVH::BuildFullSweep()
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
 	// cleanup allocated buffers
-	for (int a = 0; a < 3; a++) AlignedFree( centroid[a] );
 	for (int a = 0; a < 3; a++) AlignedFree( sortedIdx[a] );
 	AlignedFree( SAR );
 	AlignedFree( flag );
@@ -2481,22 +2542,23 @@ float BVH::NoSplitCostSAH( const int Nparent ) const
 	return (float)(l_quads ? (((Nparent + 3) >> 2) * 4) : Nparent) * c_int;
 }
 
+void BuildHQTask_( uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth,
+	uint32_t sliceStart, uint32_t sliceEnd, uint32_t* idxTmp, BVH* bvh )
+{
+	bvh->BuildHQTask( nodeIdx, depth, maxDepth, sliceStart, sliceEnd, idxTmp );
+}
 void BVH::BuildHQTask(
 	uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth,
-	uint32_t sliceStart, uint32_t sliceEnd, uint32_t* idxTmp, uint32_t& taskCount, SubdivTask* task
+	uint32_t sliceStart, uint32_t sliceEnd, uint32_t* idxTmp
 )
 {
-	// SBVH construction uses basic threading:
-	// - First, 32 subtrees are generated and placed in array SubdivTask* task
-	// - Next, these subtrees are completed in parallel using a local stack.
-	// TODO: Run object and spatial subdivision in stage 1 on multiple threads.
 	ALIGNED( 64 ) SubdivTask localTask[512];
 	uint32_t localTasks = 0;
 	bvhvec3 bestLMin = 0, bestLMax = 0, bestRMin = 0, bestRMax = 0;
 	BVHNode& root = bvhNode[0];
 	const float rootArea = tinybvh_half_area( root.aabbMax - root.aabbMin );
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f /* don't touch, carefully picked */;
-	const uint32_t bins = hqbvhbins;
+	uint32_t binCount = hqbvhbins;
 	while (1)
 	{
 		while (1)
@@ -2504,20 +2566,20 @@ void BVH::BuildHQTask(
 			// fetch node to subdivide
 			BVHNode& node = bvhNode[nodeIdx];
 			// alternating bin counts for optimizer.
-			if (hqbvhoddeven) hqbvhbins = bins + (depth & 1); // odd levels get one more
+			if (hqbvhoddeven) binCount = hqbvhbins + (depth & 1); // odd levels get one more
 			// find optimal object split
 			bvhvec3 binMin[3][MAXHQBINS], binMax[3][MAXHQBINS];
-			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < hqbvhbins; i++) binMin[a][i] = BVH_FAR, binMax[a][i] = -BVH_FAR;
+			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < binCount; i++) binMin[a][i] = BVH_FAR, binMax[a][i] = -BVH_FAR;
 			uint32_t count[3][MAXHQBINS];
-			for (uint32_t i = 0; i < 3; i++) memset( count[i], 0, hqbvhbins * 4 );
-			const bvhvec3 rpd3 = bvhvec3( (float)hqbvhbins / (node.aabbMax - node.aabbMin) ), nmin3 = node.aabbMin;
+			for (uint32_t i = 0; i < 3; i++) memset( count[i], 0, binCount * 4 );
+			const bvhvec3 rpd3 = bvhvec3( (float)binCount / (node.aabbMax - node.aabbMin) ), nmin3 = node.aabbMin;
 			for (uint32_t i = 0; i < node.triCount; i++) // process all tris for x,y and z at once
 			{
 				const uint32_t fi = primIdx[node.leftFirst + i];
 				bvhint3 bi = bvhint3( ((fragment[fi].bmin + fragment[fi].bmax) * 0.5f - nmin3) * rpd3 );
-				bi.x = tinybvh_clamp( bi.x, 0, hqbvhbins - 1 );
-				bi.y = tinybvh_clamp( bi.y, 0, hqbvhbins - 1 );
-				bi.z = tinybvh_clamp( bi.z, 0, hqbvhbins - 1 );
+				bi.x = tinybvh_clamp( bi.x, 0, binCount - 1 );
+				bi.y = tinybvh_clamp( bi.y, 0, binCount - 1 );
+				bi.z = tinybvh_clamp( bi.z, 0, binCount - 1 );
 				binMin[0][bi.x] = tinybvh_min( binMin[0][bi.x], fragment[fi].bmin );
 				binMax[0][bi.x] = tinybvh_max( binMax[0][bi.x], fragment[fi].bmax ), count[0][bi.x]++;
 				binMin[1][bi.y] = tinybvh_min( binMin[1][bi.y], fragment[fi].bmin );
@@ -2535,19 +2597,19 @@ void BVH::BuildHQTask(
 				bvhvec3 lBMax[MAXHQBINS - 1], rBMax[MAXHQBINS - 1], r1 = BVH_FAR, r2 = -BVH_FAR;
 				float AL[MAXHQBINS - 1], AR[MAXHQBINS - 1];		// left and right area per split plane
 				int NL[MAXHQBINS - 1], NR[MAXHQBINS - 1];		// summed left and right tricount
-				for (uint32_t lN = 0, rN = 0, i = 0; i < hqbvhbins - 1; i++)
+				for (uint32_t lN = 0, rN = 0, i = 0; i < binCount - 1; i++)
 				{
 					lBMin[i] = l1 = tinybvh_min( l1, binMin[a][i] );
-					rBMin[hqbvhbins - 2 - i] = r1 = tinybvh_min( r1, binMin[a][hqbvhbins - 1 - i] );
+					rBMin[binCount - 2 - i] = r1 = tinybvh_min( r1, binMin[a][binCount - 1 - i] );
 					lBMax[i] = l2 = tinybvh_max( l2, binMax[a][i] );
-					rBMax[hqbvhbins - 2 - i] = r2 = tinybvh_max( r2, binMax[a][hqbvhbins - 1 - i] );
-					lN += count[a][i], rN += count[a][hqbvhbins - 1 - i];
-					NL[i] = lN, NR[hqbvhbins - 2 - i] = rN;
+					rBMax[binCount - 2 - i] = r2 = tinybvh_max( r2, binMax[a][binCount - 1 - i] );
+					lN += count[a][i], rN += count[a][binCount - 1 - i];
+					NL[i] = lN, NR[binCount - 2 - i] = rN;
 					AL[i] = lN == 0 ? BVH_FAR : tinybvh_half_area( l2 - l1 );
-					AR[hqbvhbins - 2 - i] = rN == 0 ? BVH_FAR : tinybvh_half_area( r2 - r1 );
+					AR[binCount - 2 - i] = rN == 0 ? BVH_FAR : tinybvh_half_area( r2 - r1 );
 				}
 				// evaluate bin totals to find best position for object split
-				for (uint32_t i = 0; i < hqbvhbins - 1; i++)
+				for (uint32_t i = 0; i < binCount - 1; i++)
 				{
 					const float C = SplitCostSAH( rSAV, AL[i], NL[i], AR[i], NR[i] );
 					if (C >= splitCost) continue;
@@ -2568,17 +2630,17 @@ void BVH::BuildHQTask(
 					// setup bins
 					bvhvec3 sbinMin[MAXHQBINS], sbinMax[MAXHQBINS];
 					int countIn[MAXHQBINS], countOut[MAXHQBINS];
-					memset( countIn, 0, hqbvhbins * 4 );
-					memset( countOut, 0, hqbvhbins * 4 );
-					for (uint32_t i = 0; i < hqbvhbins; i++) sbinMin[i] = BVH_FAR, sbinMax[i] = -BVH_FAR;
+					memset( countIn, 0, binCount * 4 );
+					memset( countOut, 0, binCount * 4 );
+					for (uint32_t i = 0; i < binCount; i++) sbinMin[i] = BVH_FAR, sbinMax[i] = -BVH_FAR;
 					// populate bins with clipped fragments
-					const float planeDist = (node.aabbMax[a] - node.aabbMin[a]) / (hqbvhbins * 0.9999f);
+					const float planeDist = (node.aabbMax[a] - node.aabbMin[a]) / (binCount * 0.9999f);
 					const float rPlaneDist = 1.0f / planeDist, nodeMin = node.aabbMin[a];
 					for (unsigned i = 0; i < node.triCount; i++)
 					{
 						const uint32_t fi = primIdx[node.leftFirst + i];
-						const int bin1 = tinybvh_clamp( (int32_t)((fragment[fi].bmin[a] - nodeMin) * rPlaneDist), 0, hqbvhbins - 1 );
-						const int bin2 = tinybvh_clamp( (int32_t)((fragment[fi].bmax[a] - nodeMin) * rPlaneDist), 0, hqbvhbins - 1 );
+						const int bin1 = tinybvh_clamp( (int32_t)((fragment[fi].bmin[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
+						const int bin2 = tinybvh_clamp( (int32_t)((fragment[fi].bmax[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
 						countIn[bin1]++, countOut[bin2]++;
 						if (bin2 == bin1) // fragment fits in a single bin
 							sbinMin[bin1] = tinybvh_min( sbinMin[bin1], fragment[fi].bmin ),
@@ -2588,7 +2650,7 @@ void BVH::BuildHQTask(
 							// clip fragment to each bin it overlaps
 							bvhvec3 bmin = node.aabbMin, bmax = node.aabbMax;
 							bmin[a] = nodeMin + planeDist * j;
-							bmax[a] = j == (int)(hqbvhbins - 2) ? node.aabbMax[a] : (bmin[a] + planeDist);
+							bmax[a] = j == (int)(binCount - 2) ? node.aabbMax[a] : (bmin[a] + planeDist);
 							Fragment orig = fragment[fi];
 							Fragment tmpFrag;
 							if (!ClipFrag( orig, tmpFrag, bmin, bmax, minDim, a )) continue;
@@ -2601,17 +2663,17 @@ void BVH::BuildHQTask(
 					bvhvec3 lBMax[MAXHQBINS - 1], rBMax[MAXHQBINS - 1], r1 = BVH_FAR, r2 = -BVH_FAR;
 					float AL[MAXHQBINS], AR[MAXHQBINS];
 					int NL[MAXHQBINS], NR[MAXHQBINS];
-					for (uint32_t lN = 0, rN = 0, i = 0; i < hqbvhbins - 1; i++)
+					for (uint32_t lN = 0, rN = 0, i = 0; i < binCount - 1; i++)
 					{
-						lBMin[i] = l1 = tinybvh_min( l1, sbinMin[i] ), rBMin[hqbvhbins - 2 - i] = r1 = tinybvh_min( r1, sbinMin[hqbvhbins - 1 - i] );
-						lBMax[i] = l2 = tinybvh_max( l2, sbinMax[i] ), rBMax[hqbvhbins - 2 - i] = r2 = tinybvh_max( r2, sbinMax[hqbvhbins - 1 - i] );
-						lN += countIn[i], rN += countOut[hqbvhbins - 1 - i];
+						lBMin[i] = l1 = tinybvh_min( l1, sbinMin[i] ), rBMin[binCount - 2 - i] = r1 = tinybvh_min( r1, sbinMin[binCount - 1 - i] );
+						lBMax[i] = l2 = tinybvh_max( l2, sbinMax[i] ), rBMax[binCount - 2 - i] = r2 = tinybvh_max( r2, sbinMax[binCount - 1 - i] );
+						lN += countIn[i], rN += countOut[binCount - 1 - i];
 						AL[i] = lN == 0 ? BVH_FAR : tinybvh_half_area( l2 - l1 );
-						AR[hqbvhbins - 2 - i] = rN == 0 ? BVH_FAR : tinybvh_half_area( r2 - r1 );
-						NL[i] = lN, NR[hqbvhbins - 2 - i] = rN;
+						AR[binCount - 2 - i] = rN == 0 ? BVH_FAR : tinybvh_half_area( r2 - r1 );
+						NL[i] = lN, NR[binCount - 2 - i] = rN;
 					}
 					// find best position for spatial split
-					for (uint32_t i = 0; i < hqbvhbins - 1; i++)
+					for (uint32_t i = 0; i < binCount - 1; i++)
 					{
 						const float Cspatial = SplitCostSAH( rSAV, AL[i], NL[i], AR[i], NR[i] );
 						if (Cspatial < minSplitCost && NL[i] + NR[i] < budget && NL[i] * NR[i] > 0)
@@ -2636,7 +2698,7 @@ void BVH::BuildHQTask(
 			if (spatial)
 			{
 				// spatial partitioning
-				const float planeDist = (node.aabbMax[bestAxis] - node.aabbMin[bestAxis]) / (hqbvhbins * 0.9999f);
+				const float planeDist = (node.aabbMax[bestAxis] - node.aabbMin[bestAxis]) / (binCount * 0.9999f);
 				const float rPlaneDist = 1.0f / planeDist, nodeMin = node.aabbMin[bestAxis];
 				for (uint32_t i = 0; i < node.triCount; i++)
 				{
@@ -2683,8 +2745,11 @@ void BVH::BuildHQTask(
 						float splitPos = bestLMax[bestAxis];
 						SplitFrag( fragment[fragIdx], part1, part2, minDim, bestAxis, splitPos, leftOK, rightOK );
 						if (leftOK && rightOK)
+						{
+							uint32_t newFragIdx = atomicNextFrag->fetch_add( 1 );
 							fragment[fragIdx] = part1, idxTmp[A++] = fragIdx,
-							fragment[nextFrag] = part2, idxTmp[--B] = nextFrag++;
+								fragment[newFragIdx] = part2, idxTmp[--B] = newFragIdx;
+						}
 						else // didn't work out; unsplit (rare)
 							if (leftOK) idxTmp[A++] = fragIdx; else idxTmp[--B] = fragIdx;
 					}
@@ -2706,7 +2771,7 @@ void BVH::BuildHQTask(
 				{
 					const uint32_t fr = primIdx[src + i];
 					int32_t bi = (int32_t)(((fragment[fr].bmin[bestAxis] + fragment[fr].bmax[bestAxis]) * 0.5f - nmin) * rpd);
-					bi = tinybvh_clamp( bi, 0, hqbvhbins - 1 );
+					bi = tinybvh_clamp( bi, 0, binCount - 1 );
 					if (bi <= (int32_t)bestPos) idxTmp[A++] = fr; else idxTmp[--B] = fr;
 				}
 			}
@@ -2714,7 +2779,7 @@ void BVH::BuildHQTask(
 			memcpy( primIdx + sliceStart, idxTmp + sliceStart, (sliceEnd - sliceStart) * 4 );
 			// create child nodes
 			uint32_t leftCount = A - sliceStart, rightCount = sliceEnd - B;
-			if (leftCount == 0 || rightCount == 0 || taskCount == 1024 /* BVH_NUM_ELEMS( task ) */)
+			if (leftCount == 0 || rightCount == 0)
 			{
 				// spatial split failed. We shouldn't get here, but we do sometimes..
 				for (uint32_t i = 0; i < node.triCount; i++)
@@ -2723,20 +2788,21 @@ void BVH::BuildHQTask(
 				node.aabbMax = tinybvh_max( bestLMax, bestRMax );
 				break;
 			}
-			int32_t leftChildIdx = newNodePtr++, rightChildIdx = newNodePtr++;
+			int32_t leftChildIdx = atomicNewNodePtr->fetch_add( 2 );
+			int32_t rightChildIdx = leftChildIdx + 1;
 			bvhNode[leftChildIdx].aabbMin = bestLMin, bvhNode[leftChildIdx].aabbMax = bestLMax;
 			bvhNode[leftChildIdx].leftFirst = sliceStart, bvhNode[leftChildIdx].triCount = leftCount;
 			bvhNode[rightChildIdx].aabbMin = bestRMin, bvhNode[rightChildIdx].aabbMax = bestRMax;
 			bvhNode[rightChildIdx].leftFirst = B, bvhNode[rightChildIdx].triCount = rightCount;
 			node.leftFirst = leftChildIdx, node.triCount = 0;
 			// recurse
-			if (++depth == maxDepth)
+			if (depth < maxDepth)
 			{
-				// push the children on the stack, for multithreading
-				task[taskCount].node = rightChildIdx, task[taskCount].depth = depth;
-				task[taskCount].sliceStart = (A + B) >> 1, task[taskCount++].sliceEnd = sliceEnd;
-				task[taskCount].node = leftChildIdx, task[taskCount].depth = depth;
-				task[taskCount].sliceStart = sliceStart, task[taskCount++].sliceEnd = (A + B) >> 1;
+				// spawn a new thread for the right branch
+				std::thread t1( &BuildHQTask_, rightChildIdx, depth + 1, maxDepth, (A + B) >> 1, sliceEnd, idxTmp, this );
+				std::thread t2( &BuildHQTask_, leftChildIdx, depth + 1, maxDepth, sliceStart, (A + B) >> 1, idxTmp, this );
+				t1.join();
+				t2.join();
 				break;
 			}
 			// proceed with left child, push right child on local stack
@@ -2757,25 +2823,22 @@ void BVH::BuildHQ()
 	uint32_t* idxTmp = (uint32_t*)AlignedAlloc( (triCount + slack) * sizeof( uint32_t ) );
 	memset( idxTmp, 0, (triCount + slack) * 4 );
 	// reset node pool
-	atomicNewNodePtr = newNodePtr = 2;
-	atomicNextFrag = nextFrag = triCount;
+	atomicNewNodePtr = new std::atomic<uint32_t>( 2 );
+	atomicNextFrag = new std::atomic<uint32_t>( triCount );
 	// subdivide recursively
-	ALIGNED( 64 ) SubdivTask task[128];
-	uint32_t taskCount = 0, nodeIdx = 0, sliceStart = 0, sliceEnd = triCount + slack, depth = 0;
-	BuildHQTask( nodeIdx, depth, 5, sliceStart, sliceEnd, idxTmp, taskCount, task );
-	for (unsigned i = 0; i < taskCount; i++)
-	{
-		nodeIdx = task[i].node, depth = task[i].depth,
-			sliceStart = task[i].sliceStart, sliceEnd = task[i].sliceEnd;
-		BuildHQTask( nodeIdx, depth, 5, sliceStart, sliceEnd, idxTmp, taskCount, task );
-	}
+	uint32_t nodeIdx = 0, sliceStart = 0, sliceEnd = triCount + slack, depth = 0;
+	BuildHQTask( nodeIdx, depth, 5, sliceStart, sliceEnd, idxTmp );
 	// all done.
 	AlignedFree( idxTmp );
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 	refittable = false; // can't refit an SBVH
 	may_have_holes = false; // there may be holes in the index list, but not in the node list
-	usedNodes = newNodePtr = atomicNewNodePtr;
-	nextFrag = atomicNextFrag;
+	usedNodes = newNodePtr = atomicNewNodePtr->load();
+	nextFrag = atomicNextFrag->load();
+	delete atomicNewNodePtr;
+	delete atomicNextFrag;
+	atomicNewNodePtr = 0;
+	atomicNextFrag = 0;
 	Compact();
 }
 
@@ -3160,7 +3223,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				tmp.rD = tinybvh_rcp( tmp.D );
 				// 2. Traverse BLAS with the transformed ray
 				// Note: Valid BVH layout options for BLASses are the regular BVH layout,
-				// the AVX-optimized BVH_SOA layout and the wide BVH4_CPU layout. If all
+				// the AVX-optimized BVH_SOA layout and the wide BVH4_CPU layout. When all
 				// BLASses are of the same layout this reduces to nearly zero cost for
 				// a small set of predictable branches.
 				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH4_CPU ||
@@ -3181,6 +3244,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				#ifdef BVH_USEAVX2
 					if (blas->layout == LAYOUT_BVH8_AVX2) cost += ((BVH8_CPU*)blas)->Intersect( tmp );
 				#endif
+					if (blas->layout == LAYOUT_VOXELSET) cost += ((VoxelSet*)blas)->Intersect( tmp );
 				}
 				// 3. Restore ray
 				ray.hit = tmp.hit;
@@ -3243,9 +3307,9 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccluded( const Ray& ray 
 		{
 			if (indexedEnabled && vertIdx != 0) for (uint32_t i = 0; i < node->triCount; i++)
 			{
-				const uint32_t pi = primIdx[node->leftFirst + i] * 3;
-				const uint32_t i0 = vertIdx[pi], i1 = vertIdx[pi + 1], i2 = vertIdx[pi + 2];
-				if (TriOccludes( ray, verts, i0, i1, i2 )) return true;
+				const uint32_t pi = primIdx[node->leftFirst + i], vi0 = pi * 3;
+				const uint32_t i0 = vertIdx[vi0], i1 = vertIdx[vi0 + 1], i2 = vertIdx[vi0 + 2];
+				if (TriOccludes( ray, verts, pi, i0, i1, i2 )) return true;
 			}
 			else if (customEnabled && customIsOccluded != 0)
 			{
@@ -3254,8 +3318,8 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccluded( const Ray& ray 
 			}
 			else for (uint32_t i = 0; i < node->triCount; i++)
 			{
-				const uint32_t pi = primIdx[node->leftFirst + i] * 3;
-				if (TriOccludes( ray, verts, pi, pi + 1, pi + 2 )) return true;
+				const uint32_t pi = primIdx[node->leftFirst + i], vi0 = pi * 3;
+				if (TriOccludes( ray, verts, pi, vi0, vi0 + 1, vi0 + 2 )) return true;
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
@@ -3321,6 +3385,7 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 				#ifdef BVH_USEAVX2
 					if (blas->layout == LAYOUT_BVH8_AVX2) { if (((BVH8_CPU*)blas)->IsOccluded( tmp )) return true; }
 				#endif
+					if (blas->layout == LAYOUT_VOXELSET) { if (((VoxelSet*)blas)->IsOccluded( tmp )) return true; }
 				}
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
@@ -3592,6 +3657,393 @@ void BVH::Compact()
 	AlignedFree( primIdx );
 	bvhNode = tmp;
 	primIdx = idx;
+}
+
+// VoxelSet implementation
+// ----------------------------------------------------------------------------
+
+VoxelSet::VoxelSet()
+{
+	grid = (uint32_t*)AlignedAlloc( gridSize * sizeof( uint32_t ) );
+	memset( grid, 0, gridSize * sizeof( uint32_t ) );
+	brick = (uint32_t*)AlignedAlloc( brickSize * brickCount * sizeof( uint32_t ) );
+	memset( brick, 0, brickSize * brickCount * sizeof( uint32_t ) );
+	topGrid = (uint32_t*)AlignedAlloc( topGridSize / 8 );
+	freeBrickPtr = 1; // first available brick; we'll skip 0
+	aabbMin = bvhvec3( 0 ), aabbMax = bvhvec3( 1 ); // a voxel object is always (1,1,1) in object space.
+}
+
+void VoxelSet::Set( const uint32_t x, const uint32_t y, const uint32_t z, const uint32_t v )
+{
+	// note: not thread-safe.
+	const uint32_t bx = x / brickDim, by = y / brickDim, bz = z / brickDim;
+	const uint32_t gridIdx = bx + by * gridDim + bz * gridDim * gridDim;
+	uint32_t brickIdx = grid[gridIdx];
+	if (!brickIdx)
+	{
+		if (freeBrickPtr == brickCount) // we ran out; reallocate
+		{
+			uint32_t newBrickCount = brickCount + (brickCount >> 2);
+			uint32_t* newBrickPool = (uint32_t*)AlignedAlloc( newBrickCount * brickSize * sizeof( uint32_t ) );
+			memcpy( newBrickPool, brick, brickCount * brickSize * sizeof( uint32_t ) );
+			memset( newBrickPool + brickCount * brickSize, (newBrickCount - brickCount) * brickSize * sizeof( uint32_t ), 0 );
+			AlignedFree( brick );
+			brick = newBrickPool, brickCount = newBrickCount;
+		}
+		brickIdx = grid[gridIdx] = freeBrickPtr++;
+	}
+	const uint32_t voxelIdx = (x & (brickDim - 1)) + (y & (brickDim - 1)) * brickDim + (z & (brickDim - 1)) * brickDim * brickDim;
+	brick[brickIdx * brickSize + voxelIdx] = v;
+}
+
+void VoxelSet::UpdateTopGrid()
+{
+	memset( topGrid, 0, topGridSize / 8 );
+	for (int x = 0; x < topGridDim; x++) for (int y = 0; y < topGridDim; y++) for (int z = 0; z < topGridDim; z++)
+	{
+		uint32_t* gridBase = grid + x * groupDim + y * groupDim * gridDim + z * groupDim * gridDim * gridDim;
+		bool hasContent = false;
+		for (int u = 0; u < groupDim; u++) for (int v = 0; v < groupDim; v++) for (int w = 0; w < groupDim; w++)
+			if (gridBase[u + v * gridDim + w * gridDim * gridDim])
+			{
+				hasContent = true;
+				goto break3;
+			}
+	break3:
+		if (!hasContent) continue;
+		uint32_t topIdx = x + y * topGridDim + z * topGridDim * topGridDim;
+		topGrid[topIdx >> 5] |= 1 << (topIdx & 31);
+	}
+}
+
+bool VoxelSet::Setup3DDDA( const Ray& ray, const bvhvec3& Dsign, DDAState& state, const bvhint3& step, bvhvec3& tdelta, float& t ) const
+{
+	// if ray is not inside the object aabb: advance until it is
+	if (!(ray.O.x >= 0 && ray.O.x <= 1 && ray.O.y >= 0 && ray.O.y <= 1 && ray.O.z >= 0 && ray.O.z <= 1))
+	{
+		float tx1 = -ray.O.x * ray.rD.x, tx2 = (1 - ray.O.x) * ray.rD.x;
+		float tmin = tinybvh_min( tx1, tx2 ), tmax = tinybvh_max( tx1, tx2 );
+		float ty1 = -ray.O.y * ray.rD.y, ty2 = (1 - ray.O.y) * ray.rD.y;
+		tmin = tinybvh_max( tmin, tinybvh_min( ty1, ty2 ) );
+		tmax = tinybvh_min( tmax, tinybvh_max( ty1, ty2 ) );
+		float tz1 = -ray.O.z * ray.rD.z, tz2 = (1 - ray.O.z) * ray.rD.z;
+		tmin = tinybvh_max( tmin, tinybvh_min( tz1, tz2 ) );
+		tmax = tinybvh_min( tmax, tinybvh_max( tz1, tz2 ) );
+		if (tmax < tmin || tmin > ray.hit.t || tmax < 0) return false; else t = tmin;
+	}
+	// setup amanatides & woo - assume object size is 1x1x1, from (0,0,0) to (1,1,1)
+	static const float cellSize = 1.0f / topGridDim;
+	const bvhvec3 posInGrid = (ray.O + ray.D * (t + 0.0000025f)) * (float)topGridDim;
+	const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * cellSize;
+	const bvhint3 P(
+		tinybvh_clamp( (int)posInGrid.x, 0, topGridDim - 1 ),
+		tinybvh_clamp( (int)posInGrid.y, 0, topGridDim - 1 ),
+		tinybvh_clamp( (int)posInGrid.z, 0, topGridDim - 1 )
+	);
+	state.X = P.x, state.Y = P.y, state.Z = P.z;
+	state.tmax = (gridPlanes - ray.O) * ray.rD;
+	tdelta = bvhvec3( (float)step.x, (float)step.y, (float)step.z ) * cellSize * ray.rD;
+	// proceed with traversal
+	return true;
+}
+
+bvhvec3 VoxelSet::GetNormal( const Ray& ray ) const
+{
+	const bvhvec3 I1 = (ray.O + ray.hit.t * ray.D) * (float)objectDim; // our object is (1,1,1) in object space, so this scales each voxel to (1,1,1)
+	const bvhvec3 fG( I1.x - floorf( I1.x ), I1.y - floorf( I1.y ), I1.z - floorf( I1.z ) );
+	const bvhvec3 d = tinybvh_min( fG, 1.0f - fG );
+	const float mind = tinybvh_min( tinybvh_min( d.x, d.y ), d.z );
+	if (mind == d.x) return bvhvec3( ray.D.x > 0 ? -1.0f : 1.0f, 0, 0 );
+	else if (mind == d.y) return bvhvec3( 0, ray.D.y > 0 ? -1.0f : 1.0f, 0 );
+	else return bvhvec3( 0, 0, ray.D.z > 0 ? -1.0f : 1.0f );
+}
+
+int32_t VoxelSet::Intersect( Ray& ray ) const
+{
+	// setup Amanatides & Woo grid traversal
+	ALIGNED( 64 ) DDAState l1_, l2_;
+	const uint32_t xsign = *(uint32_t*)&ray.D.x >> 31;
+	const uint32_t ysign = *(uint32_t*)&ray.D.y >> 31;
+	const uint32_t zsign = *(uint32_t*)&ray.D.z >> 31;
+	const bvhvec3 Dsign = bvhvec3( (float)xsign, (float)ysign, (float)zsign );
+	const bvhint3 step( 1 - (int)xsign * 2, 1 - (int)ysign * 2, 1 - (int)zsign * 2 );
+	bvhvec3 tdelta;
+	float t = 0;
+	if (!Setup3DDDA( ray, Dsign, l1_, step, tdelta, t )) return 0;
+	const bvhvec3 l2tdelta = tdelta * (1.0f / groupDim);
+	const bvhvec3 l3tdelta = l2tdelta * (1.0f / brickDim);
+	uint32_t* gridBase = 0;
+	int32_t steps = 0;
+	// start stepping:
+	while (1)
+	{
+		const uint32_t tidx = l1_.X + l1_.Y * topGridDim + l1_.Z * topGridDim * topGridDim;
+		const uint32_t cell = topGrid[tidx >> 5] & (1 << (tidx & 31));
+		if (cell)
+		{
+			// setup midlevel traversal
+			const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * (float)gridDim;
+			const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / gridDim);
+			l2_.X = tinybvh_clamp( (int)posInGrid.x, l1_.X * groupDim, l1_.X * groupDim + (groupDim - 1) );
+			l2_.Y = tinybvh_clamp( (int)posInGrid.y, l1_.Y * groupDim, l1_.Y * groupDim + (groupDim - 1) );
+			l2_.Z = tinybvh_clamp( (int)posInGrid.z, l1_.Z * groupDim, l1_.Z * groupDim + (groupDim - 1) );
+			l2_.tmax = (gridPlanes - ray.O) * ray.rD;
+			gridBase = grid + ((l2_.X + l2_.Y * gridDim + l2_.Z * gridDim * gridDim) & superMask);
+			l2_.X &= groupDim - 1, l2_.Y &= groupDim - 1, l2_.Z &= groupDim - 1;
+			// step through midlevel cells
+			while (1)
+			{
+				const uint32_t brickCell = gridBase[l2_.X + l2_.Y * gridDim + l2_.Z * gridDim * gridDim];
+				if (brickCell)
+				{
+					// setup 3DDDA for brick traversal
+					uint32_t* brickData = brick + brickCell * brickSize;
+					const bvhvec3 posInBrick = (ray.O + (t + 0.0000025f) * ray.D) * (float)objectDim;
+					uint32_t X = tinybvh_clamp( (int)posInBrick.x - (l2_.X + l1_.X * groupDim) * brickDim, 0, brickDim - 1 );
+					uint32_t Y = tinybvh_clamp( (int)posInBrick.y - (l2_.Y + l1_.Y * groupDim) * brickDim, 0, brickDim - 1 );
+					uint32_t Z = tinybvh_clamp( (int)posInBrick.z - (l2_.Z + l1_.Z * groupDim) * brickDim, 0, brickDim - 1 );
+					const bvhvec3 brickPlanes = (bvhvec3( ceilf( posInBrick.x ), ceilf( posInBrick.y ), ceilf( posInBrick.z ) ) - Dsign) * (1.0f / objectDim);
+					bvhvec3 tmax = (brickPlanes - ray.O) * ray.rD;
+					// step through brick
+					while (1)
+					{
+						steps++;
+						const uint32_t v = brickData[X + Y * brickDim + Z * brickDim * brickDim];
+						if (v)
+						{
+							ray.hit.t = t;
+						#if INST_IDX_BITS == 32
+							ray.hit.prim = v;
+							ray.hit.inst = ray.instIdx; // store in dedicated field
+						#elif INST_IDX_BITS == 8
+							ray.hit.prim = v + (ray.instIdx << 24); // store in alpha
+						#else
+							ray.hit.prim = v;
+							ray.hit.u = *(float*)&ray.instIdx; // store in u; hack
+						#endif
+							return steps;
+						}
+						if (tmax.x < tmax.y)
+						{
+							if (tmax.x < tmax.z)
+							{
+								if ((X += step.x) >= brickDim) break;
+								t = tmax.x, tmax.x += l3tdelta.x;
+							}
+							else
+							{
+								if ((Z += step.z) >= brickDim) break;
+								t = tmax.z, tmax.z += l3tdelta.z;
+							}
+						}
+						else
+						{
+							if (tmax.y < tmax.z)
+							{
+								if ((Y += step.y) >= brickDim) break;
+								t = tmax.y, tmax.y += l3tdelta.y;
+							}
+							else
+							{
+								if ((Z += step.z) >= brickDim) break;
+								t = tmax.z, tmax.z += l3tdelta.z;
+							}
+						}
+					}
+				}
+				if (l2_.tmax.x < l2_.tmax.y)
+				{
+					if (l2_.tmax.x < l2_.tmax.z)
+					{
+						if ((l2_.X += step.x) >= groupDim) break;
+						t = l2_.tmax.x, l2_.tmax.x += l2tdelta.x;
+					}
+					else
+					{
+						if ((l2_.Z += step.z) >= groupDim) break;
+						t = l2_.tmax.z, l2_.tmax.z += l2tdelta.z;
+					}
+				}
+				else
+				{
+					if (l2_.tmax.y < l2_.tmax.z)
+					{
+						if ((l2_.Y += step.y) >= groupDim) break;
+						t = l2_.tmax.y, l2_.tmax.y += l2tdelta.y;
+					}
+					else
+					{
+						if ((l2_.Z += step.z) >= groupDim) break;
+						t = l2_.tmax.z, l2_.tmax.z += l2tdelta.z;
+					}
+				}
+			}
+		}
+		if (l1_.tmax.x < l1_.tmax.y)
+		{
+			if (l1_.tmax.x < l1_.tmax.z)
+			{
+				if ((l1_.X += step.x) >= topGridDim) break;
+				t = l1_.tmax.x, l1_.tmax.x += tdelta.x;
+			}
+			else
+			{
+				if ((l1_.Z += step.z) >= topGridDim) break;
+				t = l1_.tmax.z, l1_.tmax.z += tdelta.z;
+			}
+		}
+		else
+		{
+			if (l1_.tmax.y < l1_.tmax.z)
+			{
+				if ((l1_.Y += step.y) >= topGridDim) break;
+				t = l1_.tmax.y, l1_.tmax.y += tdelta.y;
+			}
+			else
+			{
+				if ((l1_.Z += step.z) >= topGridDim) break;
+				t = l1_.tmax.z, l1_.tmax.z += tdelta.z;
+			}
+		}
+	}
+	return 0;
+}
+
+bool VoxelSet::IsOccluded( const Ray& ray ) const
+{
+	// setup Amanatides & Woo grid traversal
+	ALIGNED( 64 ) DDAState l1_, l2_;
+	const uint32_t xsign = *(uint32_t*)&ray.D.x >> 31;
+	const uint32_t ysign = *(uint32_t*)&ray.D.y >> 31;
+	const uint32_t zsign = *(uint32_t*)&ray.D.z >> 31;
+	const bvhvec3 Dsign = bvhvec3( (float)xsign, (float)ysign, (float)zsign );
+	const bvhint3 step( 1 - (int)xsign * 2, 1 - (int)ysign * 2, 1 - (int)zsign * 2 );
+	bvhvec3 tdelta;
+	float t = 0;
+	if (!Setup3DDDA( ray, Dsign, l1_, step, tdelta, t )) return false;
+	const bvhvec3 l2tdelta = tdelta * (1.0f / groupDim);
+	const bvhvec3 l3tdelta = l2tdelta * (1.0f / brickDim);
+	uint32_t* gridBase = 0;
+	// start stepping:
+	while (t < ray.hit.t)
+	{
+		const uint32_t tidx = l1_.X + l1_.Y * topGridDim + l1_.Z * topGridDim * topGridDim;
+		const uint32_t cell = topGrid[tidx >> 5] & (1 << (tidx & 31));
+		if (cell)
+		{
+			// setup midlevel traversal
+			const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * (float)gridDim;
+			const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / gridDim);
+			l2_.X = tinybvh_clamp( (int)posInGrid.x, l1_.X * groupDim, l1_.X * groupDim + (groupDim - 1) );
+			l2_.Y = tinybvh_clamp( (int)posInGrid.y, l1_.Y * groupDim, l1_.Y * groupDim + (groupDim - 1) );
+			l2_.Z = tinybvh_clamp( (int)posInGrid.z, l1_.Z * groupDim, l1_.Z * groupDim + (groupDim - 1) );
+			l2_.tmax = (gridPlanes - ray.O) * ray.rD;
+			gridBase = grid + ((l2_.X + l2_.Y * gridDim + l2_.Z * gridDim * gridDim) & superMask);
+			l2_.X &= groupDim - 1, l2_.Y &= groupDim - 1, l2_.Z &= groupDim - 1;
+			// step through midlevel cells
+			while (1)
+			{
+				const uint32_t brickCell = gridBase[l2_.X + l2_.Y * gridDim + l2_.Z * gridDim * gridDim];
+				if (brickCell)
+				{
+					// setup 3DDDA for brick traversal
+					uint32_t* brickData = brick + brickCell * brickSize;
+					const bvhvec3 posInBrick = (ray.O + (t + 0.0000025f) * ray.D) * (float)objectDim;
+					uint32_t X = tinybvh_clamp( (int)posInBrick.x - (l2_.X + l1_.X * groupDim) * brickDim, 0u, brickDim - 1 );
+					uint32_t Y = tinybvh_clamp( (int)posInBrick.y - (l2_.Y + l1_.Y * groupDim) * brickDim, 0u, brickDim - 1 );
+					uint32_t Z = tinybvh_clamp( (int)posInBrick.z - (l2_.Z + l1_.Z * groupDim) * brickDim, 0u, brickDim - 1 );
+					const bvhvec3 brickPlanes = (bvhvec3( ceilf( posInBrick.x ), ceilf( posInBrick.y ), ceilf( posInBrick.z ) ) - Dsign) * (1.0f / objectDim);
+					bvhvec3 tmax = (brickPlanes - ray.O) * ray.rD;
+					// step through brick
+					while (1)
+					{
+						const uint32_t v = brickData[X + Y * brickDim + Z * brickDim * brickDim];
+						if (v) return t < ray.hit.t;
+						if (tmax.x < tmax.y)
+						{
+							if (tmax.x < tmax.z)
+							{
+								if ((X += step.x) >= brickDim) break;
+								t = tmax.x, tmax.x += l3tdelta.x;
+							}
+							else
+							{
+								if ((Z += step.z) >= brickDim) break;
+								t = tmax.z, tmax.z += l3tdelta.z;
+							}
+						}
+						else
+						{
+							if (tmax.y < tmax.z)
+							{
+								if ((Y += step.y) >= brickDim) break;
+								t = tmax.y, tmax.y += l3tdelta.y;
+							}
+							else
+							{
+								if ((Z += step.z) >= brickDim) break;
+								t = tmax.z, tmax.z += l3tdelta.z;
+							}
+						}
+					}
+				}
+				if (l2_.tmax.x < l2_.tmax.y)
+				{
+					if (l2_.tmax.x < l2_.tmax.z)
+					{
+						if ((l2_.X += step.x) >= groupDim) break;
+						t = l2_.tmax.x, l2_.tmax.x += l2tdelta.x;
+					}
+					else
+					{
+						if ((l2_.Z += step.z) >= groupDim) break;
+						t = l2_.tmax.z, l2_.tmax.z += l2tdelta.z;
+					}
+				}
+				else
+				{
+					if (l2_.tmax.y < l2_.tmax.z)
+					{
+						if ((l2_.Y += step.y) >= groupDim) break;
+						t = l2_.tmax.y, l2_.tmax.y += l2tdelta.y;
+					}
+					else
+					{
+						if ((l2_.Z += step.z) >= groupDim) break;
+						t = l2_.tmax.z, l2_.tmax.z += l2tdelta.z;
+					}
+				}
+			}
+		}
+		if (l1_.tmax.x < l1_.tmax.y)
+		{
+			if (l1_.tmax.x < l1_.tmax.z)
+			{
+				if ((l1_.X += step.x) >= topGridDim) break;
+				t = l1_.tmax.x, l1_.tmax.x += tdelta.x;
+			}
+			else
+			{
+				if ((l1_.Z += step.z) >= topGridDim) break;
+				t = l1_.tmax.z, l1_.tmax.z += tdelta.z;
+			}
+		}
+		else
+		{
+			if (l1_.tmax.y < l1_.tmax.z)
+			{
+				if ((l1_.Y += step.y) >= topGridDim) break;
+				t = l1_.tmax.y, l1_.tmax.y += tdelta.y;
+			}
+			else
+			{
+				if ((l1_.Z += step.z) >= topGridDim) break;
+				t = l1_.tmax.z, l1_.tmax.z += tdelta.z;
+			}
+		}
+	}
+	// we shouldn't get here
+	return false;
 }
 
 // BVH_Verbose implementation
@@ -5601,7 +6053,31 @@ template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU::Intersect( Ray& ray
 		const __m128 mask2 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
 		const __m128 mask3 = _mm_and_ps( _mm_cmplt_ps( ta4, t4 ), _mm_cmpgt_ps( ta4, zero4 ) );
 		__m128 combined = _mm_and_ps( _mm_and_ps( mask1, mask2 ), mask3 );
-		if (_mm_movemask_ps( combined ))
+		uint32_t imask = _mm_movemask_ps( combined );
+		// evaluate opacity map, if present (SSE version).
+		if (opmap) if (imask)
+		{
+			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
+			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
+			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
+			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
+			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
+			union { uint32_t idx[4]; __m128i idx4; };
+			union { uint32_t omask[4]; __m128 omask4; };
+			idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
+			// proceed with scalar code for gather operation - TODO: better approach?
+			omask[0] = omask[1] = omask[2] = omask[3] = 0;
+			for (int i = 0; i < 4; i++) if (imask & (1 << i))
+			{
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
+				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
+			}
+			// combine
+			combined = _mm_and_ps( combined, omask4 );
+			imask = _mm_movemask_ps( combined );
+		}
+		if (imask)
 		{
 			const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
 			// compute broadcasted horizontal minimum of dist4
@@ -5725,7 +6201,28 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 		const __m128 mask2 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
 		const __m128 mask3 = _mm_and_ps( _mm_cmplt_ps( ta4, t4 ), _mm_cmpgt_ps( ta4, zero4 ) );
 		__m128 combined = _mm_and_ps( _mm_and_ps( mask1, mask2 ), mask3 );
-		if (_mm_movemask_ps( combined )) return true;
+		// evaluate opacity map, if present (SSE version).
+		if (_mm_movemask_ps( combined ))
+		{
+			if (!opmap) return true;
+			// evaluate opacity map, SSE version.
+			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
+			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
+			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
+			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
+			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
+			union { uint32_t idx[4]; __m128i idx4; };
+			idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
+			// proceed with scalar code for gather operation - TODO: better approach?
+			const uint32_t imask = _mm_movemask_ps( combined );
+			for (int i = 0; i < 4; i++) if (imask & (1 << i))
+			{
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
+				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
+			}
+		}
+		// we continue.
 		if (!stackPtr) return false;
 		nodeIdx = nodeStack[--stackPtr];
 	}
@@ -5870,7 +6367,12 @@ void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices
 	root.aabbMin = *(bvhvec3*)&rootMin, root.aabbMax = *(bvhvec3*)&rootMax;
 	bvh_over_indices = indices != nullptr;
 }
-void BVH::BuildAVX()
+
+void BuildAVX_( uint32_t nodeIdx, uint32_t depth, BVH* bvh )
+{
+	bvh->BuildAVX( nodeIdx, depth );
+}
+void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
 {
 	// aligned data
 	ALIGNED( 64 ) __m256 binbox[3 * AVXBINS];			// 768 bytes
@@ -5889,8 +6391,12 @@ void BVH::BuildAVX()
 	struct FragSSE { __m128 bmin4, bmax4; };
 	FragSSE* frag4 = (FragSSE*)fragment;
 	__m256* frag8 = (__m256*)fragment;
+	// initialize atomic counter on first call
+	if (depth == 0) atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
+	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
+	if (triCount < MT_BUILD_THRESHOLD) depth = 999;
 	// subdivide recursively
-	ALIGNED( 64 ) uint32_t task[128], taskCount = 0, nodeIdx = 0;
+	ALIGNED( 64 ) uint32_t task[128], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f;
 	while (1)
@@ -5936,7 +6442,7 @@ void BVH::BuildAVX()
 			binbox[i0] = r0, binbox[AVXBINS + i1] = r1, binbox[2 * AVXBINS + i2] = r2;
 			// calculate per-split totals
 			float splitCost = BVH_FAR, rSAV = 1.0f / node.SurfaceArea();
-			uint32_t bestAxis = 0, bestPos = 0, n = newNodePtr, j = node.leftFirst + node.triCount, src = node.leftFirst;
+			uint32_t bestAxis = 0, bestPos = 0, j = node.leftFirst + node.triCount, src = node.leftFirst;
 			const __m256* bb = binbox;
 			for (int32_t a = 0; a < 3; a++, bb += AVXBINS) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
 			{
@@ -5974,23 +6480,37 @@ void BVH::BuildAVX()
 				if (bi <= bestPos) fr = primIdx[++src]; else t = fr, fr = primIdx[src] = primIdx[--j], primIdx[j] = t;
 			}
 			// create child nodes and recurse
+			const uint32_t n = atomicNewNodePtr->fetch_add( 2 );
 			const uint32_t leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
 			*(__m256*)& bvhNode[n] = _mm256_xor_ps( bestLBox, signFlip8 );
 			bvhNode[n].leftFirst = node.leftFirst, bvhNode[n].triCount = leftCount;
-			node.leftFirst = n++, node.triCount = 0, newNodePtr += 2;
-			*(__m256*)& bvhNode[n] = _mm256_xor_ps( bestRBox, signFlip8 );
-			bvhNode[n].leftFirst = j, bvhNode[n].triCount = rightCount;
-			task[taskCount++] = n, nodeIdx = n - 1;
+			node.leftFirst = n, node.triCount = 0;
+			*(__m256*)& bvhNode[n + 1] = _mm256_xor_ps( bestRBox, signFlip8 );
+			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
+			if (depth < 5)
+			{
+				std::thread t1( &BuildAVX_, n, depth + 1, this );
+				std::thread t2( &BuildAVX_, n + 1, depth + 1, this );
+				t1.join();
+				t2.join();
+				break;
+			}
+			else task[taskCount++] = n + 1, nodeIdx = n;
 		}
 		// fetch subdivision task from stack
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
 	// all done.
-	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
-	refittable = true; // not using spatial splits: can refit this BVH
-	may_have_holes = false; // the AVX builder produces a continuous list of nodes
-	usedNodes = newNodePtr;
+	if (depth == 0 || triCount < MT_BUILD_THRESHOLD)
+	{
+		// tree has been built.
+		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
+		refittable = true; // not using spatial splits: can refit this BVH
+		may_have_holes = false; // the AVX builder produces a continuous list of nodes
+		usedNodes = newNodePtr = atomicNewNodePtr->load();
+		delete atomicNewNodePtr;
+	}
 }
 #if defined _MSC_VER
 #pragma warning ( pop ) // restore 4701
@@ -6291,14 +6811,14 @@ bool BVH_SoA::IsOccluded( const Ray& ray ) const
 		{
 			if (indexedEnabled && bvh.vertIdx != 0) for (uint32_t i = 0; i < node->triCount; i++)
 			{
-				const uint32_t pi = primIdx[node->firstTri + i] * 3;
-				const uint32_t i0 = bvh.vertIdx[pi], i1 = bvh.vertIdx[pi + 1], i2 = bvh.vertIdx[pi + 2];
-				if (TriOccludes( ray, verts, i0, i1, i2 )) return true;
+				const uint32_t pi = primIdx[node->firstTri + i], vi0 = pi * 3;
+				const uint32_t i0 = bvh.vertIdx[vi0], i1 = bvh.vertIdx[vi0 + 1], i2 = bvh.vertIdx[vi0 + 2];
+				if (TriOccludes( ray, verts, pi, i0, i1, i2 )) return true;
 			}
 			else for (uint32_t i = 0; i < node->triCount; i++)
 			{
-				const uint32_t pi = primIdx[node->firstTri + i] * 3;
-				if (TriOccludes( ray, verts, pi, pi + 1, pi + 2 )) return true;
+				const uint32_t pi = primIdx[node->firstTri + i], vi0 = pi * 3;
+				if (TriOccludes( ray, verts, pi, vi0, vi0 + 1, vi0 + 2 )) return true;
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
@@ -6543,7 +7063,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 	const __m256 rz8 = _mm256_set1_ps( ray.O.z * ray.rD.z ), rdz8 = _mm256_set1_ps( ray.rD.z );
 	const __m128 ox4 = _mm_set1_ps( ray.O.x ), oy4 = _mm_set1_ps( ray.O.y ), oz4 = _mm_set1_ps( ray.O.z );
 	const __m128 dx4 = _mm_set1_ps( ray.D.x ), dy4 = _mm_set1_ps( ray.D.y ), dz4 = _mm_set1_ps( ray.D.z );
-	const __m128 one4 = _mm_set1_ps( 1 ), inf4 = _mm_set1_ps( 1e34f );
+	const __m128 one4 = _mm_set1_ps( 1 ), inf4 = _mm_set1_ps( 1e34f ), half4 = _mm_set1_ps( 0.5f );
 #ifdef _DEBUG
 	// sorry, not even this can be tolerated in this function. Only in debug.
 	uint32_t steps = 0;
@@ -6613,11 +7133,35 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 		const __m128 mask3 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
 		const __m128 mask4 = _mm_cmpgt_ps( ta4, _mm_setzero_ps() );
 		const __m128 mask5 = _mm_cmplt_ps( ta4, _mm256_extractf128_ps( t8, 0 ) );
-		const __m128 combined = _mm_and_ps( _mm_and_ps( _mm_and_ps( mask1, mask2 ), _mm_and_ps( mask3, mask4 ) ), mask5 );
-		if (_mm_movemask_ps( combined ))
+		__m128 combined = _mm_and_ps( _mm_and_ps( _mm_and_ps( mask1, mask2 ), _mm_and_ps( mask3, mask4 ) ), mask5 );
+		uint32_t imask = _mm_movemask_ps( combined );
+		// evaluate opacity map, if present (SSE version).
+		if (opmap) if (imask)
 		{
-			const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
+			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
+			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
+			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
+			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
+			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
+			union { uint32_t idx[4]; __m128i idx4; };
+			union { uint32_t omask[4]; __m128 omask4; };
+			idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
+			// proceed with scalar code for gather operation - TODO: better approach?
+			omask[0] = omask[1] = omask[2] = omask[3] = 0;
+			for (int i = 0; i < 4; i++) if (imask & (1 << i))
+			{
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
+				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
+			}
+			// combine
+			combined = _mm_and_ps( combined, omask4 );
+			imask = _mm_movemask_ps( combined );
+		}
+		if (imask)
+		{
 			// compute broadcasted horizontal minimum of dist4
+			const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
 			const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
 			const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
 			const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
@@ -6743,7 +7287,27 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 		const __m128 mask4 = _mm_cmplt_ps( ta4, t4 );
 		const __m128 mask5 = _mm_cmpgt_ps( ta4, zero4 );
 		__m128 combined = _mm_and_ps( _mm_and_ps( _mm_and_ps( mask1, mask2 ), _mm_and_ps( mask3, mask4 ) ), mask5 );
-		if (_mm_movemask_ps( combined )) return true;
+		if (_mm_movemask_ps( combined ))
+		{
+			if (!opmap) return true;
+			// evaluate opacity map, SSE version.
+			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
+			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
+			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
+			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
+			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
+			union { uint32_t idx[4]; __m128i idx4; };
+			idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
+			// proceed with scalar code for gather operation - TODO: better approach?
+			const uint32_t imask = _mm_movemask_ps( combined );
+			for (int i = 0; i < 4; i++) if (imask & (1 << i))
+			{
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
+				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
+			}
+		}
+		// continue
 		if (!stackPtr) return false;
 		nodeIdx = nodeStack[--stackPtr];
 	}
@@ -7215,7 +7779,7 @@ void BVH_Double::Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&
 	}
 	// start build
 	newNodePtr = 1;
-	Build(); // or BuildAVX, for large TLAS.
+	Build();
 }
 
 void BVH_Double::Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Double** blasses, const uint64_t bCount )
@@ -7253,7 +7817,7 @@ void BVH_Double::Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Doub
 	}
 	// start build
 	newNodePtr = 1;
-	Build(); // or BuildAVX, for large TLAS.
+	Build();
 }
 
 void BVH_Double::Build( const bvhdbl3* vertices, const uint64_t primCount )
@@ -7295,11 +7859,19 @@ void BVH_Double::PrepareBuild( const bvhdbl3* vertices, const uint64_t primCount
 	// all set; actual build happens in BVH_Double::Build.
 }
 
-void BVH_Double::Build()
+void BuildDouble_( uint64_t nodeIdx, uint32_t depth, BVH_Double* bvh )
 {
+	bvh->Build( nodeIdx, depth );
+}
+void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
+{
+	// initialize atomic counter on first call
+	if (depth == 0) atomicNewNodePtr = new std::atomic<uint64_t>( newNodePtr );
+	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
+	if (triCount < MT_BUILD_THRESHOLD) depth = 999;
 	// subdivide root node recursively
 	BVHNode& root = bvhNode[0];
-	uint64_t task[256], taskCount = 0, nodeIdx = 0;
+	uint64_t task[256], taskCount = 0;
 	bvhdbl3 minDim = (root.aabbMax - root.aabbMin) * 1e-20;
 	bvhdbl3 bestLMin = 0, bestLMax = 0, bestRMin = 0, bestRMax = 0;
 	while (1)
@@ -7372,24 +7944,36 @@ void BVH_Double::Build()
 			// create child nodes
 			uint64_t leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
-			const uint64_t lci = newNodePtr++, rci = newNodePtr++;
-			bvhNode[lci].aabbMin = bestLMin, bvhNode[lci].aabbMax = bestLMax;
-			bvhNode[lci].leftFirst = node.leftFirst, bvhNode[lci].triCount = leftCount;
-			bvhNode[rci].aabbMin = bestRMin, bvhNode[rci].aabbMax = bestRMax;
-			bvhNode[rci].leftFirst = j, bvhNode[rci].triCount = rightCount;
-			node.leftFirst = lci, node.triCount = 0;
+			const uint64_t n = atomicNewNodePtr->fetch_add( 2 );
+			bvhNode[n].aabbMin = bestLMin, bvhNode[n].aabbMax = bestLMax;
+			bvhNode[n].leftFirst = node.leftFirst, bvhNode[n].triCount = leftCount;
+			bvhNode[n + 1].aabbMin = bestRMin, bvhNode[n + 1].aabbMax = bestRMax;
+			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
+			node.leftFirst = n, node.triCount = 0;
+			if (depth < 5)
+			{
+				std::thread t1( &BuildDouble_, n, depth + 1, this );
+				std::thread t2( &BuildDouble_, n + 1, depth + 1, this );
+				t1.join();
+				t2.join();
+				break;
+			}
 			// recurse
-			task[taskCount++] = rci, nodeIdx = lci;
+			task[taskCount++] = n + 1, nodeIdx = n;
 		}
 		// fetch subdivision task from stack
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
-	// all done.
-	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
-	refittable = true; // not using spatial splits: can refit this BVH
-	may_have_holes = false; // the reference builder produces a continuous list of nodes
-	bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
-	usedNodes = newNodePtr;
+	if (depth == 0 || triCount < MT_BUILD_THRESHOLD)
+	{
+		// all done.
+		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
+		refittable = true; // not using spatial splits: can refit this BVH
+		may_have_holes = false; // the reference builder produces a continuous list of nodes
+		bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
+		usedNodes = newNodePtr = atomicNewNodePtr->load();
+		delete atomicNewNodePtr;
+	}
 }
 
 double BVH_Double::BVHNode::SurfaceArea() const
@@ -7486,9 +8070,7 @@ int32_t BVH_Double::IntersectTLAS( RayEx& ray ) const
 				// BLAS traversal
 				const uint64_t instIdx = primIdx[node->leftFirst + i];
 				BLASInstanceEx& inst = instList[instIdx];
-
 				if (!(inst.mask & ray.mask)) continue;
-
 				BVH_Double* blas = blasList[inst.blasIdx];
 				// 1. Transform ray with the inverse of the instance transform
 				tmp.O = tinybvh_transform_point( ray.O, inst.invTransform );
@@ -7583,9 +8165,7 @@ bool BVH_Double::IsOccludedTLAS( const RayEx& ray ) const
 			{
 				// BLAS traversal
 				BLASInstanceEx& inst = instList[primIdx[node->leftFirst + i]];
-
 				if (!(inst.mask & ray.mask)) continue;
-
 				BVH_Double* blas = blasList[inst.blasIdx];
 				// 1. Transform ray with the inverse of the instance transform
 				tmp.O = tinybvh_transform_point( ray.O, inst.invTransform );
@@ -7737,7 +8317,7 @@ float BVHBase::SA( const bvhvec3& aabbMin, const bvhvec3& aabbMax )
 }
 
 // IntersectTri
-void BVHBase::IntersectTri( Ray& ray, const uint32_t idx, const bvhvec4slice& verts, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const
+void BVHBase::IntersectTri( Ray& ray, const uint32_t triIdx, const bvhvec4slice& verts, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const
 {
 #ifdef WATERTIGHT_TRITEST
 	// Woop et al.'s Watertight intersection algorithm.
@@ -7746,9 +8326,9 @@ void BVHBase::IntersectTri( Ray& ray, const uint32_t idx, const bvhvec4slice& ve
 	if (ray.D[kz] < 0) std::swap( kx, ky );
 	const float Sz = ray.rD[kz], Sx = ray.D[kx] * Sz, Sy = ray.D[ky] * Sz;
 	// PART 2 - Intersection
-	const bvhvec3 A = bvhvec3( verts[i0] ) - ray.O;
-	const bvhvec3 B = bvhvec3( verts[i1] ) - ray.O;
-	const bvhvec3 C = bvhvec3( verts[i2] ) - ray.O;
+	const bvhvec3 C = bvhvec3( verts[i0] ) - ray.O;
+	const bvhvec3 A = bvhvec3( verts[i1] ) - ray.O;
+	const bvhvec3 B = bvhvec3( verts[i2] ) - ray.O;
 	const float Ax = A[kx] - Sx * A[kz], Ay = A[ky] - Sy * A[kz];
 	const float Bx = B[kx] - Sx * B[kz], By = B[ky] - Sy * B[kz];
 	const float Cx = C[kx] - Sx * C[kz], Cy = C[ky] - Sy * C[kz];
@@ -7767,17 +8347,26 @@ void BVHBase::IntersectTri( Ray& ray, const uint32_t idx, const bvhvec4slice& ve
 	const bvhvec3 v0 = v0_, e1 = verts[i1] - v0_, e2 = verts[i2] - v0_;
 	MOLLER_TRUMBORE_TEST( ray.hit.t, return );
 #endif
-	// register a hit: ray is shortened to t
+	// evaluate opacity map, if present.
+	if (opmap)
+	{
+		const float fN = (float)opmapN;
+		const int row = int( (u + v) * fN ), diag = int( (1 - u) * fN );
+		const int idx = (row * row) + int( v * fN ) + (diag - (opmapN - 1 - row));
+		uint32_t* om = opmap + triIdx * ((opmapN * opmapN) >> 5);
+		if (!(om[idx >> 5] & (1 << (idx & 31)))) return;
+	}
+	// register a hit: ray is shortened to t.
 	ray.hit.t = t, ray.hit.u = u, ray.hit.v = v;
 #if INST_IDX_BITS == 32
-	ray.hit.prim = idx, ray.hit.inst = ray.instIdx;
+	ray.hit.prim = triIdx, ray.hit.inst = ray.instIdx;
 #else
-	ray.hit.prim = idx + ray.instIdx;
+	ray.hit.prim = triIdx + ray.instIdx;
 #endif
 }
 
 // TriOccludes
-bool BVHBase::TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const
+bool BVHBase::TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t triIdx, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const
 {
 #ifdef WATERTIGHT_TRITEST
 	// Woop et al.'s Watertight intersection algorithm.
@@ -7806,6 +8395,16 @@ bool BVHBase::TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint
 	const bvhvec3 v0 = v0_, e1 = verts[i1] - v0_, e2 = verts[i2] - v0_;
 	MOLLER_TRUMBORE_TEST( ray.hit.t, return false );
 #endif
+	// evaluate opacity map, if present.
+	if (opmap)
+	{
+		const float fN = (float)opmapN;
+		const int row = int( (u + v) * fN ), diag = int( (1 - u) * fN );
+		const int idx = (row * row) + int( v * fN ) + (diag - (opmapN - 1 - row));
+		uint32_t* om = opmap + triIdx * ((opmapN * opmapN) >> 5);
+		if (!(om[idx >> 5] & (1 << (idx & 31)))) return false;
+	}
+	// occluded.
 	return true;
 }
 

@@ -23,14 +23,14 @@
 // 6: San Miguel
 // 7: Living Room
 // 8: Living Room, rotated
-#define SCENE	8
+#define SCENE	9
 
 // STAGES:
 // --------------------------------------------------
 // 1: Determine best bin count
 // 2: Optimize using reinsertion & RRS
 // 3: Report
-#define STAGE	3
+#define STAGE	2
 
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
@@ -135,6 +135,17 @@
 #define RRS_SIZE		2'500'032
 #define BEST_BINCOUNT	23.0f
 #define BEST_BINNED_BVH	"./testdata/opt_rrs/sbvh_living_rotated_23bins.bin"
+#elif SCENE == 9
+#define SCENE_NAME		"Cached BVH"
+#define RAYSET_TYPE		RRS_OBJECT
+#define GEOM_FILE		"./scene_0012.tri"
+#define STAT_FILE		"./scene_0012_stats.csv"
+#define HPLOC_FILE		""
+#define RESULTS_FILE	"./scene_0012_results.csv"
+#define OPTIMIZED_BVH	"./scene_0012_opt.bin"
+#define RRS_SIZE		2'500'032
+#define BEST_BINCOUNT	93.0f
+#define BEST_BINNED_BVH	"./scene_0012_opt_93bins.bin"
 #endif
 
 // TinyBVH, TinyOCL

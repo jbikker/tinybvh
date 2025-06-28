@@ -1,0 +1,20 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="..\tiny_bvh_foliage.cpp" />
+    <ClCompile Include="..\tiny_bvh_gltf_lib.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\tiny_bvh.h">
+      <Filter>tiny</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_scene.h">
+      <Filter>tiny</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="tiny">
+      <UniqueIdentifier>{39030eb7-d203-48ad-a65a-d5e47a2d8845}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

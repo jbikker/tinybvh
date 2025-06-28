@@ -1,0 +1,10 @@
+#version 310 es
+layout(local_size_x = 128) in;
+layout(std430) buffer;
+layout(binding = 0) writeonly buffer O { uint data[]; } o;
+layout(binding = 1) readonly buffer I { uint data[]; } i;
+void main()
+{
+    uint id = gl_GlobalInvocationID.x;
+    o.data[id] = i.data[id] * i.data[id];
+}

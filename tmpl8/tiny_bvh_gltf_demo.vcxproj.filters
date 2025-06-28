@@ -17,6 +17,7 @@
     <ClCompile Include="template\tmpl8math.cpp">
       <Filter>template</Filter>
     </ClCompile>
+    <ClCompile Include="gltfdemo_lib.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="gltfdemo.h" />
@@ -65,6 +66,12 @@
       <Filter>kernels</Filter>
     </None>
     <None Include="..\traverse_tlas.cl">
+      <Filter>kernels</Filter>
+    </None>
+    <None Include="..\traverse_bvh2_int.inc">
+      <Filter>kernels</Filter>
+    </None>
+    <None Include="..\traverse_cwbvh.cl">
       <Filter>kernels</Filter>
     </None>
   </ItemGroup>
