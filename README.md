@@ -1,6 +1,3 @@
-# tinybvh/dev
-This is the **development branch** for TinyBVH. Changes get tested here first.
-
 # TinyBVH
 Single-header BVH construction and traversal library written as "Sane C++" (or "C with classes"). Some C++11 is used, e.g. for threading. The library has no dependencies. 
 
@@ -70,7 +67,7 @@ The **performance measurement tool** can be compiled with:
 
 Many additional demos are provided, demonstrating features of the library in small source files.
 
-# Version 1.5.8
+# Version 1.6.0
 
 Basic use:
 
@@ -125,6 +122,7 @@ Besides basic examples demonstrating usage of the library, these more advanced e
 
 Advanced / exotic features of the library include:
 * BVH optimizer: reduces SAH cost and improves ray tracing performance ([Bittner et al., 2013](https://dspace.cvut.cz/bitstream/handle/10467/15603/2013-Fast-Insertion-Based-Optimization-of-Bounding-Volume-Hierarchies.pdf))
+* Opacity Micro Map support (as proposed [by Gruen et al.](https://dl.acm.org/doi/10.1145/3406180) in 2020)
 * Sphere/BVH collision detection via BVH::IntersectSphere(..)
 * Fast AVX2 ray tracing: Implements the 2017 paper by [Fuetterling et al.](https://web.cs.ucdavis.edu/~hamann/FuetterlingLojewskiPfreundtHamannEbertHPG2017PaperFinal06222017.pdf)
 * Fast SSE4.2 ray tracing: A modified version of the AVX2 implementation using just SSE4.2 achieves 80% of AVX2 performance.
