@@ -6487,7 +6487,7 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 			node.leftFirst = n, node.triCount = 0;
 			*(__m256*)& bvhNode[n + 1] = _mm256_xor_ps( bestRBox, signFlip8 );
 			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
-			if (depth < 5)
+			if (node.triCount > 10'000) // somewhat arbitrary, exact value does not have a huge impact.
 			{
 				std::thread t1( &BuildAVX_, n, depth + 1, subtreeNewNodePtr, this );
 				std::thread t2( &BuildAVX_, n + 1, depth + 1, subtreeNewNodePtr + leftCount * 2 - 1, this );
