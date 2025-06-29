@@ -916,7 +916,7 @@ public:
 	bool IsOccludedTLAS( const Ray& ray ) const;
 	int32_t IntersectTLAS( Ray& ray ) const;
 	void PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
-	void BuildAVX( uint32_t nodeIdx = 0, uint32_t depth = 0 );
+	void BuildAVX( uint32_t nodeIdx = 0, uint32_t depth = 0, uint32_t subtreeNewNodePtr = 0 );
 	void PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims );
 	void BuildHQ();
 	void BuildHQTask( uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* triIdxB );
@@ -6289,7 +6289,7 @@ void BVH::BuildAVX( const bvhvec4* vertices, const uint32_t primCount )
 void BVH::BuildAVX( const bvhvec4slice& vertices )
 {
 	PrepareAVXBuild( vertices, 0, 0 );
-	BuildAVX();
+	BuildAVX( 0u, 0u, 2u );
 }
 void BVH::BuildAVX( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount )
 {
@@ -6299,7 +6299,7 @@ void BVH::BuildAVX( const bvhvec4* vertices, const uint32_t* indices, const uint
 void BVH::BuildAVX( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount )
 {
 	PrepareAVXBuild( vertices, indices, primCount );
-	BuildAVX();
+	BuildAVX( 0u, 0u, 2u );
 }
 void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
 {
@@ -6368,11 +6368,11 @@ void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices
 	bvh_over_indices = indices != nullptr;
 }
 
-void BuildAVX_( uint32_t nodeIdx, uint32_t depth, BVH* bvh )
+void BuildAVX_( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr, BVH* bvh )
 {
-	bvh->BuildAVX( nodeIdx, depth );
+	bvh->BuildAVX( nodeIdx, depth, subtreeNewNodePtr );
 }
-void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
+void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr )
 {
 	// aligned data
 	ALIGNED( 64 ) __m256 binbox[3 * AVXBINS];			// 768 bytes
@@ -6391,8 +6391,6 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
 	struct FragSSE { __m128 bmin4, bmax4; };
 	FragSSE* frag4 = (FragSSE*)fragment;
 	__m256* frag8 = (__m256*)fragment;
-	// initialize atomic counter on first call
-	if (depth == 0) atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
 	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
 	if (triCount < MT_BUILD_THRESHOLD) depth = 999;
 	// subdivide recursively
@@ -6480,7 +6478,8 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
 				if (bi <= bestPos) fr = primIdx[++src]; else t = fr, fr = primIdx[src] = primIdx[--j], primIdx[j] = t;
 			}
 			// create child nodes and recurse
-			const uint32_t n = atomicNewNodePtr->fetch_add( 2 );
+			const uint32_t n = subtreeNewNodePtr;
+			subtreeNewNodePtr += 2;
 			const uint32_t leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
 			*(__m256*)& bvhNode[n] = _mm256_xor_ps( bestLBox, signFlip8 );
@@ -6490,8 +6489,8 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
 			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
 			if (depth < 5)
 			{
-				std::thread t1( &BuildAVX_, n, depth + 1, this );
-				std::thread t2( &BuildAVX_, n + 1, depth + 1, this );
+				std::thread t1( &BuildAVX_, n, depth + 1, subtreeNewNodePtr, this );
+				std::thread t2( &BuildAVX_, n + 1, depth + 1, subtreeNewNodePtr + leftCount * 2 - 1, this );
 				t1.join();
 				t2.join();
 				break;
@@ -6507,9 +6506,8 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
 		// tree has been built.
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = true; // not using spatial splits: can refit this BVH
-		may_have_holes = false; // the AVX builder produces a continuous list of nodes
-		usedNodes = newNodePtr = atomicNewNodePtr->load();
-		delete atomicNewNodePtr;
+		may_have_holes = true; // the threaded AVX builder produces gaps in the node list
+		usedNodes = newNodePtr = allocatedNodes; // atomicNewNodePtr->load();
 	}
 }
 #if defined _MSC_VER
