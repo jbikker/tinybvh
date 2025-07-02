@@ -3686,7 +3686,7 @@ void VoxelSet::Set( const uint32_t x, const uint32_t y, const uint32_t z, const 
 			uint32_t newBrickCount = brickCount + (brickCount >> 2);
 			uint32_t* newBrickPool = (uint32_t*)AlignedAlloc( newBrickCount * brickSize * sizeof( uint32_t ) );
 			memcpy( newBrickPool, brick, brickCount * brickSize * sizeof( uint32_t ) );
-			memset( newBrickPool + brickCount * brickSize, (newBrickCount - brickCount) * brickSize * sizeof( uint32_t ), 0 );
+			memset( newBrickPool + brickCount * brickSize, 0, (newBrickCount - brickCount) * brickSize * sizeof( uint32_t ));
 			AlignedFree( brick );
 			brick = newBrickPool, brickCount = newBrickCount;
 		}
