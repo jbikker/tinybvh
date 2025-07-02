@@ -6467,11 +6467,6 @@ void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices
 	bvh_over_indices = indices != nullptr;
 }
 
-void BuildAVXBinTask_( const uint32_t first, const uint32_t last, __m256* binbox, __m256* orig,
-	uint32_t* count, const __m128& nmin4, const __m128& rpd4, BVH* bvh )
-{
-	bvh->BuildAVXBinTask( first, last, binbox, orig, count, nmin4, rpd4 );
-}
 void BVH::BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* binbox, __m256* orig,
 	uint32_t* count, const __m128& nmin4, const __m128& rpd4 )
 {
@@ -6511,10 +6506,6 @@ void BVH::BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* bi
 	binbox[i0] = r0, binbox[AVXBINS + i1] = r1, binbox[2 * AVXBINS + i2] = r2;
 }
 
-void BuildAVX_( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr, BVH* bvh )
-{
-	bvh->BuildAVX( nodeIdx, depth, subtreeNewNodePtr );
-}
 void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr )
 {
 	// aligned data
@@ -6557,7 +6548,7 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 					const uint32_t last = slice == (slices - 1) ? (node.leftFirst + node.triCount) : (first + sliceSize);
 					__m256* sbb = slicebinbox[slice], * bo = binboxOrig;
 					uint32_t* sc = slicecount[slice];
-					binningJobs.Execute( [=, this]() { BuildAVXBinTask_( first, last, sbb, bo, sc, nmin4, rpd4, this ); } );
+					binningJobs.Execute( [=, this]() { BuildAVXBinTask( first, last, sbb, bo, sc, nmin4, rpd4 ); } );
 				}
 				binningJobs.Wait();
 				// combine results from threads
@@ -6619,8 +6610,8 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 			if (leftCount + rightCount > 2000 && depth < 5)
 			{
 				// be gentle, these are my first lambdas ever.
-				subtreeJobs.Execute( [=, this]() { BuildAVX_( n, depth + 1, subtreeNewNodePtr, this ); } );
-				subtreeJobs.Execute( [=, this]() { BuildAVX_( n + 1, depth + 1, subtreeNewNodePtr + leftCount * 2 - 1, this ); } );
+				subtreeJobs.Execute( [=, this]() { BuildAVX( n, depth + 1, subtreeNewNodePtr ); } );
+				subtreeJobs.Execute( [=, this]() { BuildAVX( n + 1, depth + 1, subtreeNewNodePtr + leftCount * 2 - 1 ); } );
 				break;
 			}
 			else task[taskCount++] = n + 1, nodeIdx = n;
