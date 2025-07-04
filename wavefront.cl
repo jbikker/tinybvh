@@ -105,10 +105,10 @@ void kernel Extend( global struct PathState* raysIn )
 		const float4 D4 = raysIn[pathId].D;
 	#ifdef SIMD_AABBTEST
 		const float4 rD4 = native_recip( D4 );
-		raysIn[pathId].hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4, D4, rD4, 1e30f );
+		raysIn[pathId].hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4, D4, rD4, 1e30f, 0 );
 	#else
 		const float3 rD = native_recip( D4.xyz );
-		raysIn[pathId].hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4.xyz, D4.xyz, rD, 1e30f );
+		raysIn[pathId].hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4.xyz, D4.xyz, rD, 1e30f, 0 );
 	#endif
 	}
 }

@@ -132,7 +132,7 @@ void kernel Extend( global struct PathState* raysIn )
 		const float4 O4 = raysIn[pathId].O;
 		const float4 D4 = raysIn[pathId].D;
 		const float4 rD4 = native_recip( D4 );
-		raysIn[pathId].hit = traverse_tlas( O4, D4, rD4, 1e30f );
+		raysIn[pathId].hit = traverse_tlas( O4, D4, rD4, 1e30f, 0 );
 	}
 }
 
