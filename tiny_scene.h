@@ -1947,10 +1947,6 @@ void Node::UpdateTransformFromTRS()
 	localTransform = T * R * S * matrix;
 }
 
-#ifndef uint
-#define uint unsigned
-#endif
-
 //  +-----------------------------------------------------------------------------+
 //  |  Node::Update                                                               |
 //  |  Calculates the combined transform for this node and recurses into the      |
