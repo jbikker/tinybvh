@@ -91,7 +91,7 @@ THE SOFTWARE.
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
 #define TINY_BVH_VERSION_MINOR	6
-#define TINY_BVH_VERSION_SUB	0
+#define TINY_BVH_VERSION_SUB	1
 
 // Run-time checks; disabled by default.
 // #define PARANOID // checks out-of-bound access of slices
@@ -916,7 +916,7 @@ public:
 	bool IsOccludedTLAS( const Ray& ray ) const;
 	int32_t IntersectTLAS( Ray& ray ) const;
 	void PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
-	void BuildAVX( uint32_t nodeIdx = 0, uint32_t depth = 0 );
+	void BuildAVX( uint32_t nodeIdx = 0, uint32_t depth = 0, uint32_t subtreeNewNodePtr = 0 );
 	void PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims );
 	void BuildHQ();
 	void BuildHQTask( uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* triIdxB );
@@ -963,6 +963,20 @@ private:
 	// Atomic counters for threaded builds
 	std::atomic<uint32_t>* atomicNewNodePtr = 0;
 	std::atomic<uint32_t>* atomicNextFrag = 0;
+#ifdef BVH_USEAVX
+	// AVX constants
+	static inline const __m128 half4 = _mm_set1_ps( 0.5f );
+	static inline const __m128 two4 = _mm_set1_ps( 2.0f ), min1 = _mm_set1_ps( -1 );
+	static inline const __m128i maxbin4 = _mm_set1_epi32( 7 );
+	static inline const __m128 mask3 = _mm_cmpeq_ps( _mm_setr_ps( 0, 0, 0, 1 ), _mm_setzero_ps() );
+	static inline const __m128 binmul3 = _mm_set1_ps( AVXBINS * 0.49999f );
+	static inline const __m256 max8 = _mm256_set1_ps( -BVH_FAR ), mask6 = _mm256_set_m128( mask3, mask3 );
+	static inline const __m256 signFlip8 = _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f );
+	// helper for AVX binning
+public:
+	void BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* binbox, __m256* orig,
+		uint32_t* count, const __m128& nmin4, const __m128& rpd4 );
+#endif
 };
 
 class VoxelSet : public BVHBase // just so it can be attached conveniently in a TLAS
@@ -1474,6 +1488,13 @@ public:
 #endif
 #include <fstream>			// fstream
 
+// job manager includes
+#include <functional>
+#include <algorithm>
+#include <condition_variable>
+#include <mutex>
+#include <deque>
+
 // We need quite a bit of type reinterpretation, so we'll
 // turn off the gcc warning here until the end of the file.
 #ifdef __GNUC__
@@ -1645,6 +1666,84 @@ void BVHBase::CopyBasePropertiesFrom( const BVHBase& original )
 	this->c_int = original.c_int, this->c_trav = original.c_trav;
 	this->aabbMin = original.aabbMin, this->aabbMax = original.aabbMax;
 }
+
+// Wicked job system, condensed. https://github.com/turanszkij/WickedEngine
+// Removed: Thread priority, Dispatch, graceful shutdown; not needed in TinyBVH.
+class JobSystem
+{
+public:
+	JobSystem() { Initialize(); }
+	struct context { std::atomic<uint32_t> counter{ 0 }; } ctx;
+	struct Job
+	{
+		std::function<void()> task;
+		inline uint32_t execute( context& ctx ) { task(); return ctx.counter.fetch_sub( 1 ); }
+	};
+	struct JobQueue
+	{
+		std::deque<Job> queue;
+		std::mutex locker;
+		inline void push_back( const Job& item ) { std::scoped_lock lock( locker ); queue.push_back( item ); }
+		inline bool pop_front( Job& item )
+		{
+			std::scoped_lock lock( locker );
+			if (queue.empty()) return false; else item = std::move( queue.front() );
+			queue.pop_front();
+			return true;
+		}
+	};
+	struct PriorityResources
+	{
+		uint32_t numThreads = 0;
+		std::vector<std::thread> threads;
+		std::unique_ptr<JobQueue[]> jobQueuePerThread;
+		std::atomic<uint32_t> nextQueue{ 0 };
+		std::condition_variable sleepingCondition;
+		std::mutex sleepingMutex;
+		std::condition_variable waitingCondition;
+		std::mutex waitingMutex;
+		inline void work( context& ctx, uint32_t startingQueue )
+		{
+			Job job;
+			for (uint32_t i = 0; i < numThreads; ++i) while (jobQueuePerThread[startingQueue++ % numThreads].pop_front( job ))
+				if (job.execute( ctx ) == 1) { std::unique_lock<std::mutex> lock( waitingMutex ); waitingCondition.notify_all(); }
+		}
+	} res;
+	void Initialize()
+	{
+		res.numThreads = std::thread::hardware_concurrency();
+		res.jobQueuePerThread.reset( new JobQueue[res.numThreads] );
+		res.threads.reserve( res.numThreads );
+		context& c = ctx;
+		PriorityResources& r = res;
+		for (uint32_t threadID = 0; threadID < res.numThreads; ++threadID)
+			std::thread& worker = res.threads.emplace_back( [&c, threadID, &r]
+				{	while (true) {
+			r.work( c, threadID );
+			std::unique_lock<std::mutex> lock( r.sleepingMutex );
+			r.sleepingCondition.wait( lock );
+		} } );
+	}
+	void Execute( const std::function<void()>& task )
+	{
+		ctx.counter.fetch_add( 1 );
+		Job job;
+		job.task = task;
+		res.jobQueuePerThread[res.nextQueue.fetch_add( 1 ) % res.numThreads].push_back( job );
+		res.sleepingCondition.notify_one();
+	}
+	void Wait()
+	{
+		res.sleepingCondition.notify_all();
+		res.work( ctx, res.nextQueue.fetch_add( 1 ) % res.numThreads );
+		while (IsBusy())
+		{
+			std::unique_lock<std::mutex> lock( res.waitingMutex );
+			if (IsBusy()) res.waitingCondition.wait( lock, [this] { return !IsBusy(); } );
+		}
+	}
+	bool IsBusy() { return ctx.counter.load() > 0; }
+};
 
 // BVH implementation
 // ----------------------------------------------------------------------------
@@ -3686,7 +3785,7 @@ void VoxelSet::Set( const uint32_t x, const uint32_t y, const uint32_t z, const 
 			uint32_t newBrickCount = brickCount + (brickCount >> 2);
 			uint32_t* newBrickPool = (uint32_t*)AlignedAlloc( newBrickCount * brickSize * sizeof( uint32_t ) );
 			memcpy( newBrickPool, brick, brickCount * brickSize * sizeof( uint32_t ) );
-			memset( newBrickPool + brickCount * brickSize, 0, (newBrickCount - brickCount) * brickSize * sizeof( uint32_t ));
+			memset( newBrickPool + brickCount * brickSize, 0, (newBrickCount - brickCount) * brickSize * sizeof( uint32_t ) );
 			AlignedFree( brick );
 			brick = newBrickPool, brickCount = newBrickCount;
 		}
@@ -6289,7 +6388,7 @@ void BVH::BuildAVX( const bvhvec4* vertices, const uint32_t primCount )
 void BVH::BuildAVX( const bvhvec4slice& vertices )
 {
 	PrepareAVXBuild( vertices, 0, 0 );
-	BuildAVX();
+	BuildAVX( 0u, 0u, 2u );
 }
 void BVH::BuildAVX( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount )
 {
@@ -6299,7 +6398,7 @@ void BVH::BuildAVX( const bvhvec4* vertices, const uint32_t* indices, const uint
 void BVH::BuildAVX( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount )
 {
 	PrepareAVXBuild( vertices, indices, primCount );
-	BuildAVX();
+	BuildAVX( 0u, 0u, 2u );
 }
 void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
 {
@@ -6368,33 +6467,60 @@ void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices
 	bvh_over_indices = indices != nullptr;
 }
 
-void BuildAVX_( uint32_t nodeIdx, uint32_t depth, BVH* bvh )
+void BVH::BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* binbox, __m256* orig,
+	uint32_t* count, const __m128& nmin4, const __m128& rpd4 )
 {
-	bvh->BuildAVX( nodeIdx, depth );
-}
-void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
-{
-	// aligned data
-	ALIGNED( 64 ) __m256 binbox[3 * AVXBINS];			// 768 bytes
-	ALIGNED( 64 ) __m256 binboxOrig[3 * AVXBINS];		// 768 bytes
-	ALIGNED( 64 ) uint32_t count[3][AVXBINS]{};			// 96 bytes
-	ALIGNED( 64 ) __m256 bestLBox, bestRBox;			// 64 bytes
-	// some constants
-	static const __m128 half4 = _mm_set1_ps( 0.5f );
-	static const __m128 two4 = _mm_set1_ps( 2.0f ), min1 = _mm_set1_ps( -1 );
-	static const __m128i maxbin4 = _mm_set1_epi32( 7 );
-	static const __m128 mask3 = _mm_cmpeq_ps( _mm_setr_ps( 0, 0, 0, 1 ), _mm_setzero_ps() );
-	static const __m128 binmul3 = _mm_set1_ps( AVXBINS * 0.49999f );
-	static const __m256 max8 = _mm256_set1_ps( -BVH_FAR ), mask6 = _mm256_set_m128( mask3, mask3 );
-	static const __m256 signFlip8 = _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f );
-	for (uint32_t i = 0; i < 3 * AVXBINS; i++) binboxOrig[i] = max8; // binbox initialization template
 	struct FragSSE { __m128 bmin4, bmax4; };
 	FragSSE* frag4 = (FragSSE*)fragment;
 	__m256* frag8 = (__m256*)fragment;
-	// initialize atomic counter on first call
-	if (depth == 0) atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
+	uint32_t fi = primIdx[first];
+	memset( count, 0, 3 * AVXBINS * 4 );
+	memcpy( binbox, orig, 3 * AVXBINS * 32 );
+	__m256 r0, r1, r2, f = _mm256_xor_ps( _mm256_and_ps( frag8[fi], mask6 ), signFlip8 );
+	const __m128 fmin = _mm_and_ps( frag4[fi].bmin4, mask3 ), fmax = _mm_and_ps( frag4[fi].bmax4, mask3 );
+	const __m128i bi4 = _mm_cvtps_epi32( _mm_sub_ps( _mm_mul_ps( _mm_sub_ps( _mm_add_ps( fmax, fmin ), nmin4 ), rpd4 ), half4 ) );
+	union { __m128i bc4; uint32_t bc[4]; };
+	bc4 = _mm_max_epi32( _mm_min_epi32( bi4, maxbin4 ), _mm_setzero_si128() ); // clamp needed after all
+	uint32_t i0 = bc[0], i1 = bc[1], i2 = bc[2], * ti = primIdx + first + 1;
+	for (uint32_t i = first; i < last - 1; i++)
+	{
+		uint32_t fid = *ti++;
+	#if defined __GNUC__ || _MSC_VER < 1920
+		if (fid > triCount) fid = triCount - 1; // never happens but g++ *and* vs2017 need this to not crash...
+	#endif
+		const __m256 b0 = binbox[i0], b1 = binbox[AVXBINS + i1], b2 = binbox[2 * AVXBINS + i2];
+		const __m128 frmin = _mm_and_ps( frag4[fid].bmin4, mask3 ), frmax = _mm_and_ps( frag4[fid].bmax4, mask3 );
+		r0 = _mm256_max_ps( b0, f ), r1 = _mm256_max_ps( b1, f ), r2 = _mm256_max_ps( b2, f );
+		const __m128i b4 = _mm_cvtps_epi32( _mm_sub_ps( _mm_mul_ps( _mm_sub_ps( _mm_add_ps( frmax, frmin ), nmin4 ), rpd4 ), half4 ) );
+		bc4 = _mm_max_epi32( _mm_min_epi32( b4, maxbin4 ), _mm_setzero_si128() ); // clamp needed after all
+		f = _mm256_xor_ps( _mm256_and_ps( frag8[fid], mask6 ), signFlip8 );
+		count[i0]++, count[AVXBINS + i1]++, count[AVXBINS * 2 + i2]++;
+		binbox[i0] = r0, i0 = bc[0];
+		binbox[AVXBINS + i1] = r1, i1 = bc[1];
+		binbox[2 * AVXBINS + i2] = r2, i2 = bc[2];
+	}
+	// final business for final fragment
+	const __m256 b0 = binbox[i0], b1 = binbox[AVXBINS + i1], b2 = binbox[2 * AVXBINS + i2];
+	count[i0]++, count[AVXBINS + i1]++, count[AVXBINS * 2 + i2]++;
+	r0 = _mm256_max_ps( b0, f ), r1 = _mm256_max_ps( b1, f ), r2 = _mm256_max_ps( b2, f );
+	binbox[i0] = r0, binbox[AVXBINS + i1] = r1, binbox[2 * AVXBINS + i2] = r2;
+}
+
+void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr )
+{
+	// aligned data
+	constexpr uint32_t slices = 8;
+	ALIGNED( 64 ) __m256 slicebinbox[slices][3 * AVXBINS];
+	ALIGNED( 64 ) uint32_t slicecount[slices][3 * AVXBINS];
+	ALIGNED( 64 ) __m256 binboxOrig[3 * AVXBINS];		// 768 bytes
+	ALIGNED( 64 ) __m256 bestLBox, bestRBox;			// 64 bytes
+	__m256* binbox = slicebinbox[0];
+	uint32_t* count = slicecount[0];
+	for (uint32_t i = 0; i < 3 * AVXBINS; i++) binboxOrig[i] = max8; // binbox initialization template
 	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
 	if (triCount < MT_BUILD_THRESHOLD) depth = 999;
+	// threading.
+	static JobSystem subtreeJobs, binningJobs;
 	// subdivide recursively
 	ALIGNED( 64 ) uint32_t task[128], taskCount = 0;
 	BVHNode& root = bvhNode[0];
@@ -6411,52 +6537,44 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
 			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( binmul3, d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
-			uint32_t fi = primIdx[node.leftFirst];
-			memset( count, 0, sizeof( count ) );
-			__m256 r0, r1, r2, f = _mm256_xor_ps( _mm256_and_ps( frag8[fi], mask6 ), signFlip8 );
-			const __m128 fmin = _mm_and_ps( frag4[fi].bmin4, mask3 ), fmax = _mm_and_ps( frag4[fi].bmax4, mask3 );
-			const __m128i bi4 = _mm_cvtps_epi32( _mm_sub_ps( _mm_mul_ps( _mm_sub_ps( _mm_add_ps( fmax, fmin ), nmin4 ), rpd4 ), half4 ) );
-			const __m128i b4c = _mm_max_epi32( _mm_min_epi32( bi4, maxbin4 ), _mm_setzero_si128() ); // clamp needed after all
-			memcpy( binbox, binboxOrig, sizeof( binbox ) );
-			uint32_t i0 = ILANE( b4c, 0 ), i1 = ILANE( b4c, 1 ), i2 = ILANE( b4c, 2 ), * ti = primIdx + node.leftFirst + 1;
-			for (uint32_t i = 0; i < node.triCount - 1; i++)
+			if (depth < 5 && node.triCount > 10'000)
 			{
-				uint32_t fid = *ti++;
-			#if defined __GNUC__ || _MSC_VER < 1920
-				if (fid > triCount) fid = triCount - 1; // never happens but g++ *and* vs2017 need this to not crash...
-			#endif
-				const __m256 b0 = binbox[i0], b1 = binbox[AVXBINS + i1], b2 = binbox[2 * AVXBINS + i2];
-				const __m128 frmin = _mm_and_ps( frag4[fid].bmin4, mask3 ), frmax = _mm_and_ps( frag4[fid].bmax4, mask3 );
-				r0 = _mm256_max_ps( b0, f ), r1 = _mm256_max_ps( b1, f ), r2 = _mm256_max_ps( b2, f );
-				const __m128i b4 = _mm_cvtps_epi32( _mm_sub_ps( _mm_mul_ps( _mm_sub_ps( _mm_add_ps( frmax, frmin ), nmin4 ), rpd4 ), half4 ) );
-				const __m128i bc4 = _mm_max_epi32( _mm_min_epi32( b4, maxbin4 ), _mm_setzero_si128() ); // clamp needed after all
-				f = _mm256_xor_ps( _mm256_and_ps( frag8[fid], mask6 ), signFlip8 ), count[0][i0]++, count[1][i1]++, count[2][i2]++;
-				binbox[i0] = r0, i0 = ILANE( bc4, 0 );
-				binbox[AVXBINS + i1] = r1, i1 = ILANE( bc4, 1 );
-				binbox[2 * AVXBINS + i2] = r2, i2 = ILANE( bc4, 2 );
+				// run binning in parallel slices
+				const uint32_t sliceSize = node.triCount / slices;
+				for (int slice = 0; slice < slices; slice++)
+				{
+					// calculate task start and end
+					const uint32_t first = node.leftFirst + sliceSize * slice;
+					const uint32_t last = slice == (slices - 1) ? (node.leftFirst + node.triCount) : (first + sliceSize);
+					__m256* sbb = slicebinbox[slice], * bo = binboxOrig;
+					uint32_t* sc = slicecount[slice];
+					binningJobs.Execute( [=, this]() { BuildAVXBinTask( first, last, sbb, bo, sc, nmin4, rpd4 ); } );
+				}
+				binningJobs.Wait();
+				// combine results from threads
+				for (int a = 0; a < 3; a++) for (int i = 0; i < AVXBINS; i++)
+					for (int ai = a * AVXBINS + i, slice = 1; slice < slices; slice++) count[ai] += slicecount[slice][ai],
+						binbox[ai] = _mm256_max_ps( binbox[ai], slicebinbox[slice][ai] );
 			}
-			// final business for final fragment
-			const __m256 b0 = binbox[i0], b1 = binbox[AVXBINS + i1], b2 = binbox[2 * AVXBINS + i2];
-			count[0][i0]++, count[1][i1]++, count[2][i2]++;
-			r0 = _mm256_max_ps( b0, f ), r1 = _mm256_max_ps( b1, f ), r2 = _mm256_max_ps( b2, f );
-			binbox[i0] = r0, binbox[AVXBINS + i1] = r1, binbox[2 * AVXBINS + i2] = r2;
+			else BuildAVXBinTask( node.leftFirst, node.leftFirst + node.triCount, binbox, binboxOrig, count, nmin4, rpd4 );
 			// calculate per-split totals
 			float splitCost = BVH_FAR, rSAV = 1.0f / node.SurfaceArea();
-			uint32_t bestAxis = 0, bestPos = 0, j = node.leftFirst + node.triCount, src = node.leftFirst;
+			uint32_t bestAxis = 0, bestPos = 0;
 			const __m256* bb = binbox;
 			for (int32_t a = 0; a < 3; a++, bb += AVXBINS) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
 			{
 				// hardcoded bin processing for AVXBINS == 8
 				assert( AVXBINS == 8 );
-				const uint32_t lN0 = count[a][0], rN0 = count[a][7];
+				const uint32_t* cnt = count + a * AVXBINS;
+				const uint32_t lN0 = cnt[0], rN0 = cnt[7];
 				const __m256 lb0 = bb[0], rb0 = bb[7];
-				const uint32_t lN1 = lN0 + count[a][1], rN1 = rN0 + count[a][6], lN2 = lN1 + count[a][2];
-				const uint32_t rN2 = rN1 + count[a][5], lN3 = lN2 + count[a][3], rN3 = rN2 + count[a][4];
+				const uint32_t lN1 = lN0 + cnt[1], rN1 = rN0 + cnt[6], lN2 = lN1 + cnt[2];
+				const uint32_t rN2 = rN1 + cnt[5], lN3 = lN2 + cnt[3], rN3 = rN2 + cnt[4];
 				const __m256 lb1 = _mm256_max_ps( lb0, bb[1] ), rb1 = _mm256_max_ps( rb0, bb[6] );
 				const __m256 lb2 = _mm256_max_ps( lb1, bb[2] ), rb2 = _mm256_max_ps( rb1, bb[5] );
 				const __m256 lb3 = _mm256_max_ps( lb2, bb[3] ), rb3 = _mm256_max_ps( rb2, bb[4] );
-				const uint32_t lN4 = lN3 + count[a][4], rN4 = rN3 + count[a][3], lN5 = lN4 + count[a][5];
-				const uint32_t rN5 = rN4 + count[a][2], lN6 = lN5 + count[a][6], rN6 = rN5 + count[a][1];
+				const uint32_t lN4 = lN3 + cnt[4], rN4 = rN3 + cnt[3], lN5 = lN4 + cnt[5];
+				const uint32_t rN5 = rN4 + cnt[2], lN6 = lN5 + cnt[6], rN6 = rN5 + cnt[1];
 				const __m256 lb4 = _mm256_max_ps( lb3, bb[4] ), rb4 = _mm256_max_ps( rb3, bb[3] );
 				const __m256 lb5 = _mm256_max_ps( lb4, bb[5] ), rb5 = _mm256_max_ps( rb4, bb[2] );
 				const __m256 lb6 = _mm256_max_ps( lb5, bb[6] ), rb6 = _mm256_max_ps( rb5, bb[1] );
@@ -6473,27 +6591,27 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
 			if (splitCost >= noSplitCost) break; // not splitting is better.
 			// in-place partition
 			const float rpd = (*(bvhvec3*)&rpd4)[bestAxis], nmin = (*(bvhvec3*)&nmin4)[bestAxis];
-			uint32_t t, fr = primIdx[src];
-			for (uint32_t i = 0; i < node.triCount; i++)
+			uint32_t i = node.leftFirst, j = node.leftFirst + node.triCount, t, fr = primIdx[i];
+			for (uint32_t k = 0; k < node.triCount; k++)
 			{
 				const uint32_t bi = (uint32_t)((fragment[fr].bmax[bestAxis] + fragment[fr].bmin[bestAxis] - nmin) * rpd);
-				if (bi <= bestPos) fr = primIdx[++src]; else t = fr, fr = primIdx[src] = primIdx[--j], primIdx[j] = t;
+				if (bi <= bestPos) fr = primIdx[++i]; else t = fr, fr = primIdx[i] = primIdx[--j], primIdx[j] = t;
 			}
 			// create child nodes and recurse
-			const uint32_t n = atomicNewNodePtr->fetch_add( 2 );
-			const uint32_t leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
+			const uint32_t n = subtreeNewNodePtr;
+			subtreeNewNodePtr += 2;
+			const uint32_t leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
 			*(__m256*)& bvhNode[n] = _mm256_xor_ps( bestLBox, signFlip8 );
 			bvhNode[n].leftFirst = node.leftFirst, bvhNode[n].triCount = leftCount;
 			node.leftFirst = n, node.triCount = 0;
 			*(__m256*)& bvhNode[n + 1] = _mm256_xor_ps( bestRBox, signFlip8 );
-			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
-			if (depth < 5)
+			bvhNode[n + 1].leftFirst = i, bvhNode[n + 1].triCount = rightCount;
+			if (leftCount + rightCount > 2000 && depth < 5)
 			{
-				std::thread t1( &BuildAVX_, n, depth + 1, this );
-				std::thread t2( &BuildAVX_, n + 1, depth + 1, this );
-				t1.join();
-				t2.join();
+				// be gentle, these are my first lambdas ever.
+				subtreeJobs.Execute( [=, this]() { BuildAVX( n, depth + 1, subtreeNewNodePtr ); } );
+				subtreeJobs.Execute( [=, this]() { BuildAVX( n + 1, depth + 1, subtreeNewNodePtr + leftCount * 2 - 1 ); } );
 				break;
 			}
 			else task[taskCount++] = n + 1, nodeIdx = n;
@@ -6504,12 +6622,13 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth )
 	// all done.
 	if (depth == 0 || triCount < MT_BUILD_THRESHOLD)
 	{
+		// wait for all threads to complete.
+		subtreeJobs.Wait();
 		// tree has been built.
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = true; // not using spatial splits: can refit this BVH
-		may_have_holes = false; // the AVX builder produces a continuous list of nodes
-		usedNodes = newNodePtr = atomicNewNodePtr->load();
-		delete atomicNewNodePtr;
+		may_have_holes = true; // the threaded AVX builder produces gaps in the node list
+		usedNodes = newNodePtr = allocatedNodes; // atomicNewNodePtr->load();
 	}
 }
 #if defined _MSC_VER
