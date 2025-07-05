@@ -123,6 +123,7 @@ void kernel Extend( global struct PathState* raysIn )
 	// we use a worker thread system here, where a fixed number of threads 'fight for food'
 	// by decreasing an atomic counter. This way, the counter can stay on the GPU, saving
 	// expensive transfers: The host doesn't need to know the exact amount of tasks.
+	uint stepCount = 0;
 	while (1)
 	{
 		// obtain task
@@ -132,7 +133,7 @@ void kernel Extend( global struct PathState* raysIn )
 		const float4 O4 = raysIn[pathId].O;
 		const float4 D4 = raysIn[pathId].D;
 		const float4 rD4 = native_recip( D4 );
-		raysIn[pathId].hit = traverse_tlas( O4, D4, rD4, 1e30f );
+		raysIn[pathId].hit = traverse_tlas( O4, D4, rD4, 1e30f , &stepCount );
 	}
 }
 
