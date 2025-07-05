@@ -98,7 +98,7 @@ THE SOFTWARE.
 // #define SLICEDUMP // dumps the slice used for building to a file - debug feature.
 
 // Debug threading
-#define USE_JOBSYSTEM
+// #define USE_JOBSYSTEM
 
 // Binned BVH building: bin count.
 #ifndef BVHBINS
