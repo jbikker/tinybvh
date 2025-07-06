@@ -99,7 +99,7 @@ THE SOFTWARE.
 // Run-time checks / debuggin.
 // #define PARANOID // checks out-of-bound access of slices
 // #define SLICEDUMP // dumps the slice used for building to a file - debug feature.
-// #define USE_JOBSYSTEM
+#define USE_JOBSYSTEM
 
 // Binned BVH building: bin count.
 #ifndef BVHBINS
@@ -974,6 +974,9 @@ private:
 #ifdef USE_JOBSYSTEM
 	JobSystem* subtreeJobs = 0;
 	JobSystem* binningJobs = 0; // separate job stack: these will join while subtreeJobs may still be queued.
+#else
+	void* subtreeJobs = 0; // when not using the JobSystem: Ensure sizeof and layout of BVH remains the same.
+	void* binningJobs = 0;
 #endif
 #ifdef BVH_USEAVX
 	// AVX constants
