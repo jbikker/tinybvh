@@ -94,7 +94,7 @@ THE SOFTWARE.
 #define TINY_BVH_VERSION_SUB	1
 
 // Cached BVH file version - increases only when file layout changes.
-#define TINY_BVH_CACHE_VERSION	1
+#define TINY_BVH_CACHE_VERSION	161
 
 // Run-time checks / debuggin.
 // #define PARANOID // checks out-of-bound access of slices
@@ -762,6 +762,9 @@ struct BVHContext
 	void* userdata = nullptr;
 };
 
+#ifdef USE_JOBSYSTEM
+class JobSystem;
+#endif
 class BVHBase
 {
 public:
@@ -830,13 +833,18 @@ protected:
 	__FORCEINLINE bool TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t triIdx, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
 	static void PrecomputeTriangle( const bvhvec4slice& vert, const uint32_t ti0, const uint32_t ti1, const uint32_t ti2, float* T );
 	static float SA( const bvhvec3& aabbMin, const bvhvec3& aabbMax );
+	// JobSystem pointer for threaded builds
+#ifdef USE_JOBSYSTEM
+	JobSystem* subtreeJobs = 0;
+	JobSystem* binningJobs = 0; // separate job stack: these will join while subtreeJobs may still be queued.
+#else
+	void* subtreeJobs = 0; // when not using the JobSystem: Ensure sizeof and layout of BVH remains the same.
+	void* binningJobs = 0;
+#endif
 };
 
 class BLASInstance;
 class BVH_Verbose;
-#ifdef USE_JOBSYSTEM
-class JobSystem;
-#endif
 class BVH : public BVHBase
 {
 public:
@@ -970,14 +978,6 @@ private:
 	// Atomic counters for threaded builds
 	std::atomic<uint32_t>* atomicNewNodePtr = 0;
 	std::atomic<uint32_t>* atomicNextFrag = 0;
-	// JobSystem pointer for threaded builds
-#ifdef USE_JOBSYSTEM
-	JobSystem* subtreeJobs = 0;
-	JobSystem* binningJobs = 0; // separate job stack: these will join while subtreeJobs may still be queued.
-#else
-	void* subtreeJobs = 0; // when not using the JobSystem: Ensure sizeof and layout of BVH remains the same.
-	void* binningJobs = 0;
-#endif
 #ifdef BVH_USEAVX
 	// AVX constants
 	static inline const __m128 half4 = _mm_set1_ps( 0.5f );
@@ -1795,7 +1795,7 @@ void BVH::Save( const char* fileName )
 {
 	// saving is easy, it's the loadingn that will be complex.
 	std::fstream s{ fileName, s.binary | s.out };
-	uint32_t header = TINY_BVH_CACHE_VERSION + (layout << 24);
+	uint32_t header = TINY_BVH_CACHE_VERSION /* 16 bit */ + (layout << 24);
 	s.write( (char*)&header, sizeof( uint32_t ) );
 	s.write( (char*)&triCount, sizeof( uint32_t ) );
 	s.write( (char*)this, sizeof( BVH ) );
@@ -1823,16 +1823,26 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	uint32_t header, fileTriCount;
 	s.read( (char*)&header, sizeof( uint32_t ) );
 	if ((header >> 24) != layout) return false;
-	if ((header & 255) != TINY_BVH_CACHE_VERSION) saveNewVersion = true; // return false;
+	if ((header & 0xffffffff) != TINY_BVH_CACHE_VERSION) saveNewVersion = true; // return false;
 	s.read( (char*)&fileTriCount, sizeof( uint32_t ) );
 	if (expectIndexed && fileTriCount != primCount) return false;
 	if (!expectIndexed && fileTriCount != vertices.count / 3) return false;
+	// backup pointers to JobSystems: can't deserialize pointers.
+#ifdef USE_JOBSYSTEM
+	JobSystem* subtreeBackup = subtreeJobs;
+	JobSystem* binningBackup = binningJobs;
+#else
+	void* subtreeBackup = subtreeJobs;
+	void* binningBackup = binningJobs;
+#endif
 	// all checks passed; safe to overwrite *this
 	s.read( (char*)this, sizeof( BVH ) );
 	bool fileIsIndexed = vertIdx != nullptr;
 	if (expectIndexed != fileIsIndexed) return false; // not what we expected.
 	if (blasList != nullptr || instList != nullptr) return false; // can't load/save TLAS.
 	context = tmp; // can't load context; function pointers will differ.
+	subtreeJobs = subtreeBackup;
+	binningJobs = binningBackup;
 	bvhNode = (BVHNode*)AlignedAlloc( allocatedNodes * sizeof( BVHNode ) );
 	primIdx = (uint32_t*)AlignedAlloc( idxCount * sizeof( uint32_t ) );
 	fragment = 0; // no need for this in a BVH that can't be rebuilt.
