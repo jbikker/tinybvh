@@ -5841,6 +5841,7 @@ void BVH8_CWBVH::Build( const bvhvec4slice& vertices )
 {
 	bvh8.bvh.context = bvh8.context = context;
 	bvh8.bvh.BuildDefault( vertices );
+	bvh8.bvh.Compact();
 	bvh8.bvh.SplitLeafs( 3 );
 	bvh8.ConvertFrom( bvh8.bvh, false );
 	ConvertFrom( bvh8, true );
@@ -5857,6 +5858,7 @@ void BVH8_CWBVH::Build( const bvhvec4slice& vertices, const uint32_t* indices, u
 	// build the BVH from vertices stored in a slice, indexed by 'indices'.
 	bvh8.bvh.context = bvh8.context = context;
 	bvh8.bvh.BuildDefault( vertices, indices, prims );
+	bvh8.bvh.Compact();
 	bvh8.bvh.SplitLeafs( 3 );
 	bvh8.ConvertFrom( bvh8.bvh, true );
 	ConvertFrom( bvh8, true );
