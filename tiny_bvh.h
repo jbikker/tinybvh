@@ -99,7 +99,6 @@ THE SOFTWARE.
 // Run-time checks / debuggin.
 // #define PARANOID // checks out-of-bound access of slices
 // #define SLICEDUMP // dumps the slice used for building to a file - debug feature.
-#define USE_JOBSYSTEM
 
 // Binned BVH building: bin count.
 #ifndef BVHBINS
@@ -762,9 +761,7 @@ struct BVHContext
 	void* userdata = nullptr;
 };
 
-#ifdef USE_JOBSYSTEM
 class JobSystem;
-#endif
 class BVHBase
 {
 public:
@@ -834,13 +831,8 @@ protected:
 	static void PrecomputeTriangle( const bvhvec4slice& vert, const uint32_t ti0, const uint32_t ti1, const uint32_t ti2, float* T );
 	static float SA( const bvhvec3& aabbMin, const bvhvec3& aabbMax );
 	// JobSystem pointer for threaded builds
-#ifdef USE_JOBSYSTEM
 	JobSystem* subtreeJobs = 0;
 	JobSystem* binningJobs = 0; // separate job stack: these will join while subtreeJobs may still be queued.
-#else
-	void* subtreeJobs = 0; // when not using the JobSystem: Ensure sizeof and layout of BVH remains the same.
-	void* binningJobs = 0;
-#endif
 };
 
 class BLASInstance;
@@ -1684,7 +1676,6 @@ void BVHBase::CopyBasePropertiesFrom( const BVHBase& original )
 
 // Wicked job system, condensed. https://github.com/turanszkij/WickedEngine
 // Removed: Thread priority, Dispatch, graceful shutdown; not needed in TinyBVH.
-#ifdef USE_JOBSYSTEM
 class JobSystem
 {
 public:
@@ -1775,7 +1766,6 @@ public:
 	}
 	bool IsBusy() { return ctx.counter.load() > 0; }
 };
-#endif
 
 // BVH implementation
 // ----------------------------------------------------------------------------
@@ -1785,10 +1775,8 @@ BVH::~BVH()
 	AlignedFree( bvhNode );
 	AlignedFree( primIdx );
 	AlignedFree( fragment );
-#ifdef USE_JOBSYSTEM
 	delete subtreeJobs;
 	delete binningJobs;
-#endif
 }
 
 void BVH::Save( const char* fileName )
@@ -1828,13 +1816,8 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	if (expectIndexed && fileTriCount != primCount) return false;
 	if (!expectIndexed && fileTriCount != vertices.count / 3) return false;
 	// backup pointers to JobSystems: can't deserialize pointers.
-#ifdef USE_JOBSYSTEM
 	JobSystem* subtreeBackup = subtreeJobs;
 	JobSystem* binningBackup = binningJobs;
-#else
-	void* subtreeBackup = subtreeJobs;
-	void* binningBackup = binningJobs;
-#endif
 	// all checks passed; safe to overwrite *this
 	s.read( (char*)this, sizeof( BVH ) );
 	bool fileIsIndexed = vertIdx != nullptr;
@@ -2352,9 +2335,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	if (depth == 0) atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
 	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
 	if (triCount < MT_BUILD_THRESHOLD) depth = 999;
-#ifdef USE_JOBSYSTEM
 	if (!subtreeJobs) subtreeJobs = new JobSystem();
-#endif
 	// subdivide root node recursively
 	uint32_t task[256], taskCount = 0;
 	BVHNode& root = bvhNode[0];
@@ -2439,14 +2420,13 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 			bvhNode[n + 1].aabbMin = bestRMin, bvhNode[n + 1].aabbMax = bestRMax;
 			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
 			node.leftFirst = n, node.triCount = 0;
-		#ifdef USE_JOBSYSTEM
 			if (depth < 5)
 			{
-				subtreeJobs->Execute( [=, this]() { Build( n, depth + 1 ); } );
-				subtreeJobs->Execute( [=, this]() { Build( n + 1, depth + 1 ); } );
+				BVH* thisBVH = this;
+				subtreeJobs->Execute( [=]() { thisBVH->Build( n, depth + 1 ); } );
+				subtreeJobs->Execute( [=]() { thisBVH->Build( n + 1, depth + 1 ); } );
 				break;
 			}
-		#endif
 			task[taskCount++] = n + 1, nodeIdx = n;
 		}
 		// fetch subdivision task from stack
@@ -2455,9 +2435,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	// all done.
 	if (depth == 0 || triCount < MT_BUILD_THRESHOLD)
 	{
-	#ifdef USE_JOBSYSTEM
 		subtreeJobs->Wait();
-	#endif
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = true; // not using spatial splits: can refit this BVH
 		may_have_holes = false; // the reference builder produces a continuous list of nodes
@@ -2702,9 +2680,7 @@ void BVH::BuildHQTask(
 	const float rootArea = tinybvh_half_area( root.aabbMax - root.aabbMin );
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f /* don't touch, carefully picked */;
 	// threading
-#ifdef USE_JOBSYSTEM
 	if (!subtreeJobs) subtreeJobs = new JobSystem();
-#endif
 	// subdivide
 	uint32_t binCount = hqbvhbins;
 	while (1)
@@ -2944,15 +2920,14 @@ void BVH::BuildHQTask(
 			bvhNode[rightChildIdx].leftFirst = B, bvhNode[rightChildIdx].triCount = rightCount;
 			node.leftFirst = leftChildIdx, node.triCount = 0;
 			// recurse
-		#ifdef USE_JOBSYSTEM
 			if (depth < maxDepth)
 			{
 				// spawn a new thread for the right branch
-				subtreeJobs->Execute( [=, this]() { BuildHQTask( leftChildIdx, depth + 1, maxDepth, sliceStart, (A + B) >> 1, idxTmp ); } );
-				subtreeJobs->Execute( [=, this]() { BuildHQTask( rightChildIdx, depth + 1, maxDepth, (A + B) >> 1, sliceEnd, idxTmp ); } );
+				BVH* thisBVH = this;
+				subtreeJobs->Execute( [=]() { thisBVH->BuildHQTask( leftChildIdx, depth + 1, maxDepth, sliceStart, (A + B) >> 1, idxTmp ); } );
+				subtreeJobs->Execute( [=]() { thisBVH->BuildHQTask( rightChildIdx, depth + 1, maxDepth, (A + B) >> 1, sliceEnd, idxTmp ); } );
 				break;
 			}
-		#endif
 			// proceed with left child, push right child on local stack
 			localTask[localTasks].node = rightChildIdx, localTask[localTasks].depth = depth;
 			localTask[localTasks].sliceStart = (A + B) >> 1, localTask[localTasks++].sliceEnd = sliceEnd;
@@ -2964,9 +2939,7 @@ void BVH::BuildHQTask(
 		sliceStart = localTask[localTasks].sliceStart, sliceEnd = localTask[localTasks].sliceEnd;
 	}
 	// all done.
-#ifdef USE_JOBSYSTEM
 	if (depth == 0) subtreeJobs->Wait();
-#endif
 }
 
 void BVH::BuildHQ()
@@ -6573,10 +6546,8 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
 	if (triCount < MT_BUILD_THRESHOLD) depth = 999;
 	// threading.
-#ifdef USE_JOBSYSTEM
 	if (!subtreeJobs) subtreeJobs = new JobSystem();
 	if (!binningJobs) binningJobs = new JobSystem();
-#endif
 	// subdivide recursively
 	ALIGNED( 64 ) uint32_t task[128], taskCount = 0;
 	BVHNode& root = bvhNode[0];
@@ -6593,7 +6564,6 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( binmul3, d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
-		#ifdef USE_JOBSYSTEM
 			if (depth < 5 && node.triCount > 10'000)
 			{
 				// run binning in parallel slices
@@ -6605,7 +6575,8 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 					const uint32_t last = slice == (slices - 1) ? (node.leftFirst + node.triCount) : (first + sliceSize);
 					__m256* sbb = slicebinbox[slice], * bo = binboxOrig;
 					uint32_t* sc = slicecount[slice];
-					binningJobs->Execute( [=, this]() { BuildAVXBinTask( first, last, sbb, bo, sc, nmin4, rpd4 ); } );
+					BVH* thisBVH = this;
+					binningJobs->Execute( [=]() { thisBVH->BuildAVXBinTask( first, last, sbb, bo, sc, nmin4, rpd4 ); } );
 				}
 				binningJobs->Wait();
 				// combine results from threads
@@ -6614,7 +6585,6 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 						binbox[ai] = _mm256_max_ps( binbox[ai], slicebinbox[slice][ai] );
 			}
 			else
-			#endif
 				BuildAVXBinTask( node.leftFirst, node.leftFirst + node.triCount, binbox, binboxOrig, count, nmin4, rpd4 );
 			// calculate per-split totals
 			float splitCost = BVH_FAR, rSAV = 1.0f / node.SurfaceArea();
@@ -6666,16 +6636,15 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 			node.leftFirst = n, node.triCount = 0;
 			*(__m256*)& bvhNode[n + 1] = _mm256_xor_ps( bestRBox, signFlip8 );
 			bvhNode[n + 1].leftFirst = i, bvhNode[n + 1].triCount = rightCount;
-		#ifdef USE_JOBSYSTEM
 			if (leftCount + rightCount > 2000 && depth < 5)
 			{
 				// be gentle, these are my first lambdas ever.
-				subtreeJobs->Execute( [=, this]() { BuildAVX( n, depth + 1, subtreeNewNodePtr ); } );
-				subtreeJobs->Execute( [=, this]() { BuildAVX( n + 1, depth + 1, subtreeNewNodePtr + leftCount * 2 - 1 ); } );
+				BVH* thisBVH = this;
+				subtreeJobs->Execute( [=]() { thisBVH->BuildAVX( n, depth + 1, subtreeNewNodePtr ); } );
+				subtreeJobs->Execute( [=]() { thisBVH->BuildAVX( n + 1, depth + 1, subtreeNewNodePtr + leftCount * 2 - 1 ); } );
 				break;
 			}
 			else
-			#endif
 				task[taskCount++] = n + 1, nodeIdx = n;
 		}
 		// fetch subdivision task from stack
@@ -6685,9 +6654,7 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 	if (depth == 0 || triCount < MT_BUILD_THRESHOLD)
 	{
 		// wait for all threads to complete.
-	#ifdef USE_JOBSYSTEM
 		subtreeJobs->Wait();
-	#endif
 		// tree has been built.
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = true; // not using spatial splits: can refit this BVH
