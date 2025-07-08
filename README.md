@@ -1,6 +1,3 @@
-# dev
-This is the TinyBVH **development branch**. New features are tested here. Please also make PRs to this branch.
-
 # TinyBVH
 Single-header BVH construction and traversal library written as "Sane C++" (or "C with classes"). Some C++11 is used, e.g. for threading. The library has no dependencies. 
 
@@ -70,7 +67,7 @@ The **performance measurement tool** can be compiled with:
 
 Many additional demos are provided, demonstrating features of the library in small source files.
 
-# Version 1.6.1
+# Version 1.6.2
 
 Basic use:
 
@@ -183,6 +180,9 @@ A list of projects using TinyBVH:
 The TinyBVH library can now also be used from Rust, with the [Rust bindings](https://docs.rs/tinybvh-rs/latest/tinybvh_rs) provided by David Peicho.
 
 Created or know about other projects? [Let me know](mailto:bikker.j@protonmail.com)!
+
+# Contribute
+TinyBVH received corrections and features from 28 contributors so far. Thanks! Feel free to submit PRs; **please do so in the [development branch](https://github.com/jbikker/tinybvh/tree/dev)** for a good workflow.
 
 # Contact
 Questions, remarks? Contact me at bikker.j@protonmail.com or BlueSky: @jbikker.bsky.social .
