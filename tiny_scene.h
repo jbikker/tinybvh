@@ -1947,10 +1947,6 @@ void Node::UpdateTransformFromTRS()
 	localTransform = T * R * S * matrix;
 }
 
-#ifndef uint
-#define uint unsigned
-#endif
-
 //  +-----------------------------------------------------------------------------+
 //  |  Node::Update                                                               |
 //  |  Calculates the combined transform for this node and recurses into the      |
@@ -2044,7 +2040,7 @@ void Node::Update( const ts_mat4& T )
 					strcat( t, ".tri" );
 					strcat( b, ".bvh" );
 					tinybvh::BVH& bvh = mesh->blas.rigidGPU->bvh;
-					if (bvh.Load( b, (tinybvh::bvhvec4*)mesh->vertices.data(), (uint)mesh->triangles.size() ))
+					if (bvh.Load( b, (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() ))
 					{
 						printf( "done. Finalizing... " );
 						mesh->blas.rigidGPU->ConvertFrom( bvh, true );
@@ -2087,7 +2083,7 @@ void Node::Update( const ts_mat4& T )
 					strcat( t, ".tri" );
 					strcat( b, ".bvh" );
 					tinybvh::BVH& bvh = mesh->blas.staticGPU->bvh8.bvh;
-					if (bvh.Load( b, (tinybvh::bvhvec4*)mesh->vertices.data(), (uint)mesh->triangles.size() ))
+					if (bvh.Load( b, (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() ))
 					{
 						printf( "done. Finalizing... " );
 						loaded = true;
