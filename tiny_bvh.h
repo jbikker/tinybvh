@@ -91,7 +91,7 @@ THE SOFTWARE.
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
 #define TINY_BVH_VERSION_MINOR	6
-#define TINY_BVH_VERSION_SUB	1
+#define TINY_BVH_VERSION_SUB	2
 
 // Cached BVH file version - increases only when file layout changes.
 #define TINY_BVH_CACHE_VERSION	161
@@ -1811,7 +1811,7 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	uint32_t header, fileTriCount;
 	s.read( (char*)&header, sizeof( uint32_t ) );
 	if ((header >> 24) != layout) return false;
-	if ((header & 0xffffffff) != TINY_BVH_CACHE_VERSION) return false;
+	if ((header & 0xffffff) != TINY_BVH_CACHE_VERSION) return false;
 	s.read( (char*)&fileTriCount, sizeof( uint32_t ) );
 	if (expectIndexed && fileTriCount != primCount) return false;
 	if (!expectIndexed && fileTriCount != vertices.count / 3) return false;
@@ -2422,7 +2422,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 			node.leftFirst = n, node.triCount = 0;
 			if (depth < 5)
 			{
-				BVH* thisBVH = this;
+				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
 				subtreeJobs->Execute( [=]() { thisBVH->Build( n, depth + 1 ); } );
 				subtreeJobs->Execute( [=]() { thisBVH->Build( n + 1, depth + 1 ); } );
 				break;
@@ -2923,7 +2923,7 @@ void BVH::BuildHQTask(
 			if (depth < maxDepth)
 			{
 				// spawn a new thread for the right branch
-				BVH* thisBVH = this;
+				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
 				subtreeJobs->Execute( [=]() { thisBVH->BuildHQTask( leftChildIdx, depth + 1, maxDepth, sliceStart, (A + B) >> 1, idxTmp ); } );
 				subtreeJobs->Execute( [=]() { thisBVH->BuildHQTask( rightChildIdx, depth + 1, maxDepth, (A + B) >> 1, sliceEnd, idxTmp ); } );
 				break;
@@ -6405,6 +6405,7 @@ inline float halfArea( const __m256& a /* a contains aabb itself, with min.xyz n
 #if defined _MSC_VER
 #pragma warning ( push )
 #pragma warning( disable:4701 ) // "potentially uninitialized local variable 'bestLBox' used"
+#pragma warning (disable:4324) // "lambda structure was padded due to alignment specifier"
 #elif defined __GNUC__ && !defined __clang__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
@@ -6579,7 +6580,7 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 					const uint32_t last = slice == (slices - 1) ? (node.leftFirst + node.triCount) : (first + sliceSize);
 					__m256* sbb = slicebinbox[slice], * bo = binboxOrig;
 					uint32_t* sc = slicecount[slice];
-					BVH* thisBVH = this;
+					BVH* thisBVH = this; // avoid warnings / complexities of capturing this
 					binningJobs->Execute( [=]() { thisBVH->BuildAVXBinTask( first, last, sbb, bo, sc, nmin4, rpd4 ); } );
 				}
 				binningJobs->Wait();
@@ -6643,13 +6644,12 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 			if (leftCount + rightCount > 2000 && depth < 5)
 			{
 				// be gentle, these are my first lambdas ever.
-				BVH* thisBVH = this;
+				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
 				subtreeJobs->Execute( [=]() { thisBVH->BuildAVX( n, depth + 1, subtreeNewNodePtr ); } );
 				subtreeJobs->Execute( [=]() { thisBVH->BuildAVX( n + 1, depth + 1, subtreeNewNodePtr + leftCount * 2 - 1 ); } );
 				break;
 			}
-			else
-				task[taskCount++] = n + 1, nodeIdx = n;
+			task[taskCount++] = n + 1, nodeIdx = n;
 		}
 		// fetch subdivision task from stack
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
@@ -6666,6 +6666,7 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 		usedNodes = newNodePtr = allocatedNodes; // atomicNewNodePtr->load();
 	}
 }
+
 #if defined _MSC_VER
 #pragma warning ( pop ) // restore 4701
 #elif defined __GNUC__ && !defined __clang__
