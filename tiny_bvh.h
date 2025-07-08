@@ -1811,7 +1811,7 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	uint32_t header, fileTriCount;
 	s.read( (char*)&header, sizeof( uint32_t ) );
 	if ((header >> 24) != layout) return false;
-	if ((header & 0xffffffff) != TINY_BVH_CACHE_VERSION) saveNewVersion = true; // return false;
+	if ((header & 0xffffffff) != TINY_BVH_CACHE_VERSION) return false;
 	s.read( (char*)&fileTriCount, sizeof( uint32_t ) );
 	if (expectIndexed && fileTriCount != primCount) return false;
 	if (!expectIndexed && fileTriCount != vertices.count / 3) return false;
@@ -5583,6 +5583,7 @@ void BVH8_CPU::Build( const bvhvec4slice& vertices )
 {
 	bvh8.bvh.context = bvh8.context = context;
 	bvh8.bvh.BuildDefault( vertices );
+	bvh8.bvh.Compact();
 	ConvertFrom( bvh8 );
 }
 
@@ -5597,6 +5598,7 @@ void BVH8_CPU::Build( const bvhvec4slice& vertices, const uint32_t* indices, uin
 	// build the BVH from vertices stored in a slice, indexed by 'indices'.
 	bvh8.bvh.context = bvh8.context = context;
 	bvh8.bvh.BuildDefault( vertices, indices, prims );
+	bvh8.bvh.Compact();
 	ConvertFrom( bvh8 );
 }
 
