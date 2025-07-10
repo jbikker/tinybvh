@@ -91,7 +91,7 @@ THE SOFTWARE.
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
 #define TINY_BVH_VERSION_MINOR	6
-#define TINY_BVH_VERSION_SUB	3
+#define TINY_BVH_VERSION_SUB	4
 
 // Cached BVH file version - increases only when file layout changes.
 #define TINY_BVH_CACHE_VERSION	161
