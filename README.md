@@ -67,7 +67,7 @@ The **performance measurement tool** can be compiled with:
 
 Many additional demos are provided, demonstrating features of the library in small source files.
 
-# Version 1.6.2
+# Version 1.6.3
 
 Basic use:
 
