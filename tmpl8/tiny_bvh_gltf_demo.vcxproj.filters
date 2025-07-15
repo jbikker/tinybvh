@@ -68,6 +68,9 @@
     <None Include="..\traverse_tlas.cl">
       <Filter>kernels</Filter>
     </None>
+    <None Include="..\traverse_bvh2_int.inc">
+      <Filter>kernels</Filter>
+    </None>
     <None Include="..\traverse_cwbvh.cl">
       <Filter>kernels</Filter>
     </None>
