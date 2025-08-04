@@ -487,6 +487,7 @@ inline bvhvec4 operator*( float b, const bvhvec4& a ) { return bvhvec4( b * a.x,
 inline bvhvec2 operator/( float b, const bvhvec2& a ) { return bvhvec2( b / a.x, b / a.y ); }
 inline bvhvec3 operator/( float b, const bvhvec3& a ) { return bvhvec3( b / a.x, b / a.y, b / a.z ); }
 inline bvhvec4 operator/( float b, const bvhvec4& a ) { return bvhvec4( b / a.x, b / a.y, b / a.z, b / a.w ); }
+inline bvhvec3 operator/( bvhvec3 b, const bvhvec3& a ) { return bvhvec3( b.x / a.x, b.y / a.y, b.z / a.z ); }
 inline void operator*=( bvhvec3& a, const float b ) { a.x *= b; a.y *= b; a.z *= b; }
 
 #endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
@@ -509,17 +510,19 @@ inline bvhvec3 tinybvh_normalize( const bvhvec3& a )
 }
 inline bvhvec3 tinybvh_transform_point( const bvhvec3& v, const bvhmat4& T )
 {
+	const float* Tcell = (const float*)&T;
 	const bvhvec3 res(
-		T[0] * v.x + T[1] * v.y + T[2] * v.z + T[3],
-		T[4] * v.x + T[5] * v.y + T[6] * v.z + T[7],
-		T[8] * v.x + T[9] * v.y + T[10] * v.z + T[11] );
-	const float w = T[12] * v.x + T[13] * v.y + T[14] * v.z + T[15];
+		Tcell[0] * v.x + Tcell[1] * v.y + Tcell[2] * v.z + Tcell[3],
+		Tcell[4] * v.x + Tcell[5] * v.y + Tcell[6] * v.z + Tcell[7],
+		Tcell[8] * v.x + Tcell[9] * v.y + Tcell[10] * v.z + Tcell[11] );
+	const float w = Tcell[12] * v.x + Tcell[13] * v.y + Tcell[14] * v.z + Tcell[15];
 	if (w == 1) return res; else return res * (1.f / w);
 }
 inline bvhvec3 tinybvh_transform_vector( const bvhvec3& v, const bvhmat4& T )
 {
-	return bvhvec3( T[0] * v.x + T[1] * v.y + T[2] * v.z, T[4] * v.x +
-		T[5] * v.y + T[6] * v.z, T[8] * v.x + T[9] * v.y + T[10] * v.z );
+	const float* Tcell = (const float*)&T;
+	return bvhvec3( Tcell[0] * v.x + Tcell[1] * v.y + Tcell[2] * v.z, Tcell[4] * v.x +
+		Tcell[5] * v.y + Tcell[6] * v.z, Tcell[8] * v.x + Tcell[9] * v.y + Tcell[10] * v.z );
 }
 
 #ifdef DOUBLE_PRECISION_SUPPORT
@@ -557,6 +560,7 @@ inline bvhdbl3 operator*( const bvhdbl3& a, const bvhdbl3& b ) { return bvhdbl3(
 inline bvhdbl3 operator*( const bvhdbl3& a, double b ) { return bvhdbl3( a.x * b, a.y * b, a.z * b ); }
 inline bvhdbl3 operator*( double b, const bvhdbl3& a ) { return bvhdbl3( b * a.x, b * a.y, b * a.z ); }
 inline bvhdbl3 operator/( double b, const bvhdbl3& a ) { return bvhdbl3( b / a.x, b / a.y, b / a.z ); }
+inline bvhdbl3 operator/( bvhdbl3 b, const bvhdbl3& a ) { return bvhdbl3( b.x / a.x, b.y / a.y, b.z / a.z ); }
 inline bvhdbl3 operator*=( bvhdbl3& a, const double b ) { return bvhdbl3( a.x * b, a.y * b, a.z * b ); }
 
 #endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
@@ -2339,7 +2343,8 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	// subdivide root node recursively
 	uint32_t task[256], taskCount = 0;
 	BVHNode& root = bvhNode[0];
-	bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-20f, bestLMin = 0, bestLMax = 0, bestRMin = 0, bestRMax = 0;
+	bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-20f;
+	bvhvec3 bestLMin(  0 ), bestLMax( 0 ), bestRMin( 0 ), bestRMax( 0 );
 	while (1)
 	{
 		while (1)
@@ -2347,10 +2352,11 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 			BVHNode& node = bvhNode[nodeIdx];
 			// find optimal object split
 			bvhvec3 binMin[3][BVHBINS], binMax[3][BVHBINS];
-			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < BVHBINS; i++) binMin[a][i] = BVH_FAR, binMax[a][i] = -BVH_FAR;
+			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < BVHBINS; i++) 
+				binMin[a][i] = bvhvec3( BVH_FAR ), binMax[a][i] = bvhvec3( -BVH_FAR );
 			uint32_t count[3][BVHBINS];
 			memset( count, 0, BVHBINS * 3 * sizeof( uint32_t ) );
-			const bvhvec3 rpd3 = bvhvec3( BVHBINS / (node.aabbMax - node.aabbMin) ), nmin3 = node.aabbMin;
+			const bvhvec3 rpd3 = bvhvec3( bvhvec3( BVHBINS ) / (node.aabbMax - node.aabbMin) ), nmin3 = node.aabbMin;
 			for (uint32_t i = 0; i < node.triCount; i++) // process all tris for x,y and z at once
 			{
 				const uint32_t fi = primIdx[node.leftFirst + i];
@@ -2370,8 +2376,8 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 			uint32_t bestAxis = 0, bestPos = 0;
 			for (int32_t a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
 			{
-				bvhvec3 lBMin[BVHBINS - 1], rBMin[BVHBINS - 1], l1 = BVH_FAR, l2 = -BVH_FAR;
-				bvhvec3 lBMax[BVHBINS - 1], rBMax[BVHBINS - 1], r1 = BVH_FAR, r2 = -BVH_FAR;
+				bvhvec3 lBMin[BVHBINS - 1], rBMin[BVHBINS - 1], l1( BVH_FAR ), l2( -BVH_FAR );
+				bvhvec3 lBMax[BVHBINS - 1], rBMax[BVHBINS - 1], r1( BVH_FAR ), r2( -BVH_FAR );
 				float ANL[BVHBINS - 1], ANR[BVHBINS - 1];
 				for (uint32_t lN = 0, rN = 0, i = 0; i < BVHBINS - 1; i++)
 				{
@@ -2675,7 +2681,7 @@ void BVH::BuildHQTask(
 	// prepare subdivision
 	ALIGNED( 64 ) SubdivTask localTask[512];
 	uint32_t localTasks = 0;
-	bvhvec3 bestLMin = 0, bestLMax = 0, bestRMin = 0, bestRMax = 0;
+	bvhvec3 bestLMin( 0 ), bestLMax( 0 ), bestRMin( 0 ), bestRMax( 0 );
 	BVHNode& root = bvhNode[0];
 	const float rootArea = tinybvh_half_area( root.aabbMax - root.aabbMin );
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f /* don't touch, carefully picked */;
@@ -2693,10 +2699,11 @@ void BVH::BuildHQTask(
 			if (hqbvhoddeven) binCount = hqbvhbins + (depth & 1); // odd levels get one more
 			// find optimal object split
 			bvhvec3 binMin[3][MAXHQBINS], binMax[3][MAXHQBINS];
-			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < binCount; i++) binMin[a][i] = BVH_FAR, binMax[a][i] = -BVH_FAR;
+			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < binCount; i++) 
+				binMin[a][i] = bvhvec3( BVH_FAR ), binMax[a][i] = bvhvec3( -BVH_FAR );
 			uint32_t count[3][MAXHQBINS];
 			for (uint32_t i = 0; i < 3; i++) memset( count[i], 0, binCount * 4 );
-			const bvhvec3 rpd3 = bvhvec3( (float)binCount / (node.aabbMax - node.aabbMin) ), nmin3 = node.aabbMin;
+			const bvhvec3 rpd3 = bvhvec3( bvhvec3( (float)binCount ) / (node.aabbMax - node.aabbMin) ), nmin3 = node.aabbMin;
 			for (uint32_t i = 0; i < node.triCount; i++) // process all tris for x,y and z at once
 			{
 				const uint32_t fi = primIdx[node.leftFirst + i];
@@ -2717,8 +2724,8 @@ void BVH::BuildHQTask(
 			uint32_t bestAxis = 0, bestPos = 0;
 			for (int32_t a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
 			{
-				bvhvec3 lBMin[MAXHQBINS - 1], rBMin[MAXHQBINS - 1], l1 = BVH_FAR, l2 = -BVH_FAR;
-				bvhvec3 lBMax[MAXHQBINS - 1], rBMax[MAXHQBINS - 1], r1 = BVH_FAR, r2 = -BVH_FAR;
+				bvhvec3 lBMin[MAXHQBINS - 1], rBMin[MAXHQBINS - 1], l1( BVH_FAR ), l2( -BVH_FAR );
+				bvhvec3 lBMax[MAXHQBINS - 1], rBMax[MAXHQBINS - 1], r1( BVH_FAR ), r2( -BVH_FAR );
 				float AL[MAXHQBINS - 1], AR[MAXHQBINS - 1];		// left and right area per split plane
 				int NL[MAXHQBINS - 1], NR[MAXHQBINS - 1];		// summed left and right tricount
 				for (uint32_t lN = 0, rN = 0, i = 0; i < binCount - 1; i++)
@@ -2756,7 +2763,7 @@ void BVH::BuildHQTask(
 					int countIn[MAXHQBINS], countOut[MAXHQBINS];
 					memset( countIn, 0, binCount * 4 );
 					memset( countOut, 0, binCount * 4 );
-					for (uint32_t i = 0; i < binCount; i++) sbinMin[i] = BVH_FAR, sbinMax[i] = -BVH_FAR;
+					for (uint32_t i = 0; i < binCount; i++) sbinMin[i] = bvhvec3( BVH_FAR ), sbinMax[i] = bvhvec3( -BVH_FAR );
 					// populate bins with clipped fragments
 					const float planeDist = (node.aabbMax[a] - node.aabbMin[a]) / (binCount * 0.9999f);
 					const float rPlaneDist = 1.0f / planeDist, nodeMin = node.aabbMin[a];
@@ -2783,8 +2790,8 @@ void BVH::BuildHQTask(
 						}
 					}
 					// evaluate split candidates
-					bvhvec3 lBMin[MAXHQBINS - 1], rBMin[MAXHQBINS - 1], l1 = BVH_FAR, l2 = -BVH_FAR;
-					bvhvec3 lBMax[MAXHQBINS - 1], rBMax[MAXHQBINS - 1], r1 = BVH_FAR, r2 = -BVH_FAR;
+					bvhvec3 lBMin[MAXHQBINS - 1], rBMin[MAXHQBINS - 1], l1( BVH_FAR ), l2( -BVH_FAR );
+					bvhvec3 lBMax[MAXHQBINS - 1], rBMax[MAXHQBINS - 1], r1( BVH_FAR ), r2( -BVH_FAR );
 					float AL[MAXHQBINS], AR[MAXHQBINS];
 					int NL[MAXHQBINS], NR[MAXHQBINS];
 					for (uint32_t lN = 0, rN = 0, i = 0; i < binCount - 1; i++)
@@ -4481,7 +4488,7 @@ void BVH_Verbose::SplitLeafs( const uint32_t maxPrims )
 				new2.firstTri = node.firstTri + new1.triCount;
 				new2.triCount = node.triCount - new1.triCount, new2.left = new2.right = 0;
 				node.left = newIdx1, node.right = newIdx2, node.triCount = 0;
-				new1.aabbMin = new2.aabbMin = BVH_FAR, new1.aabbMax = new2.aabbMax = -BVH_FAR;
+				new1.aabbMin = new2.aabbMin = bvhvec3( BVH_FAR ), new1.aabbMax = new2.aabbMax = bvhvec3( -BVH_FAR );
 				for (uint32_t fi, i = 0; i < new1.triCount; i++)
 					fi = primIdx[new1.firstTri + i],
 					new1.aabbMin = tinybvh_min( new1.aabbMin, fragment[fi].bmin ),
@@ -8028,7 +8035,7 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 	BVHNode& root = bvhNode[0];
 	uint64_t task[256], taskCount = 0;
 	bvhdbl3 minDim = (root.aabbMax - root.aabbMin) * 1e-20;
-	bvhdbl3 bestLMin = 0, bestLMax = 0, bestRMin = 0, bestRMax = 0;
+	bvhdbl3 bestLMin( 0 ), bestLMax( 0 ), bestRMin( 0 ), bestRMax( 0 );
 	while (1)
 	{
 		while (1)
@@ -8036,10 +8043,11 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 			BVHNode& node = bvhNode[nodeIdx];
 			// find optimal object split
 			bvhdbl3 binMin[3][BVHBINS], binMax[3][BVHBINS];
-			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < BVHBINS; i++) binMin[a][i] = BVH_DBL_FAR, binMax[a][i] = -BVH_DBL_FAR;
+			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < BVHBINS; i++) 
+				binMin[a][i] = bvhdbl3( BVH_DBL_FAR ), binMax[a][i] = bvhdbl3( -BVH_DBL_FAR );
 			uint32_t count[3][BVHBINS];
 			memset( count, 0, BVHBINS * 3 * sizeof( uint32_t ) );
-			const bvhdbl3 rpd3 = bvhdbl3( BVHBINS / (node.aabbMax - node.aabbMin) ), nmin3 = node.aabbMin;
+			const bvhdbl3 rpd3 = bvhdbl3( bvhdbl3( BVHBINS ) / (node.aabbMax - node.aabbMin) ), nmin3 = node.aabbMin;
 			for (uint32_t i = 0; i < node.triCount; i++) // process all tris for x,y and z at once
 			{
 				const uint64_t fi = primIdx[node.leftFirst + i];
@@ -8060,8 +8068,8 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 			uint32_t bestAxis = 0, bestPos = 0;
 			for (int32_t a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
 			{
-				bvhdbl3 lBMin[BVHBINS - 1], rBMin[BVHBINS - 1], l1 = BVH_DBL_FAR, l2 = -BVH_DBL_FAR;
-				bvhdbl3 lBMax[BVHBINS - 1], rBMax[BVHBINS - 1], r1 = BVH_DBL_FAR, r2 = -BVH_DBL_FAR;
+				bvhdbl3 lBMin[BVHBINS - 1], rBMin[BVHBINS - 1], l1( BVH_DBL_FAR ), l2( -BVH_DBL_FAR );
+				bvhdbl3 lBMax[BVHBINS - 1], rBMax[BVHBINS - 1], r1( BVH_DBL_FAR ), r2( -BVH_DBL_FAR );
 				double ANL[BVHBINS - 1], ANR[BVHBINS - 1];
 				for (uint32_t lN = 0, rN = 0, i = 0; i < BVHBINS - 1; i++)
 				{
@@ -8394,27 +8402,28 @@ void BLASInstance::Update( BVHBase* blas )
 void BLASInstance::InvertTransform()
 {
 	// math from MESA, via http://stackoverflow.com/questions/1148309/inverting-a-4x4-matrix
-	const bvhmat4& T = this->transform;
-	invTransform[0] = T[5] * T[10] * T[15] - T[5] * T[11] * T[14] - T[9] * T[6] * T[15] + T[9] * T[7] * T[14] + T[13] * T[6] * T[11] - T[13] * T[7] * T[10];
-	invTransform[1] = -T[1] * T[10] * T[15] + T[1] * T[11] * T[14] + T[9] * T[2] * T[15] - T[9] * T[3] * T[14] - T[13] * T[2] * T[11] + T[13] * T[3] * T[10];
-	invTransform[2] = T[1] * T[6] * T[15] - T[1] * T[7] * T[14] - T[5] * T[2] * T[15] + T[5] * T[3] * T[14] + T[13] * T[2] * T[7] - T[13] * T[3] * T[6];
-	invTransform[3] = -T[1] * T[6] * T[11] + T[1] * T[7] * T[10] + T[5] * T[2] * T[11] - T[5] * T[3] * T[10] - T[9] * T[2] * T[7] + T[9] * T[3] * T[6];
-	invTransform[4] = -T[4] * T[10] * T[15] + T[4] * T[11] * T[14] + T[8] * T[6] * T[15] - T[8] * T[7] * T[14] - T[12] * T[6] * T[11] + T[12] * T[7] * T[10];
-	invTransform[5] = T[0] * T[10] * T[15] - T[0] * T[11] * T[14] - T[8] * T[2] * T[15] + T[8] * T[3] * T[14] + T[12] * T[2] * T[11] - T[12] * T[3] * T[10];
-	invTransform[6] = -T[0] * T[6] * T[15] + T[0] * T[7] * T[14] + T[4] * T[2] * T[15] - T[4] * T[3] * T[14] - T[12] * T[2] * T[7] + T[12] * T[3] * T[6];
-	invTransform[7] = T[0] * T[6] * T[11] - T[0] * T[7] * T[10] - T[4] * T[2] * T[11] + T[4] * T[3] * T[10] + T[8] * T[2] * T[7] - T[8] * T[3] * T[6];
-	invTransform[8] = T[4] * T[9] * T[15] - T[4] * T[11] * T[13] - T[8] * T[5] * T[15] + T[8] * T[7] * T[13] + T[12] * T[5] * T[11] - T[12] * T[7] * T[9];
-	invTransform[9] = -T[0] * T[9] * T[15] + T[0] * T[11] * T[13] + T[8] * T[1] * T[15] - T[8] * T[3] * T[13] - T[12] * T[1] * T[11] + T[12] * T[3] * T[9];
-	invTransform[10] = T[0] * T[5] * T[15] - T[0] * T[7] * T[13] - T[4] * T[1] * T[15] + T[4] * T[3] * T[13] + T[12] * T[1] * T[7] - T[12] * T[3] * T[5];
-	invTransform[11] = -T[0] * T[5] * T[11] + T[0] * T[7] * T[9] + T[4] * T[1] * T[11] - T[4] * T[3] * T[9] - T[8] * T[1] * T[7] + T[8] * T[3] * T[5];
-	invTransform[12] = -T[4] * T[9] * T[14] + T[4] * T[10] * T[13] + T[8] * T[5] * T[14] - T[8] * T[6] * T[13] - T[12] * T[5] * T[10] + T[12] * T[6] * T[9];
-	invTransform[13] = T[0] * T[9] * T[14] - T[0] * T[10] * T[13] - T[8] * T[1] * T[14] + T[8] * T[2] * T[13] + T[12] * T[1] * T[10] - T[12] * T[2] * T[9];
-	invTransform[14] = -T[0] * T[5] * T[14] + T[0] * T[6] * T[13] + T[4] * T[1] * T[14] - T[4] * T[2] * T[13] - T[12] * T[1] * T[6] + T[12] * T[2] * T[5];
-	invTransform[15] = T[0] * T[5] * T[10] - T[0] * T[6] * T[9] - T[4] * T[1] * T[10] + T[4] * T[2] * T[9] + T[8] * T[1] * T[6] - T[8] * T[2] * T[5];
-	const float det = T[0] * invTransform[0] + T[1] * invTransform[4] + T[2] * invTransform[8] + T[3] * invTransform[12];
+	const float* T = (const float*)&this->transform;
+	float* iT = (float*)&this->invTransform;
+	iT[0] = T[5] * T[10] * T[15] - T[5] * T[11] * T[14] - T[9] * T[6] * T[15] + T[9] * T[7] * T[14] + T[13] * T[6] * T[11] - T[13] * T[7] * T[10];
+	iT[1] = -T[1] * T[10] * T[15] + T[1] * T[11] * T[14] + T[9] * T[2] * T[15] - T[9] * T[3] * T[14] - T[13] * T[2] * T[11] + T[13] * T[3] * T[10];
+	iT[2] = T[1] * T[6] * T[15] - T[1] * T[7] * T[14] - T[5] * T[2] * T[15] + T[5] * T[3] * T[14] + T[13] * T[2] * T[7] - T[13] * T[3] * T[6];
+	iT[3] = -T[1] * T[6] * T[11] + T[1] * T[7] * T[10] + T[5] * T[2] * T[11] - T[5] * T[3] * T[10] - T[9] * T[2] * T[7] + T[9] * T[3] * T[6];
+	iT[4] = -T[4] * T[10] * T[15] + T[4] * T[11] * T[14] + T[8] * T[6] * T[15] - T[8] * T[7] * T[14] - T[12] * T[6] * T[11] + T[12] * T[7] * T[10];
+	iT[5] = T[0] * T[10] * T[15] - T[0] * T[11] * T[14] - T[8] * T[2] * T[15] + T[8] * T[3] * T[14] + T[12] * T[2] * T[11] - T[12] * T[3] * T[10];
+	iT[6] = -T[0] * T[6] * T[15] + T[0] * T[7] * T[14] + T[4] * T[2] * T[15] - T[4] * T[3] * T[14] - T[12] * T[2] * T[7] + T[12] * T[3] * T[6];
+	iT[7] = T[0] * T[6] * T[11] - T[0] * T[7] * T[10] - T[4] * T[2] * T[11] + T[4] * T[3] * T[10] + T[8] * T[2] * T[7] - T[8] * T[3] * T[6];
+	iT[8] = T[4] * T[9] * T[15] - T[4] * T[11] * T[13] - T[8] * T[5] * T[15] + T[8] * T[7] * T[13] + T[12] * T[5] * T[11] - T[12] * T[7] * T[9];
+	iT[9] = -T[0] * T[9] * T[15] + T[0] * T[11] * T[13] + T[8] * T[1] * T[15] - T[8] * T[3] * T[13] - T[12] * T[1] * T[11] + T[12] * T[3] * T[9];
+	iT[10] = T[0] * T[5] * T[15] - T[0] * T[7] * T[13] - T[4] * T[1] * T[15] + T[4] * T[3] * T[13] + T[12] * T[1] * T[7] - T[12] * T[3] * T[5];
+	iT[11] = -T[0] * T[5] * T[11] + T[0] * T[7] * T[9] + T[4] * T[1] * T[11] - T[4] * T[3] * T[9] - T[8] * T[1] * T[7] + T[8] * T[3] * T[5];
+	iT[12] = -T[4] * T[9] * T[14] + T[4] * T[10] * T[13] + T[8] * T[5] * T[14] - T[8] * T[6] * T[13] - T[12] * T[5] * T[10] + T[12] * T[6] * T[9];
+	iT[13] = T[0] * T[9] * T[14] - T[0] * T[10] * T[13] - T[8] * T[1] * T[14] + T[8] * T[2] * T[13] + T[12] * T[1] * T[10] - T[12] * T[2] * T[9];
+	iT[14] = -T[0] * T[5] * T[14] + T[0] * T[6] * T[13] + T[4] * T[1] * T[14] - T[4] * T[2] * T[13] - T[12] * T[1] * T[6] + T[12] * T[2] * T[5];
+	iT[15] = T[0] * T[5] * T[10] - T[0] * T[6] * T[9] - T[4] * T[1] * T[10] + T[4] * T[2] * T[9] + T[8] * T[1] * T[6] - T[8] * T[2] * T[5];
+	const float det = T[0] * iT[0] + T[1] * iT[4] + T[2] * iT[8] + T[3] * iT[12];
 	if (det == 0) return; // actually, invert failed. That's bad.
 	const float invdet = 1.0f / det;
-	for (int i = 0; i < 16; i++) invTransform[i] *= invdet;
+	for (int i = 0; i < 16; i++) iT[i] *= invdet;
 }
 
 #ifdef DOUBLE_PRECISION_SUPPORT
