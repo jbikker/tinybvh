@@ -182,6 +182,9 @@ A list of projects using TinyBVH:
 # TinyBVH Rust bindings
 The TinyBVH library can now also be used from Rust, with the [Rust bindings](https://docs.rs/tinybvh-rs/latest/tinybvh_rs) provided by David Peicho.
 
+# TinyBVH Python bindings
+Florent Le Moël created Python bindings for TinyBVH. You can find details in the [pytinybvh repository](https://github.com/FlorentLM/pytinybvh) on GitHub.
+
 Created or know about other projects? [Let me know](mailto:bikker.j@protonmail.com)!
 
 # Contribute
