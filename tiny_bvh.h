@@ -6208,7 +6208,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU::Intersect( Ray& ray
 			omask[0] = omask[1] = omask[2] = omask[3] = 0;
 			for (int i = 0; i < 4; i++) if (imask & (1 << i))
 			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
 				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
 			}
 			// combine
@@ -6356,7 +6356,7 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 			const uint32_t imask = _mm_movemask_ps( combined );
 			for (int i = 0; i < 4; i++) if (imask & (1 << i))
 			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
 				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
 			}
 		}
@@ -7315,7 +7315,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 			omask[0] = omask[1] = omask[2] = omask[3] = 0;
 			for (int i = 0; i < 4; i++) if (imask & (1 << i))
 			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
 				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
 			}
 			// combine
@@ -7467,7 +7467,7 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 			const uint32_t imask = _mm_movemask_ps( combined );
 			for (int i = 0; i < 4; i++) if (imask & (1 << i))
 			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN) >> 5);
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
 				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
 			}
 		}
@@ -8519,7 +8519,7 @@ void BVHBase::IntersectTri( Ray& ray, const uint32_t triIdx, const bvhvec4slice&
 		const float fN = (float)opmapN;
 		const int row = int( (u + v) * fN ), diag = int( (1 - u) * fN );
 		const int idx = (row * row) + int( v * fN ) + (diag - (opmapN - 1 - row));
-		uint32_t* om = opmap + triIdx * ((opmapN * opmapN) >> 5);
+		uint32_t* om = opmap + triIdx * ((opmapN * opmapN + 31) >> 5);
 		if (!(om[idx >> 5] & (1 << (idx & 31)))) return;
 	}
 	// register a hit: ray is shortened to t.
@@ -8567,7 +8567,7 @@ bool BVHBase::TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint
 		const float fN = (float)opmapN;
 		const int row = int( (u + v) * fN ), diag = int( (1 - u) * fN );
 		const int idx = (row * row) + int( v * fN ) + (diag - (opmapN - 1 - row));
-		uint32_t* om = opmap + triIdx * ((opmapN * opmapN) >> 5);
+		uint32_t* om = opmap + triIdx * ((opmapN * opmapN + 31) >> 5);
 		if (!(om[idx >> 5] & (1 << (idx & 31)))) return false;
 	}
 	// occluded.

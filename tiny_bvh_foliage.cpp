@@ -138,8 +138,13 @@ bvhvec3 Trace( Ray& ray, bool vox, const int depth = 0 )
 			float alpha;
 			GetShadingData( ray, albedo, alpha, N, iN );
 			if (alpha > 0) break;
+		#if 1
+			albedo = bvhvec3( 1, 0, 1 );
+			break;
+		#else
 			ray.O = I + ray.D * 0.0001f; // we hit an alpha masked pixel, continue
 			ray.hit.t = 1e34f;
+		#endif
 		}
 	}
 	else
@@ -204,7 +209,7 @@ void Init()
 	t.close();
 	// create opacity map for "leaves" node / subtree
 	int leaves = scene.FindNode( "leaves" );
-	scene.CreateOpacityMicroMaps( leaves );
+	scene.CreateOpacityMicroMaps( leaves, 32 );
 	// convert scene to 128x128x128 voxel object
 	scene.UpdateSceneGraph( 0 );
 	// determine bounding cube

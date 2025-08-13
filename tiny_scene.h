@@ -426,7 +426,7 @@ public:
 		const ::std::vector<ts_vec4>& tmpTs, const ::std::vector<Pose>& tmpPoses,
 		const ::std::vector<ts_uint4>& tmpJoints, const ::std::vector<ts_vec4>& tmpWeights, const int materialIdx );
 	void BuildMaterialList();
-	void CreateOpacityMicroMaps();
+	void CreateOpacityMicroMaps( const int N = 32 );
 	void SetPose( const ::std::vector<float>& weights );
 	void SetPose( const Skin* skin );
 	// data members
@@ -435,6 +435,7 @@ public:
 	int ID = -1;						// unique ID for the mesh: position in mesh array
 	::std::vector<ts_vec4> vertices;	// model vertices, always 3 per triangle: vertices are *not* indexed.
 	::std::vector<FatTri> triangles;	// full triangles, to be used for shading
+	uint32_t omapN = 32;				// default; may be overridden
 	uint32_t* omaps = 0;				// at N=32: 1024 bit / 128 byte per triangle
 	::std::vector<ts_vec3> vertexNormals;	// vertex normals, 1 per vertex
 	::std::vector<int> materialList;	// list of materials used by the mesh; used to efficiently track light changes
@@ -789,7 +790,7 @@ public:
 	static int FindNode( const char* name );
 	static int FindMeshNode( const int nodeId, const int meshId );
 	static int CollapseMeshes( const int nodeId );
-	static void CreateOpacityMicroMaps( const int nodeId );
+	static void CreateOpacityMicroMaps( const int nodeId, const int N = 32 );
 	static void SetBVHType( const int nodeId, const int t );
 	static void SetNodeTransform( const int nodeId, const ts_mat4& transform );
 	static const ts_mat4& GetNodeTransform( const int nodeId );
@@ -1682,9 +1683,10 @@ void CreateOpacityMicroMap( Mesh* mesh, const int N, const int first, const int 
 {
 	const float fN = (float)N;
 	const float rN = 1.0f / fN;
+	const int dwordsPerTri = (N * N + 31) >> 5;
 	for (int i = first; i < last; i++)
 	{
-		uint32_t* map = mesh->omaps + i * ((N * N) / 32);
+		uint32_t* map = mesh->omaps + i * dwordsPerTri;
 		FatTri& tri = mesh->triangles[i];
 		const uint32_t matIdx = tri.material;
 		const Material* material = Scene::materials[matIdx];
@@ -1694,11 +1696,11 @@ void CreateOpacityMicroMap( Mesh* mesh, const int N, const int first, const int 
 			tex = Scene::textures[material->color.textureID];
 			if (!tex->idata) tex = 0; // can't use hdr textures for now.
 		}
-		if (!tex) { memset( map, 255, N * N / 8 ); continue; }
-		memset( map, 0, N * N / 8 );
+		if (!tex) { memset( map, 255, dwordsPerTri * 4 ); continue; }
+		memset( map, 0, dwordsPerTri * 4 );
 		const float u0 = tri.u0, u1 = tri.u1, u2 = tri.u2, w = (float)tex->width;
 		const float v0 = tri.v0, v1 = tri.v1, v2 = tri.v2, h = (float)tex->height;
-		const int iw = tex->width;
+		const int iw = tex->width, ih = tex->height;
 		for (int y = 0; y < N * 4; y++)
 		{
 			float v = ((float)y + 0.5f) * 0.25f * rN, u = 0.125f / fN;
@@ -1711,21 +1713,22 @@ void CreateOpacityMicroMap( Mesh* mesh, const int N, const int first, const int 
 				const int idx = (row * row) + int( v * fN ) + (diag - (N - 1 - row));
 				const float tu = u * u1 + v * u2 + (1 - u - v) * u0;
 				const float tv = u * v1 + v * v2 + (1 - u - v) * v0;
-				const int iu = (int)((tu - floorf( tu )) * w);
-				const int iv = (int)((tv - floorf( tv )) * h);
+				const int iu = min( iw - 1, (int)((tu - floorf( tu )) * w) );
+				const int iv = min( ih - 1, (int)((tv - floorf( tv )) * h) );
 				const uint32_t pixel = ((uint32_t*)tex->idata)[iu + iv * iw];
 				if ((pixel >> 24) > 2) map[idx >> 5] |= 1 << (idx & 31);
 			}
 		}
 	}
 }
-void Mesh::CreateOpacityMicroMaps()
+void Mesh::CreateOpacityMicroMaps( const int N /* defaults to 32, for 32 * 32 = 1024bits = 32 uints per tri */ )
 {
 	// fill the opacity maps: WIP, we simply take one texture sample.
 	printf( "creating opacity micromaps... " );
-	const int N = 32; // i.e.: 32 * 32 = 1024bits = 128 bytes = 32 uints per tri.
 	free64( omaps );
-	omaps = (uint32_t*)malloc64( triangles.size() * N * N / 8 );
+	uint32_t dwordsPerTri = (N * N + 31) >> 5;
+	omaps = (uint32_t*)malloc64( triangles.size() * dwordsPerTri * 4 );
+	omapN = N;
 	constexpr int slices = 32;
 	const int slice = (int)triangles.size() / slices;
 	vector<thread> jobs;
@@ -1996,7 +1999,7 @@ void Node::Update( const ts_mat4& T )
 				if (mesh->blas.dynamicBVH == 0)
 				{
 					mesh->blas.dynamicBVH = new tinybvh::BVH();
-					if (mesh->omaps) mesh->blas.dynamicBVH->SetOpacityMicroMaps( mesh->omaps, 32 );
+					if (mesh->omaps) mesh->blas.dynamicBVH->SetOpacityMicroMaps( mesh->omaps, mesh->omapN );
 				}
 				mesh->blas.dynamicBVH->Build( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
@@ -2010,7 +2013,7 @@ void Node::Update( const ts_mat4& T )
 				#else
 					mesh->blas.rigidBVH = new tinybvh::BVH_SoA();
 				#endif
-					if (mesh->omaps) mesh->blas.rigidBVH->SetOpacityMicroMaps( mesh->omaps, 32 );
+					if (mesh->omaps) mesh->blas.rigidBVH->SetOpacityMicroMaps( mesh->omaps, mesh->omapN );
 				}
 				mesh->blas.rigidBVH->BuildHQ( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
@@ -2018,7 +2021,7 @@ void Node::Update( const ts_mat4& T )
 				if (mesh->blas.dynamicGPU == 0)
 				{
 					mesh->blas.dynamicGPU = new tinybvh::BVH_GPU();
-					if (mesh->omaps) mesh->blas.dynamicGPU->SetOpacityMicroMaps( mesh->omaps, 32 );
+					if (mesh->omaps) mesh->blas.dynamicGPU->SetOpacityMicroMaps( mesh->omaps, mesh->omapN );
 				}
 				mesh->blas.dynamicGPU->Build( (tinybvh::bvhvec4*)mesh->vertices.data(), (unsigned)mesh->triangles.size() );
 				break;
@@ -2027,7 +2030,7 @@ void Node::Update( const ts_mat4& T )
 				if (mesh->blas.rigidGPU == 0)
 				{
 					mesh->blas.rigidGPU = new tinybvh::BVH_GPU();
-					if (mesh->omaps) mesh->blas.rigidGPU->SetOpacityMicroMaps( mesh->omaps, 32 );
+					if (mesh->omaps) mesh->blas.rigidGPU->SetOpacityMicroMaps( mesh->omaps, mesh->omapN );
 				}
 				// attempt to load cached BVH
 				bool loaded = false;
@@ -2070,7 +2073,7 @@ void Node::Update( const ts_mat4& T )
 				if (mesh->blas.staticGPU == 0)
 				{
 					mesh->blas.staticGPU = new tinybvh::BVH8_CWBVH();
-					if (mesh->omaps) mesh->blas.staticGPU->SetOpacityMicroMaps( mesh->omaps, 32 );
+					if (mesh->omaps) mesh->blas.staticGPU->SetOpacityMicroMaps( mesh->omaps, mesh->omapN );
 				}
 				// attempt to load cached BVH
 				bool loaded = false;
@@ -3409,12 +3412,12 @@ int Scene::FindNode( const char* name )
 //  |  process all meshes in the specified subtree and produce opacity            |
 //  |  maps for them.                                                       LH2'25|
 //  +-----------------------------------------------------------------------------+
-void Scene::CreateOpacityMicroMaps( const int nodeId )
+void Scene::CreateOpacityMicroMaps( const int nodeId, const int N )
 {
 	Node* node = nodePool[nodeId];
 	int m = node->meshID;
-	if (m > -1) meshPool[m]->CreateOpacityMicroMaps();
-	for (int id : node->childIdx) CreateOpacityMicroMaps( id );
+	if (m > -1) meshPool[m]->CreateOpacityMicroMaps( N );
+	for (int id : node->childIdx) CreateOpacityMicroMaps( id, N );
 }
 
 //  +-----------------------------------------------------------------------------+
