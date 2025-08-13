@@ -759,7 +759,6 @@ int main()
 	printf( "- BVH2 refitting: " );
 	BVH tmpBVH;
 	tmpBVH.Build( triangles, verts / 3 );
-	float sahBefore = tmpBVH.SAHCost();
 	for (int pass = 0; pass < 10; pass++)
 	{
 		if (pass == 1) t.reset();
