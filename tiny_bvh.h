@@ -5447,7 +5447,7 @@ bool BVH4_CPU::Load( const char* fileName, const uint32_t expectedTris )
 	s.read( (char*)&fileTriCount, sizeof( uint32_t ) );
 	if (fileTriCount != expectedTris) return false;
 	// all checks passed; safe to overwrite *this
-	s.read( (char*)this, sizeof( BVH8_CPU ) );
+	s.read( (char*)this, sizeof( BVH4_CPU ) );
 	context = tmp; // can't load context; function pointers will differ.
 	bvh4Data = (CacheLine*)AlignedAlloc( usedBlocks * 64 );
 	allocatedBlocks = usedBlocks;
