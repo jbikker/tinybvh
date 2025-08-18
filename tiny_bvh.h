@@ -837,9 +837,6 @@ protected:
 	__FORCEINLINE bool TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t triIdx, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
 	static void PrecomputeTriangle( const bvhvec4slice& vert, const uint32_t ti0, const uint32_t ti1, const uint32_t ti2, float* T );
 	static float SA( const bvhvec3& aabbMin, const bvhvec3& aabbMax );
-	// JobSystem pointer for threaded builds
-	JobSystem* subtreeJobs = 0;
-	JobSystem* binningJobs = 0; // separate job stack: these will join while subtreeJobs may still be queued.
 };
 
 class BLASInstance;
@@ -978,6 +975,8 @@ private:
 	// Atomic counters for threaded builds
 	std::atomic<uint32_t>* atomicNewNodePtr = 0;
 	std::atomic<uint32_t>* atomicNextFrag = 0;
+	JobSystem* subtreeJobs = 0;
+	JobSystem* binningJobs = 0;
 #ifdef BVH_USEAVX
 	// AVX constants
 	static inline const __m128 half4 = _mm_set1_ps( 0.5f );
@@ -1775,6 +1774,9 @@ public:
 	bool IsBusy() { return ctx.counter.load() > 0; }
 };
 
+static thread_local JobSystem* globalSubtreeJobs = 0;
+static thread_local JobSystem* globalBinningJobs = 0;
+
 // BVH implementation
 // ----------------------------------------------------------------------------
 
@@ -1783,8 +1785,6 @@ BVH::~BVH()
 	AlignedFree( bvhNode );
 	AlignedFree( primIdx );
 	AlignedFree( fragment );
-	delete subtreeJobs;
-	delete binningJobs;
 }
 
 void BVH::Save( const char* fileName )
@@ -1823,17 +1823,12 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	s.read( (char*)&fileTriCount, sizeof( uint32_t ) );
 	if (expectIndexed && fileTriCount != primCount) return false;
 	if (!expectIndexed && fileTriCount != vertices.count / 3) return false;
-	// backup pointers to JobSystems: can't deserialize pointers.
-	JobSystem* subtreeBackup = subtreeJobs;
-	JobSystem* binningBackup = binningJobs;
 	// all checks passed; safe to overwrite *this
 	s.read( (char*)this, sizeof( BVH ) );
 	bool fileIsIndexed = vertIdx != nullptr;
 	if (expectIndexed != fileIsIndexed) return false; // not what we expected.
 	if (blasList != nullptr || instList != nullptr) return false; // can't load/save TLAS.
 	context = tmp; // can't load context; function pointers will differ.
-	subtreeJobs = subtreeBackup;
-	binningJobs = binningBackup;
 	bvhNode = (BVHNode*)AlignedAlloc( allocatedNodes * sizeof( BVHNode ) );
 	primIdx = (uint32_t*)AlignedAlloc( idxCount * sizeof( uint32_t ) );
 	fragment = 0; // no need for this in a BVH that can't be rebuilt.
@@ -2340,15 +2335,18 @@ void BVH::PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, c
 void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 {
 	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
-#ifdef NO_THREADED_BUILDS
-	threadedBuild = false;
-#else
-	if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false;
-#endif
-	if (threadedBuild && depth == 0)
+	if (depth == 0)
 	{
-		if (!subtreeJobs) subtreeJobs = new JobSystem();
-		atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
+	#ifdef NO_THREADED_BUILDS
+		threadedBuild = false;
+	#else
+		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
+		{
+			if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();	
+			subtreeJobs = globalSubtreeJobs;
+			atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
+		}
+	#endif
 	}
 	// subdivide root node recursively
 	uint32_t task[256], taskCount = 0;
@@ -2437,7 +2435,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 			bvhNode[n + 1].aabbMin = bestRMin, bvhNode[n + 1].aabbMax = bestRMax;
 			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
 			node.leftFirst = n, node.triCount = 0;
-			if (depth < 5 && threadedBuild == true)
+			if (depth < 5 && threadedBuild)
 			{
 				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
 				subtreeJobs->Execute( [=]() { thisBVH->Build( n, depth + 1 ); } );
@@ -2678,10 +2676,7 @@ void BVH::PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices,
 #ifdef NO_THREADED_BUILDS
 	threadedBuild = false;
 #else
-	if (primCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
-	{
-		if (!subtreeJobs) subtreeJobs = new JobSystem();
-	}
+	if (primCount < MT_BUILD_THRESHOLD) threadedBuild = false;
 #endif
 	// all set; actual build happens in BVH::BuildHQ.
 }
@@ -2981,6 +2976,8 @@ void BVH::BuildHQ()
 	// reset node pool
 	if (threadedBuild)
 	{
+		if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();	
+		subtreeJobs = globalSubtreeJobs;
 		atomicNewNodePtr = new std::atomic<uint32_t>( 2 );
 		atomicNextFrag = new std::atomic<uint32_t>( triCount );
 	}
@@ -6597,10 +6594,13 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 #ifdef NO_THREADED_BUILDS
 	threadedBuild = false;
 #else
-	if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
+	if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false;
+	if (threadedBuild) 
 	{
-		if (!subtreeJobs) subtreeJobs = new JobSystem();
-		if (!binningJobs) binningJobs = new JobSystem();
+		if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();	
+		if (!globalBinningJobs) globalBinningJobs = new JobSystem();	
+		subtreeJobs = globalSubtreeJobs;
+		binningJobs = globalBinningJobs;
 	}
 #endif
 	// subdivide recursively
@@ -8162,7 +8162,7 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 			node.leftFirst = n, node.triCount = 0;
 			if (depth < 5)
 			{
-				std::thread t1( &BuildDouble_, n, depth + 1, this );
+				std::thread t1( &BuildDouble_, n, depth + 1, this ); // TODO: migrate to JobSystem.
 				std::thread t2( &BuildDouble_, n + 1, depth + 1, this );
 				t1.join();
 				t2.join();
