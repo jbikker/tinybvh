@@ -161,6 +161,9 @@ THE SOFTWARE.
 #ifndef NO_CUSTOM_GEOMETRY
 #define ENABLE_CUSTOM_GEOMETRY
 #endif
+#ifndef NO_THREADED_BUILDS
+#define ENABLE_THREADED_BUILDS
+#endif
 
 // Experimental / WIP features
 
@@ -967,6 +970,7 @@ public:
 	uint32_t nextFrag = 0;			// used during SBVH build to keep track of next free fragment.
 	Fragment* fragment = 0;			// input primitive bounding boxes.
 	bool useFullSweep = false;		// for experiments only; full-sweep SAH builder.
+	bool threadedBuild = true;		// will be disabled for small meshes.
 	// Custom geometry intersection callback
 	bool (*customIntersect)(Ray&, const unsigned) = 0;
 	bool (*customIsOccluded)(const Ray&, const unsigned) = 0;
@@ -2335,11 +2339,17 @@ void BVH::PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, c
 
 void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 {
-	// initialize atomic counter on first call
-	if (depth == 0) atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
 	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
-	if (triCount < MT_BUILD_THRESHOLD) depth = 999;
-	if (!subtreeJobs) subtreeJobs = new JobSystem();
+#ifdef NO_THREADED_BUILDS
+	threadedBuild = false;
+#else
+	if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false;
+#endif
+	if (threadedBuild && depth == 0)
+	{
+		if (!subtreeJobs) subtreeJobs = new JobSystem();
+		atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
+	}
 	// subdivide root node recursively
 	uint32_t task[256], taskCount = 0;
 	BVHNode& root = bvhNode[0];
@@ -2420,13 +2430,14 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 			// create child nodes
 			uint32_t leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
-			const int32_t n = atomicNewNodePtr->fetch_add( 2 );
+			int32_t n;
+			if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
 			bvhNode[n].aabbMin = bestLMin, bvhNode[n].aabbMax = bestLMax;
 			bvhNode[n].leftFirst = node.leftFirst, bvhNode[n].triCount = leftCount;
 			bvhNode[n + 1].aabbMin = bestRMin, bvhNode[n + 1].aabbMax = bestRMax;
 			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
 			node.leftFirst = n, node.triCount = 0;
-			if (depth < 5)
+			if (depth < 5 && threadedBuild == true)
 			{
 				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
 				subtreeJobs->Execute( [=]() { thisBVH->Build( n, depth + 1 ); } );
@@ -2439,15 +2450,20 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
 	// all done.
-	if (depth == 0 || triCount < MT_BUILD_THRESHOLD)
+	if (depth == 0)
 	{
-		subtreeJobs->Wait();
+		if (threadedBuild) 
+		{
+			subtreeJobs->Wait();
+			newNodePtr = atomicNewNodePtr->load();
+			delete atomicNewNodePtr;
+			atomicNewNodePtr = 0;
+		}
+		usedNodes = newNodePtr;
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = true; // not using spatial splits: can refit this BVH
 		may_have_holes = false; // the reference builder produces a continuous list of nodes
 		bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
-		usedNodes = newNodePtr = atomicNewNodePtr->load();
-		delete atomicNewNodePtr;
 	}
 }
 
@@ -2658,6 +2674,15 @@ void BVH::PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices,
 	// clear remainder of index array
 	memset( primIdx + triCount, 0, slack * 4 );
 	bvh_over_indices = indices != nullptr;
+	// threading
+#ifdef NO_THREADED_BUILDS
+	threadedBuild = false;
+#else
+	if (primCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
+	{
+		if (!subtreeJobs) subtreeJobs = new JobSystem();
+	}
+#endif
 	// all set; actual build happens in BVH::BuildHQ.
 }
 
@@ -2685,8 +2710,6 @@ void BVH::BuildHQTask(
 	BVHNode& root = bvhNode[0];
 	const float rootArea = tinybvh_half_area( root.aabbMax - root.aabbMin );
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f /* don't touch, carefully picked */;
-	// threading
-	if (!subtreeJobs) subtreeJobs = new JobSystem();
 	// subdivide
 	uint32_t binCount = hqbvhbins;
 	while (1)
@@ -2877,7 +2900,7 @@ void BVH::BuildHQTask(
 						SplitFrag( fragment[fragIdx], part1, part2, minDim, bestAxis, splitPos, leftOK, rightOK );
 						if (leftOK && rightOK)
 						{
-							uint32_t newFragIdx = atomicNextFrag->fetch_add( 1 );
+							uint32_t newFragIdx = threadedBuild ?  atomicNextFrag->fetch_add( 1 ) : nextFrag++;
 							fragment[fragIdx] = part1, idxTmp[A++] = fragIdx,
 								fragment[newFragIdx] = part2, idxTmp[--B] = newFragIdx;
 						}
@@ -2919,7 +2942,8 @@ void BVH::BuildHQTask(
 				node.aabbMax = tinybvh_max( bestLMax, bestRMax );
 				break;
 			}
-			int32_t leftChildIdx = atomicNewNodePtr->fetch_add( 2 );
+			int32_t leftChildIdx;
+			if (threadedBuild) leftChildIdx = atomicNewNodePtr->fetch_add( 2 ); else leftChildIdx = newNodePtr, newNodePtr += 2;
 			int32_t rightChildIdx = leftChildIdx + 1;
 			bvhNode[leftChildIdx].aabbMin = bestLMin, bvhNode[leftChildIdx].aabbMax = bestLMax;
 			bvhNode[leftChildIdx].leftFirst = sliceStart, bvhNode[leftChildIdx].triCount = leftCount;
@@ -2927,7 +2951,7 @@ void BVH::BuildHQTask(
 			bvhNode[rightChildIdx].leftFirst = B, bvhNode[rightChildIdx].triCount = rightCount;
 			node.leftFirst = leftChildIdx, node.triCount = 0;
 			// recurse
-			if (depth < maxDepth)
+			if (depth < maxDepth && threadedBuild)
 			{
 				// spawn a new thread for the right branch
 				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
@@ -2946,7 +2970,7 @@ void BVH::BuildHQTask(
 		sliceStart = localTask[localTasks].sliceStart, sliceEnd = localTask[localTasks].sliceEnd;
 	}
 	// all done.
-	if (depth == 0) subtreeJobs->Wait();
+	if (depth == 0 && threadedBuild) subtreeJobs->Wait();
 }
 
 void BVH::BuildHQ()
@@ -2955,8 +2979,16 @@ void BVH::BuildHQ()
 	uint32_t* idxTmp = (uint32_t*)AlignedAlloc( (triCount + slack) * sizeof( uint32_t ) );
 	memset( idxTmp, 0, (triCount + slack) * 4 );
 	// reset node pool
-	atomicNewNodePtr = new std::atomic<uint32_t>( 2 );
-	atomicNextFrag = new std::atomic<uint32_t>( triCount );
+	if (threadedBuild)
+	{
+		atomicNewNodePtr = new std::atomic<uint32_t>( 2 );
+		atomicNextFrag = new std::atomic<uint32_t>( triCount );
+	}
+	else
+	{
+		newNodePtr = 2;
+		nextFrag = triCount;
+	}
 	// subdivide recursively
 	uint32_t nodeIdx = 0, sliceStart = 0, sliceEnd = triCount + slack, depth = 0;
 	BuildHQTask( nodeIdx, depth, 5, sliceStart, sliceEnd, idxTmp );
@@ -2965,8 +2997,12 @@ void BVH::BuildHQ()
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 	refittable = false; // can't refit an SBVH
 	may_have_holes = false; // there may be holes in the index list, but not in the node list
-	usedNodes = newNodePtr = atomicNewNodePtr->load();
-	nextFrag = atomicNextFrag->load();
+	if (threadedBuild)
+	{
+		newNodePtr = atomicNewNodePtr->load();
+		nextFrag = atomicNextFrag->load();
+	}
+	usedNodes = newNodePtr;
 	delete atomicNewNodePtr;
 	delete atomicNextFrag;
 	atomicNewNodePtr = 0;
@@ -6558,10 +6594,15 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 	uint32_t* count = slicecount[0];
 	for (uint32_t i = 0; i < 3 * AVXBINS; i++) binboxOrig[i] = max8; // binbox initialization template
 	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
-	if (triCount < MT_BUILD_THRESHOLD) depth = 999;
-	// threading.
-	if (!subtreeJobs) subtreeJobs = new JobSystem();
-	if (!binningJobs) binningJobs = new JobSystem();
+#ifdef NO_THREADED_BUILDS
+	threadedBuild = false;
+#else
+	if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
+	{
+		if (!subtreeJobs) subtreeJobs = new JobSystem();
+		if (!binningJobs) binningJobs = new JobSystem();
+	}
+#endif
 	// subdivide recursively
 	ALIGNED( 64 ) uint32_t task[128], taskCount = 0;
 	BVHNode& root = bvhNode[0];
@@ -6578,7 +6619,7 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( binmul3, d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
-			if (depth < 5 && node.triCount > 10'000)
+			if (depth < 5 && threadedBuild && node.triCount > 10'000)
 			{
 				// run binning in parallel slices
 				const uint32_t sliceSize = node.triCount / slices;
@@ -6650,7 +6691,7 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 			node.leftFirst = n, node.triCount = 0;
 			*(__m256*)& bvhNode[n + 1] = _mm256_xor_ps( bestRBox, signFlip8 );
 			bvhNode[n + 1].leftFirst = i, bvhNode[n + 1].triCount = rightCount;
-			if (leftCount + rightCount > 2000 && depth < 5)
+			if (leftCount + rightCount > 2000 && depth < 5 && threadedBuild)
 			{
 				// be gentle, these are my first lambdas ever.
 				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
@@ -6664,10 +6705,10 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
 	// all done.
-	if (depth == 0 || triCount < MT_BUILD_THRESHOLD)
+	if (depth == 0)
 	{
 		// wait for all threads to complete.
-		subtreeJobs->Wait();
+		if (threadedBuild) subtreeJobs->Wait();
 		// tree has been built.
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = true; // not using spatial splits: can refit this BVH
@@ -8032,7 +8073,11 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 	// initialize atomic counter on first call
 	if (depth == 0) atomicNewNodePtr = new std::atomic<uint64_t>( newNodePtr );
 	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
+#ifdef NO_THREADED_BUILDS
+	depth = 999;
+#else
 	if (triCount < MT_BUILD_THRESHOLD) depth = 999;
+#endif
 	// subdivide root node recursively
 	BVHNode& root = bvhNode[0];
 	uint64_t task[256], taskCount = 0;
