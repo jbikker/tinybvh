@@ -945,9 +945,84 @@ protected:
 	// Helpers
 	inline float SplitCostSAH( const float rAparent, const float Aleft, const int Nleft, const float Aright, const int Nright ) const;
 	inline float NoSplitCostSAH( const int Nparent ) const;
-	void QuickSort( const uint32_t axis, uint32_t* primIdx, int first, int last );
 	float EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx = 0 ) const;
 	float PrimArea( const uint32_t p ) const;
+
+	static inline unsigned FloatToKey(float value)
+	{
+		// Integer comparisons between numbers returned from this function behave
+		// as if the original float values where compared.
+		// Simple reinterpretation works only for [0, ...], but this also handles negatives
+
+		unsigned f = *(unsigned*)&value;
+		unsigned mask = (unsigned)((int)f >> 31 | (1 << 31));
+
+		return f ^ mask;
+	}
+
+	template<typename T, typename Func>
+	static inline void RadixSort(T* input, T* output, int len, Func getKey)
+	{
+		// http://stereopsis.com/radix.html
+		// Beats std::sort unless for small inputs (say len <= ~64)
+
+		const int radixSize = 11;
+		const int binSize = 1 << radixSize;
+		const int mask = binSize - 1;
+		const int passes = 3;
+
+		int prefixSum[binSize * passes] = { 0 };
+
+		auto getPrefixSumRef = [=, &prefixSum](unsigned key, int pass) -> int& {
+			unsigned radix = (key >> (pass * radixSize)) & mask;
+			int& offset = prefixSum[radix + pass * binSize];
+
+			return offset;
+		};
+
+		// Compute histogram for all passes
+		for (int i = 0; i < len; i++)
+		{
+			unsigned key = getKey(input[i]);
+
+			getPrefixSumRef(key, 0)++;
+			getPrefixSumRef(key, 1)++;
+			getPrefixSumRef(key, 2)++;
+		}
+
+		// Compute prefix sum for all passes
+		{
+			int sum0 = 0, sum1 = 0, sum2 = 0;
+			for (int i = 0; i < binSize; i++)
+			{
+				int temp0 = prefixSum[i + 0 * binSize];
+				int temp1 = prefixSum[i + 1 * binSize];
+				int temp2 = prefixSum[i + 2 * binSize];
+
+				prefixSum[i + 0 * binSize] = sum0;
+				prefixSum[i + 1 * binSize] = sum1;
+				prefixSum[i + 2 * binSize] = sum2;
+
+				sum0 += temp0;
+				sum1 += temp1;
+				sum2 += temp2;
+			}
+		}
+
+		// Sort from LSB to MSB in radix-sized steps
+		for (int i = 0; i < passes; i++)
+		{
+			for (int j = 0; j < len; j++)
+			{
+				T element = input[j];
+				unsigned key0 = getKey(element);
+				output[getPrefixSumRef(key0, i)++] = element;
+			}
+
+			tinybvh_swap(input, output);
+		}
+	}
+
 public:
 	// BVH type identification
 	bool isTLAS() const { return instList != 0; }
@@ -2470,17 +2545,6 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	}
 }
 
-void BVH::QuickSort( const uint32_t a, uint32_t* q, int f, int l ) // minimal qsort
-{
-	static int* s = (int*)AlignedAlloc( 4096 * 4 ); // some scenes have weird distributions...
-	int p = 0, h, i, r;
-start: while (f >= l) { if (p == 0) return; else f = s[--p], l = s[--p]; }
-	for (r = f, i = f + 1; i <= l; i++)
-		if (fragment[q[i]].bmin[a] + fragment[q[i]].bmax[a] < fragment[q[f]].bmin[a] + fragment[q[f]].bmax[a])
-			h = q[++r], q[r] = q[i], q[i] = h;
-	h = q[f], q[f] = q[r], q[r] = h, s[p++] = l, s[p++] = r + 1, l = r - 1; goto start;
-}
-
 // Full-sweep SAH builder.
 // Instead of using binning, this builder evaluates all possible split plane
 // candidates for each axis. Not efficient; e.g. sorting for each split can
@@ -2494,8 +2558,10 @@ void BVH::BuildFullSweep()
 	for (int a = 0; a < 3; a++) sortedIdx[a] = (uint32_t*)AlignedAlloc( triCount * 4 );
 	for (uint32_t a = 0; a < 3; a++)
 	{
-		memcpy( sortedIdx[a], primIdx, triCount * 4 );
-		QuickSort( a, sortedIdx[a], 0, triCount - 1 );
+		RadixSort(primIdx, sortedIdx[a], triCount, [=](int index) {
+			float p = (fragment[index].bmin[a] + fragment[index].bmax[a]) * 0.5f;
+			return FloatToKey(p);
+		});
 	}
 	// allocate space for right sweep
 	float* SAR = (float*)AlignedAlloc( triCount * sizeof( float ) );
