@@ -150,6 +150,7 @@
     <None Include="..\raytracer.cl" />
     <None Include="..\tools.cl" />
     <None Include="..\traverse_bvh2.cl" />
+    <None Include="..\traverse_bvh2_int.inc" />
     <None Include="..\traverse_cwbvh.cl" />
     <None Include="..\traverse_tlas.cl" />
     <None Include="README.md" />
