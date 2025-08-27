@@ -947,82 +947,6 @@ protected:
 	inline float NoSplitCostSAH( const int Nparent ) const;
 	float EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx = 0 ) const;
 	float PrimArea( const uint32_t p ) const;
-
-	static inline unsigned FloatToKey(float value)
-	{
-		// Integer comparisons between numbers returned from this function behave
-		// as if the original float values where compared.
-		// Simple reinterpretation works only for [0, ...], but this also handles negatives
-
-		unsigned f = *(unsigned*)&value;
-		unsigned mask = (unsigned)((int)f >> 31 | (1 << 31));
-
-		return f ^ mask;
-	}
-
-	template<typename T, typename Func>
-	static inline void RadixSort(T* input, T* output, int len, Func getKey)
-	{
-		// http://stereopsis.com/radix.html
-		// Beats std::sort unless for small inputs (say len <= ~64)
-
-		const int radixSize = 11;
-		const int binSize = 1 << radixSize;
-		const int mask = binSize - 1;
-		const int passes = 3;
-
-		int prefixSum[binSize * passes] = { 0 };
-
-		auto getPrefixSumRef = [=, &prefixSum](unsigned key, int pass) -> int& {
-			unsigned radix = (key >> (pass * radixSize)) & mask;
-			int& offset = prefixSum[radix + pass * binSize];
-
-			return offset;
-		};
-
-		// Compute histogram for all passes
-		for (int i = 0; i < len; i++)
-		{
-			unsigned key = getKey(input[i]);
-
-			getPrefixSumRef(key, 0)++;
-			getPrefixSumRef(key, 1)++;
-			getPrefixSumRef(key, 2)++;
-		}
-
-		// Compute prefix sum for all passes
-		{
-			int sum0 = 0, sum1 = 0, sum2 = 0;
-			for (int i = 0; i < binSize; i++)
-			{
-				int temp0 = prefixSum[i + 0 * binSize];
-				int temp1 = prefixSum[i + 1 * binSize];
-				int temp2 = prefixSum[i + 2 * binSize];
-
-				prefixSum[i + 0 * binSize] = sum0;
-				prefixSum[i + 1 * binSize] = sum1;
-				prefixSum[i + 2 * binSize] = sum2;
-
-				sum0 += temp0;
-				sum1 += temp1;
-				sum2 += temp2;
-			}
-		}
-
-		// Sort from LSB to MSB in radix-sized steps
-		for (int i = 0; i < passes; i++)
-		{
-			for (int j = 0; j < len; j++)
-			{
-				T element = input[j];
-				unsigned key0 = getKey(element);
-				output[getPrefixSumRef(key0, i)++] = element;
-			}
-
-			tinybvh_swap(input, output);
-		}
-	}
-
 public:
 	// BVH type identification
 	bool isTLAS() const { return instList != 0; }
@@ -1639,6 +1563,56 @@ bvhvec3 tinybvh_rndvec3( uint32_t& s )
 loop: R = bvhvec3( tinybvh_rndfloat( s ) - 0.5f, tinybvh_rndfloat( s ) * 0.5f, tinybvh_rndfloat( s ) * 0.5f );
 	if (tinybvh_dot( R, R ) > 0.25f) goto loop;
 	return tinybvh_normalize( R );
+}
+
+// radix sort
+static inline unsigned FloatToKey( const float value )
+{
+	// Integer comparisons between numbers returned from this function behave
+	// as if the original float values where compared.
+	// Simple reinterpretation works only for [0, ...], but this also handles negatives
+	const unsigned f = *(unsigned*)&value, mask = (unsigned)((int)f >> 31 | (1 << 31));
+	return f ^ mask;
+}
+template<typename T, typename Func> static inline void RadixSort( T* input, T* output, int len, Func getKey )
+{
+	// http://stereopsis.com/radix.html - Beats std::sort unless for small inputs (say len <= ~64)
+	const int radixSize = 11, binSize = 1 << radixSize, mask = binSize - 1, passes = 3;
+	int prefixSum[binSize * passes] = { 0 };
+	auto getPrefixSumRef = [=, &prefixSum]( unsigned key, int pass ) -> int& {
+		const unsigned radix = (key >> (pass * radixSize)) & mask;
+		int& offset = prefixSum[radix + pass * binSize];
+		return offset;
+		};
+	// Compute histogram for all passes
+	for (int i = 0; i < len; i++)
+	{
+		const unsigned key = getKey( input[i] );
+		getPrefixSumRef( key, 0 )++, getPrefixSumRef( key, 1 )++, getPrefixSumRef( key, 2 )++;
+	}
+	// Compute prefix sum for all passes
+	int sum0 = 0, sum1 = 0, sum2 = 0;
+	for (int i = 0; i < binSize; i++)
+	{
+		const int temp0 = prefixSum[i + 0 * binSize];
+		const int temp1 = prefixSum[i + 1 * binSize];
+		const int temp2 = prefixSum[i + 2 * binSize];
+		prefixSum[i + 0 * binSize] = sum0;
+		prefixSum[i + 1 * binSize] = sum1;
+		prefixSum[i + 2 * binSize] = sum2;
+		sum0 += temp0, sum1 += temp1, sum2 += temp2;
+	}
+	// Sort from LSB to MSB in radix-sized steps
+	for (int i = 0; i < passes; i++)
+	{
+		for (int j = 0; j < len; j++)
+		{
+			const T element = input[j];
+			const unsigned key0 = getKey( element );
+			output[getPrefixSumRef( key0, i )++] = element;
+		}
+		tinybvh_swap( input, output );
+	}
 }
 
 // error handling
@@ -2422,7 +2396,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	#else
 		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
 		{
-			if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();	
+			if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();
 			subtreeJobs = globalSubtreeJobs;
 			atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
 		}
@@ -2432,7 +2406,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	uint32_t task[256], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-20f;
-	bvhvec3 bestLMin(  0 ), bestLMax( 0 ), bestRMin( 0 ), bestRMax( 0 );
+	bvhvec3 bestLMin( 0 ), bestLMax( 0 ), bestRMin( 0 ), bestRMax( 0 );
 	while (1)
 	{
 		while (1)
@@ -2440,7 +2414,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 			BVHNode& node = bvhNode[nodeIdx];
 			// find optimal object split
 			bvhvec3 binMin[3][BVHBINS], binMax[3][BVHBINS];
-			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < BVHBINS; i++) 
+			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < BVHBINS; i++)
 				binMin[a][i] = bvhvec3( BVH_FAR ), binMax[a][i] = bvhvec3( -BVH_FAR );
 			uint32_t count[3][BVHBINS];
 			memset( count, 0, BVHBINS * 3 * sizeof( uint32_t ) );
@@ -2530,7 +2504,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	// all done.
 	if (depth == 0)
 	{
-		if (threadedBuild) 
+		if (threadedBuild)
 		{
 			subtreeJobs->Wait();
 			newNodePtr = atomicNewNodePtr->load();
@@ -2557,12 +2531,9 @@ void BVH::BuildFullSweep()
 	uint32_t* sortedIdx[3];
 	for (int a = 0; a < 3; a++) sortedIdx[a] = (uint32_t*)AlignedAlloc( triCount * 4 );
 	for (uint32_t a = 0; a < 3; a++)
-	{
-		RadixSort(primIdx, sortedIdx[a], triCount, [=](int index) {
-			float p = (fragment[index].bmin[a] + fragment[index].bmax[a]) * 0.5f;
-			return FloatToKey(p);
-		});
-	}
+		RadixSort( primIdx, sortedIdx[a], triCount, [=]( int index ) {
+		return FloatToKey( fragment[index].bmin[a] + fragment[index].bmax[a] );
+			} );
 	// allocate space for right sweep
 	float* SAR = (float*)AlignedAlloc( triCount * sizeof( float ) );
 	// subdivide root node recursively
@@ -2788,7 +2759,7 @@ void BVH::BuildHQTask(
 			if (hqbvhoddeven) binCount = hqbvhbins + (depth & 1); // odd levels get one more
 			// find optimal object split
 			bvhvec3 binMin[3][MAXHQBINS], binMax[3][MAXHQBINS];
-			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < binCount; i++) 
+			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < binCount; i++)
 				binMin[a][i] = bvhvec3( BVH_FAR ), binMax[a][i] = bvhvec3( -BVH_FAR );
 			uint32_t count[3][MAXHQBINS];
 			for (uint32_t i = 0; i < 3; i++) memset( count[i], 0, binCount * 4 );
@@ -2966,7 +2937,7 @@ void BVH::BuildHQTask(
 						SplitFrag( fragment[fragIdx], part1, part2, minDim, bestAxis, splitPos, leftOK, rightOK );
 						if (leftOK && rightOK)
 						{
-							uint32_t newFragIdx = threadedBuild ?  atomicNextFrag->fetch_add( 1 ) : nextFrag++;
+							uint32_t newFragIdx = threadedBuild ? atomicNextFrag->fetch_add( 1 ) : nextFrag++;
 							fragment[fragIdx] = part1, idxTmp[A++] = fragIdx,
 								fragment[newFragIdx] = part2, idxTmp[--B] = newFragIdx;
 						}
@@ -3047,7 +3018,7 @@ void BVH::BuildHQ()
 	// reset node pool
 	if (threadedBuild)
 	{
-		if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();	
+		if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();
 		subtreeJobs = globalSubtreeJobs;
 		atomicNewNodePtr = new std::atomic<uint32_t>( 2 );
 		atomicNextFrag = new std::atomic<uint32_t>( triCount );
@@ -6666,10 +6637,10 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 	threadedBuild = false;
 #else
 	if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false;
-	if (threadedBuild) 
+	if (threadedBuild)
 	{
-		if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();	
-		if (!globalBinningJobs) globalBinningJobs = new JobSystem();	
+		if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();
+		if (!globalBinningJobs) globalBinningJobs = new JobSystem();
 		subtreeJobs = globalSubtreeJobs;
 		binningJobs = globalBinningJobs;
 	}
@@ -8161,7 +8132,7 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 			BVHNode& node = bvhNode[nodeIdx];
 			// find optimal object split
 			bvhdbl3 binMin[3][BVHBINS], binMax[3][BVHBINS];
-			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < BVHBINS; i++) 
+			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < BVHBINS; i++)
 				binMin[a][i] = bvhdbl3( BVH_DBL_FAR ), binMax[a][i] = bvhdbl3( -BVH_DBL_FAR );
 			uint32_t count[3][BVHBINS];
 			memset( count, 0, BVHBINS * 3 * sizeof( uint32_t ) );
