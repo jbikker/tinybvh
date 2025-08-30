@@ -2535,7 +2535,7 @@ void BVH::BuildFullSweep()
 		return FloatToKey( fragment[index].bmin[a] + fragment[index].bmax[a] );
 			} );
 	// allocate space for right sweep
-	float* SAR = (float*)AlignedAlloc( triCount * sizeof( float ) );
+	float* SARs = (float*)AlignedAlloc( triCount * sizeof( float ) );
 	// subdivide root node recursively
 	uint32_t task[256], taskCount = 0, nodeIdx = 0;
 	bvhvec3 minDim = (bvhNode->aabbMax - bvhNode->aabbMin) * 1e-20f;
@@ -2556,33 +2556,53 @@ void BVH::BuildFullSweep()
 			const float rSAV = 1.0f / node.SurfaceArea();
 			const bvhvec3 extent = node.aabbMax - node.aabbMin;
 			// iterate over x,y,z
-			float splitCost = 1e30f;
+
+			float splitCost = (float)node.triCount;
 			uint32_t splitAxis = 0, splitPos = 0;
 			for (uint32_t a = 0; a < 3; a++) if (extent[a] > minDim[a])
 			{
 				// sweep from right to left
 				bvhvec3 Rmin( BVH_FAR ), Rmax( -BVH_FAR );
+				int firstRightTri = 1;
 				for (uint32_t i = 0; i < node.triCount; i++)
 				{
 					const uint32_t fi = sortedIdx[a][node.leftFirst + node.triCount - i - 1];
-					SAR[node.triCount - i - 1] = (float)i * tinybvh_half_area( Rmax - Rmin );
+					const float SAR = (float)i * tinybvh_half_area( Rmax - Rmin ) * rSAV;
+					SARs[node.triCount - i - 1] = SAR;
 					Rmin = tinybvh_min( Rmin, fragment[fi].bmin );
 					Rmax = tinybvh_max( Rmax, fragment[fi].bmax );
+
+					if (SAR >= splitCost)
+					{
+						// Right side's cost is already greater than lowest cost and will only increase. Stop early
+						firstRightTri = node.triCount - i;
+						break;
+					}
 				}
 				// sweep from left to right
 				bvhvec3 Lmin( BVH_FAR ), Lmax( -BVH_FAR );
-				for (uint32_t i = 0; i < node.triCount - 1; i++)
+				for (uint32_t i = 0; i < firstRightTri - 1; i++)
 				{
 					const uint32_t fi = sortedIdx[a][node.leftFirst + i];
 					Lmin = tinybvh_min( Lmin, fragment[fi].bmin );
 					Lmax = tinybvh_max( Lmax, fragment[fi].bmax );
-					const float SAL = (float)(i + 1) * tinybvh_half_area( Lmax - Lmin );
-					const float C = SAL + SAR[i];
+				}
+				for (uint32_t i = firstRightTri - 1; i < node.triCount - 1; i++)
+				{
+					const uint32_t fi = sortedIdx[a][node.leftFirst + i];
+					Lmin = tinybvh_min( Lmin, fragment[fi].bmin );
+					Lmax = tinybvh_max( Lmax, fragment[fi].bmax );
+					const float SAL = (float)(i + 1) * tinybvh_half_area( Lmax - Lmin ) * rSAV;
+					const float C = SAL + SARs[i];
+
 					if (C < splitCost) splitCost = C, splitPos = i + 1, splitAxis = a;
+					else if (SAL >= splitCost) break;
 				}
 			}
-			splitCost = c_trav + c_int * splitCost * rSAV;
-			float noSplitCost = (float)node.triCount * c_int;
+
+			float noSplitCost = c_int * (float)node.triCount;
+			splitCost = c_trav + (c_int * splitCost);
+
 			if (splitCost >= noSplitCost) break; // not splitting turns out to be better.
 			// partition
 			for (uint32_t i = 0; i < splitPos; i++) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 0; // "left"
@@ -2614,7 +2634,7 @@ void BVH::BuildFullSweep()
 	}
 	// cleanup allocated buffers
 	for (int a = 0; a < 3; a++) AlignedFree( sortedIdx[a] );
-	AlignedFree( SAR );
+	AlignedFree( SARs );
 	AlignedFree( flag );
 	AlignedFree( tmp );
 	// all done.
