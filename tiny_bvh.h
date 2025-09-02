@@ -2453,7 +2453,7 @@ void BVH::BuildFullSweep()
 			{
 				// sweep from right to left
 				bvhvec3 Rmin( BVH_FAR ), Rmax( -BVH_FAR );
-				int firstRightTri = 1;
+				uint32_t firstRightTri = 1;
 				for (uint32_t i = 0; i < node.triCount; i++)
 				{
 					const uint32_t fi = sortedIdx[a][node.leftFirst + node.triCount - i - 1];

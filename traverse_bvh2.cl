@@ -210,10 +210,11 @@ void kernel batch_ailalaine( const global struct BVHNode* bvhNode, const global 
 {
 	// fetch ray
 	const uint threadId = get_global_id( 0 );
+	if (threadId >= get_global_size( 0 )) return;
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	float4 hit = traverse_ailalaine( bvhNode, idx, 0, verts, O, D, rD, 1e30f, 0 );
+	float4 hit = traverse_ailalaine( bvhNode, idx, verts, 0, O, D, rD, 1e30f, 0 );
 	rayData[threadId].hit = hit;
 }
 
@@ -221,6 +222,7 @@ void kernel batch_ailalaine_rrs( const global struct BVHNode* bvhNode, const glo
 {
 	// fetch ray
 	const uint threadId = get_global_id( 0 );
+	if (threadId >= get_global_size( 0 )) return;
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
