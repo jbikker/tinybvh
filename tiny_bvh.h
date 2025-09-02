@@ -2447,7 +2447,6 @@ void BVH::BuildFullSweep()
 			const float rSAV = 1.0f / node.SurfaceArea();
 			const bvhvec3 extent = node.aabbMax - node.aabbMin;
 			// iterate over x,y,z
-
 			float splitCost = (float)node.triCount;
 			uint32_t splitAxis = 0, splitPos = 0;
 			for (uint32_t a = 0; a < 3; a++) if (extent[a] > minDim[a])
@@ -2462,7 +2461,6 @@ void BVH::BuildFullSweep()
 					SARs[node.triCount - i - 1] = SAR;
 					Rmin = tinybvh_min( Rmin, fragment[fi].bmin );
 					Rmax = tinybvh_max( Rmax, fragment[fi].bmax );
-
 					if (SAR >= splitCost)
 					{
 						// Right side's cost is already greater than lowest cost and will only increase. Stop early
@@ -2490,10 +2488,8 @@ void BVH::BuildFullSweep()
 					else if (SAL >= splitCost) break;
 				}
 			}
-
 			float noSplitCost = c_int * (float)node.triCount;
 			splitCost = c_trav + (c_int * splitCost);
-
 			if (splitCost >= noSplitCost) break; // not splitting turns out to be better.
 			// partition
 			for (uint32_t i = 0; i < splitPos; i++) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 0; // "left"
