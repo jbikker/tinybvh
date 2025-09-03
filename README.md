@@ -1,4 +1,4 @@
-#dev
+# dev
 This is the **development branch** for TinyBVH. New functionality is tested here first. Please send your PRs to this branch as well.
 
 # TinyBVH
