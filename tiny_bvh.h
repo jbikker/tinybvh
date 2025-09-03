@@ -917,7 +917,7 @@ public:
 	// private:
 	void PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( uint32_t nodeIdx = 0, uint32_t depth = 0 );
-	void BuildFullSweep();
+	void BuildFullSweep( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	bool IsOccludedTLAS( const Ray& ray ) const;
 	int32_t IntersectTLAS( Ray& ray ) const;
 	void PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
@@ -968,6 +968,10 @@ private:
 	// Atomic counters for threaded builds
 	std::atomic<uint32_t>* atomicNewNodePtr = 0;
 	std::atomic<uint32_t>* atomicNextFrag = 0;
+	// data for full sweep builder
+	uint8_t* flag = 0;
+	uint32_t* tmp = 0, *sortedIdx[3] = { 0 };
+	float* SARs = 0;
 #ifdef BVH_USEAVX
 	// static AVX data members
 	static __m128 half4, two4, min1, mask3, binmul3;
@@ -2420,22 +2424,34 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 // Instead of using binning, this builder evaluates all possible split plane
 // candidates for each axis. Not efficient; e.g. sorting for each split can
 // be prevented.
-void BVH::BuildFullSweep()
+void BuildFullSweep_( uint32_t n, uint32_t d, BVH* bvh ) { bvh->BuildFullSweep( n, d ); }
+void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 {
-	// allocate data for O(N) stable partition
-	uint8_t* flag = (uint8_t*)AlignedAlloc( triCount );
-	uint32_t* tmp = (uint32_t*)AlignedAlloc( triCount * 4 );
-	uint32_t* sortedIdx[3];
-	BVH* thisBVH = this;
-	for (int a = 0; a < 3; a++) sortedIdx[a] = (uint32_t*)AlignedAlloc( triCount * 4 );
-	for (uint32_t a = 0; a < 3; a++)
-		RadixSort( primIdx, sortedIdx[a], triCount, [=]( int index ) {
-		return FloatToKey( thisBVH->fragment[index].bmin[a] + thisBVH->fragment[index].bmax[a] );
-			} );
-	// allocate space for right sweep
-	float* SARs = (float*)AlignedAlloc( triCount * sizeof( float ) );
+	if (depth == 0)
+	{
+		// allocate data for O(N) stable partition
+		flag = (uint8_t*)AlignedAlloc( triCount );
+		tmp = (uint32_t*)AlignedAlloc( triCount * 4 );
+		for (int a = 0; a < 3; a++) sortedIdx[a] = (uint32_t*)AlignedAlloc( triCount * 4 );
+		BVH* thisBVH = this;
+		for (uint32_t a = 0; a < 3; a++)
+			RadixSort( primIdx, sortedIdx[a], triCount, [=]( int index ) {
+			return FloatToKey( thisBVH->fragment[index].bmin[a] + thisBVH->fragment[index].bmax[a] );
+				} );
+		// allocate space for right sweep
+		SARs = (float*)AlignedAlloc( triCount * sizeof( float ) );
+		// prepare threading
+	#ifdef NO_THREADED_BUILDS
+		threadedBuild = false;
+	#else
+		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
+		{
+			atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
+		}
+	#endif
+	}
 	// subdivide root node recursively
-	uint32_t task[256], taskCount = 0, nodeIdx = 0;
+	uint32_t task[256], taskCount = 0;
 	bvhvec3 minDim = (bvhNode->aabbMax - bvhNode->aabbMin) * 1e-20f;
 	while (1)
 	{
@@ -2465,7 +2481,7 @@ void BVH::BuildFullSweep()
 				{
 					const uint32_t fi = sortedIdx[a][node.leftFirst + node.triCount - i - 1];
 					const float SAR = (float)i * tinybvh_half_area( Rmax - Rmin ) * rSAV;
-					SARs[node.triCount - i - 1] = SAR;
+					SARs[node.leftFirst + node.triCount - i - 1] = SAR;
 					Rmin = tinybvh_min( Rmin, fragment[fi].bmin );
 					Rmax = tinybvh_max( Rmax, fragment[fi].bmax );
 					if (SAR >= splitCost)
@@ -2489,8 +2505,7 @@ void BVH::BuildFullSweep()
 					Lmin = tinybvh_min( Lmin, fragment[fi].bmin );
 					Lmax = tinybvh_max( Lmax, fragment[fi].bmax );
 					const float SAL = (float)(i + 1) * tinybvh_half_area( Lmax - Lmin ) * rSAV;
-					const float C = SAL + SARs[i];
-
+					const float C = SAL + SARs[node.leftFirst + i];
 					if (C < splitCost) splitCost = C, splitPos = i + 1, splitAxis = a;
 					else if (SAL >= splitCost) break;
 				}
@@ -2507,36 +2522,54 @@ void BVH::BuildFullSweep()
 				for (uint32_t i = 0; i < node.triCount; i++)
 				{
 					const uint32_t fi = sortedIdx[a][node.leftFirst + i];
-					if (flag[fi]) tmp[p1++] = fi; else sortedIdx[a][node.leftFirst + p0++] = fi;
+					if (flag[fi]) tmp[node.leftFirst + p1++] = fi; else sortedIdx[a][node.leftFirst + p0++] = fi;
 				}
-				memcpy( &sortedIdx[a][node.leftFirst + p0], tmp, p1 * 4 );
+				memcpy( &sortedIdx[a][node.leftFirst + p0], tmp + node.leftFirst, p1 * 4 );
 			}
 			// create child nodes
 			uint32_t leftCount = splitPos, rightCount = node.triCount - leftCount;
 			if (leftCount >= node.triCount || rightCount >= node.triCount || taskCount == BVH_NUM_ELEMS( task )) break;
 			memcpy( primIdx + node.leftFirst, sortedIdx[splitAxis] + node.leftFirst, node.triCount * 4 );
-			bvhNode[newNodePtr].leftFirst = node.leftFirst;
-			bvhNode[newNodePtr++].triCount = leftCount;
-			bvhNode[newNodePtr].leftFirst = node.leftFirst + leftCount;
-			bvhNode[newNodePtr++].triCount = rightCount;
-			node.leftFirst = newNodePtr - 2, node.triCount = 0;
+			int32_t n;
+			if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
+			bvhNode[n].leftFirst = node.leftFirst;
+			bvhNode[n].triCount = leftCount;
+			bvhNode[n + 1].leftFirst = node.leftFirst + leftCount;
+			bvhNode[n + 1].triCount = rightCount;
+			node.leftFirst = n, node.triCount = 0;
+			if (leftCount + rightCount > 2000 && depth < 5 && threadedBuild)
+			{
+				std::thread t1( &BuildFullSweep_, n, depth + 1, this );
+				std::thread t2( &BuildFullSweep_, n + 1, depth + 1, this );
+				t1.join();
+				t2.join(); // TODO: join is only needed in the 'all done' section below.
+				break;
+			}
 			// recurse
-			task[taskCount++] = newNodePtr - 1, nodeIdx = newNodePtr - 2;
+			task[taskCount++] = n + 1, nodeIdx = n;
 		}
 		// fetch subdivision task from stack
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
-	// cleanup allocated buffers
-	for (int a = 0; a < 3; a++) AlignedFree( sortedIdx[a] );
-	AlignedFree( SARs );
-	AlignedFree( flag );
-	AlignedFree( tmp );
-	// all done.
-	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
-	refittable = true; // not using spatial splits: can refit this BVH
-	may_have_holes = false; // the reference builder produces a continuous list of nodes
-	bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
-	usedNodes = newNodePtr;
+	// cleanup allocated buffers when done
+	if (depth == 0)
+	{
+		for (int a = 0; a < 3; a++) AlignedFree( sortedIdx[a] );
+		AlignedFree( SARs );
+		AlignedFree( flag );
+		AlignedFree( tmp );
+		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
+		refittable = true; // not using spatial splits: can refit this BVH
+		may_have_holes = false; // this builder produces a continuous list of nodes
+		bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
+		if (threadedBuild)
+		{
+			newNodePtr = atomicNewNodePtr->load();
+			delete atomicNewNodePtr;
+			atomicNewNodePtr = 0;
+		}
+		usedNodes = newNodePtr;
+	}
 }
 
 // SBVH builder.
