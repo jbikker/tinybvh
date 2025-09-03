@@ -921,7 +921,7 @@ public:
 	bool IsOccludedTLAS( const Ray& ray ) const;
 	int32_t IntersectTLAS( Ray& ray ) const;
 	void PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
-	void BuildAVX( uint32_t nodeIdx = 0, uint32_t depth = 0, uint32_t subtreeNewNodePtr = 0 );
+	void BuildAVXSubtree( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims );
 	void BuildHQ();
 	void BuildHQTask( uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* triIdxB );
@@ -6326,17 +6326,18 @@ void BVH::BuildAVX( const bvhvec4* vertices, const uint32_t primCount )
 void BVH::BuildAVX( const bvhvec4slice& vertices )
 {
 	PrepareAVXBuild( vertices, 0, 0 );
-	BuildAVX( 0u, 0u, 2u );
+	BuildAVXSubtree( 0u, 0u );
 }
 void BVH::BuildAVX( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount )
 {
 	// build the BVH with an indexed array of bvhvec4 vertices.
-	BuildAVX( bvhvec4slice{ vertices, primCount * 3, sizeof( bvhvec4 ) }, indices, primCount );
+	bvhvec4slice slice( vertices, primCount * 3, sizeof( bvhvec4 ) );
+	BuildAVX( slice, indices, primCount );
 }
 void BVH::BuildAVX( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount )
 {
 	PrepareAVXBuild( vertices, indices, primCount );
-	BuildAVX( 0u, 0u, 2u );
+	BuildAVXSubtree( 0u, 0u );
 }
 void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
 {
@@ -6444,8 +6445,8 @@ void BVH::BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* bi
 	binbox[i0] = r0, binbox[AVXBINS + i1] = r1, binbox[2 * AVXBINS + i2] = r2;
 }
 
-void BuildAVX_( uint32_t n, uint32_t d, uint32_t s, BVH* bvh ) { bvh->BuildAVX( n, d, s ); }
-void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr )
+void BuildAVXSubtree_( uint32_t n, uint32_t d, BVH* bvh ) { bvh->BuildAVXSubtree( n, d ); }
+void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 {
 	// aligned data
 	constexpr uint32_t slices = 8;
@@ -6456,14 +6457,20 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 	__m256* binbox = slicebinbox[0];
 	uint32_t* count = slicecount[0];
 	for (uint32_t i = 0; i < 3 * AVXBINS; i++) binboxOrig[i] = max8; // binbox initialization template
-	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
-#ifdef NO_THREADED_BUILDS
-	threadedBuild = false;
-#else
-	if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false;
-#endif
+	if (depth == 0)
+	{
+		// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
+	#ifdef NO_THREADED_BUILDS
+		threadedBuild = false;
+	#else
+		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
+		{
+			atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
+		}
+	#endif
+	}
 	// subdivide recursively
-	ALIGNED( 64 ) uint32_t task[128], taskCount = 0;
+	ALIGNED( 64 ) uint32_t task[256], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f;
 	while (1)
@@ -6544,8 +6551,8 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 				if (bi <= bestPos) fr = primIdx[++i]; else t = fr, fr = primIdx[i] = primIdx[--j], primIdx[j] = t;
 			}
 			// create child nodes and recurse
-			const uint32_t n = subtreeNewNodePtr;
-			subtreeNewNodePtr += 2;
+			uint32_t n;
+			if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
 			const uint32_t leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
 			*(__m256*)& bvhNode[n] = _mm256_xor_ps( bestLBox, signFlip8 );
@@ -6555,8 +6562,8 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 			bvhNode[n + 1].leftFirst = i, bvhNode[n + 1].triCount = rightCount;
 			if (leftCount + rightCount > 2000 && depth < 5 && threadedBuild)
 			{
-				std::thread t1( &BuildAVX_, n, depth + 1, subtreeNewNodePtr, this );
-				std::thread t2( &BuildAVX_, n + 1, depth + 1, subtreeNewNodePtr + leftCount * 2 - 1, this );
+				std::thread t1( &BuildAVXSubtree_, n, depth + 1, this );
+				std::thread t2( &BuildAVXSubtree_, n + 1, depth + 1, this );
 				t1.join();
 				t2.join(); // TODO: join is only needed in the 'all done' section below.
 				break;
@@ -6572,8 +6579,14 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 		// tree has been built.
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = true; // not using spatial splits: can refit this BVH
-		may_have_holes = true; // the threaded AVX builder produces gaps in the node list
-		usedNodes = newNodePtr = allocatedNodes; // atomicNewNodePtr->load();
+		may_have_holes = false; // there are no holes in the list of nodes.
+		if (threadedBuild)
+		{
+			newNodePtr = atomicNewNodePtr->load();
+			delete atomicNewNodePtr;
+			atomicNewNodePtr = 0;
+		}
+		usedNodes = newNodePtr;
 	}
 }
 
