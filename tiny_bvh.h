@@ -146,7 +146,7 @@ THE SOFTWARE.
 
 // Threaded BuildAVX
 #ifndef MT_BUILD_THRESHOLD
-#define MT_BUILD_THRESHOLD 50'000 // single-threaded builds below this triangle count
+#define MT_BUILD_THRESHOLD 50000 // single-threaded builds below this triangle count
 #endif
 
 // Features
@@ -969,16 +969,12 @@ private:
 	std::atomic<uint32_t>* atomicNewNodePtr = 0;
 	std::atomic<uint32_t>* atomicNextFrag = 0;
 #ifdef BVH_USEAVX
-	// AVX constants
-	static inline const __m128 half4 = _mm_set1_ps( 0.5f );
-	static inline const __m128 two4 = _mm_set1_ps( 2.0f ), min1 = _mm_set1_ps( -1 );
-	static inline const __m128i maxbin4 = _mm_set1_epi32( 7 );
-	static inline const __m128 mask3 = _mm_cmpeq_ps( _mm_setr_ps( 0, 0, 0, 1 ), _mm_setzero_ps() );
-	static inline const __m128 binmul3 = _mm_set1_ps( AVXBINS * 0.49999f );
-	static inline const __m256 max8 = _mm256_set1_ps( -BVH_FAR ), mask6 = _mm256_set_m128( mask3, mask3 );
-	static inline const __m256 signFlip8 = _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f );
-	// helper for AVX binning
+	// static AVX data members
+	static __m128 half4, two4, min1, mask3, binmul3;
+	static __m128i maxbin4;
+	static __m256 max8, mask6, signFlip8;
 public:
+	// helper for AVX binning
 	void BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* binbox, __m256* orig,
 		uint32_t* count, const __m128& nmin4, const __m128& rpd4 );
 #endif
@@ -1724,6 +1720,17 @@ void BVHBase::CopyBasePropertiesFrom( const BVHBase& original )
 
 // BVH implementation
 // ----------------------------------------------------------------------------
+
+// static variable declarations
+#ifdef BVH_USEAVX
+__m128 BVH::half4 = _mm_set1_ps( 0.5f );
+__m128 BVH::two4 = _mm_set1_ps( 2.0f ), BVH::min1 = _mm_set1_ps( -1 );
+__m128i BVH::maxbin4 = _mm_set1_epi32( 7 );
+__m128 BVH::mask3 = _mm_cmpeq_ps( _mm_setr_ps( 0, 0, 0, 1 ), _mm_setzero_ps() );
+__m128 BVH::binmul3 = _mm_set1_ps( AVXBINS * 0.49999f );
+__m256 BVH::max8 = _mm256_set1_ps( -BVH_FAR ), BVH::mask6 = _mm256_set_m128( mask3, mask3 );
+__m256 BVH::signFlip8 = _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f );
+#endif
 
 BVH::~BVH()
 {
@@ -6485,7 +6492,7 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( binmul3, d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
-			if (0) // depth < 5 && threadedBuild && node.triCount > 10'000)
+			if (0) // depth < 5 && threadedBuild && node.triCount > 10000)
 			{
 				// DISABLED for now until a good jobsystem arrives.
 			#if 0
