@@ -421,7 +421,7 @@ int run()
 	f.height = SCRHEIGHT;
 	f.buf = buf;
 	f.title = new char[128];
-	strcpy( f.title, "tiny_bvh" );
+	memcpy( f.title, "tiny_bvh", 9 );
 	fenster_open( &f );
 	Timer t;
 	Init();
