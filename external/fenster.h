@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <chrono>
 
 struct Timer
@@ -421,7 +422,7 @@ int run()
 	f.height = SCRHEIGHT;
 	f.buf = buf;
 	f.title = new char[128];
-	memcpy( f.title, "tiny_bvh", 9 );
+	strcpy( f.title, "tiny_bvh" );
 	fenster_open( &f );
 	Timer t;
 	Init();
