@@ -91,7 +91,7 @@ THE SOFTWARE.
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
 #define TINY_BVH_VERSION_MINOR	6
-#define TINY_BVH_VERSION_SUB	6
+#define TINY_BVH_VERSION_SUB	7
 
 // Cached BVH file version - increases only when file layout changes.
 #define TINY_BVH_CACHE_VERSION	166
@@ -146,7 +146,7 @@ THE SOFTWARE.
 
 // Threaded BuildAVX
 #ifndef MT_BUILD_THRESHOLD
-#define MT_BUILD_THRESHOLD 50'000 // single-threaded builds below this triangle count
+#define MT_BUILD_THRESHOLD 50000 // single-threaded builds below this triangle count
 #endif
 
 // Features
@@ -917,11 +917,11 @@ public:
 	// private:
 	void PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( uint32_t nodeIdx = 0, uint32_t depth = 0 );
-	void BuildFullSweep();
+	void BuildFullSweep( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	bool IsOccludedTLAS( const Ray& ray ) const;
 	int32_t IntersectTLAS( Ray& ray ) const;
 	void PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
-	void BuildAVX( uint32_t nodeIdx = 0, uint32_t depth = 0, uint32_t subtreeNewNodePtr = 0 );
+	void BuildAVXSubtree( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims );
 	void BuildHQ();
 	void BuildHQTask( uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* triIdxB );
@@ -968,17 +968,17 @@ private:
 	// Atomic counters for threaded builds
 	std::atomic<uint32_t>* atomicNewNodePtr = 0;
 	std::atomic<uint32_t>* atomicNextFrag = 0;
+	// data for full sweep builder
+	uint8_t* flag = 0;
+	uint32_t* tmp = 0, *sortedIdx[3] = { 0 };
+	float* SARs = 0;
 #ifdef BVH_USEAVX
-	// AVX constants
-	static inline const __m128 half4 = _mm_set1_ps( 0.5f );
-	static inline const __m128 two4 = _mm_set1_ps( 2.0f ), min1 = _mm_set1_ps( -1 );
-	static inline const __m128i maxbin4 = _mm_set1_epi32( 7 );
-	static inline const __m128 mask3 = _mm_cmpeq_ps( _mm_setr_ps( 0, 0, 0, 1 ), _mm_setzero_ps() );
-	static inline const __m128 binmul3 = _mm_set1_ps( AVXBINS * 0.49999f );
-	static inline const __m256 max8 = _mm256_set1_ps( -BVH_FAR ), mask6 = _mm256_set_m128( mask3, mask3 );
-	static inline const __m256 signFlip8 = _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f );
-	// helper for AVX binning
+	// static AVX data members
+	static __m128 half4, two4, min1, mask3, binmul3;
+	static __m128i maxbin4;
+	static __m256 max8, mask6, signFlip8;
 public:
+	// helper for AVX binning
 	void BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* binbox, __m256* orig,
 		uint32_t* count, const __m128& nmin4, const __m128& rpd4 );
 #endif
@@ -1725,6 +1725,17 @@ void BVHBase::CopyBasePropertiesFrom( const BVHBase& original )
 // BVH implementation
 // ----------------------------------------------------------------------------
 
+// static variable declarations
+#ifdef BVH_USEAVX
+__m128 BVH::half4 = _mm_set1_ps( 0.5f );
+__m128 BVH::two4 = _mm_set1_ps( 2.0f ), BVH::min1 = _mm_set1_ps( -1 );
+__m128i BVH::maxbin4 = _mm_set1_epi32( 7 );
+__m128 BVH::mask3 = _mm_cmpeq_ps( _mm_setr_ps( 0, 0, 0, 1 ), _mm_setzero_ps() );
+__m128 BVH::binmul3 = _mm_set1_ps( AVXBINS * 0.49999f );
+__m256 BVH::max8 = _mm256_set1_ps( -BVH_FAR ), BVH::mask6 = _mm256_set_m128( mask3, mask3 );
+__m256 BVH::signFlip8 = _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f );
+#endif
+
 BVH::~BVH()
 {
 	AlignedFree( bvhNode );
@@ -2413,22 +2424,34 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 // Instead of using binning, this builder evaluates all possible split plane
 // candidates for each axis. Not efficient; e.g. sorting for each split can
 // be prevented.
-void BVH::BuildFullSweep()
+void BuildFullSweep_( uint32_t n, uint32_t d, BVH* bvh ) { bvh->BuildFullSweep( n, d ); }
+void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 {
-	// allocate data for O(N) stable partition
-	uint8_t* flag = (uint8_t*)AlignedAlloc( triCount );
-	uint32_t* tmp = (uint32_t*)AlignedAlloc( triCount * 4 );
-	uint32_t* sortedIdx[3];
-	BVH* thisBVH = this;
-	for (int a = 0; a < 3; a++) sortedIdx[a] = (uint32_t*)AlignedAlloc( triCount * 4 );
-	for (uint32_t a = 0; a < 3; a++)
-		RadixSort( primIdx, sortedIdx[a], triCount, [=]( int index ) {
-		return FloatToKey( thisBVH->fragment[index].bmin[a] + thisBVH->fragment[index].bmax[a] );
-			} );
-	// allocate space for right sweep
-	float* SARs = (float*)AlignedAlloc( triCount * sizeof( float ) );
+	if (depth == 0)
+	{
+		// allocate data for O(N) stable partition
+		flag = (uint8_t*)AlignedAlloc( triCount );
+		tmp = (uint32_t*)AlignedAlloc( triCount * 4 );
+		for (int a = 0; a < 3; a++) sortedIdx[a] = (uint32_t*)AlignedAlloc( triCount * 4 );
+		BVH* thisBVH = this;
+		for (uint32_t a = 0; a < 3; a++)
+			RadixSort( primIdx, sortedIdx[a], triCount, [=]( int index ) {
+			return FloatToKey( thisBVH->fragment[index].bmin[a] + thisBVH->fragment[index].bmax[a] );
+				} );
+		// allocate space for right sweep
+		SARs = (float*)AlignedAlloc( triCount * sizeof( float ) );
+		// prepare threading
+	#ifdef NO_THREADED_BUILDS
+		threadedBuild = false;
+	#else
+		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
+		{
+			atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
+		}
+	#endif
+	}
 	// subdivide root node recursively
-	uint32_t task[256], taskCount = 0, nodeIdx = 0;
+	uint32_t task[256], taskCount = 0;
 	bvhvec3 minDim = (bvhNode->aabbMax - bvhNode->aabbMin) * 1e-20f;
 	while (1)
 	{
@@ -2458,7 +2481,7 @@ void BVH::BuildFullSweep()
 				{
 					const uint32_t fi = sortedIdx[a][node.leftFirst + node.triCount - i - 1];
 					const float SAR = (float)i * tinybvh_half_area( Rmax - Rmin ) * rSAV;
-					SARs[node.triCount - i - 1] = SAR;
+					SARs[node.leftFirst + node.triCount - i - 1] = SAR;
 					Rmin = tinybvh_min( Rmin, fragment[fi].bmin );
 					Rmax = tinybvh_max( Rmax, fragment[fi].bmax );
 					if (SAR >= splitCost)
@@ -2482,8 +2505,7 @@ void BVH::BuildFullSweep()
 					Lmin = tinybvh_min( Lmin, fragment[fi].bmin );
 					Lmax = tinybvh_max( Lmax, fragment[fi].bmax );
 					const float SAL = (float)(i + 1) * tinybvh_half_area( Lmax - Lmin ) * rSAV;
-					const float C = SAL + SARs[i];
-
+					const float C = SAL + SARs[node.leftFirst + i];
 					if (C < splitCost) splitCost = C, splitPos = i + 1, splitAxis = a;
 					else if (SAL >= splitCost) break;
 				}
@@ -2500,36 +2522,54 @@ void BVH::BuildFullSweep()
 				for (uint32_t i = 0; i < node.triCount; i++)
 				{
 					const uint32_t fi = sortedIdx[a][node.leftFirst + i];
-					if (flag[fi]) tmp[p1++] = fi; else sortedIdx[a][node.leftFirst + p0++] = fi;
+					if (flag[fi]) tmp[node.leftFirst + p1++] = fi; else sortedIdx[a][node.leftFirst + p0++] = fi;
 				}
-				memcpy( &sortedIdx[a][node.leftFirst + p0], tmp, p1 * 4 );
+				memcpy( &sortedIdx[a][node.leftFirst + p0], tmp + node.leftFirst, p1 * 4 );
 			}
 			// create child nodes
 			uint32_t leftCount = splitPos, rightCount = node.triCount - leftCount;
 			if (leftCount >= node.triCount || rightCount >= node.triCount || taskCount == BVH_NUM_ELEMS( task )) break;
 			memcpy( primIdx + node.leftFirst, sortedIdx[splitAxis] + node.leftFirst, node.triCount * 4 );
-			bvhNode[newNodePtr].leftFirst = node.leftFirst;
-			bvhNode[newNodePtr++].triCount = leftCount;
-			bvhNode[newNodePtr].leftFirst = node.leftFirst + leftCount;
-			bvhNode[newNodePtr++].triCount = rightCount;
-			node.leftFirst = newNodePtr - 2, node.triCount = 0;
+			int32_t n;
+			if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
+			bvhNode[n].leftFirst = node.leftFirst;
+			bvhNode[n].triCount = leftCount;
+			bvhNode[n + 1].leftFirst = node.leftFirst + leftCount;
+			bvhNode[n + 1].triCount = rightCount;
+			node.leftFirst = n, node.triCount = 0;
+			if (leftCount + rightCount > 2000 && depth < 5 && threadedBuild)
+			{
+				std::thread t1( &BuildFullSweep_, n, depth + 1, this );
+				std::thread t2( &BuildFullSweep_, n + 1, depth + 1, this );
+				t1.join();
+				t2.join(); // TODO: join is only needed in the 'all done' section below.
+				break;
+			}
 			// recurse
-			task[taskCount++] = newNodePtr - 1, nodeIdx = newNodePtr - 2;
+			task[taskCount++] = n + 1, nodeIdx = n;
 		}
 		// fetch subdivision task from stack
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
 	}
-	// cleanup allocated buffers
-	for (int a = 0; a < 3; a++) AlignedFree( sortedIdx[a] );
-	AlignedFree( SARs );
-	AlignedFree( flag );
-	AlignedFree( tmp );
-	// all done.
-	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
-	refittable = true; // not using spatial splits: can refit this BVH
-	may_have_holes = false; // the reference builder produces a continuous list of nodes
-	bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
-	usedNodes = newNodePtr;
+	// cleanup allocated buffers when done
+	if (depth == 0)
+	{
+		for (int a = 0; a < 3; a++) AlignedFree( sortedIdx[a] );
+		AlignedFree( SARs );
+		AlignedFree( flag );
+		AlignedFree( tmp );
+		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
+		refittable = true; // not using spatial splits: can refit this BVH
+		may_have_holes = false; // this builder produces a continuous list of nodes
+		bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
+		if (threadedBuild)
+		{
+			newNodePtr = atomicNewNodePtr->load();
+			delete atomicNewNodePtr;
+			atomicNewNodePtr = 0;
+		}
+		usedNodes = newNodePtr;
+	}
 }
 
 // SBVH builder.
@@ -6326,17 +6366,18 @@ void BVH::BuildAVX( const bvhvec4* vertices, const uint32_t primCount )
 void BVH::BuildAVX( const bvhvec4slice& vertices )
 {
 	PrepareAVXBuild( vertices, 0, 0 );
-	BuildAVX( 0u, 0u, 2u );
+	BuildAVXSubtree( 0u, 0u );
 }
 void BVH::BuildAVX( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount )
 {
 	// build the BVH with an indexed array of bvhvec4 vertices.
-	BuildAVX( bvhvec4slice{ vertices, primCount * 3, sizeof( bvhvec4 ) }, indices, primCount );
+	bvhvec4slice slice( vertices, primCount * 3, sizeof( bvhvec4 ) );
+	BuildAVX( slice, indices, primCount );
 }
 void BVH::BuildAVX( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount )
 {
 	PrepareAVXBuild( vertices, indices, primCount );
-	BuildAVX( 0u, 0u, 2u );
+	BuildAVXSubtree( 0u, 0u );
 }
 void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
 {
@@ -6444,8 +6485,8 @@ void BVH::BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* bi
 	binbox[i0] = r0, binbox[AVXBINS + i1] = r1, binbox[2 * AVXBINS + i2] = r2;
 }
 
-void BuildAVX_( uint32_t n, uint32_t d, uint32_t s, BVH* bvh ) { bvh->BuildAVX( n, d, s ); }
-void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr )
+void BuildAVXSubtree_( uint32_t n, uint32_t d, BVH* bvh ) { bvh->BuildAVXSubtree( n, d ); }
+void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 {
 	// aligned data
 	constexpr uint32_t slices = 8;
@@ -6456,14 +6497,20 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 	__m256* binbox = slicebinbox[0];
 	uint32_t* count = slicecount[0];
 	for (uint32_t i = 0; i < 3 * AVXBINS; i++) binboxOrig[i] = max8; // binbox initialization template
-	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
-#ifdef NO_THREADED_BUILDS
-	threadedBuild = false;
-#else
-	if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false;
-#endif
+	if (depth == 0)
+	{
+		// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
+	#ifdef NO_THREADED_BUILDS
+		threadedBuild = false;
+	#else
+		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
+		{
+			atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
+		}
+	#endif
+	}
 	// subdivide recursively
-	ALIGNED( 64 ) uint32_t task[128], taskCount = 0;
+	ALIGNED( 64 ) uint32_t task[256], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f;
 	while (1)
@@ -6478,7 +6525,7 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( binmul3, d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
-			if (0) // depth < 5 && threadedBuild && node.triCount > 10'000)
+			if (0) // depth < 5 && threadedBuild && node.triCount > 10000)
 			{
 				// DISABLED for now until a good jobsystem arrives.
 			#if 0
@@ -6544,8 +6591,8 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 				if (bi <= bestPos) fr = primIdx[++i]; else t = fr, fr = primIdx[i] = primIdx[--j], primIdx[j] = t;
 			}
 			// create child nodes and recurse
-			const uint32_t n = subtreeNewNodePtr;
-			subtreeNewNodePtr += 2;
+			uint32_t n;
+			if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
 			const uint32_t leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
 			*(__m256*)& bvhNode[n] = _mm256_xor_ps( bestLBox, signFlip8 );
@@ -6555,8 +6602,8 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 			bvhNode[n + 1].leftFirst = i, bvhNode[n + 1].triCount = rightCount;
 			if (leftCount + rightCount > 2000 && depth < 5 && threadedBuild)
 			{
-				std::thread t1( &BuildAVX_, n, depth + 1, subtreeNewNodePtr, this );
-				std::thread t2( &BuildAVX_, n + 1, depth + 1, subtreeNewNodePtr + leftCount * 2 - 1, this );
+				std::thread t1( &BuildAVXSubtree_, n, depth + 1, this );
+				std::thread t2( &BuildAVXSubtree_, n + 1, depth + 1, this );
 				t1.join();
 				t2.join(); // TODO: join is only needed in the 'all done' section below.
 				break;
@@ -6572,8 +6619,14 @@ void BVH::BuildAVX( uint32_t nodeIdx, uint32_t depth, uint32_t subtreeNewNodePtr
 		// tree has been built.
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = true; // not using spatial splits: can refit this BVH
-		may_have_holes = true; // the threaded AVX builder produces gaps in the node list
-		usedNodes = newNodePtr = allocatedNodes; // atomicNewNodePtr->load();
+		may_have_holes = false; // there are no holes in the list of nodes.
+		if (threadedBuild)
+		{
+			newNodePtr = atomicNewNodePtr->load();
+			delete atomicNewNodePtr;
+			atomicNewNodePtr = 0;
+		}
+		usedNodes = newNodePtr;
 	}
 }
 
