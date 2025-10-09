@@ -767,6 +767,13 @@ struct BVHContext
 	void* userdata = nullptr;
 };
 
+struct OptimizerOptions {
+	uint32_t iterations = 25;
+	bool extreme = false;
+	bool mergeLeaves = false;
+	bool stochastic = false;
+};
+
 class BVHBase
 {
 public:
@@ -906,6 +913,7 @@ public:
 	void BuildNEON();
 #endif
 	void Refit( const uint32_t nodeIdx = 0 );
+	void Optimize( const OptimizerOptions& options );
 	void Optimize( const uint32_t iterations = 25, bool extreme = false, bool stochastic = false );
 	uint32_t CombineLeafs( const uint32_t primCount, uint32_t& firstIdx, uint32_t nodeIdx = 0 );
 	void CombineLeafs( const uint32_t nodeIdx = 0 );
@@ -964,6 +972,8 @@ public:
 	// Custom geometry intersection callback
 	bool (*customIntersect)(Ray&, const unsigned) = 0;
 	bool (*customIsOccluded)(const Ray&, const unsigned) = 0;
+
+	BVH_Verbose* optimizer = 0;
 private:
 	// Atomic counters for threaded builds
 	std::atomic<uint32_t>* atomicNewNodePtr = 0;
@@ -1741,6 +1751,7 @@ BVH::~BVH()
 	AlignedFree( bvhNode );
 	AlignedFree( primIdx );
 	AlignedFree( fragment );
+	if (optimizer) AlignedFree( optimizer );
 }
 
 void BVH::Save( const char* fileName )
@@ -2999,13 +3010,25 @@ void BVH::BuildHQ()
 	Compact();
 }
 
+void BVH::Optimize( const OptimizerOptions& options ) {
+	if (!optimizer) {
+		optimizer = new BVH_Verbose();
+	}
+	optimizer->ConvertFrom( *this );
+	optimizer->Optimize( options.iterations, options.extreme, options.stochastic );
+	if (options.mergeLeaves) optimizer->MergeLeafs();
+
+	ConvertFrom( *optimizer );
+}
+
 // Optimize: Will happen via BVH_Verbose.
 void BVH::Optimize( const uint32_t iterations, bool extreme, bool stochastic )
 {
-	BVH_Verbose* verbose = new BVH_Verbose();
-	verbose->ConvertFrom( *this );
-	verbose->Optimize( iterations, extreme, stochastic );
-	ConvertFrom( *verbose );
+	OptimizerOptions options;
+	options.iterations = iterations;
+	options.extreme = extreme;
+	options.stochastic = stochastic;
+	Optimize(options);
 }
 
 // Refitting: For animated meshes, where the topology remains intact. This
