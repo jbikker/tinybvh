@@ -3149,6 +3149,7 @@ bool BVH::IntersectSphere( const bvhvec3& pos, const float r ) const
 				}
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			continue;
 		}
 		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
 		bool hit1 = child1->Intersect( bmin, bmax ), hit2 = child2->Intersect( bmin, bmax );
