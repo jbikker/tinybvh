@@ -94,7 +94,7 @@ THE SOFTWARE.
 #define TINY_BVH_VERSION_SUB	8
 
 // Cached BVH file version - increases only when file layout changes.
-#define TINY_BVH_CACHE_VERSION	166
+#define TINY_BVH_CACHE_VERSION	168
 
 // Run-time checks / debuggin.
 // #define PARANOID // checks out-of-bound access of slices
@@ -767,6 +767,7 @@ struct BVHContext
 	void* userdata = nullptr;
 };
 
+class JobSystem;
 class BVHBase
 {
 public:
@@ -968,6 +969,9 @@ private:
 	// Atomic counters for threaded builds
 	std::atomic<uint32_t>* atomicNewNodePtr = 0;
 	std::atomic<uint32_t>* atomicNextFrag = 0;
+	// job system for parallel builds
+	JobSystem* subtreeJobs = 0;
+	JobSystem* binningJobs = 0;
 	// data for full sweep builder
 	uint8_t* flag = 0;
 	uint32_t* tmp = 0, *sortedIdx[3] = { 0 };
@@ -1722,6 +1726,102 @@ void BVHBase::CopyBasePropertiesFrom( const BVHBase& original )
 	this->aabbMin = original.aabbMin, this->aabbMax = original.aabbMax;
 }
 
+// Wicked job system, condensed. https://github.com/turanszkij/WickedEngine
+// Removed: Thread priority, Dispatch, graceful shutdown; not needed in TinyBVH.
+class JobSystem
+{
+public:
+	JobSystem() { Initialize(); }
+	~JobSystem()
+	{
+		if (res.numThreads == 0) return;
+		res.alive.store( false );
+		bool wake_loop = true;
+		std::thread waker( [&] { while (wake_loop) res.sleepingCondition.notify_all(); } );
+		for (auto& thread : res.threads) thread.join();
+		wake_loop = false;
+		waker.join();
+		res.jobQueue.reset();
+		res.threads.clear();
+		res.numThreads = 0;
+	}
+	struct context { std::atomic<uint32_t> counter{ 0 }; } ctx;
+	struct Job
+	{
+		std::function<void()> task;
+		inline uint32_t execute( context& ctx ) { task(); return ctx.counter.fetch_sub( 1 ); }
+	};
+	struct JobQueue
+	{
+		std::deque<Job> queue;
+		std::mutex locker;
+		inline void push_back( const Job& item ) { std::scoped_lock lock( locker ); queue.push_back( item ); }
+		inline bool pop_front( Job& item )
+		{
+			std::scoped_lock lock( locker );
+			if (queue.empty()) return false; else item = std::move( queue.front() );
+			queue.pop_front();
+			return true;
+		}
+	};
+	struct Resources
+	{
+		uint32_t numThreads = 0;
+		std::vector<std::thread> threads;
+		std::unique_ptr<JobQueue[]> jobQueue;
+		std::atomic<uint32_t> nextQueue{ 0 };
+		std::condition_variable sleepingCondition;
+		std::mutex sleepingMutex;
+		std::condition_variable waitingCondition;
+		std::mutex waitingMutex;
+		std::atomic_bool alive{ true };
+		inline void work( context& ctx, uint32_t startingQueue )
+		{
+			Job job;
+			for (uint32_t i = 0; i < numThreads; ++i) while (jobQueue[startingQueue++ % numThreads].pop_front( job ))
+				if (job.execute( ctx ) == 1) { std::unique_lock<std::mutex> lock( waitingMutex ); waitingCondition.notify_all(); }
+		}
+	} res;
+	void Initialize()
+	{
+		res.numThreads = std::thread::hardware_concurrency();
+		res.jobQueue.reset( new JobQueue[res.numThreads] );
+		res.threads.reserve( res.numThreads );
+		context& c = ctx;
+		Resources& r = res;
+		for (uint32_t threadID = 0; threadID < res.numThreads; threadID++)
+			res.threads.emplace_back( [&c, threadID, &r]
+				{	while (r.alive.load()) {
+			r.work( c, threadID );
+			std::unique_lock<std::mutex> lock( r.sleepingMutex );
+			r.sleepingCondition.wait( lock );
+		} } );
+	}
+	void Execute( const std::function<void()>& task )
+	{
+		ctx.counter.fetch_add( 1 );
+		Job job;
+		job.task = task;
+		res.jobQueue[res.nextQueue.fetch_add( 1 ) % res.numThreads].push_back( job );
+		res.sleepingCondition.notify_one();
+	}
+	void Wait()
+	{
+		if (!IsBusy()) return;
+		res.sleepingCondition.notify_all();
+		res.work( ctx, res.nextQueue.fetch_add( 1 ) % res.numThreads );
+		while (IsBusy())
+		{
+			std::unique_lock<std::mutex> lock( res.waitingMutex );
+			if (IsBusy()) res.waitingCondition.wait( lock, [this] { return !IsBusy(); } );
+		}
+	}
+	bool IsBusy() { return ctx.counter.load() > 0; }
+};
+
+static thread_local JobSystem* globalSubtreeJobs = 0;
+static thread_local JobSystem* globalBinningJobs = 0;
+
 // BVH implementation
 // ----------------------------------------------------------------------------
 
@@ -1779,12 +1879,17 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	s.read( (char*)&fileTriCount, sizeof( uint32_t ) );
 	if (expectIndexed && fileTriCount != primCount) return false;
 	if (!expectIndexed && fileTriCount != vertices.count / 3) return false;
+	// backup pointers to JobSystems: can't deserialize pointers.
+	JobSystem* subtreeBackup = subtreeJobs;
+	JobSystem* binningBackup = binningJobs;
 	// all checks passed; safe to overwrite *this
 	s.read( (char*)this, sizeof( BVH ) );
 	bool fileIsIndexed = vertIdx != nullptr;
 	if (expectIndexed != fileIsIndexed) return false; // not what we expected.
 	if (blasList != nullptr || instList != nullptr) return false; // can't load/save TLAS.
 	context = tmp; // can't load context; function pointers will differ.
+	subtreeJobs = subtreeBackup;
+	binningJobs = binningBackup;
 	bvhNode = (BVHNode*)AlignedAlloc( allocatedNodes * sizeof( BVHNode ) );
 	primIdx = (uint32_t*)AlignedAlloc( idxCount * sizeof( uint32_t ) );
 	fragment = 0; // no need for this in a BVH that can't be rebuilt.
@@ -2288,7 +2393,6 @@ void BVH::PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, c
 	// all set; actual build happens in BVH::Build.
 }
 
-void Build_( uint32_t nodeIdx, uint32_t depth, BVH* bvh ) { bvh->Build( nodeIdx, depth ); }
 void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 {
 	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
@@ -2299,6 +2403,8 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	#else
 		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
 		{
+			if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();
+			subtreeJobs = globalSubtreeJobs;
 			atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
 		}
 	#endif
@@ -2392,10 +2498,9 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 			node.leftFirst = n, node.triCount = 0;
 			if (depth < 5 && threadedBuild)
 			{
-				std::thread t1( &Build_, n, depth + 1, this );
-				std::thread t2( &Build_, n + 1, depth + 1, this );
-				t1.join();
-				t2.join(); // TODO: join is only needed in the 'all done' section below.
+				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
+				subtreeJobs->Execute( [=]() { thisBVH->Build( n, depth + 1 ); } );
+				subtreeJobs->Execute( [=]() { thisBVH->Build( n + 1, depth + 1 ); } );
 				break;
 			}
 			task[taskCount++] = n + 1, nodeIdx = n;
@@ -2408,6 +2513,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	{
 		if (threadedBuild)
 		{
+			subtreeJobs->Wait();
 			newNodePtr = atomicNewNodePtr->load();
 			delete atomicNewNodePtr;
 			atomicNewNodePtr = 0;
@@ -2682,13 +2788,6 @@ float BVH::NoSplitCostSAH( const int Nparent ) const
 	return (float)(l_quads ? (((Nparent + 3) >> 2) * 4) : Nparent) * c_int;
 }
 
-void BuildHQTask_(
-	uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth,
-	uint32_t sliceStart, uint32_t sliceEnd, uint32_t* idxTmp, BVH* bvh
-)
-{
-	bvh->BuildHQTask( nodeIdx, depth, maxDepth, sliceStart, sliceEnd, idxTmp );
-}
 void BVH::BuildHQTask(
 	uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth,
 	uint32_t sliceStart, uint32_t sliceEnd, uint32_t* idxTmp
@@ -2944,10 +3043,10 @@ void BVH::BuildHQTask(
 			// recurse
 			if (depth < maxDepth && threadedBuild)
 			{
-				std::thread t1( &BuildHQTask_, leftChildIdx, depth + 1, maxDepth, sliceStart, (A + B) >> 1, idxTmp, this );
-				std::thread t2( &BuildHQTask_, rightChildIdx, depth + 1, maxDepth, (A + B) >> 1, sliceEnd, idxTmp, this );
-				t1.join();
-				t2.join(); // TODO: join is only needed in the 'all done' section below.
+				// spawn a new thread for the right branch
+				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
+				subtreeJobs->Execute( [=]() { thisBVH->BuildHQTask( leftChildIdx, depth + 1, maxDepth, sliceStart, (A + B) >> 1, idxTmp ); } );
+				subtreeJobs->Execute( [=]() { thisBVH->BuildHQTask( rightChildIdx, depth + 1, maxDepth, (A + B) >> 1, sliceEnd, idxTmp ); } );
 				break;
 			}
 			// proceed with left child, push right child on local stack
@@ -2960,6 +3059,8 @@ void BVH::BuildHQTask(
 		nodeIdx = localTask[--localTasks].node, depth = localTask[localTasks].depth;
 		sliceStart = localTask[localTasks].sliceStart, sliceEnd = localTask[localTasks].sliceEnd;
 	}
+	// all done.
+	if (depth == 0 && threadedBuild) subtreeJobs->Wait();
 }
 
 void BVH::BuildHQ()
@@ -2970,6 +3071,8 @@ void BVH::BuildHQ()
 	// reset node pool
 	if (threadedBuild)
 	{
+		if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();
+		subtreeJobs = globalSubtreeJobs;
 		atomicNewNodePtr = new std::atomic<uint32_t>( 2 );
 		atomicNextFrag = new std::atomic<uint32_t>( triCount );
 	}
@@ -6505,6 +6608,10 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 	#else
 		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
 		{
+		if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();
+		if (!globalBinningJobs) globalBinningJobs = new JobSystem();
+		subtreeJobs = globalSubtreeJobs;
+		binningJobs = globalBinningJobs;
 			atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
 		}
 	#endif
@@ -6525,10 +6632,8 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( binmul3, d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
-			if (0) // depth < 5 && threadedBuild && node.triCount > 10000)
+			if (depth < 5 && threadedBuild && node.triCount > 10000)
 			{
-				// DISABLED for now until a good jobsystem arrives.
-			#if 0
 				// run binning in parallel slices
 				const uint32_t sliceSize = node.triCount / slices;
 				for (int slice = 0; slice < (int)slices; slice++)
@@ -6538,15 +6643,14 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 					const uint32_t last = slice == (slices - 1) ? (node.leftFirst + node.triCount) : (first + sliceSize);
 					__m256* sbb = slicebinbox[slice], * bo = binboxOrig;
 					uint32_t* sc = slicecount[slice];
-					// BVH* thisBVH = this; // avoid warnings / complexities of capturing this
-					// binningJobs->Execute( [=]() { thisBVH->BuildAVXBinTask( first, last, sbb, bo, sc, nmin4, rpd4 ); } );
+					BVH* thisBVH = this; // avoid warnings / complexities of capturing this
+					binningJobs->Execute( [=]() { thisBVH->BuildAVXBinTask( first, last, sbb, bo, sc, nmin4, rpd4 ); } );
 				}
-				// binningJobs->Wait();
+				binningJobs->Wait();
 				// combine results from threads
 				for (int a = 0; a < 3; a++) for (int i = 0; i < AVXBINS; i++)
 					for (int ai = a * AVXBINS + i, slice = 1; slice < (int)slices; slice++) count[ai] += slicecount[slice][ai],
 						binbox[ai] = _mm256_max_ps( binbox[ai], slicebinbox[slice][ai] );
-			#endif
 			}
 			else
 				BuildAVXBinTask( node.leftFirst, node.leftFirst + node.triCount, binbox, binboxOrig, count, nmin4, rpd4 );
@@ -6602,10 +6706,10 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 			bvhNode[n + 1].leftFirst = i, bvhNode[n + 1].triCount = rightCount;
 			if (leftCount + rightCount > 2000 && depth < 5 && threadedBuild)
 			{
-				std::thread t1( &BuildAVXSubtree_, n, depth + 1, this );
-				std::thread t2( &BuildAVXSubtree_, n + 1, depth + 1, this );
-				t1.join();
-				t2.join(); // TODO: join is only needed in the 'all done' section below.
+				// be gentle, these are my first lambdas ever.
+				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
+				subtreeJobs->Execute( [=]() { thisBVH->BuildAVXSubtree( n, depth + 1 ); } );
+				subtreeJobs->Execute( [=]() { thisBVH->BuildAVXSubtree( n + 1, depth + 1 ); } );
 				break;
 			}
 			task[taskCount++] = n + 1, nodeIdx = n;
@@ -6616,16 +6720,18 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 	// all done.
 	if (depth == 0)
 	{
-		// tree has been built.
-		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
-		refittable = true; // not using spatial splits: can refit this BVH
-		may_have_holes = false; // there are no holes in the list of nodes.
+		// wait for all threads to complete.
 		if (threadedBuild)
 		{
+			subtreeJobs->Wait();
 			newNodePtr = atomicNewNodePtr->load();
 			delete atomicNewNodePtr;
 			atomicNewNodePtr = 0;
 		}
+		// tree has been built.
+		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
+		refittable = true; // not using spatial splits: can refit this BVH
+		may_have_holes = false; // there are no holes in the list of nodes.
 		usedNodes = newNodePtr;
 	}
 }
@@ -8075,7 +8181,7 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 			node.leftFirst = n, node.triCount = 0;
 			if (depth < 5)
 			{
-				std::thread t1( &BuildDouble_, n, depth + 1, this );
+				std::thread t1( &BuildDouble_, n, depth + 1, this ); // TODO: migrate to JobSystem.
 				std::thread t2( &BuildDouble_, n + 1, depth + 1, this );
 				t1.join();
 				t2.join();
