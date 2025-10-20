@@ -1,4 +1,5 @@
 #define TINYBVH_IMPLEMENTATION
+// #define NO_THREADED_BUILDS
 #define INST_IDX_BITS 10 // reduces the size of the hit record to 16 bytes.
 #include "tiny_bvh.h"
 
