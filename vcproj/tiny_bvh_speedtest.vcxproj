@@ -132,6 +132,8 @@
       <OpenMPSupport>true</OpenMPSupport>
       <AdditionalIncludeDirectories>../external/OpenCL/inc/;../external/embree/include;../external/madmann91</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <DebugInformationFormat>OldStyle</DebugInformationFormat>
+      <AdditionalOptions>/fsanitize=address %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
