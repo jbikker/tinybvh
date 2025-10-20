@@ -1903,7 +1903,7 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	// open file and check contents
 	std::fstream s{ fileName, s.binary | s.in };
 	if (!s) return false;
-	BVHContext tmp = context;
+	BVHContext ctxBackup = context;
 	bool expectIndexed = (indices != nullptr), saveNewVersion = false;
 	uint32_t header, fileTriCount;
 	s.read( (char*)&header, sizeof( uint32_t ) );
@@ -1920,7 +1920,7 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	bool fileIsIndexed = vertIdx != nullptr;
 	if (expectIndexed != fileIsIndexed) return false; // not what we expected.
 	if (blasList != nullptr || instList != nullptr) return false; // can't load/save TLAS.
-	context = tmp; // can't load context; function pointers will differ.
+	context = ctxBackup; // can't load context; function pointers will differ.
 	subtreeJobs = subtreeBackup;
 	binningJobs = binningBackup;
 	bvhNode = (BVHNode*)AlignedAlloc( allocatedNodes * sizeof( BVHNode ) );
@@ -3413,7 +3413,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 		cost += c_trav;
 		if (node->isLeaf())
 		{
-			Ray tmp;
+			Ray tmpRay;
 			for (uint32_t i = 0; i < node->triCount; i++)
 			{
 				// BLAS traversal
@@ -3423,11 +3423,11 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				if (!(inst.mask & ray.mask)) continue;
 				const BVHBase* blas = blasList[inst.blasIdx];
 				// 1. Transform ray with the inverse of the instance transform
-				tmp.O = tinybvh_transform_point( ray.O, inst.invTransform );
-				tmp.D = tinybvh_transform_vector( ray.D, inst.invTransform );
-				tmp.instIdx = instIdx << (32 - INST_IDX_BITS);
-				tmp.hit = ray.hit;
-				tmp.rD = tinybvh_rcp( tmp.D );
+				tmpRay.O = tinybvh_transform_point( ray.O, inst.invTransform );
+				tmpRay.D = tinybvh_transform_vector( ray.D, inst.invTransform );
+				tmpRay.instIdx = instIdx << (32 - INST_IDX_BITS);
+				tmpRay.hit = ray.hit;
+				tmpRay.rD = tinybvh_rcp( tmpRay.D );
 				// 2. Traverse BLAS with the transformed ray
 				// Note: Valid BVH layout options for BLASses are the regular BVH layout,
 				// the AVX-optimized BVH_SOA layout and the wide BVH4_CPU layout. When all
@@ -3438,23 +3438,23 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				if (blas->layout == LAYOUT_BVH)
 				{
 					// regular (triangle) BVH traversal
-					cost += ((BVH*)blas)->Intersect( tmp );
+					cost += ((BVH*)blas)->Intersect( tmpRay );
 				}
 				else
 				{
 				#ifdef BVH_USESSE
-					if (blas->layout == LAYOUT_BVH4_CPU) cost += ((BVH4_CPU*)blas)->Intersect( tmp );
+					if (blas->layout == LAYOUT_BVH4_CPU) cost += ((BVH4_CPU*)blas)->Intersect( tmpRay );
 				#endif
 				#ifdef BVH_USEAVX
-					if (blas->layout == LAYOUT_BVH_SOA) cost += ((BVH_SoA*)blas)->Intersect( tmp );
+					if (blas->layout == LAYOUT_BVH_SOA) cost += ((BVH_SoA*)blas)->Intersect( tmpRay );
 				#endif
 				#ifdef BVH_USEAVX2
-					if (blas->layout == LAYOUT_BVH8_AVX2) cost += ((BVH8_CPU*)blas)->Intersect( tmp );
+					if (blas->layout == LAYOUT_BVH8_AVX2) cost += ((BVH8_CPU*)blas)->Intersect( tmpRay );
 				#endif
-					if (blas->layout == LAYOUT_VOXELSET) cost += ((VoxelSet*)blas)->Intersect( tmp );
+					if (blas->layout == LAYOUT_VOXELSET) cost += ((VoxelSet*)blas)->Intersect( tmpRay );
 				}
 				// 3. Restore ray
-				ray.hit = tmp.hit;
+				ray.hit = tmpRay.hit;
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
@@ -3553,7 +3553,7 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 {
 	BVHNode* node = &bvhNode[0], * stack[64];
 	uint32_t stackPtr = 0;
-	Ray tmp;
+	Ray tmpRay;
 	const float rox = ray.O.x * ray.rD.x;
 	const float roy = ray.O.y * ray.rD.y;
 	const float roz = ray.O.z * ray.rD.z;
@@ -3569,30 +3569,30 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 				// Check if the ray should intersect this BLAS Instance, otherwise skip it
 				if (!(inst.mask & ray.mask)) continue;
 				// 1. Transform ray with the inverse of the instance transform
-				tmp.O = tinybvh_transform_point( ray.O, inst.invTransform );
-				tmp.D = tinybvh_transform_vector( ray.D, inst.invTransform );
-				tmp.hit.t = ray.hit.t;
-				tmp.rD = tinybvh_rcp( tmp.D );
+				tmpRay.O = tinybvh_transform_point( ray.O, inst.invTransform );
+				tmpRay.D = tinybvh_transform_vector( ray.D, inst.invTransform );
+				tmpRay.hit.t = ray.hit.t;
+				tmpRay.rD = tinybvh_rcp( tmpRay.D );
 				// 2. Traverse BLAS with the transformed ray
 				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH_SOA ||
 					blas->layout == LAYOUT_BVH8_AVX2 || blas->layout == LAYOUT_BVH4_CPU );
 				if (blas->layout == LAYOUT_BVH)
 				{
 					// regular (triangle) BVH traversal
-					if (((BVH*)blas)->IsOccluded( tmp )) return true;
+					if (((BVH*)blas)->IsOccluded( tmpRay )) return true;
 				}
 				else
 				{
 				#ifdef BVH_USESSE
-					if (blas->layout == LAYOUT_BVH4_CPU) { if (((BVH4_CPU*)blas)->IsOccluded( tmp )) return true; }
+					if (blas->layout == LAYOUT_BVH4_CPU) { if (((BVH4_CPU*)blas)->IsOccluded( tmpRay )) return true; }
 				#endif
 				#ifdef BVH_USEAVX
-					if (blas->layout == LAYOUT_BVH_SOA) { if (((BVH_SoA*)blas)->IsOccluded( tmp )) return true; }
+					if (blas->layout == LAYOUT_BVH_SOA) { if (((BVH_SoA*)blas)->IsOccluded( tmpRay )) return true; }
 				#endif
 				#ifdef BVH_USEAVX2
-					if (blas->layout == LAYOUT_BVH8_AVX2) { if (((BVH8_CPU*)blas)->IsOccluded( tmp )) return true; }
+					if (blas->layout == LAYOUT_BVH8_AVX2) { if (((BVH8_CPU*)blas)->IsOccluded( tmpRay )) return true; }
 				#endif
-					if (blas->layout == LAYOUT_VOXELSET) { if (((VoxelSet*)blas)->IsOccluded( tmp )) return true; }
+					if (blas->layout == LAYOUT_VOXELSET) { if (((VoxelSet*)blas)->IsOccluded( tmpRay )) return true; }
 				}
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
@@ -3831,15 +3831,15 @@ void BVH::Compact()
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::Compact(), bvhNode == 0." );
 	if (bvhNode[0].isLeaf()) return; // nothing to compact.
-	BVHNode* tmp = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * allocatedNodes /* do *not* trim */ );
+	BVHNode* tmpNodes = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * allocatedNodes /* do *not* trim */ );
 	uint32_t* idx = (uint32_t*)AlignedAlloc( sizeof( uint32_t ) * idxCount );
-	memcpy( tmp, bvhNode, 2 * sizeof( BVHNode ) );
+	memcpy( tmpNodes, bvhNode, 2 * sizeof( BVHNode ) );
 	newNodePtr = 2;
 	uint32_t newIdxPtr = 0;
 	uint32_t nodeIdx = 0, stack[128], stackPtr = 0;
 	while (1)
 	{
-		BVHNode& node = tmp[nodeIdx];
+		BVHNode& node = tmpNodes[nodeIdx];
 		if (node.isLeaf())
 		{
 			const uint32_t leafStart = newIdxPtr;
@@ -3852,7 +3852,7 @@ void BVH::Compact()
 		{
 			const BVHNode& left = bvhNode[node.leftFirst];
 			const BVHNode& right = bvhNode[node.leftFirst + 1];
-			tmp[newNodePtr] = left, tmp[newNodePtr + 1] = right;
+			tmpNodes[newNodePtr] = left, tmpNodes[newNodePtr + 1] = right;
 			const uint32_t todo1 = newNodePtr, todo2 = newNodePtr + 1;
 			node.leftFirst = newNodePtr, newNodePtr += 2;
 			nodeIdx = todo1;
@@ -3862,7 +3862,7 @@ void BVH::Compact()
 	usedNodes = newNodePtr;
 	AlignedFree( bvhNode );
 	AlignedFree( primIdx );
-	bvhNode = tmp;
+	bvhNode = tmpNodes;
 	primIdx = idx;
 }
 
