@@ -869,7 +869,10 @@ public:
 	BVH( const BVH_Verbose& original ) { layout = LAYOUT_BVH; ConvertFrom( original ); }
 	BVH( const bvhvec4* vertices, const uint32_t primCount ) { layout = LAYOUT_BVH; Build( vertices, primCount ); }
 	BVH( const bvhvec4slice& vertices ) { layout = LAYOUT_BVH; Build( vertices ); }
+	BVH( BVH&& ) noexcept;
+	BVH& operator=( const BVH& other )=default;
 	~BVH();
+
 	void ConvertFrom( const BVH_Verbose& original, bool compact = true );
 	void SplitLeafs( const uint32_t maxPrims );
 	float SAHCost( const uint32_t nodeIdx = 0 ) const;
@@ -1057,7 +1060,10 @@ public:
 		uint64_t primIdx;			// index of the original primitive
 	};
 	BVH_Double( BVHContext ctx = {} ) { layout = LAYOUT_BVH_DOUBLE; context = ctx; }
+	BVH_Double( BVH_Double&& );
+	BVH_Double& operator=( const BVH_Double& )=default;
 	~BVH_Double();
+
 	void Build( const bvhdbl3* vertices, const uint64_t primCount );
 	void Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Double** blasses, const uint64_t blasCount );
 	void Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&), const uint64_t primCount );
@@ -1108,7 +1114,10 @@ public:
 	};
 	BVH_GPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH_GPU; context = ctx; }
 	BVH_GPU( const BVH& original ) { /* DEPRICATED */ ConvertFrom( original ); }
+	BVH_GPU( BVH_GPU&& );
+	BVH_GPU& operator=( const BVH_GPU& )=default;
 	~BVH_GPU();
+
 	void Build( const bvhvec4* vertices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices );
 	void Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
@@ -1142,7 +1151,10 @@ public:
 	};
 	BVH_SoA( BVHContext ctx = {} ) { layout = LAYOUT_BVH_SOA; context = ctx; }
 	BVH_SoA( const BVH& original ) { /* DEPRICATED */ layout = LAYOUT_BVH_SOA; ConvertFrom( original ); }
+	BVH_SoA( BVH_SoA&& );
+	BVH_SoA& operator=( const BVH_SoA& )=default;
 	~BVH_SoA();
+
 	void Build( const bvhvec4* vertices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices );
 	void Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
@@ -1183,7 +1195,9 @@ public:
 	};
 	BVH_Verbose( BVHContext ctx = {} ) { layout = LAYOUT_BVH_VERBOSE; context = ctx; }
 	BVH_Verbose( const BVH& original ) { /* DEPRECATED */ layout = LAYOUT_BVH_VERBOSE; ConvertFrom( original ); }
-	~BVH_Verbose() { AlignedFree( bvhNode ); }
+	BVH_Verbose( BVH_Verbose&& );
+	BVH_Verbose& operator=( const BVH_Verbose& )=default;
+	~BVH_Verbose();
 	void ConvertFrom( const BVH& original, bool compact = true );
 	float SAHCost( const uint32_t nodeIdx = 0 ) const;
 	int32_t NodeCount() const;
@@ -1225,6 +1239,8 @@ public:
 	};
 	MBVH( BVHContext ctx = {} ) { layout = LAYOUT_MBVH; context = ctx; }
 	MBVH( const BVH& original ) { /* DEPRECATED */ layout = LAYOUT_MBVH; ConvertFrom( original ); }
+	MBVH( MBVH&& );
+	MBVH& operator=( const MBVH& )=default;
 	~MBVH();
 	void Build( const bvhvec4* vertices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices );
@@ -1269,6 +1285,8 @@ public:
 	};
 	BVH4_GPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH4_GPU; context = ctx; }
 	BVH4_GPU( const MBVH<4>& bvh4 ) { /* DEPRECATED */ layout = LAYOUT_BVH4_GPU; ConvertFrom( bvh4 ); }
+	BVH4_GPU( BVH4_GPU&& );
+	BVH4_GPU& operator=( const BVH4_GPU& )=default;
 	~BVH4_GPU();
 	void Build( const bvhvec4* vertices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices );
@@ -1306,6 +1324,8 @@ public:
 	};
 	struct CacheLine { SIMDVEC4 a, b, c, d; };
 	BVH4_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH4_CPU; context = ctx; c_int = 2; l_quads = true; }
+	BVH4_CPU( BVH4_CPU&& );
+	BVH4_CPU& operator=( const BVH4_CPU& )=default;
 	~BVH4_CPU();
 	void Save( const char* fileName );
 	bool Load( const char* fileName, const uint32_t expectedTris );
@@ -1339,6 +1359,8 @@ class BVH8_CWBVH : public BVHBase
 public:
 	BVH8_CWBVH( BVHContext ctx = {} ) { layout = LAYOUT_CWBVH; context = ctx; }
 	BVH8_CWBVH( MBVH<8>& bvh8 ) { /* DEPRECATED */ layout = LAYOUT_CWBVH; ConvertFrom( bvh8 ); }
+	BVH8_CWBVH( BVH8_CWBVH&& );
+	BVH8_CWBVH& operator=( const BVH8_CWBVH& )=default;
 	~BVH8_CWBVH();
 	void Save( const char* fileName );
 	bool Load( const char* fileName, const uint32_t expectedTris );
@@ -1412,6 +1434,8 @@ public:
 	};
 	struct CacheLine { SIMDVEC8 a, b; };
 	BVH8_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH8_AVX2; context = ctx; c_int = 2; l_quads = true; }
+	BVH8_CPU( BVH8_CPU&& );
+	BVH8_CPU& operator=( const BVH8_CPU& )=default;
 	~BVH8_CPU();
 	void Save( const char* fileName );
 	bool Load( const char* fileName, const uint32_t expectedTris );
@@ -1708,7 +1732,7 @@ void* BVHBase::AlignedAlloc( size_t size )
 
 void BVHBase::AlignedFree( void* ptr )
 {
-	if (context.free)
+	if (context.free && ptr)
 		context.free( ptr, context.userdata );
 }
 
@@ -1836,11 +1860,24 @@ __m256 BVH::max8 = _mm256_set1_ps( -BVH_FAR ), BVH::mask6 = _mm256_set_m128( mas
 __m256 BVH::signFlip8 = _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f );
 #endif
 
+BVH::BVH( BVH&& other ) noexcept
+{
+	// Shallow copy of parameters, options, and pointers
+	*this = other;
+	// Mark `other` as deleted to avoid double-free
+	other.primIdx = 0;
+	other.bvhNode = 0;
+	other.fragment = 0;
+}
+
 BVH::~BVH()
 {
 	AlignedFree( bvhNode );
+	bvhNode = 0;
 	AlignedFree( primIdx );
+	primIdx = 0;
 	AlignedFree( fragment );
+	fragment = 0;
 }
 
 void BVH::Save( const char* fileName )
@@ -3252,6 +3289,7 @@ bool BVH::IntersectSphere( const bvhvec3& pos, const float r ) const
 				}
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			continue;
 		}
 		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
 		bool hit1 = child1->Intersect( bmin, bmax ), hit2 = child2->Intersect( bmin, bmax );
@@ -4222,6 +4260,17 @@ bool VoxelSet::IsOccluded( const Ray& ray ) const
 // BVH_Verbose implementation
 // ----------------------------------------------------------------------------
 
+BVH_Verbose::BVH_Verbose( BVH_Verbose&& other )
+{
+	*this = other;
+	other.bvhNode = 0;
+}
+
+BVH_Verbose::~BVH_Verbose()
+{
+	AlignedFree( bvhNode );
+}
+
 void BVH_Verbose::ConvertFrom( const BVH& original, bool /* unused here */ )
 {
 	// allocate space
@@ -4603,6 +4652,12 @@ void BVH_Verbose::MergeLeafs()
 // BVH_GPU implementation
 // ----------------------------------------------------------------------------
 
+BVH_GPU::BVH_GPU(BVH_GPU&& other)
+{
+	*this = other;
+	other.bvhNode = 0;
+}
+
 BVH_GPU::~BVH_GPU()
 {
 	if (!ownBVH) bvh = BVH(); // clear out pointers we don't own.
@@ -4777,6 +4832,12 @@ int32_t BVH_GPU::Intersect( Ray& ray ) const
 // BVH_SoA implementation
 // ----------------------------------------------------------------------------
 
+BVH_SoA::BVH_SoA(BVH_SoA&& other)
+{
+	*this = other;
+	other.bvhNode = 0;
+}
+
 BVH_SoA::~BVH_SoA()
 {
 	if (!ownBVH) bvh = BVH(); // clear out pointers we don't own.
@@ -4913,6 +4974,12 @@ void BVH_SoA::ConvertFrom( const BVH& original, bool compact )
 
 // Generic (templated) MBVH implementation
 // ----------------------------------------------------------------------------
+
+template<int M> MBVH<M>::MBVH( MBVH<M>&& other )
+{
+	*this = other;
+	other.mbvhNode = 0;
+}
 
 template<int M> MBVH<M>::~MBVH()
 {
@@ -5112,6 +5179,12 @@ template<int M> void MBVH<M>::ConvertFrom( const BVH& original, bool compact )
 
 // BVH4_GPU implementation
 // ----------------------------------------------------------------------------
+
+BVH4_GPU::BVH4_GPU(BVH4_GPU&& other)
+{
+	*this = other;
+	other.bvh4Data = 0;
+}
 
 BVH4_GPU::~BVH4_GPU()
 {
@@ -5408,6 +5481,12 @@ int32_t BVH4_GPU::Intersect( Ray& ray ) const
 // BVH4_CPU implementation
 // ----------------------------------------------------------------------------
 
+BVH4_CPU::BVH4_CPU(BVH4_CPU&& other)
+{
+	*this = other;
+	other.bvh4Data = 0;
+}
+
 BVH4_CPU::~BVH4_CPU()
 {
 	if (!ownBVH4) bvh4 = MBVH<4>(); // clear out pointers we don't own.
@@ -5615,6 +5694,12 @@ void BVH4_CPU::ConvertFrom( MBVH<4>& original )
 
 // BVH8_CPU implementation
 // ----------------------------------------------------------------------------
+
+BVH8_CPU::BVH8_CPU( BVH8_CPU&& other )
+{
+	*this = other;
+	other.bvh8Data = 0;
+}
 
 BVH8_CPU::~BVH8_CPU()
 {
@@ -5827,6 +5912,13 @@ void BVH8_CPU::ConvertFrom( MBVH<8>& original )
 
 // BVH8_CWBVH implementation
 // ----------------------------------------------------------------------------
+
+BVH8_CWBVH::BVH8_CWBVH( BVH8_CWBVH&& other )
+{
+	*this = other;
+	other.bvh8Data = 0;
+	other.bvh8Tris = 0;
+}
 
 BVH8_CWBVH::~BVH8_CWBVH()
 {
@@ -7968,6 +8060,14 @@ bool BVH_SoA::IsOccluded( const Ray& ray ) const
 // ============================================================================
 
 #ifdef DOUBLE_PRECISION_SUPPORT
+
+BVH_Double::BVH_Double(BVH_Double&& other)
+{
+	*this = other;
+	other.fragment = 0;
+	other.bvhNode = 0;
+	other.primIdx = 0;
+}
 
 // Destructor
 BVH_Double::~BVH_Double()
