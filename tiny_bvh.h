@@ -970,6 +970,7 @@ public:
 private:
 	// Atomic counters for threaded builds
 	std::atomic<uint32_t>* atomicNewNodePtr = 0;
+	std::atomic<uint32_t>* atomicThreadCountPtr = 0;
 	std::atomic<uint32_t>* atomicNextFrag = 0;
 	// job system for parallel builds
 	JobSystem* subtreeJobs = 0;
@@ -2586,6 +2587,7 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
 		{
 			atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
+			atomicThreadCountPtr = new std::atomic<uint32_t>(0);
 		}
 	#endif
 	}
@@ -2676,12 +2678,27 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 			bvhNode[n + 1].leftFirst = node.leftFirst + leftCount;
 			bvhNode[n + 1].triCount = rightCount;
 			node.leftFirst = n, node.triCount = 0;
-			if (leftCount + rightCount > 2000 && depth < 5 && threadedBuild)
+
+			if (threadedBuild)
 			{
-				std::thread t1( &BuildFullSweep_, n, depth + 1, this );
-				std::thread t2( &BuildFullSweep_, n + 1, depth + 1, this );
-				t1.join();
-				t2.join(); // TODO: join is only needed in the 'all done' section below.
+				// process left subtree, on a new thread if worth it
+				if (leftCount >= (1 << 14))
+				{
+					atomicThreadCountPtr->fetch_add(1);
+					std::thread t([&]() {
+						BuildFullSweep_(n, depth + 1, this);
+						atomicThreadCountPtr->fetch_add(-1);
+					});
+					t.detach();
+				}
+				else
+				{
+					BuildFullSweep_(n, depth + 1, this);
+				}
+
+				// process right subtree on current thread
+				BuildFullSweep_(n + 1, depth + 1, this);
+
 				break;
 			}
 			// recurse
@@ -2693,6 +2710,9 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 	// cleanup allocated buffers when done
 	if (depth == 0)
 	{
+		// spin until all threads finished building their subtree
+		while (threadedBuild && atomicThreadCountPtr->load() > 0);
+
 		for (int a = 0; a < 3; a++) AlignedFree( sortedIdx[a] );
 		AlignedFree( SARs );
 		AlignedFree( flag );
@@ -2706,6 +2726,9 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 			newNodePtr = atomicNewNodePtr->load();
 			delete atomicNewNodePtr;
 			atomicNewNodePtr = 0;
+
+			delete atomicThreadCountPtr;
+			atomicThreadCountPtr = 0;
 		}
 		usedNodes = newNodePtr;
 	}
