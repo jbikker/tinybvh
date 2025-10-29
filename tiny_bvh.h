@@ -2685,7 +2685,7 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 				if (leftCount >= (1 << 14))
 				{
 					atomicThreadCountPtr->fetch_add(1);
-					std::thread t([&]() {
+					std::thread t([=]() {
 						BuildFullSweep_(n, depth + 1, this);
 						atomicThreadCountPtr->fetch_add(-1);
 					});
