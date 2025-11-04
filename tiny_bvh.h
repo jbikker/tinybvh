@@ -2676,11 +2676,11 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 			bvhNode[n + 1].leftFirst = node.leftFirst + leftCount;
 			bvhNode[n + 1].triCount = rightCount;
 			node.leftFirst = n, node.triCount = 0;
-
-			if (leftCount >= (1 << 14) && threadedBuild)
+			
+			if (tinybvh_min( leftCount, rightCount ) >= (1 << 13) && threadedBuild)
 			{
-				std::thread t(&BuildFullSweep_, n, depth + 1, this);
-				BuildFullSweep_(n + 1, depth + 1, this);
+				std::thread t( &BuildFullSweep_, n, depth + 1, this );
+				BuildFullSweep_( n + 1, depth + 1, this );
 
 				t.join();
 				break;
