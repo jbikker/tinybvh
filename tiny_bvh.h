@@ -6126,7 +6126,6 @@ void BVH8_CWBVH::ConvertFrom( MBVH<8>& original, bool )
 				uint8_t* const childMetaField = ((uint8_t*)&bvh8Data[currentNodeAddr + 1]) + 8;
 				childMetaField[i] = (1 << 5) | (24 + (uint8_t)i); // I don't see how this accounts for empty children?
 				stackNodePtr[stackPtr] = child, stackNodeAddr[stackPtr++] = childNodeAddr; // counted in float4s
-				internalChildCount++;
 				continue;
 			}
 			// leaf node
