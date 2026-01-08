@@ -5083,6 +5083,7 @@ template<int M> void MBVH<M>::Refit( const uint32_t nodeIdx )
 			bmin = tinybvh_min( bmin, child.aabbMin );
 			bmax = tinybvh_max( bmax, child.aabbMax );
 		}
+		node.aabbMin = bmin, node.aabbMax = bmax;
 	}
 	if (nodeIdx == 0) aabbMin = node.aabbMin, aabbMax = node.aabbMax;
 }
