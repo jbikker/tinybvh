@@ -2624,7 +2624,7 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 					Rmax = tinybvh_max( Rmax, fragment[fi].bmax );
 					if (SAR >= splitCost)
 					{
-						// Right side's cost is already greater than lowest cost and will only increase. Stop early
+						// right side's cost is already greater than lowest cost and will only increase. Stop early
 						firstRightTri = node.triCount - i;
 						break;
 					}
