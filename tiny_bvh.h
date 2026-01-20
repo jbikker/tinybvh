@@ -976,7 +976,7 @@ private:
 	JobSystem* binningJobs = 0;
 	// data for full sweep builder
 	uint8_t* flag = 0;
-	uint32_t* tmp = 0, *sortedIdx[3] = { 0 };
+	uint32_t* sortedIdx[3] = { 0 };
 	float* SARs = 0;
 #ifdef BVH_USEAVX
 	// static AVX data members
@@ -2570,7 +2570,6 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 	{
 		// allocate data for O(N) stable partition
 		flag = (uint8_t*)AlignedAlloc( triCount );
-		tmp = (uint32_t*)AlignedAlloc( triCount * 4 );
 		for (int a = 0; a < 3; a++) sortedIdx[a] = (uint32_t*)AlignedAlloc( triCount * 4 );
 		BVH* thisBVH = this;
 		for (uint32_t a = 0; a < 3; a++)
@@ -2655,6 +2654,9 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 			// partition
 			for (uint32_t i = 0; i < splitPos; i++) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 0; // "left"
 			for (uint32_t i = splitPos; i < node.triCount; i++) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 1; // "right"
+			
+			// stable partition needs temp buffer, let's reuse memory
+			uint32_t* tmp = (uint32_t*)SARs;
 			for (uint32_t a = 0; a < 3; a++) if (a != splitAxis)
 			{
 				int p0 = 0, p1 = 0;
@@ -2697,7 +2699,6 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 		for (int a = 0; a < 3; a++) AlignedFree( sortedIdx[a] );
 		AlignedFree( SARs );
 		AlignedFree( flag );
-		AlignedFree( tmp );
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = true; // not using spatial splits: can refit this BVH
 		may_have_holes = false; // this builder produces a continuous list of nodes
