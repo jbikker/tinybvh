@@ -926,6 +926,13 @@ public:
 	void PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void BuildAVXSubtree( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims );
+
+	/**
+	 * Combine and split leaves to make this BVH usable with
+	 * BVH4 and BVH8
+	 */
+	void PrepareBuild4_8();
+
 	void BuildHQ();
 	void BuildHQTask( uint32_t nodeIdx, uint32_t depth, const uint32_t maxDepth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* triIdxB );
 	bool ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, bvhvec3 minDim, const uint32_t splitAxis ) const;
@@ -1336,7 +1343,7 @@ public:
 	void Optimize( const uint32_t iterations, bool extreme );
 	void Refit();
 	float SAHCost( const uint32_t nodeIdx ) const;
-	void ConvertFrom( MBVH<4>& original );
+	void ConvertFrom( const MBVH<4>& original );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// Intersect / IsOccluded specialize for ray octant using templated functions.
@@ -1369,7 +1376,7 @@ public:
 	void BuildHQ( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void BuildHQ( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void Optimize( const uint32_t iterations = 25, bool extreme = false );
-	void ConvertFrom( MBVH<8>& original, bool compact = true );
+	void ConvertFrom( const MBVH<8>& original, bool compact = true );
 	float SAHCost( const uint32_t nodeIdx = 0 ) const;
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const { FALLBACK_SHADOW_QUERY( ray ); }
@@ -1446,7 +1453,7 @@ public:
 	void Optimize( const uint32_t iterations, bool extreme );
 	void Refit();
 	float SAHCost( const uint32_t nodeIdx ) const;
-	void ConvertFrom( MBVH<8>& original );
+	void ConvertFrom( const MBVH<8>& original );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// Intersect / IsOccluded specialize for ray octant using templated functions.
@@ -2424,6 +2431,12 @@ void BVH::PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, c
 	newNodePtr = 2;
 	bvh_over_indices = indices != nullptr;
 	// all set; actual build happens in BVH::Build.
+}
+
+void BVH::PrepareBuild4_8() {
+	uint32_t firstIdx;
+	CombineLeafs( 4, firstIdx, 0 );
+	SplitLeafs( 4 );
 }
 
 void BVH::Build( uint32_t nodeIdx, uint32_t depth )
@@ -5501,6 +5514,8 @@ void BVH4_CPU::Build( const bvhvec4slice& vertices )
 {
 	bvh4.bvh.context = bvh4.context = context;
 	bvh4.bvh.BuildDefault( vertices );
+	bvh4.bvh.PrepareBuild4_8();
+	bvh4.ConvertFrom( bvh4.bvh, true );
 	ConvertFrom( bvh4 );
 }
 
@@ -5515,6 +5530,8 @@ void BVH4_CPU::Build( const bvhvec4slice& vertices, const uint32_t* indices, uin
 	// build the BVH from vertices stored in a slice, indexed by 'indices'.
 	bvh4.bvh.context = bvh4.context = context;
 	bvh4.bvh.BuildDefault( vertices, indices, prims );
+	bvh4.bvh.PrepareBuild4_8();
+	bvh4.ConvertFrom( bvh4.bvh, true );
 	ConvertFrom( bvh4 );
 }
 
@@ -5527,6 +5544,8 @@ void BVH4_CPU::BuildHQ( const bvhvec4slice& vertices )
 {
 	bvh4.bvh.context = bvh4.context = context;
 	bvh4.bvh.BuildHQ( vertices );
+	bvh4.bvh.PrepareBuild4_8();
+	bvh4.ConvertFrom( bvh4.bvh, true );
 	ConvertFrom( bvh4 );
 }
 
@@ -5539,6 +5558,8 @@ void BVH4_CPU::BuildHQ( const bvhvec4slice& vertices, const uint32_t* indices, u
 {
 	bvh4.bvh.context = bvh4.context = context;
 	bvh4.bvh.BuildHQ( vertices, indices, prims );
+	bvh4.bvh.PrepareBuild4_8();
+	bvh4.ConvertFrom( bvh4.bvh, true );
 	ConvertFrom( bvh4 );
 }
 
@@ -5594,7 +5615,7 @@ float BVH4_CPU::SAHCost( const uint32_t nodeIdx ) const
 
 #define SORT(a,b) { if (dist[a] < dist[b]) { float h = dist[a]; dist[a] = dist[b], dist[b] = h; } }
 
-void BVH4_CPU::ConvertFrom( MBVH<4>& original )
+void BVH4_CPU::ConvertFrom( const MBVH<4>& original )
 {
 	// Note: identical to BVH8_CPU version, just with fewer lanes.
 	// get a copy of the input bvh4
@@ -5602,9 +5623,6 @@ void BVH4_CPU::ConvertFrom( MBVH<4>& original )
 	bvh4 = original;
 	// prepare input bvh4
 	uint32_t firstIdx = 0;
-	bvh4.bvh.CombineLeafs( 4, firstIdx, 0 );
-	bvh4.bvh.SplitLeafs( 4 );
-	bvh4.ConvertFrom( bvh4.bvh, true );
 	// allocate if needed
 	uint32_t nodesNeeded = bvh4.usedNodes, leafsNeeded = bvh4.LeafCount();
 	uint32_t blocksNeeded = nodesNeeded * (sizeof( BVHNode ) / 64); // here, block = cacheline.
@@ -5715,7 +5733,9 @@ void BVH8_CPU::Build( const bvhvec4slice& vertices )
 {
 	bvh8.bvh.context = bvh8.context = context;
 	bvh8.bvh.BuildDefault( vertices );
+	bvh8.bvh.PrepareBuild4_8();
 	bvh8.bvh.Compact();
+	bvh8.ConvertFrom( bvh8.bvh, true );
 	ConvertFrom( bvh8 );
 }
 
@@ -5730,7 +5750,9 @@ void BVH8_CPU::Build( const bvhvec4slice& vertices, const uint32_t* indices, uin
 	// build the BVH from vertices stored in a slice, indexed by 'indices'.
 	bvh8.bvh.context = bvh8.context = context;
 	bvh8.bvh.BuildDefault( vertices, indices, prims );
+	bvh8.bvh.PrepareBuild4_8();
 	bvh8.bvh.Compact();
+	bvh8.ConvertFrom( bvh8.bvh, true );
 	ConvertFrom( bvh8 );
 }
 
@@ -5743,6 +5765,9 @@ void BVH8_CPU::BuildHQ( const bvhvec4slice& vertices )
 {
 	bvh8.bvh.context = bvh8.context = context;
 	bvh8.bvh.BuildHQ( vertices );
+	bvh8.bvh.PrepareBuild4_8();
+	bvh8.bvh.Compact();
+	bvh8.ConvertFrom( bvh8.bvh, true );
 	ConvertFrom( bvh8 );
 }
 
@@ -5755,6 +5780,9 @@ void BVH8_CPU::BuildHQ( const bvhvec4slice& vertices, const uint32_t* indices, u
 {
 	bvh8.bvh.context = bvh8.context = context;
 	bvh8.bvh.BuildHQ( vertices, indices, prims );
+	bvh8.bvh.PrepareBuild4_8();
+	bvh8.bvh.Compact();
+	bvh8.ConvertFrom( bvh8.bvh, true );
 	ConvertFrom( bvh8 );
 }
 
@@ -5808,16 +5836,11 @@ float BVH8_CPU::SAHCost( const uint32_t nodeIdx ) const
 	return bvh8.SAHCost( nodeIdx );
 }
 
-void BVH8_CPU::ConvertFrom( MBVH<8>& original )
+void BVH8_CPU::ConvertFrom( const MBVH<8>& original )
 {
 	// get a copy of the input bvh8
 	if (&original != &bvh8) ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
 	bvh8 = original;
-	// prepare input bvh8
-	uint32_t firstIdx = 0;
-	bvh8.bvh.CombineLeafs( 4, firstIdx, 0 );
-	bvh8.bvh.SplitLeafs( 4 );
-	bvh8.ConvertFrom( bvh8.bvh, true );
 	// allocate if needed
 	uint32_t nodesNeeded = bvh8.usedNodes, leafsNeeded = bvh8.LeafCount();
 	uint32_t blocksNeeded = nodesNeeded * (sizeof( BVHNode ) / 64); // here, block = cacheline.
@@ -6035,7 +6058,7 @@ void BVH8_CWBVH::BuildHQ( const bvhvec4slice& vertices, const uint32_t* indices,
 
 // Convert a BVH8 to the format specified in: "Efficient Incoherent Ray Traversal on GPUs Through
 // Compressed Wide BVHs", Ylitie et al. 2017. Adapted from code by "AlanWBFT".
-void BVH8_CWBVH::ConvertFrom( MBVH<8>& original, bool )
+void BVH8_CWBVH::ConvertFrom( const MBVH<8>& original, bool )
 {
 	// get a copy of the original bvh8
 	if (&original != &bvh8) ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
