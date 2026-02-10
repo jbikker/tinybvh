@@ -884,6 +884,7 @@ public:
 	void BuildQuick( const bvhvec4* vertices, const uint32_t primCount );
 	void BuildQuick( const bvhvec4slice& vertices );
 	void Build( const bvhvec4* vertices, const uint32_t primCount );
+	void BuildAABB( const bvhvec4* aabbs, const uint32_t primCount);
 	void Build( const bvhvec4slice& vertices );
 	void Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
@@ -2146,6 +2147,45 @@ void BVH::Build( const bvhvec4slice& vertices, const uint32_t* indices, uint32_t
 	PrepareBuild( vertices, indices, prims );
 	if (useFullSweep) BuildFullSweep(); else Build();
 }
+
+void BVH::BuildAABB(const bvhvec4* aabbs, const uint32_t primCount)
+{
+	BVH_FATAL_ERROR_IF(primCount == 0, " BVH::BuildAABB(const bvhvec4* aabbs, const uint32_t primCount), primCount == 0.");
+	triCount = idxCount = primCount;
+	const uint32_t spaceNeeded = primCount * 2; // upper limit
+	if (allocatedNodes < spaceNeeded)
+	{
+		AlignedFree(bvhNode);
+		AlignedFree(primIdx);
+		AlignedFree(fragment);
+		bvhNode = (BVHNode*)AlignedAlloc(spaceNeeded * sizeof(BVHNode));
+		allocatedNodes = spaceNeeded;
+		memset(&bvhNode[1], 0, 32);	// node 1 remains unused, for cache line alignment.
+		primIdx = (uint32_t*)AlignedAlloc(primCount * sizeof(uint32_t));
+		fragment = (Fragment*)AlignedAlloc(primCount * sizeof(Fragment));
+	}
+	// copy relevant data from instance array
+	BVHNode& root = bvhNode[0];
+	root.leftFirst = 0, root.triCount = primCount, root.aabbMin = bvhvec3(BVH_FAR), root.aabbMax = bvhvec3(-BVH_FAR);
+	// * 2 since, primCount is the amount of aabbs and each aabb is made of 2 bvhvec4
+	int realIndex = 0;
+	for (uint32_t i = 0; i < primCount; i++)
+	{
+		//customGetAABB(i, fragment[i].bmin, fragment[i].bmax);
+		fragment[i].bmin = bvhvec3(aabbs[realIndex]);
+		fragment[i].bmax = bvhvec3(aabbs[realIndex + 1]);
+		fragment[i].primIdx = i, fragment[i].clipped = 0, primIdx[i] = i;
+		root.aabbMin = tinybvh_min(root.aabbMin, fragment[i].bmin);
+		root.aabbMax = tinybvh_max(root.aabbMax, fragment[i].bmax);
+
+		realIndex += 2;
+	}
+	// start build
+	newNodePtr = 2;
+	Build(); // or BuildAVX, for large TLAS.
+}
+
+
 
 void BVH::Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&), const uint32_t primCount )
 {
