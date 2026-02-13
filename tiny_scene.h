@@ -112,11 +112,6 @@ THE SOFTWARE.
 namespace tinyscene
 {
 
-// aligned memory allocation
-// note: formally, size needs to be a multiple of 'alignment', see:
-// https://en.cppreference.com/w/c/memory/aligned_alloc.
-// EMSCRIPTEN enforces this.
-// Copy of the same construct in tinyocl/tinybvh, in a different namespace.
 inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alignment - 1)) & ~(alignment - 1); }
 #ifdef _MSC_VER // Visual Studio / C11
 #define ALIGNED( x ) __declspec( align( x ) )
