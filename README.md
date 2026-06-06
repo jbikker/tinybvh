@@ -70,7 +70,7 @@ The **performance measurement tool** can be compiled with:
 
 Many additional demos are provided, demonstrating features of the library in small source files.
 
-# Version 1.7.0
+# Version 1.7.1
 
 Basic use:
 
