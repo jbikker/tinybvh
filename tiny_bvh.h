@@ -1,7 +1,7 @@
 ﻿/*
 The MIT License (MIT)
 
-Copyright (c) 2024-2025, Jacco Bikker / Breda University of Applied Sciences.
+Copyright (c) 2024-2026, Jacco Bikker / Breda University of Applied Sciences.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -99,10 +99,10 @@ THE SOFTWARE.
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
 #define TINY_BVH_VERSION_MINOR	7
-#define TINY_BVH_VERSION_SUB	0
+#define TINY_BVH_VERSION_SUB	1
 
 // Cached BVH file version - increases only when file layout changes.
-#define TINY_BVH_CACHE_VERSION	170
+#define TINY_BVH_CACHE_VERSION	171
 
 // Run-time checks / debugging.
 // #define PARANOID // checks out-of-bound access of slices
