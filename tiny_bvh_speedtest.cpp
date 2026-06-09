@@ -9,13 +9,14 @@
 #define SCRHEIGHT	320
 
 // GPU ray tracing
-// #define ENABLE_OPENCL
+#define ENABLE_OPENCL
 
 #if 1
 
 // tests to perform
 // #define BUILD_MIDPOINT
 #define BUILD_REFERENCE
+#define BUILD_PRESPLIT
 #define BUILD_FULLSWEEP
 #define BUILD_DOUBLE
 #define BUILD_AVX
@@ -114,6 +115,7 @@ RayEx* doubleBatch[3];
 
 // bvh layouts
 BVH* mybvh = new BVH();
+BVH* presplitbvh = new BVH();
 BVH* sweepbvh = new BVH();
 BVH* ref_bvh = new BVH();
 BVH_Verbose* bvh_verbose = 0;
@@ -127,7 +129,7 @@ BVH4_GPU* bvh4_gpu = 0;
 BVH8_CWBVH* cwbvh = 0;
 BVH8_CPU* bvh8_cpu = 0;
 BVH8_CPU* bvh8_cpu_opt = 0;
-enum { _DEFAULT = 1, _BVH, _SWEEP, _VERBOSE, _DOUBLE, _SOA, _GPU2, _BVH4, _CPU4, _ALT4, _CPU4A, _CPU8, _OPT8, _GPU4, _BVH8, _CWBVH };
+enum { _DEFAULT = 1, _BVH, _PRESPLIT, _SWEEP, _VERBOSE, _DOUBLE, _SOA, _GPU2, _BVH4, _CPU4, _ALT4, _CPU4A, _CPU8, _OPT8, _GPU4, _BVH8, _CWBVH };
 
 #if defined _WIN32 || defined _WIN64
 #if defined EMBREE_BUILD || defined EMBREE_TRAVERSE
@@ -196,6 +198,7 @@ float TestPrimaryRays( uint32_t layout, unsigned N, unsigned passes, float* avgC
 		switch (layout)
 		{
 		case _BVH: for (unsigned i = 0; i < N; i++) travCost += mybvh->Intersect( batch[i] ); break;
+		case _PRESPLIT: for (unsigned i = 0; i < N; i++) travCost += presplitbvh->Intersect( batch[i] ); break;
 		case _SWEEP: for (unsigned i = 0; i < N; i++) travCost += sweepbvh->Intersect( batch[i] ); break;
 		case _DEFAULT: for (unsigned i = 0; i < N; i++) travCost += ref_bvh->Intersect( batch[i] ); break;
 		case _GPU2: for (unsigned i = 0; i < N; i++) travCost += bvh_gpu->Intersect( batch[i] ); break;
@@ -235,6 +238,7 @@ float TestDiffuseRays( uint32_t layout, unsigned passes, float* avgCost = 0 )
 		switch (layout)
 		{
 		case _BVH: for (unsigned i = 0; i < Nsmall; i++) travCost += mybvh->Intersect( batch[i] ); break;
+		case _PRESPLIT: for (unsigned i = 0; i < Nsmall; i++) travCost += presplitbvh->Intersect( batch[i] ); break;
 		case _SWEEP: for (unsigned i = 0; i < Nsmall; i++) travCost += sweepbvh->Intersect( batch[i] ); break;
 		case _DEFAULT: for (unsigned i = 0; i < Nsmall; i++) travCost += ref_bvh->Intersect( batch[i] ); break;
 		case _GPU2: for (unsigned i = 0; i < Nsmall; i++) travCost += bvh_gpu->Intersect( batch[i] ); break;
@@ -608,22 +612,36 @@ int main()
 	buildTime = t.elapsed() / 3.0f;
 	TestPrimaryRays( _BVH, Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
-	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), avgCost );
+	printf( "- %6i nodes, SAH=%.2f, EPO=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), mybvh->EPOCost(), avgCost );
 
 #endif
 
 #ifdef BUILD_FULLSWEEP
 
 	// measure single-core bvh construction time - full-sweep SAH builder
-	printf( "- fullsweep builder" );
+	printf( "- fullsweep builder: " );
 	t.reset();
 	sweepbvh->useFullSweep = true;
 	sweepbvh->Build( triangles, verts / 3 );
 	buildTime = t.elapsed();
-	printf( ": " );
 	TestPrimaryRays( _SWEEP, Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
-	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", sweepbvh->usedNodes, sweepbvh->SAHCost(), avgCost );
+	printf( "- %6i nodes, SAH=%.2f, EPO=%.2f, rayCost=%.2f\n", sweepbvh->usedNodes, sweepbvh->SAHCost(), sweepbvh->EPOCost(), avgCost );
+
+#endif
+
+#ifdef BUILD_PRESPLIT
+
+	// measure single-core bvh construction time - reference binned SAH builder
+	printf( "- presplit builder:  " );
+	t.reset();
+	sweepbvh->useFullSweep = true;
+	presplitbvh->usePresplitting = true;
+	for (int pass = 0; pass < 3; pass++) presplitbvh->Build( triangles, verts / 3 );
+	buildTime = t.elapsed() / 3.0f;
+	TestPrimaryRays( _PRESPLIT, Nsmall, 3, &avgCost );
+	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
+	printf( "- %6i nodes, SAH=%.2f, EPO=%.2f, rayCost=%.2f\n", presplitbvh->usedNodes, presplitbvh->SAHCost(), presplitbvh->EPOCost(), avgCost );
 
 #endif
 
@@ -641,7 +659,7 @@ int main()
 	buildTime = t.elapsed();
 	TestPrimaryRaysEx( Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
-	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), avgCost );
+	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", (int)bvh_double->usedNodes, bvh_double->SAHCost(), avgCost );
 
 #endif
 
@@ -654,7 +672,7 @@ int main()
 	buildTime = t.elapsed() / 3.0f;
 	TestPrimaryRays( _BVH, Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
-	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), avgCost );
+	printf( "- %6i nodes, SAH=%.2f, EPO=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), mybvh->EPOCost(), avgCost );
 
 #endif
 
@@ -680,7 +698,7 @@ int main()
 	buildTime = t.elapsed() / 2.0f;
 	TestPrimaryRays( _BVH, Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
-	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), avgCost );
+	printf( "- %6i nodes, SAH=%.2f, EPO=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), mybvh->EPOCost(), avgCost );
 
 #endif
 

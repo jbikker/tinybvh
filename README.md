@@ -67,7 +67,7 @@ The **performance measurement tool** can be compiled with:
 
 Many additional demos are provided, demonstrating features of the library in small source files.
 
-# Version 1.7.0
+# Version 1.7.1
 
 Basic use:
 
@@ -140,9 +140,11 @@ Advanced / exotic features of the library include:
 
 The current version of the library is stable. Changes may happen but should be limited.
 
-Plans, ordered by priority:
+Some plans:
 
+* Better benchmark tool
 * Speed improvements:
+  * Faster builds
   * Faster optimizer for AVX-capable CPUs
 * Demo of TinyBVH on GPU using other apis:
   * Ray tracing in pure DirectX
@@ -151,15 +153,6 @@ Plans, ordered by priority:
   * Produce a BVH for Intel rt hw (mind the quads)
   * Produce a BVH for AMD rt hw
   * Use inline asm on AMD for aabb/tri intersect
-* Comparisons / experiments:
-  * Memory use analysis in speedtest
-  * DXR renderer to compare against hw rt
-* CPU single-ray performance
-  * Reverse-engineer Embree & PhysX
-  * Combination of TLAS and packet traversal
-* Ease-of-use
-  * Robust default origin offset
-  * Engine layer
 
 # Platforms
 TinyBVH is a cross-platfrom library and should build on any platform that supports C++20 (the '20' bit is for threading). That being said, several platforms are specifically supported:
@@ -172,7 +165,7 @@ TinyBVH is a cross-platfrom library and should build on any platform that suppor
   
 # TinyBVH in the Wild
 A list of projects using TinyBVH:
-* Remedy's [Northlight[(https://www.remedygames.com/northlight) engine uses TinyBVH in their editor and for baking per-micro-vertex displacements.
+* Remedy's [Northlight](https://www.remedygames.com/northlight) engine uses TinyBVH in their editor and for baking per-micro-vertex displacements.
 * [EA SEED's Gigi](https://github.com/electronicarts/gigi/releases/tag/v1.0.0): Uses TinyBVH for WebGPU ray tracing, "..as fast as when using the DXR api in DX12". Try the [demo](https://electronicarts.github.io/gigi/Demos/tinybvh/index.html).
 * SideFX [Houdini](https://www.sidefx.com/docs/houdini/licenses) uses TinyBVH.
 * [wave_tracer](https://github.com/ssteinberg/wave_tracer) by Shlomi Steinberg uses TinyBVH to trace path segments.

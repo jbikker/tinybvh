@@ -1,7 +1,7 @@
 /*
 The MIT License (MIT)
 
-Copyright (c) 2024-2025, Jacco Bikker / Breda University of Applied Sciences.
+Copyright (c) 2024-2026, Jacco Bikker / Breda University of Applied Sciences.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -22,7 +22,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-// Mar 03, '25: version 0.2.0 : MacOS support, by wuyakuma
+// Jun 07, '26: version 0.3.0 : Upgraded to latest OpenCL version.
+// Mar 03, '25: version 0.2.0 : MacOS support, by wuyakuma.
 // Nov 18, '24: version 0.1.1 : Added custom alloc/free.
 // Nov 15, '24: version 0.1.0 : Accidentally started another tiny lib.
 
@@ -39,7 +40,7 @@ THE SOFTWARE.
 #ifndef TINY_OCL_H_
 #define TINY_OCL_H_
 
-#define CL_TARGET_OPENCL_VERSION 300
+#define CL_TARGET_OPENCL_VERSION 310
 #ifdef __APPLE__
 #include <OpenCL/cl.h>  // use with -framework OpenCL
 #else
@@ -51,39 +52,52 @@ THE SOFTWARE.
 // note: formally, size needs to be a multiple of 'alignment', see:
 // https://en.cppreference.com/w/c/memory/aligned_alloc.
 // EMSCRIPTEN enforces this.
-// Copy of the same construct in tinyocl, in a different namespace.
+// Copy of the same construct in tinybvh, in a different namespace.
 namespace tinyocl {
 inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alignment - 1)) & ~(alignment - 1); }
+#ifndef _ALIGNED_ALLOC
 #ifdef _MSC_VER // Visual Studio / C11
 #define ALIGNED( x ) __declspec( align( x ) )
-#define _ALIGNED_ALLOC(alignment,size) _aligned_malloc( make_multiple_of( size, alignment ), alignment );
-#define _ALIGNED_FREE(ptr) _aligned_free( ptr );
-#else // EMSCRIPTEN / gcc / clang
+#define _ALIGNED_ALLOC(alignment,size) _aligned_malloc( make_multiple_of( size, alignment ), alignment )
+#define _ALIGNED_FREE(ptr) _aligned_free( ptr )
+#else // EMSCRIPTEN / gcc / clang / Android
 #define ALIGNED( x ) __attribute__( ( aligned( x ) ) )
 #if !defined TINYBVH_NO_SIMD && (defined __x86_64__ || defined _M_X64 || defined __wasm_simd128__ || defined __wasm_relaxed_simd__)
 #include <xmmintrin.h>
-#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment );
-#define _ALIGNED_FREE(ptr) _mm_free( ptr );
-#else
-#if defined __APPLE__ || (defined __ANDROID_NDK__ && defined(__NDK_MAJOR__) && (__NDK_MAJOR__ >= 28))
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) );
-#elif defined __GNUC__
+#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment )
+#define _ALIGNED_FREE(ptr) _mm_free( ptr )
+#elif defined(__ANDROID__)
+#include <malloc.h>
+#include <android/api-level.h>
+// Android API 28+ supports aligned_alloc, but older versions (like API 24) 
+// require memalign for aligned memory.
+#if defined(__ANDROID_API__) && (__ANDROID_API__ >= 28) // Modern Android (9.0+)
+#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
+#else // Legacy Android
+#define _ALIGNED_ALLOC(alignment,size) memalign( alignment, make_multiple_of( size, alignment ) )
+#endif
+#define _ALIGNED_FREE(ptr) free( ptr )
+#elif defined(__EMSCRIPTEN__) || defined(__APPLE__) || defined(__aarch64__)
+// Emscripten and Apple strictly follow C11 aligned_alloc
+#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
+#define _ALIGNED_FREE(ptr) free( ptr )
+#elif defined(__GNUC__)
 #ifdef __linux__
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) );
+#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
 #else
-#define _ALIGNED_ALLOC(alignment,size) _aligned_malloc( alignment, make_multiple_of( size, alignment ) );
+#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment );
 #endif
+#define _ALIGNED_FREE(ptr) free( ptr )
+#else
+// Fallback
+#define _ALIGNED_ALLOC(alignment,size) malloc( size )
+#define _ALIGNED_FREE(ptr) free( ptr )
 #endif
-#define _ALIGNED_FREE(ptr) free( ptr );
 #endif
 #endif
 inline void* malloc64( size_t size, void* = nullptr ) { return size == 0 ? 0 : _ALIGNED_ALLOC( 64, size ); }
-inline void* malloc4k( size_t size, void* = nullptr ) { return size == 0 ? 0 : _ALIGNED_ALLOC( 4096, size ); }
-inline void* malloc32k( size_t size, void* = nullptr ) { return size == 0 ? 0 : _ALIGNED_ALLOC( 32768, size ); }
 inline void free64( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
-inline void free4k( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
-inline void free32k( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
-}; // namespace tiybvh
+}; // namespace tiyocl
 
 namespace tinyocl {
 
