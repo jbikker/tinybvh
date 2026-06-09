@@ -1012,10 +1012,12 @@ private:
 	uint8_t* flag = 0;
 	uint32_t* sortedIdx[3] = { 0 };
 	float* SARs = 0;
-#ifdef BVH_USEAVX
-	// static AVX data members
+#ifdef BVH_USESSE
 	static __m128 half4, two4, min1, mask3, binmul3;
 	static __m128i maxbin4;
+#endif
+#ifdef BVH_USEAVX
+	// static AVX data members
 	static __m256 max8, mask6, signFlip8;
 public:
 	// helper for AVX binning
