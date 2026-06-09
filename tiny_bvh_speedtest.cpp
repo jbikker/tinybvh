@@ -16,8 +16,8 @@
 // tests to perform
 // #define BUILD_MIDPOINT
 #define BUILD_REFERENCE
-#define BUILD_PRESPLIT
 #define BUILD_FULLSWEEP
+#define BUILD_PRESPLIT
 #define BUILD_DOUBLE
 #define BUILD_AVX
 #define BUILD_NEON
@@ -635,7 +635,7 @@ int main()
 	// measure single-core bvh construction time - reference binned SAH builder
 	printf( "- presplit builder:  " );
 	t.reset();
-	sweepbvh->useFullSweep = true;
+	presplitbvh->useFullSweep = true;
 	presplitbvh->usePresplitting = true;
 	for (int pass = 0; pass < 3; pass++) presplitbvh->Build( triangles, verts / 3 );
 	buildTime = t.elapsed() / 3.0f;

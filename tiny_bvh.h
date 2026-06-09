@@ -2932,6 +2932,11 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 		may_have_holes = false; // this builder produces a continuous list of nodes
 		bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
 		usedNodes = newNodePtr;
+		if (usePresplitting)
+		{
+			// finalize indices in index array
+			for (uint32_t i = 0; i < triCount; i++) primIdx[i] = fragment[primIdx[i]].primIdx;
+		}
 	}
 }
 
