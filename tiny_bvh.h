@@ -595,8 +595,8 @@ constexpr bvhdbl3 operator*=( bvhdbl3& a, const double b ) { return bvhdbl3( a.x
 
 #endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
-double tinybvh_length( const bvhdbl3& a ) { return sqrt( a.x * a.x + a.y * a.y + a.z * a.z ); }
-bvhdbl3 tinybvh_normalize( const bvhdbl3& a )
+inline double tinybvh_length( const bvhdbl3& a ) { return sqrt( a.x * a.x + a.y * a.y + a.z * a.z ); }
+inline bvhdbl3 tinybvh_normalize( const bvhdbl3& a )
 {
 	double l = tinybvh_length( a ), rl = l == 0 ? 0 : (1.0 / l);
 	return a * rl;
@@ -801,7 +801,7 @@ class BVHBase
 public:
 	enum BVHType : uint32_t
 	{
-		// Every BVHJ class is derived from BVHBase, but we don't use virtual functions, for
+		// Every BVH class is derived from BVHBase, but we don't use virtual functions, for
 		// performance reasons. For a TLAS over a mix of BVH layouts we do however need this
 		// kind of behavior when transitioning from a TLAS leaf to a BLAS root node.
 		UNDEFINED = 0,
