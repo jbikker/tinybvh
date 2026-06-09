@@ -1,6 +1,3 @@
-# Dev
-This is the *development branch* for TinyBVH. New features are tested here first. Please direct your PRs to this branch.
-
 # TinyBVH
 Single-header BVH construction and traversal library written as "Sane C++" (or "C with classes"). Some C++11 is used, e.g. for threading. The library has no dependencies. 
 
@@ -143,9 +140,11 @@ Advanced / exotic features of the library include:
 
 The current version of the library is stable. Changes may happen but should be limited.
 
-Plans, ordered by priority:
+Some plans:
 
+* Better benchmark tool
 * Speed improvements:
+  * Faster builds
   * Faster optimizer for AVX-capable CPUs
 * Demo of TinyBVH on GPU using other apis:
   * Ray tracing in pure DirectX
@@ -154,15 +153,6 @@ Plans, ordered by priority:
   * Produce a BVH for Intel rt hw (mind the quads)
   * Produce a BVH for AMD rt hw
   * Use inline asm on AMD for aabb/tri intersect
-* Comparisons / experiments:
-  * Memory use analysis in speedtest
-  * DXR renderer to compare against hw rt
-* CPU single-ray performance
-  * Reverse-engineer Embree & PhysX
-  * Combination of TLAS and packet traversal
-* Ease-of-use
-  * Robust default origin offset
-  * Engine layer
 
 # Platforms
 TinyBVH is a cross-platfrom library and should build on any platform that supports C++20 (the '20' bit is for threading). That being said, several platforms are specifically supported:
