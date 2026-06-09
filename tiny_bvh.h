@@ -2317,21 +2317,27 @@ void BVH::Build( const bvhvec4* vertices, const uint32_t prims )
 	Build( bvhvec4slice{ vertices, prims * 3, sizeof( bvhvec4 ) } );
 }
 
-void BVH::Build( const bvhvec4slice& vertices )
-{
-	// build the BVH from vertices stored in a slice.
-	PrepareBuild( vertices, 0, 0 /* empty index list; prim count is derived from slice */ );
-	if (useFullSweep) BuildFullSweep(); else Build();
-}
-
 void BVH::Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t prims )
 {
 	// build the BVH with a continuous array of bvhvec4 vertices, indexed by 'indices'.
 	Build( bvhvec4slice{ vertices, prims * 3, sizeof( bvhvec4 ) }, indices, prims );
 }
 
+void BVH::Build( const bvhvec4slice& vertices ) { Build( vertices, 0, 0 ); }
 void BVH::Build( const bvhvec4slice& vertices, const uint32_t* indices, uint32_t prims )
 {
+#ifdef SLICEDUMP
+	// this code dumps the passed geometry data to a file - for debugging only.
+	std::fstream df{ "dump.bin", df.binary | df.out };
+	uint32_t vcount = vertices.count, indexed = indices == 0 ? 0 : 1, stride = vertices.stride;
+	uint32_t pcount = indices ? prims : (vertices.count / 3);
+	df.write( (char*)&pcount, 4 );
+	df.write( (char*)&vcount, 4 );
+	df.write( (char*)&stride, 4 );
+	df.write( (char*)&indexed, sizeof( uint32_t ) );
+	df.write( (char*)vertices.data, vertices.stride * vertices.count );
+	if (indexed) df.write( (char*)indices, prims * 3 * 4 );
+#endif
 	// build the BVH from vertices stored in a slice, indexed by 'indices'.
 	PrepareBuild( vertices, indices, prims );
 	if (useFullSweep) BuildFullSweep(); else Build();
@@ -2481,70 +2487,55 @@ uint32_t BVH::Presplit()
 	const uint32_t splitBudget = (int)(triCount * presplitFactor);
 	// determine per-triangle split count.
 	float* prio = new float[triCount + splitBudget];
-	int* splits = new int[triCount + splitBudget];
+	int* splits = new int[triCount + splitBudget], s;
 	while (1)
 	{
-		float summedPrio = 0;
+		float summedPrio = 0, p;
 		for (uint32_t i = 0; i < triCount; i++)
-		{
-			float p = SplitPriority( fragment[i] );
+			p = SplitPriority( fragment[i] ),
 			prio[i] = p, summedPrio += p;
-		}
 		uint32_t totalSplits = 0;
 		for (uint32_t i = 0; i < triCount; i++)
-		{
-			int s = SplitCount( prio[i], summedPrio, triCount, factor );
+			s = SplitCount( prio[i], summedPrio, triCount, factor ),
 			splits[i] = s, totalSplits += s;
-		}
 		if (totalSplits <= triCount + splitBudget) break;
-		factor *= 0.95f; // TODO: will this ever happen? Also: tweak based on excess.
+		factor *= 0.95f; // TODO: will this ever happen? also: tweak based on excess.
 	}
 	// do actual splitting.
 	const BVHNode& root = bvhNode[0];
-	const bvhvec3 rootSize = root.aabbMax - root.aabbMin;
-	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f /* don't touch, carefully picked */;
+	const bvhvec3 rootExtent = root.aabbMax - root.aabbMin;
 	ALIGNED( 64 ) Fragment part1, part2; // keep all clipping in a single cacheline.
 	for (uint32_t i = 0; i < fragCount; ) if (splits[i] == 1) i++; else
 	{
 		const Fragment& f = fragment[i];
 		const bvhvec3 extent = f.bmax - f.bmin;
 		const int splitAxis = tinybvh_maxdim( extent );
-		const float largestExtent = extent[splitAxis];
-		const float nodeSize = GetNodeSize( largestExtent, rootSize[splitAxis] );
+		const float nodeSize = GetNodeSize( extent[splitAxis], rootExtent[splitAxis] );
 		// snap mid position to nearest split plane
 		const float midPos = (f.bmin[splitAxis] + f.bmax[splitAxis]) * 0.5f;
 		const float index = roundf( (midPos - root.aabbMin[splitAxis]) / nodeSize );
 		const float splitPos = root.aabbMin[splitAxis] + index * nodeSize;
 		// actual split
-		bool leftOK = false, rightOK = false;
 		if (!SplitFrag( fragment[i], part1, part2, splitAxis, splitPos )) { i++; continue; /* split failed; rare. */ }
 		fragment[i] = part1, fragment[fragCount] = part2;
-		const int splitsRemaining = splits[i] - 1;
-		splits[i] = tinybvh_max( 1, splitsRemaining >> 1 );
-		splits[fragCount] = tinybvh_max( 1, (splitsRemaining >> 1) - splits[i] ); // TODO: better sharing
-		primIdx[fragCount] = fragCount++;
+		// distribute available splits over part1 and part2
+		const int toDivide = splits[i];
+		const bvhvec3 p1Extent = part1.bmax - part1.bmin, p2Extent = part2.bmax - part2.bmin;
+		const float p1Size = p1Extent[tinybvh_maxdim( p1Extent )];
+		const float p2Size = p2Extent[tinybvh_maxdim( p2Extent )];
+		const int p1Count = (int)((float)toDivide * p1Size / (p1Size + p2Size));
+		splits[i] = tinybvh_clamp( p1Count, 1, toDivide - 1 );
+		splits[fragCount] = toDivide - splits[i], primIdx[fragCount] = fragCount++;
 	}
 	// cleanup
 	delete prio;
 	delete splits;
-	// done.
+	// all done.
 	return fragCount;
 }
 
 void BVH::PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
 {
-#ifdef SLICEDUMP
-	// this code dumps the passed geometry data to a file - for debugging only.
-	std::fstream df{ "dump.bin", df.binary | df.out };
-	uint32_t vcount = vertices.count, indexed = indices == 0 ? 0 : 1, stride = vertices.stride;
-	uint32_t pcount = indices ? prims : (vertices.count / 3);
-	df.write( (char*)&pcount, 4 );
-	df.write( (char*)&vcount, 4 );
-	df.write( (char*)&stride, 4 );
-	df.write( (char*)&indexed, sizeof( uint32_t ) );
-	df.write( (char*)vertices.data, vertices.stride * vertices.count );
-	if (indexed) df.write( (char*)indices, prims * 3 * 4 );
-#endif
 	const uint32_t primCount = prims > 0 ? prims : vertices.count / 3;
 	const uint32_t splitBudget = usePresplitting ? ((int)(primCount * presplitFactor)) : 0;
 	const uint32_t spaceNeeded = (primCount + splitBudget) * 2; // upper limit
