@@ -612,7 +612,7 @@ int main()
 	buildTime = t.elapsed() / 3.0f;
 	TestPrimaryRays( _BVH, Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
-	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), avgCost );
+	printf( "- %6i nodes, SAH=%.2f, EPO=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), mybvh->EPOCost(), avgCost );
 
 #endif
 
@@ -626,7 +626,7 @@ int main()
 	buildTime = t.elapsed();
 	TestPrimaryRays( _SWEEP, Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
-	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", sweepbvh->usedNodes, sweepbvh->SAHCost(), avgCost );
+	printf( "- %6i nodes, SAH=%.2f, EPO=%.2f, rayCost=%.2f\n", sweepbvh->usedNodes, sweepbvh->SAHCost(), sweepbvh->EPOCost(), avgCost );
 
 #endif
 
@@ -641,7 +641,7 @@ int main()
 	buildTime = t.elapsed() / 3.0f;
 	TestPrimaryRays( _PRESPLIT, Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
-	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", presplitbvh->usedNodes, presplitbvh->SAHCost(), avgCost );
+	printf( "- %6i nodes, SAH=%.2f, EPO=%.2f, rayCost=%.2f\n", presplitbvh->usedNodes, presplitbvh->SAHCost(), presplitbvh->EPOCost(), avgCost );
 
 #endif
 
@@ -659,7 +659,7 @@ int main()
 	buildTime = t.elapsed();
 	TestPrimaryRaysEx( Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
-	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), avgCost );
+	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", (int)bvh_double->usedNodes, bvh_double->SAHCost(), avgCost );
 
 #endif
 
@@ -672,7 +672,7 @@ int main()
 	buildTime = t.elapsed() / 3.0f;
 	TestPrimaryRays( _BVH, Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
-	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), avgCost );
+	printf( "- %6i nodes, SAH=%.2f, EPO=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), mybvh->EPOCost(), avgCost );
 
 #endif
 
@@ -698,7 +698,7 @@ int main()
 	buildTime = t.elapsed() / 2.0f;
 	TestPrimaryRays( _BVH, Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
-	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), avgCost );
+	printf( "- %6i nodes, SAH=%.2f, EPO=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), mybvh->EPOCost(), avgCost );
 
 #endif
 
