@@ -175,7 +175,7 @@ TinyBVH is a cross-platfrom library and should build on any platform that suppor
   
 # TinyBVH in the Wild
 A list of projects using TinyBVH:
-* Remedy's [Northlight[(https://www.remedygames.com/northlight) engine uses TinyBVH in their editor and for baking per-micro-vertex displacements.
+* Remedy's [Northlight](https://www.remedygames.com/northlight) engine uses TinyBVH in their editor and for baking per-micro-vertex displacements.
 * [EA SEED's Gigi](https://github.com/electronicarts/gigi/releases/tag/v1.0.0): Uses TinyBVH for WebGPU ray tracing, "..as fast as when using the DXR api in DX12". Try the [demo](https://electronicarts.github.io/gigi/Demos/tinybvh/index.html).
 * SideFX [Houdini](https://www.sidefx.com/docs/houdini/licenses) uses TinyBVH.
 * [wave_tracer](https://github.com/ssteinberg/wave_tracer) by Shlomi Steinberg uses TinyBVH to trace path segments.
