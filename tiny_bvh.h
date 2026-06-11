@@ -1683,15 +1683,9 @@ template<typename T, typename Func> static inline void RadixSort( T* input, T* o
 
 // error handling
 #ifdef _WINDOWS_ // windows.h has been included
-#ifdef _MSC_VER // avoid _CRT_SECURE_NO_WARNING requirement for MSC
-#define BVH_FATAL_ERROR_IF(c,s) if (c) { char t[512]; sprintf_s( t, 512, \
+#define BVH_FATAL_ERROR_IF(c,s) if (c) { char t[512]; snprintf( t, 512, \
 	"Fatal error in tiny_bvh.h, line %i:\n%s\n", __LINE__, s ); \
 	MessageBoxA( NULL, t, "Fatal error", MB_OK ); exit( 1 ); }
-#else
-#define BVH_FATAL_ERROR_IF(c,s) if (c) { char t[512]; sprintf( t, \
-	"Fatal error in tiny_bvh.h, line %i:\n%s\n", __LINE__, s ); \
-	MessageBoxA( NULL, t, "Fatal error", MB_OK ); exit( 1 ); }
-#endif
 #else
 #define BVH_FATAL_ERROR_IF(c,s) if (c) { fprintf( stderr, \
 	"Fatal error in tiny_bvh.h, line %i:\n%s\n", __LINE__, s ); exit( 1 ); }
@@ -3313,8 +3307,8 @@ uint32_t BVH::Presplit()
 		fragCount++;
 	}
 	// cleanup
-	delete prio;
-	delete splits;
+	delete [] prio;
+	delete [] splits;
 	// all done.
 	return fragCount;
 }
