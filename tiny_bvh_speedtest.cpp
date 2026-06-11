@@ -1,5 +1,5 @@
 #define TINYBVH_IMPLEMENTATION
-// #define NO_THREADED_BUILDS
+#define NO_THREADED_BUILDS
 #define INST_IDX_BITS 10 // reduces the size of the hit record to 16 bytes.
 #include "tiny_bvh.h"
 
@@ -16,10 +16,12 @@
 // tests to perform
 // #define BUILD_MIDPOINT
 #define BUILD_REFERENCE
-#define BUILD_FULLSWEEP
+// #define BUILD_FULLSWEEP
 #define BUILD_PRESPLIT
+#define BUILD_PRESPLIT_POST
 #define BUILD_DOUBLE
 #define BUILD_AVX
+#define BUILD_AVX_PRESPLIT
 #define BUILD_NEON
 #define BUILD_SBVH
 #define REFIT_BVH2
@@ -621,7 +623,7 @@ int main()
 	// measure single-core bvh construction time - full-sweep SAH builder
 	printf( "- fullsweep builder: " );
 	t.reset();
-	sweepbvh->useFullSweep = true;
+	sweepbvh->settings.useFullSweep = true;
 	sweepbvh->Build( triangles, verts / 3 );
 	buildTime = t.elapsed();
 	TestPrimaryRays( _SWEEP, Nsmall, 3, &avgCost );
@@ -635,8 +637,25 @@ int main()
 	// measure single-core bvh construction time - reference binned SAH builder
 	printf( "- presplit builder:  " );
 	t.reset();
-	presplitbvh->useFullSweep = true;
-	presplitbvh->usePresplitting = true;
+	presplitbvh->settings.useFullSweep = true;
+	presplitbvh->settings.usePresplitting = true;
+	presplitbvh->settings.presplitPostPass = false;
+	for (int pass = 0; pass < 3; pass++) presplitbvh->Build( triangles, verts / 3 );
+	buildTime = t.elapsed() / 3.0f;
+	TestPrimaryRays( _PRESPLIT, Nsmall, 3, &avgCost );
+	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
+	printf( "- %6i nodes, SAH=%.2f, EPO=%.2f, rayCost=%.2f\n", presplitbvh->usedNodes, presplitbvh->SAHCost(), presplitbvh->EPOCost(), avgCost );
+
+#endif
+
+#ifdef BUILD_PRESPLIT_POST
+
+	// measure single-core bvh construction time - reference binned SAH builder
+	printf( "- presplit + post:   " );
+	t.reset();
+	presplitbvh->settings.useFullSweep = true;
+	presplitbvh->settings.usePresplitting = true;
+	presplitbvh->settings.presplitPostPass = true;
 	for (int pass = 0; pass < 3; pass++) presplitbvh->Build( triangles, verts / 3 );
 	buildTime = t.elapsed() / 3.0f;
 	TestPrimaryRays( _PRESPLIT, Nsmall, 3, &avgCost );
@@ -668,6 +687,21 @@ int main()
 	// measure single-core bvh construction time - AVX builder
 	printf( "- fast AVX builder:  " );
 	t.reset();
+	for (int pass = 0; pass < 3; pass++) mybvh->BuildAVX( triangles, verts / 3 );
+	buildTime = t.elapsed() / 3.0f;
+	TestPrimaryRays( _BVH, Nsmall, 3, &avgCost );
+	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
+	printf( "- %6i nodes, SAH=%.2f, EPO=%.2f, rayCost=%.2f\n", mybvh->usedNodes, mybvh->SAHCost(), mybvh->EPOCost(), avgCost );
+
+#endif
+
+#if defined BUILD_AVX_PRESPLIT && defined BVH_USEAVX
+
+	// measure single-core bvh construction time - AVX builder
+	printf( "- presplit AVX bld:  " );
+	t.reset();
+	mybvh->settings.presplitPostPass = false;
+	mybvh->settings.usePresplitting = true;
 	for (int pass = 0; pass < 3; pass++) mybvh->BuildAVX( triangles, verts / 3 );
 	buildTime = t.elapsed() / 3.0f;
 	TestPrimaryRays( _BVH, Nsmall, 3, &avgCost );
@@ -1054,7 +1088,7 @@ int main()
 
 	printf( "Optimizing 'full-sweep' SAH BVH...        " );
 	PrepareTest();
-	mybvh->useFullSweep = true;
+	mybvh->settings.useFullSweep = true;
 	mybvh->Build( triangles, verts / 3 );
 	prevSAH = mybvh->SAHCost();
 	t.reset();
@@ -1062,7 +1096,7 @@ int main()
 	optimizeTime = t.elapsed();
 	TestPrimaryRays( _BVH, Nsmall, 3, &avgCost );
 	printf( "done (%.2fs). New: %i nodes, SAH=%.2f to %.2f, rayCost=%.2f\n", optimizeTime, mybvh->NodeCount(), prevSAH, mybvh->SAHCost(), avgCost );
-	mybvh->useFullSweep = false;
+	mybvh->settings.useFullSweep = false;
 
 #endif
 
