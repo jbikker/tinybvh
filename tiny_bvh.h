@@ -2510,13 +2510,17 @@ uint32_t BVH::Presplit()
 		const Fragment& f = fragment[i];
 		const bvhvec3 extent = f.bmax - f.bmin;
 		const int splitAxis = tinybvh_maxdim( extent );
-		const float nodeSize = GetNodeSize( extent[splitAxis], rootExtent[splitAxis] );
+		float nodeSize = GetNodeSize( extent[splitAxis], rootExtent[splitAxis] );
+		if (nodeSize >= extent[splitAxis] - 0.0001f)
+		{
+			nodeSize *= 0.5f;
+		}
 		// snap mid position to nearest split plane
 		const float midPos = (f.bmin[splitAxis] + f.bmax[splitAxis]) * 0.5f;
 		const float index = roundf( (midPos - root.aabbMin[splitAxis]) / nodeSize );
 		const float splitPos = root.aabbMin[splitAxis] + index * nodeSize;
 		// actual split
-		if (!SplitFrag( fragment[i], part1, part2, splitAxis, splitPos )) { i++; continue; /* split failed; rare. */ }
+		SplitFrag(fragment[i], part1, part2, splitAxis, splitPos);
 		fragment[i] = part1, fragment[fragCount] = part2;
 		// distribute available splits over part1 and part2
 		const int toDivide = splits[i];
