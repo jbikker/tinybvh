@@ -176,6 +176,9 @@ THE SOFTWARE.
 #ifndef NO_THREADED_BUILDS
 #define ENABLE_THREADED_BUILDS
 #endif
+#ifndef NO_VOXEL_SUPPORT
+#define ENABLE_VOXEL_SUPPORT
+#endif
 
 // Experimental / WIP features
 
@@ -831,7 +834,9 @@ public:
 		LAYOUT_BVH4_GPU,
 		LAYOUT_CWBVH,
 		LAYOUT_BVH8_AVX2,
+	#ifdef ENABLE_VOXEL_SUPPORT
 		LAYOUT_VOXELSET
+	#endif
 	};
 	struct ALIGNED( 32 ) Fragment
 	{
@@ -1008,7 +1013,7 @@ public:
 	bool (*customIntersect)(Ray&, const unsigned) = 0;
 	bool (*customIsOccluded)(const Ray&, const unsigned) = 0;
 private:
-#ifndef NO_THREADED_BUILDS
+#ifdef ENABLE_THREADED_BUILDS
 	// Atomic counters for threaded builds
 	std::atomic<uint32_t>* atomicNewNodePtr = 0;
 	std::atomic<uint32_t>* atomicNextFrag = 0;
@@ -1033,6 +1038,8 @@ public:
 		uint32_t* count, const __m128& nmin4, const __m128& rpd4 );
 #endif
 };
+
+#ifdef ENABLE_VOXEL_SUPPORT
 
 class VoxelSet : public BVHBase // just so it can be attached conveniently in a TLAS
 {
@@ -1077,6 +1084,8 @@ private:
 	uint32_t freeBrickPtr = 1; // skip 1, as 0 denotes an empty brick in the topgrid.
 	uint32_t* topGrid = 0;
 };
+
+#endif
 
 #ifdef DOUBLE_PRECISION_SUPPORT
 
@@ -1134,7 +1143,7 @@ public:
 	// Custom geometry intersection callback
 	bool (*customIntersect)(RayEx&, uint64_t) = 0;
 	bool (*customIsOccluded)(const RayEx&, uint64_t) = 0;
-#ifndef NO_THREADED_BUILDS
+#ifdef ENABLE_THREADED_BUILDS
 private:
 	// Atomic counter for threaded builds
 	std::atomic<uint64_t>* atomicNewNodePtr = 0;
@@ -1797,7 +1806,7 @@ void BVHBase::CopyBasePropertiesFrom( const BVHBase& original )
 	this->aabbMin = original.aabbMin, this->aabbMax = original.aabbMax;
 }
 
-#if defined MT_USE_JOBSYSTEM && !defined NO_THREADED_BUILDS
+#if defined ENABLE_THREADED_BUILDS && defined MT_USE_JOBSYSTEM
 
 // Wicked job system, condensed. https://github.com/turanszkij/WickedEngine
 // Removed: Thread priority, Dispatch, graceful shutdown; not needed in TinyBVH.
@@ -1962,7 +1971,7 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	if (expectIndexed && fileTriCount != primCount) return false;
 	if (!expectIndexed && fileTriCount != vertices.count / 3) return false;
 	// backup pointers to JobSystems: can't deserialize pointers.
-#ifndef NO_THREADED_BUILDS
+#ifdef ENABLE_THREADED_BUILDS
 	JobSystem* subtreeBackup = subtreeJobs;
 	JobSystem* binningBackup = binningJobs;
 #endif
@@ -1972,7 +1981,7 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	if (expectIndexed != fileIsIndexed) return false; // not what we expected.
 	if (blasList != nullptr || instList != nullptr) return false; // can't load/save TLAS.
 	context = ctxBackup; // can't load context; function pointers will differ.
-#ifndef NO_THREADED_BUILDS
+#ifdef ENABLE_THREADED_BUILDS
 	subtreeJobs = subtreeBackup;
 	binningJobs = binningBackup;
 #endif
@@ -2280,7 +2289,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	// Reference builder: Binned, threaded SAH BVH builder. Not using SIMD.
 	if (depth == 0)
 	{
-	#ifdef NO_THREADED_BUILDS
+	#ifndef ENABLE_THREADED_BUILDS
 		threadedBuild = false;
 	#else
 		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
@@ -2380,7 +2389,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 			uint32_t leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
 			int32_t n;
-		#ifndef NO_THREADED_BUILDS
+		#ifdef ENABLE_THREADED_BUILDS
 			if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
 		#else
 			n = newNodePtr, newNodePtr += 2;
@@ -2390,7 +2399,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 			bvhNode[n + 1].aabbMin = bestRMin, bvhNode[n + 1].aabbMax = bestRMax;
 			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
 			node.leftFirst = n, node.triCount = 0;
-		#ifndef NO_THREADED_BUILDS
+		#ifdef ENABLE_THREADED_BUILDS
 		#ifdef MT_USE_JOBSYSTEM
 			if (depth < MT_JOBSYSTEM_DEPTH && threadedBuild)
 			{
@@ -2417,7 +2426,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	// all done.
 	if (depth == 0)
 	{
-	#ifndef NO_THREADED_BUILDS
+	#ifdef ENABLE_THREADED_BUILDS
 		if (threadedBuild)
 		{
 		#ifdef MT_USE_JOBSYSTEM
@@ -2462,7 +2471,7 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 		// allocate space for right sweep
 		SARs = (float*)AlignedAlloc( triCount * sizeof( float ) );
 		// prepare threading
-	#ifdef NO_THREADED_BUILDS
+	#ifndef ENABLE_THREADED_BUILDS
 		threadedBuild = false;
 	#else
 		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
@@ -2558,7 +2567,7 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 			if (leftCount >= node.triCount || rightCount >= node.triCount || taskCount == BVH_NUM_ELEMS( task )) break;
 			memcpy( primIdx + node.leftFirst, sortedIdx[splitAxis] + node.leftFirst, node.triCount * 4 );
 			int32_t n;
-		#ifndef NO_THREADED_BUILDS
+		#ifdef ENABLE_THREADED_BUILDS
 			if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
 		#else
 			n = newNodePtr, newNodePtr += 2;
@@ -2568,7 +2577,7 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 			bvhNode[n + 1].leftFirst = node.leftFirst + leftCount;
 			bvhNode[n + 1].triCount = rightCount;
 			node.leftFirst = n, node.triCount = 0;
-		#ifndef NO_THREADED_BUILDS
+		#ifdef ENABLE_THREADED_BUILDS
 		#ifdef MT_USE_JOBSYSTEM
 			if (threadedBuild && depth < MT_JOBSYSTEM_DEPTH)
 			{
@@ -2596,7 +2605,7 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 	// cleanup allocated buffers when done
 	if (depth == 0)
 	{
-	#ifndef NO_THREADED_BUILDS
+	#ifdef ENABLE_THREADED_BUILDS
 		if (threadedBuild)
 		{
 		#ifdef MT_USE_JOBSYSTEM
@@ -2689,7 +2698,7 @@ void BVH::PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices,
 	memset( primIdx + triCount, 0, slack * 4 );
 	bvh_over_indices = indices != nullptr;
 	// threading
-#ifdef NO_THREADED_BUILDS
+#ifndef ENABLE_THREADED_BUILDS
 	threadedBuild = false;
 #else
 	if (primCount < MT_BUILD_THRESHOLD) threadedBuild = false;
@@ -2705,10 +2714,10 @@ void BVH::BuildHQ()
 	memset( idxTmp, 0, (triCount + slack) * 4 );
 	// reset node pool
 	newNodePtr = 2, nextFrag = triCount;
-#ifndef NO_THREADED_BUILDS
+#ifdef ENABLE_THREADED_BUILDS
 	if (threadedBuild)
 	{
-	#if defined MT_USE_JOBSYSTEM && !defined NO_THREADED_BUILDS
+	#if defined MT_USE_JOBSYSTEM
 		if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();
 		subtreeJobs = globalSubtreeJobs;
 	#endif
@@ -2724,7 +2733,7 @@ void BVH::BuildHQ()
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 	refittable = false; // can't refit an SBVH
 	may_have_holes = false; // there may be holes in the index list, but not in the node list
-#ifndef NO_THREADED_BUILDS
+#ifdef ENABLE_THREADED_BUILDS
 	if (threadedBuild) newNodePtr = atomicNewNodePtr->load(), nextFrag = atomicNextFrag->load();
 	delete atomicNewNodePtr;
 	delete atomicNextFrag;
@@ -2934,7 +2943,7 @@ void BVH::BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, ui
 						float splitPos = bestLMax[bestAxis];
 						if (SplitFrag( fragment[fragIdx], part1, part2, bestAxis, splitPos ))
 						{
-						#ifndef NO_THREADED_BUILDS
+						#ifdef ENABLE_THREADED_BUILDS
 							uint32_t newFragIdx = threadedBuild ? atomicNextFrag->fetch_add( 1 ) : nextFrag++;
 						#else
 							uint32_t newFragIdx = nextFrag++;
@@ -2945,7 +2954,6 @@ void BVH::BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, ui
 						else // didn't work out; see what we can do.
 						{
 							const float sahLeft = tinybvh_halfarea( part1.bmax - part1.bmin );
-							const float sahRight = tinybvh_halfarea( part2.bmax - part2.bmin );
 							if (sahLeft > 0) idxTmp[A++] = fragIdx; else idxTmp[--B] = fragIdx;
 						}
 					}
@@ -2985,7 +2993,7 @@ void BVH::BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, ui
 				break;
 			}
 			int32_t leftChildIdx;
-		#ifndef NO_THREADED_BUILDS
+		#ifdef ENABLE_THREADED_BUILDS
 			if (threadedBuild) leftChildIdx = atomicNewNodePtr->fetch_add( 2 ); else leftChildIdx = newNodePtr, newNodePtr += 2;
 		#else
 			leftChildIdx = newNodePtr, newNodePtr += 2;
@@ -2997,7 +3005,7 @@ void BVH::BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, ui
 			bvhNode[rightChildIdx].leftFirst = B, bvhNode[rightChildIdx].triCount = rightCount;
 			node.leftFirst = leftChildIdx, node.triCount = 0;
 			// recurse
-		#ifndef NO_THREADED_BUILDS
+		#ifdef ENABLE_THREADED_BUILDS
 		#ifdef MT_USE_JOBSYSTEM
 			if (depth < MT_JOBSYSTEM_DEPTH && threadedBuild)
 			{
@@ -3028,7 +3036,7 @@ void BVH::BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, ui
 		sliceStart = localTask[localTasks].sliceStart, sliceEnd = localTask[localTasks].sliceEnd;
 	}
 	// all done.
-#if defined( MT_USE_JOBSYSTEM ) && !defined NO_THREADED_BUILDS
+#if defined ENABLE_THREADED_BUILDS && defined MT_USE_JOBSYSTEM
 	if (depth == 0 && threadedBuild) subtreeJobs->Wait();
 #endif
 }
@@ -3237,10 +3245,10 @@ float BVH::SplitPriority( const Fragment& f ) const
 	return cbrtf( extentPrio * emptyAreaPrio );
 }
 
-int BVH::SplitCount( const float prio, const float sumPrio, const int triCount, const float factor ) const
+int BVH::SplitCount( const float prio, const float sumPrio, const int tris, const float factor ) const
 {
-	const float shareOfTris = prio / sumPrio * triCount;
-	return 1 + (int)(shareOfTris * settings.presplitFactor);
+	const float shareOfTris = prio / sumPrio * tris;
+	return 1 + (int)(shareOfTris * factor);
 }
 
 float BVH::GetNodeSize( const float extent, const float globalSize )
@@ -3307,8 +3315,8 @@ uint32_t BVH::Presplit()
 		fragCount++;
 	}
 	// cleanup
-	delete [] prio;
-	delete [] splits;
+	delete[] prio;
+	delete[] splits;
 	// all done.
 	return fragCount;
 }
@@ -3634,7 +3642,9 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				#ifdef BVH_USEAVX2
 					if (blas->layout == LAYOUT_BVH8_AVX2) cost += ((BVH8_CPU*)blas)->Intersect( tmpRay );
 				#endif
+				#ifdef ENABLE_VOXEL_SUPPORT
 					if (blas->layout == LAYOUT_VOXELSET) cost += ((VoxelSet*)blas)->Intersect( tmpRay );
+				#endif
 				}
 				// 3. Restore ray
 				ray.hit = tmpRay.hit;
@@ -3775,7 +3785,9 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 				#ifdef BVH_USEAVX2
 					if (blas->layout == LAYOUT_BVH8_AVX2) { if (((BVH8_CPU*)blas)->IsOccluded( tmpRay )) return true; }
 				#endif
+				#ifdef ENABLE_VOXEL_SUPPORT
 					if (blas->layout == LAYOUT_VOXELSET) { if (((VoxelSet*)blas)->IsOccluded( tmpRay )) return true; }
+				#endif
 				}
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
@@ -4044,6 +4056,8 @@ void BVH::Compact()
 	AlignedFree( primIdx );
 	usedNodes = newNodePtr, bvhNode = tmpNodes, primIdx = idx;
 }
+
+#ifdef ENABLE_VOXEL_SUPPORT
 
 // VoxelSet implementation
 // ----------------------------------------------------------------------------
@@ -4431,6 +4445,8 @@ bool VoxelSet::IsOccluded( const Ray& ray ) const
 	// we shouldn't get here
 	return false;
 }
+
+#endif
 
 // BVH_Verbose implementation
 // ----------------------------------------------------------------------------
@@ -6642,7 +6658,7 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 	if (depth == 0)
 	{
 		// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
-	#ifdef NO_THREADED_BUILDS
+	#ifndef ENABLE_THREADED_BUILDS
 		threadedBuild = false;
 	#else
 		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
@@ -6673,7 +6689,7 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( binmul3, d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
-		#if defined MT_USE_JOBSYSTEM && !defined NO_THREADED_BUILDS
+		#if defined ENABLE_THREADED_BUILDS && defined MT_USE_JOBNSYSTEM
 			if (threadedBuild && node.triCount > MT_BUILD_THRESHOLD)
 			{
 				// run binning in parallel slices
@@ -6742,7 +6758,7 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 			}
 			// create child nodes and recurse
 			uint32_t n;
-		#ifndef NO_THREADED_BUILDS
+		#ifdef ENABLE_THREADED_BUILDS
 			if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
 		#else
 			n = newNodePtr, newNodePtr += 2;
@@ -6754,7 +6770,7 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 			node.leftFirst = n, node.triCount = 0;
 			*(__m256*)& bvhNode[n + 1] = _mm256_xor_ps( bestRBox, signFlip8 );
 			bvhNode[n + 1].leftFirst = i, bvhNode[n + 1].triCount = rightCount;
-		#ifdef NO_THREADED_BUILDS
+		#ifndef ENABLE_THREADED_BUILDS
 			task[taskCount++] = n + 1, nodeIdx = n;
 		#elif defined MT_USE_JOBSYSTEM
 			const bool spawnThreads = leftCount + rightCount > 5000 && depth < MT_JOBSYSTEM_DEPTH && threadedBuild;
@@ -6783,7 +6799,7 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 	if (depth == 0)
 	{
 		// wait for all threads to complete.
-	#ifndef NO_THREADED_BUILDS
+	#ifdef ENABLE_THREADED_BUILDS
 		if (threadedBuild)
 		{
 		#ifdef MT_USE_JOBSYSTEM
@@ -8159,7 +8175,7 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
 	if (depth == 0)
 	{
-	#ifdef NO_THREADED_BUILDS
+	#ifndef ENABLE_THREADED_BUILDS
 		threadedBuild = false;
 	#else
 		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
@@ -8255,7 +8271,7 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 			uint64_t leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
 			uint64_t n;
-		#ifndef NO_THREADED_BUILDS
+		#ifdef ENABLE_THREADED_BUILDS
 			if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
 		#else
 			n = newNodePtr, newNodePtr += 2;
@@ -8265,7 +8281,7 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 			bvhNode[n + 1].aabbMin = bestRMin, bvhNode[n + 1].aabbMax = bestRMax;
 			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
 			node.leftFirst = n, node.triCount = 0;
-		#ifndef NO_THREADED_BUILDS
+		#ifdef ENABLE_THREADED_BUILDS
 		#ifdef MT_USE_JOBSYSTEM
 			if (depth < MT_JOBSYSTEM_DEPTH && threadedBuild)
 			{
@@ -8292,7 +8308,7 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 	}
 	if (depth == 0 || triCount < MT_BUILD_THRESHOLD)
 	{
-	#ifndef NO_THREADED_BUILDS
+	#ifdef ENABLE_THREADED_BUILDS
 		if (threadedBuild)
 		{
 		#ifdef MT_USE_JOBSYSTEM
