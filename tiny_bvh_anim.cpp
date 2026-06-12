@@ -8,6 +8,7 @@
 #define INSTCOUNT (GRIDSIZE * GRIDSIZE * GRIDSIZE)
 
 #define NO_DOUBLE_PRECISION_SUPPORT
+#define NO_VOXEL_SUPPORT
 #define TINYBVH_IMPLEMENTATION
 #define INST_IDX_BITS 8 // override default; space for 256 instances.
 #include "tiny_bvh.h"
@@ -18,7 +19,7 @@ using namespace tinybvh;
 
 struct Sphere { bvhvec3 pos; float r; };
 
-BVH8_CPU sponza;
+BVH sponza;
 BVH obj; // custom geometry BVH must be regular BVH layout.
 BVH tlas; // TLAS must for now be in regular BVH layout.
 BVHBase* bvhList[] = { &obj, &sponza };
@@ -73,7 +74,10 @@ void Init()
 	printf( "Loading triangle data (%i tris).\n", verts );
 	verts *= 3, triangles = (bvhvec4*)malloc64( verts * 16 );
 	s.read( (char*)triangles, verts * 16 );
-	sponza.BuildHQ( triangles, verts / 3 );
+	sponza.settings.useFullSweep = true;
+	sponza.settings.usePresplitting = true;
+	sponza.settings.presplitPostPass = true;
+	sponza.Build( triangles, verts / 3 );
 
 	// load bunny
 	std::fstream b{ "./testdata/bunny.bin", s.binary | s.in };
