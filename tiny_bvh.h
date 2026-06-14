@@ -976,6 +976,7 @@ private:
 	void BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* triIdxB );
 	void PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( uint32_t nodeIdx = 0, uint32_t depth = 0 );
+	void RadixSort( uint32_t* input, uint32_t* output, uint32_t* keys, int len, int a );
 	void BuildFullSweep( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void BuildAVXSubtree( uint32_t nodeIdx = 0, uint32_t depth = 0 );
@@ -1638,56 +1639,6 @@ bvhvec3 tinybvh_rndvec3( uint32_t& s )
 loop: R = bvhvec3( tinybvh_rndfloat( s ) - 0.5f, tinybvh_rndfloat( s ) * 0.5f, tinybvh_rndfloat( s ) * 0.5f );
 	if (tinybvh_dot( R, R ) > 0.25f) goto loop;
 	return tinybvh_normalize( R );
-}
-
-// radix sort
-static inline unsigned FloatToKey( const float value )
-{
-	// Integer comparisons between numbers returned from this function behave
-	// as if the original float values where compared.
-	// Simple reinterpretation works only for [0, ...], but this also handles negatives
-	const unsigned f = *(unsigned*)&value, mask = (unsigned)((int)f >> 31 | (1 << 31));
-	return f ^ mask;
-}
-template<typename T, typename Func> static inline void RadixSort( T* input, T* output, int len, Func getKey )
-{
-	// http://stereopsis.com/radix.html - Beats std::sort unless for small inputs (say len <= ~64)
-	const int radixSize = 11, binSize = 1 << radixSize, mask = binSize - 1, passes = 3;
-	int prefixSum[binSize * passes] = { 0 };
-	auto getPrefixSumRef = [=, &prefixSum]( unsigned key, int pass ) -> int& {
-		const unsigned radix = (key >> (pass * radixSize)) & mask;
-		int& offset = prefixSum[radix + pass * binSize];
-		return offset;
-		};
-	// Compute histogram for all passes
-	for (int i = 0; i < len; i++)
-	{
-		const unsigned key = getKey( input[i] );
-		getPrefixSumRef( key, 0 )++, getPrefixSumRef( key, 1 )++, getPrefixSumRef( key, 2 )++;
-	}
-	// Compute prefix sum for all passes
-	int sum0 = 0, sum1 = 0, sum2 = 0;
-	for (int i = 0; i < binSize; i++)
-	{
-		const int temp0 = prefixSum[i + 0 * binSize];
-		const int temp1 = prefixSum[i + 1 * binSize];
-		const int temp2 = prefixSum[i + 2 * binSize];
-		prefixSum[i + 0 * binSize] = sum0;
-		prefixSum[i + 1 * binSize] = sum1;
-		prefixSum[i + 2 * binSize] = sum2;
-		sum0 += temp0, sum1 += temp1, sum2 += temp2;
-	}
-	// Sort from LSB to MSB in radix-sized steps
-	for (int i = 0; i < passes; i++)
-	{
-		for (int j = 0; j < len; j++)
-		{
-			const T element = input[j];
-			const unsigned key0 = getKey( element );
-			output[getPrefixSumRef( key0, i )++] = element;
-		}
-		tinybvh_swap( input, output );
-	}
 }
 
 // error handling
@@ -2451,6 +2402,42 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	}
 }
 
+// radix sort
+static inline unsigned FloatToKey( const float value )
+{
+	const unsigned f = *(unsigned*)&value, mask = (unsigned)((int)f >> 31 | (1 << 31));
+	return f ^ mask;
+}
+void BVH::RadixSort( uint32_t* input, uint32_t* output, uint32_t* keys, int len, int a )
+{
+	// http://stereopsis.com/radix.html - Beats std::sort unless for small inputs (say len <= ~64)
+	const int binSize = 1 << 11, mask = binSize - 1;
+	int prefixSum[binSize * 3] = { 0 };
+	for (int i = 0; i < len; i++) // compute histogram for all passes
+	{
+		const unsigned key = keys[input[i]];
+		prefixSum[key & mask]++, prefixSum[((key >> 11) & mask) + binSize]++;
+		prefixSum[((key >> 22) & mask) + 2 * binSize]++;
+	}
+	// compute prefix sum for all passes
+	int sum0 = 0, sum1 = 0, sum2 = 0;
+	for (int i = 0; i < binSize; i++)
+	{
+		const int temp0 = prefixSum[i], temp1 = prefixSum[i + binSize], temp2 = prefixSum[i + 2 * binSize];
+		prefixSum[i] = sum0, sum0 += temp0, prefixSum[i + binSize] = sum1, sum1 += temp1;
+		prefixSum[i + 2 * binSize] = sum2, sum2 += temp2;
+	}
+	for (int i = 0; i < 3; i++) // sort from LSB to MSB in radix-sized steps
+	{
+		for (int j = 0; j < len; j++)
+		{
+			const uint32_t element = input[j], key = keys[element];
+			output[prefixSum[((key >> (i * 11)) & mask) + i * binSize]++] = element;
+		}
+		tinybvh_swap( input, output );
+	}
+}
+
 #ifndef MT_USE_JOBSYSTEM
 void BuildFullSweep_( uint32_t n, uint32_t d, BVH* bvh ) { bvh->BuildFullSweep( n, d ); }
 #endif
@@ -2460,16 +2447,6 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 	// plane candidates for each axis. Works well with triangle presplitting.
 	if (depth == 0)
 	{
-		// allocate data for O(N) stable partition
-		flag = (uint8_t*)AlignedAlloc( triCount );
-		for (int a = 0; a < 3; a++) sortedIdx[a] = (uint32_t*)AlignedAlloc( triCount * 4 );
-		BVH* thisBVH = this;
-		for (uint32_t a = 0; a < 3; a++)
-			RadixSort( primIdx, sortedIdx[a], triCount, [=]( int index ) {
-			return FloatToKey( thisBVH->fragment[index].bmin[a] + thisBVH->fragment[index].bmax[a] );
-				} );
-		// allocate space for right sweep
-		SARs = (float*)AlignedAlloc( triCount * sizeof( float ) );
 		// prepare threading
 	#ifndef ENABLE_THREADED_BUILDS
 		threadedBuild = false;
@@ -2483,6 +2460,28 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 			atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
 		}
 	#endif
+		// create 32-bit integer sorting key from fragment centroids
+		uint32_t* sortKey[3];
+		for( int a = 0; a < 3; a++ ) sortKey[a] = (uint32_t*)(bvhNode + 2) + a * triCount;
+		for( uint32_t i = 0; i < triCount; i++ ) 
+			for( int a = 0; a < 3; a++ ) sortKey[a][i] = FloatToKey( fragment[i].bmin[a] + fragment[i].bmax[a] );
+		// allocate data for O(N) stable partition
+		flag = (uint8_t*)AlignedAlloc( triCount );
+		for (int a = 0; a < 3; a++) sortedIdx[a] = (uint32_t*)AlignedAlloc( triCount * 4 );
+	#if defined ENABLE_THREADED_BUILDS && defined MT_USE_JOBSYSTEM
+		// sort three axii in parallel
+		uint32_t* primTmp1 = sortKey[2] + triCount, * primTmp2 = primTmp1 + triCount;
+		memcpy( primTmp1, primIdx, triCount * 4 );
+		memcpy( primTmp2, primIdx, triCount * 4 );
+		subtreeJobs->Execute( [=]() { RadixSort( primIdx, sortedIdx[0], sortKey[0], triCount, 0 ); } );
+		subtreeJobs->Execute( [=]() { RadixSort( primTmp1, sortedIdx[1], sortKey[1], triCount, 1 ); } );
+		subtreeJobs->Execute( [=]() { RadixSort( primTmp2, sortedIdx[2], sortKey[2], triCount, 2 ); } );
+		subtreeJobs->Wait();
+	#else
+		for (uint32_t a = 0; a < 3; a++) RadixSort( primIdx, sortedIdx[a], sortKey[a], triCount, a );
+	#endif
+		// allocate space for right sweep
+		SARs = (float*)AlignedAlloc( triCount * sizeof( float ) );
 	}
 	// subdivide root node recursively
 	uint32_t task[256], taskCount = 0;
