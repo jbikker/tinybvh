@@ -183,7 +183,7 @@ The TinyBVH library can now also be used from Rust, with the [Rust bindings](htt
 Florent Le Moël created Python bindings for TinyBVH. You can find details in the [pytinybvh repository](https://github.com/FlorentLM/pytinybvh) on GitHub.
 
 # TinyBVH .NET wrapper
-Anders Forsgren provides [TinyBVHNet](https://github.com/andersforsgren/TinyBVHNet), a .NET wrapper for TinyBVH, targetting ```net48``` and ```net10.0```. Get it via NuGet: [NuGet: https://www.nuget.org/packages/TinyBVHNet](https://www.nuget.org/packages/TinyBVHNet)
+Anders Forsgren provides [TinyBVHNet](https://github.com/andersforsgren/TinyBVHNet), a .NET wrapper for TinyBVH, targetting ```net48``` and ```net10.0```. Get it via [NuGet](https://www.nuget.org/packages/TinyBVHNet).
 
 Created or know about other projects? [Let me know](mailto:bikker.j@protonmail.com)!
 
