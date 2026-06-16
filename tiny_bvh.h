@@ -759,12 +759,6 @@ inline float tinybvh_intersect_aabb( Ray& ray, const bvhvec3& aabbMin, const bvh
 	if (tmax >= tmin && tmin < ray.hit.t && tmax >= 0) return tmin; else return BVH_FAR;
 }
 
-inline bool tinybvh_aabbs_overlap( const bvhvec3& bmin1, const bvhvec3& bmax1, const bvhvec3& bmin2, const bvhvec3& bmax2 )
-{
-	return bmin1.x <= bmax2.x && bmax1.x >= bmin2.x && bmin1.y <= bmax2.y &&
-		bmax1.y >= bmin2.y && bmin1.z <= bmax2.z && bmax1.z >= bmin2.z;
-}
-
 #ifdef DOUBLE_PRECISION_SUPPORT
 
 struct IntersectionEx
@@ -3129,6 +3123,21 @@ float BVH::PrimArea( const uint32_t p ) const
 	return 0.5f * tinybvh_length( tinybvh_cross( v1 - v0, v2 - v0 ) );
 }
 
+inline bool tinybvh_aabbs_overlap( const BVH::BVHNode& node1, const BVH::BVHNode& node2 )
+{
+#ifdef BVH_USESSE
+	return (_mm_movemask_ps( _mm_and_ps( 
+		_mm_cmple_ps( *(__m128*)&node1.aabbMin, *(__m128*)&node2.aabbMax ), 
+		_mm_cmpge_ps( *(__m128*)&node1.aabbMax, *(__m128*)&node2.aabbMin ) )
+	) & 7) == 7;
+#else
+	const bvhvec3 bmin1 = node1.aabbMin, bmin2 = node2.aabbMin;
+	const bvhvec3 bmax1 = node1.aabbMax, bmax2 = node2.aabbMax;
+	return bmin1.x <= bmax2.x && bmax1.x >= bmin2.x && bmin1.y <= bmax2.y &&
+		bmax1.y >= bmin2.y && bmin1.z <= bmax2.z && bmax1.z >= bmin2.z;
+#endif
+}
+
 float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx )
 {
 	// abort if we reached the subtree
@@ -3142,24 +3151,30 @@ float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx )
 		const bvhvec3 bmin = subtree.aabbMin, bmax = subtree.aabbMax;
 		for (unsigned i = 0; i < n.triCount; i++)
 		{
-			// Sutherland-Hodgeman against six bounding planes
-			uint32_t Nin = 3, vidx = primIdx[n.leftFirst + i] * 3;
-			bvhvec3 vin[10], vout[10], C;
-			if (vertIdx)
-				vin[0] = verts[vertIdx[vidx]], vin[1] = verts[vertIdx[vidx + 1]], vin[2] = verts[vertIdx[vidx + 2]];
-			else
-				vin[0] = verts[vidx], vin[1] = verts[vidx + 1], vin[2] = verts[vidx + 2];
 			// Early out: triangle fully inside the subtree AABB?
-			bool allin = true;
-			for (uint32_t i = 0; i < 3; i++)
-				allin &= vin[i].x >= bmin.x && vin[i].x <= bmax.x && vin[i].y >= bmin.y &&
-					vin[i].y <= bmax.y && vin[i].z >= bmin.z && vin[i].z <= bmax.z;
-			if (allin) 
+			uint32_t vidx = primIdx[n.leftFirst + i] * 3;
+			bvhvec4 v0, v1, v2;
+			if (vertIdx) v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
+			else v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
+		#ifdef BVH_USESSE
+			union { __m128 vmin4; bvhvec4 vmin; };
+			union { __m128 vmax4; bvhvec4 vmax; };
+			vmin4 = _mm_min_ps( _mm_min_ps( *(__m128*)&v0, *(__m128*)&v1 ), *(__m128*)&v2 );
+			vmax4 = _mm_max_ps( _mm_max_ps( *(__m128*)&v0, *(__m128*)&v1 ), *(__m128*)&v2 );
+			const bool allin = (_mm_movemask_ps( _mm_and_ps( _mm_cmpge_ps( vmin4, *(__m128*)&bmin ), _mm_cmple_ps( vmax4, *(__m128*)&bmax ) ) ) & 7) == 7;
+		#else
+			bool allin = v0.x >= bmin.x && v0.x <= bmax.x && v0.y >= bmin.y && v0.y <= bmax.y && v0.z >= bmin.z && v0.z <= bmax.z;
+			allin &= v1.x >= bmin.x && v1.x <= bmax.x && v1.y >= bmin.y && v1.y <= bmax.y && v1.z >= bmin.z && v1.z <= bmax.z;
+			allin &= v2.x >= bmin.x && v2.x <= bmax.x && v2.y >= bmin.y && v2.y <= bmax.y && v2.z >= bmin.z && v2.z <= bmax.z;
+		#endif
+			if (allin)
 			{
-				area += 0.5f * tinybvh_length( tinybvh_cross( vin[1] - vin[0], vin[2] - vin[0] ) );
+				area += 0.5f * tinybvh_length( tinybvh_cross( bvhvec3( v1 - v0 ), bvhvec3( v2 - v0 ) ) );
 				continue;
 			}
 			// Brute force: clip triangle against six planes of the AABB.
+			uint32_t Nin = 3;
+			bvhvec3 vin[10] = { v0, v1, v2 }, vout[10], C;
 			for (uint32_t a = 0; a < 3; a++)
 			{
 				uint32_t Nout = 0;
@@ -3187,18 +3202,16 @@ float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx )
 			if (Nin < 3) continue;
 			// calculate area of remaining convex shape in vin
 			const uint32_t tris = Nin - 2;
-			bvhvec3 v0 = vin[0], v1, v2;
-			for (uint32_t j = 0; j < tris; j++) v1 = vin[j + 1], v2 = vin[j + 2],
-				area += 0.5f * tinybvh_length( tinybvh_cross( v1 - v0, v2 - v0 ) );
+			bvhvec3 p0 = vin[0], p1, p2;
+			for (uint32_t j = 0; j < tris; j++) p1 = vin[j + 1], p2 = vin[j + 2],
+				area += 0.5f * tinybvh_length( tinybvh_cross( p1 - p0, p2 - p0 ) );
 		}
 		return area;
 	}
 	// recurse if n is an inner node
 	BVHNode& left = bvhNode[n.leftFirst], & right = bvhNode[n.leftFirst + 1];
-	if (tinybvh_aabbs_overlap( left.aabbMin, left.aabbMax, subtree.aabbMin, subtree.aabbMax ))
-		area += EPOArea( subtreeRoot, n.leftFirst );
-	if (tinybvh_aabbs_overlap( right.aabbMin, right.aabbMax, subtree.aabbMin, subtree.aabbMax ))
-		area += EPOArea( subtreeRoot, n.leftFirst + 1 );
+	if (tinybvh_aabbs_overlap( left, subtree )) area += EPOArea( subtreeRoot, n.leftFirst );
+	if (tinybvh_aabbs_overlap( right, subtree )) area += EPOArea( subtreeRoot, n.leftFirst + 1 );
 	return area;
 }
 
