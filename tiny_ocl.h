@@ -914,7 +914,7 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 				if (!errorInInclude) lineNr -= vendorLines;
 				// present error message
 				char t[1024];
-				sprintf( t, "file %s, line %i, pos %i:\n%s", errorFile.c_str(), lineNr + 1, linePos, lns );
+				snprintf( t, 1024, "file %s, line %i, pos %i:\n%s", errorFile.c_str(), lineNr + 1, linePos, lns );
 				FatalError( t, "Build error" );
 			}
 		}
@@ -922,7 +922,7 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 		{
 			// error string has unknown format; just dump it to a window
 			log[2048] = 0; // truncate very long logs
-			if (!log[0]) sprintf( log, "Failed to build entry point %s in %s", entryPoint, file ); 
+			if (!log[0]) snprintf( log, 2048, "Failed to build entry point %s in %s", entryPoint, file ); 
 			FatalError( log, "Build error" );
 		}
 	#endif
