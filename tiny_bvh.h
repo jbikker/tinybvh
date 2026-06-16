@@ -887,6 +887,12 @@ protected:
 	__FORCEINLINE bool TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t triIdx, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
 	static void PrecomputeTriangle( const bvhvec4slice& vert, const uint32_t ti0, const uint32_t ti1, const uint32_t ti2, float* T );
 	static float SA( const bvhvec3& aabbMin, const bvhvec3& aabbMax );
+#ifdef ENABLE_THREADED_BUILDS
+	// job system for parallel builds
+	JobSystem* jobStream0, * jobStream1;
+	JobSystem* GetJobStream0();
+	JobSystem* GetJobStream1();
+#endif
 };
 
 class BLASInstance;
@@ -925,12 +931,12 @@ public:
 	void BuildQuick( const bvhvec4* vertices, const uint32_t primCount );
 	void BuildQuick( const bvhvec4slice& vertices );
 	void Build( const bvhvec4* vertices, const uint32_t primCount );
-	void BuildAABB( const bvhvec4* aabbs, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices );
 	void Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( BLASInstance* instances, const uint32_t instCount, BVHBase** blasses, const uint32_t blasCount );
 	void Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&), const uint32_t primCount );
+	void BuildAABB( const bvhvec4* aabbs, const uint32_t primCount );
 	void BuildHQ( const bvhvec4* vertices, const uint32_t primCount );
 	void BuildHQ( const bvhvec4slice& vertices );
 	void BuildHQ( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
@@ -950,7 +956,7 @@ public:
 	void SplitLeafs( const uint32_t maxPrims );
 	void CombineLeafs( const uint32_t nodeIdx = 0 );
 	float SAHCost( const uint32_t nodeIdx = 0 ) const;
-	float EPOCost( const uint32_t nodeIdx = 0 ) const;
+	float EPOCost( const uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void Refit( const uint32_t nodeIdx = 0 );
 	void Compact();
 	void Optimize( const uint32_t iterations = 25, bool extreme = false, bool stochastic = false );
@@ -962,6 +968,11 @@ public:
 	bool isBLAS() const { return instList == 0; }
 	bool isIndexed() const { return vertIdx != 0; }
 	bool hasCustomGeom() const { return customIntersect != 0; }
+	// internal methods that need to be public
+	void Build( uint32_t nodeIdx = 0, uint32_t depth = 0 );
+	void BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* triIdxB );
+	void BuildFullSweep( uint32_t nodeIdx = 0, uint32_t depth = 0 );
+	void BuildAVXSubtree( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 #ifdef BVH_USENEON
 	void BuildNEON( const bvhvec4* vertices, const uint32_t primCount );
 	void BuildNEON( const bvhvec4slice& vertices );
@@ -973,13 +984,9 @@ public:
 private:
 	void PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims );
 	void BuildHQ();
-	void BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* triIdxB );
 	void PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
-	void Build( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void RadixSort( uint32_t* input, uint32_t* output, uint32_t* keys, int len, int a );
-	void BuildFullSweep( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
-	void BuildAVXSubtree( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	bool ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, const uint32_t splitAxis ) const;
 	bool SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t splitAxis, const float splitPos ) const;
 	uint32_t CombineLeafs( const uint32_t primCount, uint32_t& firstIdx, uint32_t nodeIdx = 0 );
@@ -990,7 +997,7 @@ private:
 	void PresplitPostPass();
 	inline float SplitCostSAH( const float rAparent, const float Aleft, const int Nleft, const float Aright, const int Nright ) const;
 	inline float NoSplitCostSAH( const int Nparent ) const;
-	float EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx = 0 ) const;
+	float EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx = 0 );
 	float PrimArea( const uint32_t p ) const;
 protected:
 	template <bool posX, bool posY, bool posZ> int32_t Intersect( Ray& ray ) const;
@@ -1018,9 +1025,6 @@ private:
 	// Atomic counters for threaded builds
 	std::atomic<uint32_t>* atomicNewNodePtr = 0;
 	std::atomic<uint32_t>* atomicNextFrag = 0;
-	// job system for parallel builds
-	JobSystem* subtreeJobs = 0;
-	JobSystem* binningJobs = 0;
 #endif
 	// data for full sweep builder
 	uint8_t* flag = 0;
@@ -1148,9 +1152,6 @@ public:
 private:
 	// Atomic counter for threaded builds
 	std::atomic<uint64_t>* atomicNewNodePtr = 0;
-	// job system for parallel builds
-	JobSystem* subtreeJobs = 0;
-	JobSystem* binningJobs = 0;
 #endif
 };
 
@@ -1652,7 +1653,7 @@ loop: R = bvhvec3( tinybvh_rndfloat( s ) - 0.5f, tinybvh_rndfloat( s ) * 0.5f, t
 #endif
 #define BVH_FATAL_ERROR(s) BVH_FATAL_ERROR_IF(1,s)
 
-// Fallbacks to be used in the absence of HW SIMD support.
+// fallbacks to be used in the absence of HW SIMD support.
 #if !defined BVH_USESSE || defined BVH_USENEON
 int32_t BVH4_CPU::Intersect( Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::Intersect requires SSE. " ); }
 bool BVH4_CPU::IsOccluded( const Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::IsOccluded requires SSE. " ); }
@@ -1852,8 +1853,20 @@ public:
 	bool IsBusy() { return ctx.counter.load() > 0; }
 };
 
-static thread_local JobSystem* globalSubtreeJobs = 0;
-static thread_local JobSystem* globalBinningJobs = 0;
+JobSystem* BVHBase::GetJobStream0() {
+	static thread_local JobSystem* globalSubtreeJobs = 0;
+	if (!jobStream0) {
+		if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();
+		jobStream0 = globalSubtreeJobs;
+	} return jobStream0;
+}
+JobSystem* BVHBase::GetJobStream1() {
+	static thread_local JobSystem* globalBinningJobs = 0;
+	if (!jobStream1) {
+		if (!globalBinningJobs) globalBinningJobs = new JobSystem();
+		jobStream1 = globalBinningJobs;
+	} return jobStream1;
+}
 
 #endif
 
@@ -1867,6 +1880,21 @@ __m128i BVH::maxbin4 = _mm_set1_epi32( 7 );
 __m128 BVH::half4 = _mm_set1_ps( 0.5f );
 __m128 BVH::two4 = _mm_set1_ps( 2.0f ), BVH::min1 = _mm_set1_ps( -1 );
 __m128 BVH::mask3 = _mm_cmpeq_ps( _mm_setr_ps( 0, 0, 0, 1 ), _mm_setzero_ps() );
+// SIMD lane access
+#if defined _MSC_VER && !defined __clang__
+#define LANE(a,b) a.m128_f32[b]
+// Not using clang/g++ method under MSCC; compiler may benefit from .m128_i32.
+#define ILANE(a,b) a.m128i_i32[b]
+#else
+#define LANE(a,b) a[b]
+// Below method reduces to a single instruction.
+#define ILANE(a,b) _mm_cvtsi128_si32(_mm_castps_si128( _mm_shuffle_ps(_mm_castsi128_ps( a ), _mm_castsi128_ps( a ), b)))
+#endif
+// AABB halfarea calculation
+inline float halfArea( const __m128 a /* a contains extent of aabb */ )
+{
+	return LANE( a, 0 ) * LANE( a, 1 ) + LANE( a, 1 ) * LANE( a, 2 ) + LANE( a, 2 ) * LANE( a, 3 );
+}
 #endif
 #ifdef BVH_USEAVX
 __m256 BVH::max8 = _mm256_set1_ps( -BVH_FAR ), BVH::mask6 = _mm256_set_m128( mask3, mask3 );
@@ -1923,8 +1951,8 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	if (!expectIndexed && fileTriCount != vertices.count / 3) return false;
 	// backup pointers to JobSystems: can't deserialize pointers.
 #ifdef ENABLE_THREADED_BUILDS
-	JobSystem* subtreeBackup = subtreeJobs;
-	JobSystem* binningBackup = binningJobs;
+	JobSystem* subtreeBackup = jobStream0;
+	JobSystem* binningBackup = jobStream1;
 #endif
 	// all checks passed; safe to overwrite *this
 	s.read( (char*)this, sizeof( BVH ) );
@@ -1933,8 +1961,8 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	if (blasList != nullptr || instList != nullptr) return false; // can't load/save TLAS.
 	context = ctxBackup; // can't load context; function pointers will differ.
 #ifdef ENABLE_THREADED_BUILDS
-	subtreeJobs = subtreeBackup;
-	binningJobs = binningBackup;
+	jobStream0 = subtreeBackup;
+	jobStream1 = binningBackup;
 #endif
 	bvhNode = (BVHNode*)AlignedAlloc( allocatedNodes * sizeof( BVHNode ) );
 	primIdx = (uint32_t*)AlignedAlloc( idxCount * sizeof( uint32_t ) );
@@ -2240,17 +2268,9 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	// Reference builder: Binned, threaded SAH BVH builder. Not using SIMD.
 	if (depth == 0)
 	{
-	#ifndef ENABLE_THREADED_BUILDS
 		threadedBuild = false;
-	#else
-		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
-		{
-		#ifdef MT_USE_JOBSYSTEM
-			if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();
-			subtreeJobs = globalSubtreeJobs;
-		#endif
-			atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
-		}
+	#ifdef ENABLE_THREADED_BUILDS
+		if (triCount >= MT_BUILD_THRESHOLD) threadedBuild = true, atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
 	#endif
 	}
 	// subdivide root node recursively
@@ -2354,9 +2374,8 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 		#ifdef MT_USE_JOBSYSTEM
 			if (depth < MT_JOBSYSTEM_DEPTH && threadedBuild)
 			{
-				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
-				subtreeJobs->Execute( [=]() { thisBVH->Build( n, depth + 1 ); } );
-				subtreeJobs->Execute( [=]() { thisBVH->Build( n + 1, depth + 1 ); } );
+				GetJobStream0()->Execute( [=]() { Build( n, depth + 1 ); } );
+				GetJobStream0()->Execute( [=]() { Build( n + 1, depth + 1 ); } );
 				break;
 			}
 		#else
@@ -2381,7 +2400,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 		if (threadedBuild)
 		{
 		#ifdef MT_USE_JOBSYSTEM
-			subtreeJobs->Wait();
+			GetJobStream0()->Wait();
 		#endif
 			newNodePtr = atomicNewNodePtr->load();
 			delete atomicNewNodePtr;
@@ -2448,23 +2467,15 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 	if (depth == 0)
 	{
 		// prepare threading
-	#ifndef ENABLE_THREADED_BUILDS
 		threadedBuild = false;
-	#else
-		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
-		{
-		#ifdef MT_USE_JOBSYSTEM
-			if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();
-			subtreeJobs = globalSubtreeJobs;
-		#endif
-			atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
-		}
+	#ifdef ENABLE_THREADED_BUILDS
+		if (triCount >= MT_BUILD_THRESHOLD) threadedBuild = true, atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
 	#endif
 		// create 32-bit integer sorting key from fragment centroids
 		uint32_t* sortKey[3];
-		for( int a = 0; a < 3; a++ ) sortKey[a] = (uint32_t*)(bvhNode + 2) + a * triCount;
-		for( uint32_t i = 0; i < triCount; i++ ) 
-			for( int a = 0; a < 3; a++ ) sortKey[a][i] = FloatToKey( fragment[i].bmin[a] + fragment[i].bmax[a] );
+		for (int a = 0; a < 3; a++) sortKey[a] = (uint32_t*)(bvhNode + 2) + a * triCount;
+		for (uint32_t i = 0; i < triCount; i++)
+			for (int a = 0; a < 3; a++) sortKey[a][i] = FloatToKey( fragment[i].bmin[a] + fragment[i].bmax[a] );
 		// allocate data for O(N) stable partition
 		flag = (uint8_t*)AlignedAlloc( triCount );
 		for (int a = 0; a < 3; a++) sortedIdx[a] = (uint32_t*)AlignedAlloc( triCount * 4 );
@@ -2473,10 +2484,10 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 		uint32_t* primTmp1 = sortKey[2] + triCount, * primTmp2 = primTmp1 + triCount;
 		memcpy( primTmp1, primIdx, triCount * 4 );
 		memcpy( primTmp2, primIdx, triCount * 4 );
-		subtreeJobs->Execute( [=]() { RadixSort( primIdx, sortedIdx[0], sortKey[0], triCount, 0 ); } );
-		subtreeJobs->Execute( [=]() { RadixSort( primTmp1, sortedIdx[1], sortKey[1], triCount, 1 ); } );
-		subtreeJobs->Execute( [=]() { RadixSort( primTmp2, sortedIdx[2], sortKey[2], triCount, 2 ); } );
-		subtreeJobs->Wait();
+		GetJobStream0()->Execute( [&]() { RadixSort( primIdx, sortedIdx[0], sortKey[0], triCount, 0 ); } );
+		GetJobStream0()->Execute( [&]() { RadixSort( primTmp1, sortedIdx[1], sortKey[1], triCount, 1 ); } );
+		GetJobStream0()->Execute( [&]() { RadixSort( primTmp2, sortedIdx[2], sortKey[2], triCount, 2 ); } );
+		GetJobStream0()->Wait();
 	#else
 		for (uint32_t a = 0; a < 3; a++) RadixSort( primIdx, sortedIdx[a], sortKey[a], triCount, a );
 	#endif
@@ -2500,20 +2511,20 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 				node.aabbMax = tinybvh_max( node.aabbMax, fragment[fi].bmax );
 			}
 			if (node.triCount == 1) break; // can't split one triangle.
-			const float rSAV = 1.0f / node.SurfaceArea();
 			const bvhvec3 extent = node.aabbMax - node.aabbMin;
 			// iterate over x,y,z
-			float splitCost = (float)node.triCount;
+			float splitCost = (float)node.triCount * node.SurfaceArea();
 			uint32_t splitAxis = 0, splitPos = 0;
 			for (uint32_t a = 0; a < 3; a++) if (extent[a] > minDim[a])
 			{
-				// sweep from right to left
-				bvhvec3 Rmin( BVH_FAR ), Rmax( -BVH_FAR );
 				uint32_t firstRightTri = 1;
-				for (uint32_t i = 0; i < node.triCount; i++)
+				bvhvec3 Rmin( BVH_FAR ), Rmax( -BVH_FAR );
+				// sweep from right to left
+				float if32 = 0;
+				for (uint32_t i = 0; i < node.triCount; i++, if32 += 1.0f)
 				{
 					const uint32_t fi = sortedIdx[a][node.leftFirst + node.triCount - i - 1];
-					const float SAR = (float)i * tinybvh_halfarea( Rmax - Rmin ) * rSAV;
+					const float SAR = if32 * tinybvh_halfarea( Rmax - Rmin );
 					SARs[node.leftFirst + node.triCount - i - 1] = SAR;
 					Rmin = tinybvh_min( Rmin, fragment[fi].bmin );
 					Rmax = tinybvh_max( Rmax, fragment[fi].bmax );
@@ -2532,19 +2543,20 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 					Lmin = tinybvh_min( Lmin, fragment[fi].bmin );
 					Lmax = tinybvh_max( Lmax, fragment[fi].bmax );
 				}
-				for (uint32_t i = firstRightTri - 1; i < node.triCount - 1; i++)
+				if32 = (float)firstRightTri;
+				for (uint32_t i = firstRightTri - 1; i < node.triCount - 1; i++, if32 += 1.0f)
 				{
 					const uint32_t fi = sortedIdx[a][node.leftFirst + i];
 					Lmin = tinybvh_min( Lmin, fragment[fi].bmin );
 					Lmax = tinybvh_max( Lmax, fragment[fi].bmax );
-					const float SAL = (float)(i + 1) * tinybvh_halfarea( Lmax - Lmin ) * rSAV;
+					const float SAL = if32 * tinybvh_halfarea( Lmax - Lmin );
 					const float C = SAL + SARs[node.leftFirst + i];
 					if (C < splitCost) splitCost = C, splitPos = i + 1, splitAxis = a;
 					else if (SAL >= splitCost) break;
 				}
 			}
 			float noSplitCost = c_int * (float)node.triCount;
-			splitCost = c_trav + (c_int * splitCost);
+			splitCost = c_trav + c_int * splitCost / node.SurfaceArea();
 			if (splitCost >= noSplitCost) break; // not splitting turns out to be better.
 			// partition
 			for (uint32_t i = 0; i < splitPos; i++) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 0; // "left"
@@ -2580,10 +2592,9 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 		#ifdef MT_USE_JOBSYSTEM
 			if (threadedBuild && depth < MT_JOBSYSTEM_DEPTH)
 			{
-				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
-				subtreeJobs->Execute( [=]() { thisBVH->BuildFullSweep( n, depth + 1 ); } );
-				subtreeJobs->Execute( [=]() { thisBVH->BuildFullSweep( n + 1, depth + 1 ); } );
-				break;
+				GetJobStream0()->Execute( [=]() { BuildFullSweep( n + 1, depth + 1 ); } );
+				nodeIdx = n;
+				continue;
 			}
 		#else
 			if (tinybvh_min( leftCount, rightCount ) >= (1 << 11) && threadedBuild)
@@ -2608,7 +2619,7 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 		if (threadedBuild)
 		{
 		#ifdef MT_USE_JOBSYSTEM
-			subtreeJobs->Wait();
+			GetJobStream0()->Wait();
 		#endif
 			newNodePtr = atomicNewNodePtr->load();
 			delete atomicNewNodePtr;
@@ -2716,10 +2727,6 @@ void BVH::BuildHQ()
 #ifdef ENABLE_THREADED_BUILDS
 	if (threadedBuild)
 	{
-	#if defined MT_USE_JOBSYSTEM
-		if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();
-		subtreeJobs = globalSubtreeJobs;
-	#endif
 		atomicNewNodePtr = new std::atomic<uint32_t>( 2 );
 		atomicNextFrag = new std::atomic<uint32_t>( triCount );
 	}
@@ -3009,9 +3016,8 @@ void BVH::BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, ui
 			if (depth < MT_JOBSYSTEM_DEPTH && threadedBuild)
 			{
 				// spawn a new thread for the right branch
-				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
-				subtreeJobs->Execute( [=]() { thisBVH->BuildHQTask( leftChildIdx, depth + 1, sliceStart, (A + B) >> 1, idxTmp ); } );
-				subtreeJobs->Execute( [=]() { thisBVH->BuildHQTask( rightChildIdx, depth + 1, (A + B) >> 1, sliceEnd, idxTmp ); } );
+				GetJobStream0()->Execute( [=]() { BuildHQTask( leftChildIdx, depth + 1, sliceStart, (A + B) >> 1, idxTmp ); } );
+				GetJobStream0()->Execute( [=]() { BuildHQTask( rightChildIdx, depth + 1, (A + B) >> 1, sliceEnd, idxTmp ); } );
 				break;
 			}
 		#else
@@ -3036,7 +3042,7 @@ void BVH::BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, ui
 	}
 	// all done.
 #if defined ENABLE_THREADED_BUILDS && defined MT_USE_JOBSYSTEM
-	if (depth == 0 && threadedBuild) subtreeJobs->Wait();
+	if (depth == 0 && threadedBuild) GetJobStream0()->Wait();
 #endif
 }
 
@@ -3123,7 +3129,7 @@ float BVH::PrimArea( const uint32_t p ) const
 	return 0.5f * tinybvh_length( tinybvh_cross( v1 - v0, v2 - v0 ) );
 }
 
-float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx ) const
+float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx )
 {
 	// abort if we reached the subtree
 	if (nodeIdx == subtreeRoot) return 0;
@@ -3133,7 +3139,6 @@ float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx ) const
 	float area = 0;
 	if (n.isLeaf())
 	{
-		// clip triangles to AABB of subtreeRoot and sum resulting areas
 		const bvhvec3 bmin = subtree.aabbMin, bmax = subtree.aabbMax;
 		for (unsigned i = 0; i < n.triCount; i++)
 		{
@@ -3144,6 +3149,17 @@ float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx ) const
 				vin[0] = verts[vertIdx[vidx]], vin[1] = verts[vertIdx[vidx + 1]], vin[2] = verts[vertIdx[vidx + 2]];
 			else
 				vin[0] = verts[vidx], vin[1] = verts[vidx + 1], vin[2] = verts[vidx + 2];
+			// Early out: triangle fully inside the subtree AABB?
+			bool allin = true;
+			for (uint32_t i = 0; i < 3; i++)
+				allin &= vin[i].x >= bmin.x && vin[i].x <= bmax.x && vin[i].y >= bmin.y &&
+					vin[i].y <= bmax.y && vin[i].z >= bmin.z && vin[i].z <= bmax.z;
+			if (allin) 
+			{
+				area += 0.5f * tinybvh_length( tinybvh_cross( vin[1] - vin[0], vin[2] - vin[0] ) );
+				continue;
+			}
+			// Brute force: clip triangle against six planes of the AABB.
 			for (uint32_t a = 0; a < 3; a++)
 			{
 				uint32_t Nout = 0;
@@ -3172,8 +3188,7 @@ float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx ) const
 			// calculate area of remaining convex shape in vin
 			const uint32_t tris = Nin - 2;
 			bvhvec3 v0 = vin[0], v1, v2;
-			for (uint32_t j = 0; j < tris; j++)
-				v1 = vin[j + 1], v2 = vin[j + 2],
+			for (uint32_t j = 0; j < tris; j++) v1 = vin[j + 1], v2 = vin[j + 2],
 				area += 0.5f * tinybvh_length( tinybvh_cross( v1 - v0, v2 - v0 ) );
 		}
 		return area;
@@ -3187,21 +3202,50 @@ float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx ) const
 	return area;
 }
 
-float BVH::EPOCost( const uint32_t nodeIdx ) const
+#if !defined ENABLE_THREADED_BUILDS || !defined MT_USE_JOBSYSTEM
+
+float BVH::EPOCost( const uint32_t nodeIdx, uint32_t )
 {
 	// Determine the EPO cost of the tree. See:
 	// "On Quality Metrics of Bounding Volume Hierarchies", Aila et al., 2013.
 	const BVHNode& n = bvhNode[nodeIdx];
-	float area = EPOArea( nodeIdx );
-	float cost = (n.isLeaf() ? (c_int * n.triCount) : c_trav) * area;
+	float cost = (n.isLeaf() ? (c_int * n.triCount) : c_trav) * EPOArea( nodeIdx ), totalArea = 0;
 	if (!n.isLeaf()) cost += EPOCost( n.leftFirst ) + EPOCost( n.leftFirst + 1 );
 	if (nodeIdx > 0) return cost;
 	// recursion ends with node 0: Finalize EPO calculation
-	float totalArea = 0;
-	for (unsigned i = 0; i < triCount; i++) totalArea += PrimArea( i );
+	for (uint32_t i = 0; i < triCount; i++) totalArea += PrimArea( i );
 	cost /= totalArea;
 	return (1.0f - W_EPO) * SAHCost( 0 ) + W_EPO * cost;
 }
+
+#else
+
+float BVH::EPOCost( const uint32_t nodeIdx, uint32_t depth )
+{
+	// Determine the EPO cost of the tree, threaded version.
+	static float costs[256];
+	static std::atomic<uint32_t> slotIdx;
+	const BVHNode& n = bvhNode[nodeIdx];
+	float cost = (n.isLeaf() ? (c_int * n.triCount) : c_trav) * EPOArea( nodeIdx ), totalArea = 0;
+	if (!n.isLeaf())
+	{
+		if (depth > 5) cost += EPOCost( n.leftFirst, 99 ) + EPOCost( n.leftFirst + 1, 99 ); else
+		{
+			if (depth == 0) slotIdx = 0;
+			GetJobStream0()->Execute( [=]() { costs[slotIdx++] = EPOCost( n.leftFirst + 1, depth + 1 ); } );
+			cost += EPOCost( n.leftFirst, depth + 1 );
+		}
+	}
+	if (nodeIdx > 0) return cost;
+	// recursion ends with node 0: Finalize EPO calculation
+	GetJobStream0()->Wait();
+	for (uint32_t last = slotIdx, i = 0; i < last; i++) cost += costs[i];
+	for (uint32_t i = 0; i < triCount; i++) totalArea += PrimArea( i );
+	cost /= totalArea;
+	return (1.0f - W_EPO) * SAHCost( 0 ) + W_EPO * cost;
+}
+
+#endif
 
 void BVH::SplitLeafs( const uint32_t maxPrims )
 {
@@ -6469,24 +6513,14 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 // This code produces BVHs nearly identical to reference, but much faster.
 // The code relies on the availability of AVX instructions. AVX2 is not needed.
 #if defined _MSC_VER && !defined __clang__
-#define LANE(a,b) a.m128_f32[b]
 #define LANE8(a,b) a.m256_f32[b]
-// Not using clang/g++ method under MSCC; compiler may benefit from .m128_i32.
-#define ILANE(a,b) a.m128i_i32[b]
 #else
-#define LANE(a,b) a[b]
 #define LANE8(a,b) a[b]
-// Below method reduces to a single instruction.
-#define ILANE(a,b) _mm_cvtsi128_si32(_mm_castps_si128( _mm_shuffle_ps(_mm_castsi128_ps( a ), _mm_castsi128_ps( a ), b)))
 #endif
 inline __m256 fastrcp8( const __m256 a )
 {
 	const __m256 res = _mm256_rcp_ps( a ), muls = _mm256_mul_ps( a, _mm256_mul_ps( res, res ) );
 	return _mm256_sub_ps( _mm256_add_ps( res, res ), muls );
-}
-inline float halfArea( const __m128 a /* a contains extent of aabb */ )
-{
-	return LANE( a, 0 ) * LANE( a, 1 ) + LANE( a, 1 ) * LANE( a, 2 ) + LANE( a, 2 ) * LANE( a, 3 );
 }
 inline float halfArea( const __m256& a /* a contains aabb itself, with min.xyz negated */ )
 {
@@ -6657,19 +6691,9 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 	if (depth == 0)
 	{
 		// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
-	#ifndef ENABLE_THREADED_BUILDS
 		threadedBuild = false;
-	#else
-		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
-		{
-		#ifdef MT_USE_JOBSYSTEM
-			if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();
-			if (!globalBinningJobs) globalBinningJobs = new JobSystem();
-			subtreeJobs = globalSubtreeJobs;
-			binningJobs = globalBinningJobs;
-		#endif
-			atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
-		}
+	#ifdef ENABLE_THREADED_BUILDS
+		if (triCount >= MT_BUILD_THRESHOLD) threadedBuild = true, atomicNewNodePtr = new std::atomic<uint32_t>( newNodePtr );
 	#endif
 	}
 	// subdivide recursively
@@ -6688,7 +6712,7 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( binmul3, d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
-		#if defined ENABLE_THREADED_BUILDS && defined MT_USE_JOBNSYSTEM
+		#if defined ENABLE_THREADED_BUILDS && defined MT_USE_JOBSYSTEM
 			if (threadedBuild && node.triCount > MT_BUILD_THRESHOLD)
 			{
 				// run binning in parallel slices
@@ -6700,10 +6724,9 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 					const uint32_t last = slice == (slices - 1) ? (node.leftFirst + node.triCount) : (first + sliceSize);
 					__m256* sbb = slicebinbox[slice], * bo = binboxOrig;
 					uint32_t* sc = slicecount[slice];
-					BVH* thisBVH = this; // avoid warnings / complexities of capturing this
-					binningJobs->Execute( [=]() { thisBVH->BuildAVXBinTask( first, last, sbb, bo, sc, nmin4, rpd4 ); } );
+					GetJobStream1()->Execute( [=]() { BuildAVXBinTask( first, last, sbb, bo, sc, nmin4, rpd4 ); } );
 				}
-				binningJobs->Wait();
+				GetJobStream1()->Wait();
 				// combine results from threads
 				for (int a = 0; a < 3; a++) for (int i = 0; i < AVXBINS; i++)
 					for (int ai = a * AVXBINS + i, slice = 1; slice < (int)slices; slice++) count[ai] += slicecount[slice][ai],
@@ -6775,8 +6798,7 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 			const bool spawnThreads = leftCount + rightCount > 5000 && depth < MT_JOBSYSTEM_DEPTH && threadedBuild;
 			if (!spawnThreads) task[taskCount++] = n + 1, nodeIdx = n; else
 			{
-				BVH* thisBVH = this; // avoid warnings / complexities of capturing this
-				subtreeJobs->Execute( [=]() { thisBVH->BuildAVXSubtree( n + 1, depth + 1 ); } );
+				GetJobStream0()->Execute( [=]() { BuildAVXSubtree( n + 1, depth + 1 ); } );
 				nodeIdx = n;
 			}
 		#else
@@ -6802,7 +6824,7 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 		if (threadedBuild)
 		{
 		#ifdef MT_USE_JOBSYSTEM
-			subtreeJobs->Wait();
+			GetJobStream0()->Wait();
 		#endif
 			newNodePtr = atomicNewNodePtr->load();
 			delete atomicNewNodePtr;
@@ -8174,17 +8196,9 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 	// avoid threaded building for small meshes: not efficient; build multiple in parallel instead.
 	if (depth == 0)
 	{
-	#ifndef ENABLE_THREADED_BUILDS
 		threadedBuild = false;
-	#else
-		if (triCount < MT_BUILD_THRESHOLD) threadedBuild = false; else
-		{
-		#ifdef MT_USE_JOBSYSTEM
-			if (!globalSubtreeJobs) globalSubtreeJobs = new JobSystem();
-			subtreeJobs = globalSubtreeJobs;
-		#endif
-			atomicNewNodePtr = new std::atomic<uint64_t>( newNodePtr );
-		}
+	#ifdef ENABLE_THREADED_BUILDS
+		if (triCount >= MT_BUILD_THRESHOLD) threadedBuild = true, atomicNewNodePtr = new std::atomic<uint64_t>( newNodePtr );
 	#endif
 	}
 	// subdivide root node recursively
@@ -8284,9 +8298,8 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 		#ifdef MT_USE_JOBSYSTEM
 			if (depth < MT_JOBSYSTEM_DEPTH && threadedBuild)
 			{
-				BVH_Double* thisBVH = this; // avoid warnings / complexities of capturing this
-				subtreeJobs->Execute( [=]() { thisBVH->Build( n, depth + 1 ); } );
-				subtreeJobs->Execute( [=]() { thisBVH->Build( n + 1, depth + 1 ); } );
+				GetJobStream0()->Execute( [=]() { Build( n, depth + 1 ); } );
+				GetJobStream0()->Execute( [=]() { Build( n + 1, depth + 1 ); } );
 				break;
 			}
 		#else
@@ -8311,7 +8324,7 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 		if (threadedBuild)
 		{
 		#ifdef MT_USE_JOBSYSTEM
-			subtreeJobs->Wait();
+			GetJobStream0()->Wait();
 		#endif
 			newNodePtr = atomicNewNodePtr->load();
 			delete atomicNewNodePtr;
