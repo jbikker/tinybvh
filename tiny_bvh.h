@@ -949,7 +949,7 @@ public:
 	void ConvertFrom( const BVH_Verbose& original, bool compact = true );
 	void SplitLeafs( const uint32_t maxPrims );
 	void CombineLeafs( const uint32_t nodeIdx = 0 );
-	float SAHCost( const uint32_t nodeIdx = 0 ) const;
+	float SAHCost( const uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	float EPOCost( const uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void Refit( const uint32_t nodeIdx = 0 );
 	void Compact();
@@ -1180,7 +1180,7 @@ public:
 	void BuildHQ( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void BuildHQ( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void Optimize( const uint32_t iterations = 25, bool extreme = false );
-	float SAHCost( const uint32_t nodeIdx = 0 ) const { return bvh.SAHCost( nodeIdx ); }
+	float SAHCost( const uint32_t nodeIdx = 0 ) { return bvh.SAHCost( nodeIdx ); }
 	void ConvertFrom( const BVH& original, bool compact = true );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const { FALLBACK_SHADOW_QUERY( ray ); }
@@ -1215,7 +1215,7 @@ public:
 	void BuildHQ( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void BuildHQ( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void Optimize( const uint32_t iterations = 25, bool extreme = false );
-	float SAHCost( const uint32_t nodeIdx = 0 ) const { return bvh.SAHCost( nodeIdx ); }
+	float SAHCost( const uint32_t nodeIdx = 0 ) { return bvh.SAHCost( nodeIdx ); }
 	void Save( const char* fileName );
 	bool Load( const char* fileName, const bvhvec4* vertices, const uint32_t primCount );
 	bool Load( const char* fileName, const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
@@ -3061,7 +3061,9 @@ int32_t BVH::PrimCount( const uint32_t nodeIdx ) const
 	return n.isLeaf() ? n.triCount : (PrimCount( n.leftFirst ) + PrimCount( n.leftFirst + 1 ));
 }
 
-float BVH::SAHCost( const uint32_t nodeIdx ) const
+#if !defined ENABLE_THREADED_BUILDS || !defined MT_USE_JOBSYSTEM
+
+float BVH::SAHCost( const uint32_t nodeIdx, uint32_t )
 {
 	// Determine the SAH cost of the tree. This provides an indication
 	// of the quality of the BVH: Lower is better.
@@ -3070,6 +3072,31 @@ float BVH::SAHCost( const uint32_t nodeIdx ) const
 	float cost = c_trav * n.SurfaceArea() + SAHCost( n.leftFirst ) + SAHCost( n.leftFirst + 1 );
 	return nodeIdx == 0 ? (cost / n.SurfaceArea()) : cost;
 }
+
+#else
+
+float BVH::SAHCost( const uint32_t nodeIdx, uint32_t depth )
+{
+	// Threaded SAH calculation.
+	static float costs[128];
+	static std::atomic<uint32_t> slotIdx;
+	const BVHNode& n = bvhNode[nodeIdx];
+	if (n.isLeaf()) return c_int * n.SurfaceArea() * n.triCount;
+	float cost = c_trav * n.SurfaceArea();
+	if (depth > 6) cost += SAHCost( n.leftFirst, 99 ) + SAHCost( n.leftFirst + 1, 99 ); else
+	{
+		if (depth == 0) slotIdx = 0;
+		GetJobStream0()->Execute( [=]() { costs[slotIdx++] = SAHCost( n.leftFirst + 1, depth + 1 ); } );
+		cost += SAHCost( n.leftFirst, depth + 1 );
+	}
+	if (nodeIdx > 0) return cost;
+	// recursion ends with node 0: Finalize threaded SAH calculation
+	GetJobStream0()->Wait();
+	for (uint32_t last = slotIdx, i = 0; i < last; i++) cost += costs[i];
+	return cost / n.SurfaceArea();
+}
+
+#endif
 
 void BVH::ConvertFrom( const BVH_Verbose& original, bool compact )
 {
@@ -3236,13 +3263,13 @@ float BVH::EPOCost( const uint32_t nodeIdx, uint32_t )
 float BVH::EPOCost( const uint32_t nodeIdx, uint32_t depth )
 {
 	// Determine the EPO cost of the tree, threaded version.
-	static float costs[256];
+	static float costs[1024];
 	static std::atomic<uint32_t> slotIdx;
 	const BVHNode& n = bvhNode[nodeIdx];
 	float cost = (n.isLeaf() ? (c_int * n.triCount) : c_trav) * EPOArea( nodeIdx ), totalArea = 0;
 	if (!n.isLeaf())
 	{
-		if (depth > 5) cost += EPOCost( n.leftFirst, 99 ) + EPOCost( n.leftFirst + 1, 99 ); else
+		if (depth > 9) cost += EPOCost( n.leftFirst, 99 ) + EPOCost( n.leftFirst + 1, 99 ); else
 		{
 			if (depth == 0) slotIdx = 0;
 			GetJobStream0()->Execute( [=]() { costs[slotIdx++] = EPOCost( n.leftFirst + 1, depth + 1 ); } );
