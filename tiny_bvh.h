@@ -8475,8 +8475,11 @@ bool BVH_Double::IsOccluded( const RayEx& ray ) const
 	{
 		if (node->isLeaf())
 		{
-			if (customEnabled && customIntersect != 0) for (uint32_t i = 0; i < node->triCount; i++)
-				(*customIsOccluded)(ray, primIdx[node->leftFirst + i]);
+			if (customEnabled && customIsOccluded != 0)
+			{
+				for (uint32_t i = 0; i < node->triCount; i++)
+					if ((*customIsOccluded)(ray, primIdx[node->leftFirst + i])) return true;
+			}
 			else for (uint32_t i = 0; i < node->triCount; i++)
 			{
 				const uint64_t idx = primIdx[node->leftFirst + i];

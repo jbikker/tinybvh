@@ -37,6 +37,7 @@ enable_testing()
 add_executable(tiny_bvh_minimal tiny_bvh_minimal.cpp)
 add_executable(tiny_bvh_renderer tiny_bvh_renderer.cpp)
 add_executable(tiny_bvh_speedtest tiny_bvh_speedtest.cpp)
+add_executable(tiny_bvh_double_test tiny_bvh_double_test.cpp)
 if (NOT EMSCRIPTEN) # EMSCRIPTEN doesn't render anything by default (you would need WebGL/WebGPU)
 	add_executable(tiny_bvh_fenster tiny_bvh_fenster.cpp)
 endif()
@@ -87,6 +88,9 @@ if (NOT MSVC)
 
 	target_compile_options(tiny_bvh_renderer PRIVATE ${common_cxx_flags})
 	target_link_options(tiny_bvh_renderer PRIVATE ${common_link_flags})
+
+	target_compile_options(tiny_bvh_double_test PRIVATE ${common_cxx_flags})
+	target_link_options(tiny_bvh_double_test PRIVATE ${common_link_flags})
 
 	# No openmp support in default compiler
 	set(tiny_bvh_speedtest_cxx_flags ${common_cxx_flags})
@@ -148,3 +152,4 @@ else()
 endif()
 
 add_test(NAME "tiny_bvh_minimal" COMMAND tiny_bvh_minimal)
+add_test(NAME "tiny_bvh_double_test" COMMAND tiny_bvh_double_test)
