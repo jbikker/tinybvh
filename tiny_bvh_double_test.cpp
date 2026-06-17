@@ -107,9 +107,87 @@ static void TestCustomShadowRays()
 	delete[] g_spheres, g_spheres = 0;
 }
 
+// ----------------------------------------------------------------------------
+// Indexed geometry: a shared-vertex grid mesh built both as an indexed mesh and
+// as an expanded triangle soup; traversal results must be identical.
+// ----------------------------------------------------------------------------
+
+static void TestIndexedGeometry()
+{
+	printf( "Test: double-precision indexed geometry...\n" );
+	const int G = 12;                       // G x G vertex grid
+	const int quads = (G - 1) * (G - 1);
+	const int triCount = quads * 2;
+
+	// shared-vertex array: one vertex per grid point, with a deterministic
+	// per-vertex z-offset so triangles are not all coplanar.
+	bvhdbl3* gridVerts = new bvhdbl3[G * G];
+	for (int j = 0; j < G; j++) for (int i = 0; i < G; i++)
+	{
+		const double z = 0.05 * (double)((i * 7 + j * 13) % 5);
+		gridVerts[j * G + i] = bvhdbl3( (double)i, (double)j, z );
+	}
+
+	// index buffer (indexed mesh) and expanded soup (non-indexed), same prim order.
+	uint32_t* indices = new uint32_t[triCount * 3];
+	bvhdbl3* soup = new bvhdbl3[triCount * 3];
+	int t = 0;
+	for (int j = 0; j < G - 1; j++) for (int i = 0; i < G - 1; i++)
+	{
+		const uint32_t a = j * G + i, b = j * G + i + 1, c = (j + 1) * G + i, d = (j + 1) * G + i + 1;
+		const uint32_t tris[2][3] = { { a, b, c }, { b, d, c } };
+		for (int k = 0; k < 2; k++, t++) for (int v = 0; v < 3; v++)
+		{
+			indices[t * 3 + v] = tris[k][v];
+			soup[t * 3 + v] = gridVerts[tris[k][v]];
+		}
+	}
+
+	BVH_Double indexed, plain;
+	indexed.Build( gridVerts, indices, triCount );
+	plain.Build( soup, triCount );
+
+	CHECK( indexed.isIndexed() == true );
+	CHECK( plain.isIndexed() == false );
+
+	// Cast a grid of rays along -z; compare hit records between the two BVHs.
+	int hits = 0;
+	for (int sy = 0; sy < 40; sy++) for (int sx = 0; sx < 40; sx++)
+	{
+		// sample positions span the grid and a margin outside it (some misses)
+		const double px = -1.0 + (double)sx / 39.0 * ((double)(G + 1));
+		const double py = -1.0 + (double)sy / 39.0 * ((double)(G + 1));
+		const bvhdbl3 O( px, py, -5.0 ), D( 0, 0, 1 );
+
+		RayEx ri( O, D, 1e30 ), rp( O, D, 1e30 );
+		indexed.Intersect( ri );
+		plain.Intersect( rp );
+
+		// same primitive, same distance, same barycentrics
+		CHECK( ri.hit.prim == rp.hit.prim );
+		CHECK( fabs( ri.hit.t - rp.hit.t ) < 1e-9 );
+		if (ri.hit.t < 1e30)
+		{
+			hits++;
+			CHECK( fabs( ri.hit.u - rp.hit.u ) < 1e-9 );
+			CHECK( fabs( ri.hit.v - rp.hit.v ) < 1e-9 );
+		}
+
+		// occlusion must agree between layouts, and with Intersect.
+		RayEx si( O, D, 1e30 ), sp( O, D, 1e30 );
+		const bool oi = indexed.IsOccluded( si ), op = plain.IsOccluded( sp );
+		CHECK( oi == op );
+		CHECK( oi == (ri.hit.t < 1e30) );
+	}
+	CHECK( hits > 0 ); // sanity: the ray grid actually hit the mesh
+
+	delete[] gridVerts, delete[] indices, delete[] soup;
+}
+
 int main()
 {
 	TestCustomShadowRays();
+	TestIndexedGeometry();
 
 	if (g_failures == 0) { printf( "All double-precision tests passed.\n" ); return 0; }
 	printf( "%i double-precision test(s) FAILED.\n", g_failures );

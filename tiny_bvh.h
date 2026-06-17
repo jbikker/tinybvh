@@ -1121,16 +1121,20 @@ public:
 	BVH_Double& operator=( const BVH_Double& ) = default;
 	~BVH_Double();
 	void Build( const bvhdbl3* vertices, const uint64_t primCount );
+	void Build( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount );
 	void Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Double** blasses, const uint64_t blasCount );
 	void Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&), const uint64_t primCount );
 	void PrepareBuild( const bvhdbl3* vertices, const uint64_t primCount );
+	void PrepareBuild( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount );
 	void Build( uint64_t nodeIdx = 0, uint32_t depth = 0 );
 	double SAHCost( const uint64_t nodeIdx = 0 ) const;
 	int32_t Intersect( RayEx& ray ) const;
 	bool IsOccluded( const RayEx& ray ) const;
 	bool IsOccludedTLAS( const RayEx& ray ) const;
 	int32_t IntersectTLAS( RayEx& ray ) const;
+	bool isIndexed() const { return vertIdx != 0; }
 	bvhdbl3* verts = 0;				// pointer to input primitive array, double-precision, 3x24 bytes per tri.
+	uint32_t* vertIdx = 0;			// vertex indices, only used in case the BVH is built over indexed prims.
 	Fragment* fragment = 0;			// input primitive bounding boxes, double-precision.
 	BVHNode* bvhNode = 0;			// BVH node, double precision format.
 	uint64_t* primIdx = 0;			// primitive index array for double-precision bvh.
@@ -8151,11 +8155,21 @@ void BVH_Double::Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Doub
 
 void BVH_Double::Build( const bvhdbl3* vertices, const uint64_t primCount )
 {
-	PrepareBuild( vertices, primCount );
+	Build( vertices, 0, primCount );
+}
+
+void BVH_Double::Build( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount )
+{
+	PrepareBuild( vertices, indices, primCount );
 	Build();
 }
 
 void BVH_Double::PrepareBuild( const bvhdbl3* vertices, const uint64_t primCount )
+{
+	PrepareBuild( vertices, 0, primCount );
+}
+
+void BVH_Double::PrepareBuild( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount )
 {
 	BVH_FATAL_ERROR_IF( primCount == 0, "BVH_Double::PrepareBuild( .. ), primCount == 0." );
 	const uint64_t spaceNeeded = primCount * 2; // upper limit
@@ -8171,20 +8185,39 @@ void BVH_Double::PrepareBuild( const bvhdbl3* vertices, const uint64_t primCount
 		fragment = (Fragment*)AlignedAlloc( primCount * sizeof( Fragment ) );
 	}
 	verts = (bvhdbl3*)vertices; // note: we're not copying this data; don't delete.
+	vertIdx = (uint32_t*)indices; // also not copied; for indexed triangle meshes.
 	idxCount = triCount = primCount;
 	// prepare fragments
 	BVHNode& root = bvhNode[0];
 	root.leftFirst = 0, root.triCount = triCount, root.aabbMin = bvhdbl3( BVH_DBL_FAR ), root.aabbMax = bvhdbl3( -BVH_DBL_FAR );
-	for (uint32_t i = 0; i < triCount; i++)
+	if (!indices)
 	{
-		const bvhdbl3 v0 = verts[i * 3], v1 = verts[i * 3 + 1], v2 = verts[i * 3 + 2];
-		fragment[i].bmin = tinybvh_min( tinybvh_min( v0, v1 ), v2 );
-		fragment[i].bmax = tinybvh_max( tinybvh_max( v0, v1 ), v2 );
-		root.aabbMin = tinybvh_min( root.aabbMin, fragment[i].bmin );
-		root.aabbMax = tinybvh_max( root.aabbMax, fragment[i].bmax ), primIdx[i] = i;
+		// building a BVH over triangles specified as three 24-byte vertices each.
+		for (uint32_t i = 0; i < triCount; i++)
+		{
+			const bvhdbl3 v0 = verts[i * 3], v1 = verts[i * 3 + 1], v2 = verts[i * 3 + 2];
+			fragment[i].bmin = tinybvh_min( tinybvh_min( v0, v1 ), v2 );
+			fragment[i].bmax = tinybvh_max( tinybvh_max( v0, v1 ), v2 );
+			root.aabbMin = tinybvh_min( root.aabbMin, fragment[i].bmin );
+			root.aabbMax = tinybvh_max( root.aabbMax, fragment[i].bmax ), primIdx[i] = i;
+		}
+	}
+	else
+	{
+		// building a BVH over triangles consisting of vertices indexed by 'indices'.
+		for (uint32_t i = 0; i < triCount; i++)
+		{
+			const uint32_t i0 = indices[i * 3], i1 = indices[i * 3 + 1], i2 = indices[i * 3 + 2];
+			const bvhdbl3 v0 = verts[i0], v1 = verts[i1], v2 = verts[i2];
+			fragment[i].bmin = tinybvh_min( tinybvh_min( v0, v1 ), v2 );
+			fragment[i].bmax = tinybvh_max( tinybvh_max( v0, v1 ), v2 );
+			root.aabbMin = tinybvh_min( root.aabbMin, fragment[i].bmin );
+			root.aabbMax = tinybvh_max( root.aabbMax, fragment[i].bmax ), primIdx[i] = i;
+		}
 	}
 	// reset node pool
 	newNodePtr = 1;
+	bvh_over_indices = indices != nullptr;
 	// all set; actual build happens in BVH_Double::Build.
 }
 
@@ -8375,14 +8408,15 @@ int32_t BVH_Double::Intersect( RayEx& ray ) const
 			else for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
 			{
 				const uint64_t idx = primIdx[node->leftFirst + i];
-				const uint64_t vertIdx = idx * 3;
-				const bvhdbl3 e1 = verts[vertIdx + 1] - verts[vertIdx];
-				const bvhdbl3 e2 = verts[vertIdx + 2] - verts[vertIdx];
+				uint64_t i0, i1, i2;
+				GET_PRIM_INDICES_I0_I1_I2( (*this), idx );
+				const bvhdbl3 e1 = verts[i1] - verts[i0];
+				const bvhdbl3 e2 = verts[i2] - verts[i0];
 				const bvhdbl3 h = tinybvh_cross( ray.D, e2 );
 				const double a = tinybvh_dot( e1, h );
 				if (fabs( a ) < 0.0000001) continue; // ray parallel to triangle
 				const double f = 1 / a;
-				const bvhdbl3 s = ray.O - bvhdbl3( verts[vertIdx] );
+				const bvhdbl3 s = ray.O - verts[i0];
 				const double u = f * tinybvh_dot( s, h );
 				const bvhdbl3 q = tinybvh_cross( s, e1 );
 				const double v = f * tinybvh_dot( ray.D, q );
@@ -8483,14 +8517,15 @@ bool BVH_Double::IsOccluded( const RayEx& ray ) const
 			else for (uint32_t i = 0; i < node->triCount; i++)
 			{
 				const uint64_t idx = primIdx[node->leftFirst + i];
-				const uint64_t vertIdx = idx * 3;
-				const bvhdbl3 e1 = verts[vertIdx + 1] - verts[vertIdx];
-				const bvhdbl3 e2 = verts[vertIdx + 2] - verts[vertIdx];
+				uint64_t i0, i1, i2;
+				GET_PRIM_INDICES_I0_I1_I2( (*this), idx );
+				const bvhdbl3 e1 = verts[i1] - verts[i0];
+				const bvhdbl3 e2 = verts[i2] - verts[i0];
 				const bvhdbl3 h = tinybvh_cross( ray.D, e2 );
 				const double a = tinybvh_dot( e1, h );
 				if (fabs( a ) < 0.0000001) continue; // ray parallel to triangle
 				const double f = 1 / a;
-				const bvhdbl3 s = ray.O - bvhdbl3( verts[vertIdx] );
+				const bvhdbl3 s = ray.O - verts[i0];
 				const double u = f * tinybvh_dot( s, h );
 				const bvhdbl3 q = tinybvh_cross( s, e1 );
 				const double v = f * tinybvh_dot( ray.D, q );
