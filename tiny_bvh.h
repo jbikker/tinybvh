@@ -211,6 +211,7 @@ THE SOFTWARE.
 
 #ifndef TINYBVH_NO_BUILTIN_POOL
 // For the default threading implementation, we need a few additional headers.
+#include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <thread>
