@@ -189,7 +189,7 @@ Anders Forsgren provides [TinyBVHNet](https://github.com/andersforsgren/TinyBVHN
 Created or know about other projects? [Let me know](mailto:bikker.j@protonmail.com)!
 
 # Contribute
-TinyBVH received corrections and features from 28 contributors so far. Thanks! Feel free to submit PRs; **please do so in the [development branch](https://github.com/jbikker/tinybvh/tree/dev)** for a good workflow.
+TinyBVH received features and bug fixes from [32 contributors](https://github.com/jbikker/tinybvh/graphs/contributors?all=1) so far. Thanks! Feel free to submit PRs; **please do so in the [development branch](https://github.com/jbikker/tinybvh/tree/dev)** for a good workflow.
 
 # Contact
 Questions, remarks? Contact me at bikker.j@protonmail.com or BlueSky: @jbikker.bsky.social .
