@@ -1,0 +1,52 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="..\tiny_bvh_benchmark.cpp" />
+    <ClCompile Include="..\benchmark\ray_distribution.cpp">
+      <Filter>tool</Filter>
+    </ClCompile>
+    <ClCompile Include="..\benchmark\primitive_set.cpp">
+      <Filter>tool</Filter>
+    </ClCompile>
+    <ClCompile Include="..\benchmark\acc_struc.cpp">
+      <Filter>tool</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\tiny_bvh.h" />
+    <ClInclude Include="..\tiny_ocl.h">
+      <Filter>opencl</Filter>
+    </ClInclude>
+    <ClInclude Include="..\benchmark\ray_distribution.h">
+      <Filter>tool</Filter>
+    </ClInclude>
+    <ClInclude Include="..\benchmark\primitive_set.h">
+      <Filter>tool</Filter>
+    </ClInclude>
+    <ClInclude Include="..\benchmark\acc_struc.h">
+      <Filter>tool</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\traverse.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\traverse_bvh2.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\traverse_bvh4.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\traverse_cwbvh.cl">
+      <Filter>opencl</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="opencl">
+      <UniqueIdentifier>{dc322f45-47f8-44fc-abcd-13c932d5edd8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tool">
+      <UniqueIdentifier>{69dbfbf6-ab2a-48e4-b6b4-9d0de31f3576}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
