@@ -6134,7 +6134,7 @@ void BVH8_CWBVH::ConvertFrom( MBVH<8>& original, bool )
 				else
 					ti0 = triIdx * 3, ti1 = triIdx * 3 + 1, ti2 = triIdx * 3 + 2;
 			#ifdef CWBVH_COMPRESSED_TRIS
-				PrecomputeTriangle( verts, ti0, ti1, ti2, (float*)&bvh8Tris[triDataPtr] );
+				PrecomputeTriangle( bvh8.bvh.verts, ti0, ti1, ti2, (float*)&bvh8Tris[triDataPtr] );
 				bvh8Tris[triDataPtr + 3] = bvhvec4( 0, 0, 0, *(float*)&triIdx );
 				triDataPtr += 4;
 			#else
