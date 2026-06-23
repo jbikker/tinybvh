@@ -20,6 +20,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\benchmark\acc_struc.h" />
+    <ClInclude Include="..\benchmark\experiment.h" />
     <ClInclude Include="..\benchmark\primitive_set.h" />
     <ClInclude Include="..\benchmark\ray_distribution.h" />
     <ClInclude Include="..\tiny_bvh.h" />
@@ -27,6 +28,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\benchmark\acc_struc.cpp" />
+    <ClCompile Include="..\benchmark\experiment.cpp" />
     <ClCompile Include="..\benchmark\primitive_set.cpp" />
     <ClCompile Include="..\benchmark\ray_distribution.cpp" />
     <ClCompile Include="..\tiny_bvh_benchmark.cpp" />

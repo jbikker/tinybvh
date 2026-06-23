@@ -11,6 +11,9 @@
     <ClCompile Include="..\benchmark\acc_struc.cpp">
       <Filter>tool</Filter>
     </ClCompile>
+    <ClCompile Include="..\benchmark\experiment.cpp">
+      <Filter>tool</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\tiny_bvh.h" />
@@ -24,6 +27,9 @@
       <Filter>tool</Filter>
     </ClInclude>
     <ClInclude Include="..\benchmark\acc_struc.h">
+      <Filter>tool</Filter>
+    </ClInclude>
+    <ClInclude Include="..\benchmark\experiment.h">
       <Filter>tool</Filter>
     </ClInclude>
   </ItemGroup>
