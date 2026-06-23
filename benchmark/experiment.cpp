@@ -42,14 +42,15 @@ Experiment::Experiment( BVHBase::BVHType layout, BuildFlags flags, Scene prims, 
 		if (view)
 		{
 			FILE* f = fopen( view, "wb" );
-			const int h[] = { 3 << 16, 8 << 24, 0, 1000 + (1000 << 16), 8 };
+			const int imgSize = (int)sqrtf( RAY_BATCH_SIZE );
+			const int h[] = { 3 << 16, 8 << 24, 0, imgSize + (imgSize << 16), 8 };
 			fwrite( h, 2, 9, f ); // minimalist greyscale tga header
 			bvh->Build( cachedPrimSet[primSet] );
 			const bvhvec3 sceneExtent = bvh->SceneExtent();
 			const float distScale = 384.0f / sceneExtent[tinybvh_maxdim( sceneExtent )];
-			for (int i = 0; i < 1'000'000; i++)
+			for (int i = 0; i < RAY_BATCH_SIZE; i++)
 			{
-				int x = i % 1000, y = i / 1000, p = x + (999 - y) * 1000; // flip over y
+				int x = i % imgSize, y = i / imgSize, p = x + (imgSize - 1 - y) * imgSize; // flip over y
 				Ray r( cachedRaySet[raySet]->O[p], cachedRaySet[raySet]->D[p], 1e34f );
 				bvh->IntersectBatch( &r, 1 );
 				int c = (int)(255 - tinybvh_min( 255.0f, r.hit.t * distScale ) );
@@ -93,7 +94,7 @@ void Experiment::Run()
 		}
 		float traceTime = t.elapsed() * (1.0f / runs); // average of runs.
 		float raysPerSecond = (float)N / traceTime;
-		float mraysPerSecond = raysPerSecond / 1'000'000;
+		float mraysPerSecond = raysPerSecond / RAY_BATCH_SIZE;
 		printf( "%s\nfind nearest: %.1fM, ", title, mraysPerSecond );
 		// trace shadow rays
 		t.reset();
@@ -105,7 +106,7 @@ void Experiment::Run()
 		}
 		traceTime = t.elapsed() * (1.0f / runs); // average of runs.
 		raysPerSecond = (float)N / traceTime;
-		mraysPerSecond = raysPerSecond / 1'000'000;
+		mraysPerSecond = raysPerSecond / RAY_BATCH_SIZE;
 		printf( "any hit: %.1fM\n", mraysPerSecond );
 		// cleanup
 		free64( extensionRays );

@@ -41,6 +41,7 @@ int main()
 	experiment.push_back( new Experiment( BVHBase::BVHType::LAYOUT_BVH, NO_FLAGS, CRYTEK_SPONZA, PRIMARY_VIEW1, "view1.tga" ) );
 	experiment.push_back( new Experiment( BVHBase::BVHType::LAYOUT_BVH, NO_FLAGS, CRYTEK_SPONZA, PRIMARY_VIEW2, "view2.tga" ) );
 	experiment.push_back( new Experiment( BVHBase::BVHType::LAYOUT_BVH, NO_FLAGS, CRYTEK_SPONZA, PRIMARY_VIEW3, "view3.tga" ) );
+	experiment.push_back( new Experiment( BVHBase::BVHType::LAYOUT_BVH, NO_FLAGS, CRYTEK_SPONZA, FIRST_BOUNCE, "view1.tga" ) );
 	// run experiments
 	for (auto ex : experiment) ex->Run();
 	// all done.
