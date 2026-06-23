@@ -319,6 +319,9 @@ inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alig
 #endif
 inline void* malloc64( size_t size, void* = nullptr ) { return size == 0 ? 0 : _ALIGNED_ALLOC( 64, size ); }
 inline void free64( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
+// cleanup defines
+#undef _ALIGNED_ALLOC
+#undef _ALIGNED_FREE
 }; // namespace tiybvh
 
 // Derived TLAS things; for convenience.
@@ -3132,22 +3135,22 @@ float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx )
 				const float l = bmin[a], r = bmax[a];
 				for (uint32_t v = 0; v < Nin; v++)
 				{
-					bvhvec3 v0 = vin[v], v1 = vin[(v + 1) % Nin];
-					const bool v0in = v0[a] >= l, v1in = v1[a] >= l;
+					bvhvec3 vert0 = vin[v], vert1 = vin[(v + 1) % Nin];
+					const bool v0in = vert0[a] >= l, v1in = vert1[a] >= l;
 					if (!(v0in || v1in)) continue; else if (v0in ^ v1in)
-						C = v0 + (l - v0[a]) / (v1[a] - v0[a]) * (v1 - v0),
+						C = vert0 + (l - vert0[a]) / (vert1[a] - vert0[a]) * (vert1 - vert0),
 						C[a] = l /* accurate */, vout[Nout++] = C;
-					if (v1in) vout[Nout++] = v1;
+					if (v1in) vout[Nout++] = vert1;
 				}
 				Nin = 0;
 				for (uint32_t v = 0; v < Nout; v++)
 				{
-					bvhvec3 v0 = vout[v], v1 = vout[(v + 1) % Nout];
-					const bool v0in = v0[a] <= r, v1in = v1[a] <= r;
+					bvhvec3 vert0 = vout[v], vert1 = vout[(v + 1) % Nout];
+					const bool v0in = vert0[a] <= r, v1in = vert1[a] <= r;
 					if (!(v0in || v1in)) continue; else if (v0in ^ v1in)
-						C = v0 + (r - v0[a]) / (v1[a] - v0[a]) * (v1 - v0),
+						C = vert0 + (r - vert0[a]) / (vert1[a] - vert0[a]) * (vert1 - vert0),
 						C[a] = r /* accurate */, vin[Nin++] = C;
-					if (v1in) vin[Nin++] = v1;
+					if (v1in) vin[Nin++] = vert1;
 				}
 			}
 			if (Nin < 3) continue;
@@ -9104,6 +9107,7 @@ public:
 	struct Job
 	{
 		void (*fn)(void*) = nullptr;
+		uint8_t padding[8]; // avoid VS warning.
 		alignas(16) uint8_t payload[JOB_PAYLOAD_MAX]; // inline copy; scheduling never allocates
 		inline uint32_t execute( context& ctx )
 		{
