@@ -1031,8 +1031,8 @@ private:
 #ifdef BVH_USENEON
 	void BuildNEON( const bvhvec4* vertices, const uint32_t primCount );
 	void BuildNEON( const bvhvec4slice& vertices );
-	void BuildNEON( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );,
-		void BuildNEON( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
+	void BuildNEON( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
+	void BuildNEON( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void PrepareNEONBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void BuildNEON();
 #endif
