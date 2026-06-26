@@ -30,7 +30,6 @@
 #define REFIT_MBVH8
 #define TRAVERSE_2WAY_ST
 #define TRAVERSE_ALT2WAY_ST
-#define TRAVERSE_SOA2WAY_ST
 #define TRAVERSE_4WAY
 #define TRAVERSE_8WAY
 #define TRAVERSE_2WAY_DBL
@@ -123,7 +122,6 @@ BVH* sweepbvh = new BVH();
 BVH* ref_bvh = new BVH();
 BVH_Verbose* bvh_verbose = 0;
 BVH_Double* bvh_double = new BVH_Double();
-BVH_SoA* bvh_soa = 0;
 BVH_GPU* bvh_gpu = 0;
 MBVH<4>* bvh4 = 0;
 MBVH<8>* bvh8 = 0;
@@ -132,7 +130,7 @@ BVH4_GPU* bvh4_gpu = 0;
 BVH8_CWBVH* cwbvh = 0;
 BVH8_CPU* bvh8_cpu = 0;
 BVH8_CPU* bvh8_cpu_opt = 0;
-enum { _DEFAULT = 1, _BVH, _PRESPLIT, _SWEEP, _VERBOSE, _DOUBLE, _SOA, _GPU2, _BVH4, _CPU4, _ALT4, _CPU4A, _CPU8, _OPT8, _GPU4, _BVH8, _CWBVH };
+enum { _DEFAULT = 1, _BVH, _PRESPLIT, _SWEEP, _VERBOSE, _DOUBLE, _GPU2, _BVH4, _CPU4, _ALT4, _CPU4A, _CPU8, _OPT8, _GPU4, _BVH8, _CWBVH };
 
 #if defined _WIN32 || defined _WIN64
 #if defined EMBREE_BUILD || defined EMBREE_TRAVERSE
@@ -211,7 +209,6 @@ float TestPrimaryRays( uint32_t layout, unsigned N, unsigned passes, float* avgC
 		#endif
 		#ifdef BVH_USEAVX
 		case _CWBVH: for (unsigned i = 0; i < N; i++) travCost += cwbvh->Intersect( batch[i] ); break;
-		case _SOA: for (unsigned i = 0; i < N; i++) travCost += bvh_soa->Intersect( batch[i] ); break;
 		case _CPU8: for (unsigned i = 0; i < N; i++) travCost += bvh8_cpu->Intersect( batch[i] ); break;
 		case _OPT8: for (unsigned i = 0; i < N; i++) travCost += bvh8_cpu_opt->Intersect( batch[i] ); break;
 		#endif
@@ -251,7 +248,6 @@ float TestDiffuseRays( uint32_t layout, unsigned passes, float* avgCost = 0 )
 		#endif
 		#ifdef BVH_USEAVX
 		case _CWBVH: for (unsigned i = 0; i < Nsmall; i++) travCost += cwbvh->Intersect( batch[i] ); break;
-		case _SOA: for (unsigned i = 0; i < Nsmall; i++) travCost += bvh_soa->Intersect( batch[i] ); break;
 		case _CPU8: for (unsigned i = 0; i < Nsmall; i++) travCost += bvh8_cpu->Intersect( batch[i] ); break;
 		case _OPT8: for (unsigned i = 0; i < Nsmall; i++) travCost += bvh8_cpu_opt->Intersect( batch[i] ); break;
 		#endif
@@ -318,9 +314,6 @@ float TestShadowRays( uint32_t layout, unsigned N, unsigned passes )
 		{
 		#ifdef BVH_USESSE
 		case _CPU4: for (unsigned i = 0; i < N; i++) occluded += bvh4_cpu->IsOccluded( batch[i] ); break;
-		#endif
-		#ifdef BVH_USEAVX
-		case _SOA: for (unsigned i = 0; i < N; i++) occluded += bvh_soa->IsOccluded( batch[i] ); break;
 		#endif
 		#ifdef BVH_USEAVX2
 		case _CPU8: for (unsigned i = 0; i < N; i++) occluded += bvh8_cpu->IsOccluded( batch[i] ); break;
@@ -961,28 +954,6 @@ int main()
 
 #endif
 
-#if defined TRAVERSE_SOA2WAY_ST && defined BVH_USEAVX // BVH_SoA::IsOccluded is not available for NEON yet.
-
-	// SOA
-	if (!bvh_soa)
-	{
-		bvh_soa = new BVH_SoA();
-		bvh_soa->BuildHQ( triangles, verts / 3 );
-	}
-	printf( "- BVH_SOA     - primary: " );
-	PrepareTest();
-	traceTime = TestPrimaryRays( _SOA, Nsmall, 3 );
-	ValidateTraceResult( refDist, Nsmall, __LINE__ );
-	// printf( "%4.2fM rays in %5.1fms (%7.2fMRays/s), ", (float)Nsmall * 1e-6f, traceTime * 1000, (float)Nsmall / traceTime * 1e-6f );
-	printf( "%7.2fMRays/s,  ", (float)Nsmall / traceTime * 1e-6f );
-	traceTime = TestShadowRays( _SOA, Nsmall, 3 );
-	// printf( "shadow: %5.1fms (%7.2fMRays/s)\n", traceTime * 1000, (float)Nsmall / traceTime * 1e-6f );
-	printf( "shadow: %7.2fMRays/s,  ", (float)Nsmall / traceTime * 1e-6f );
-	traceTime = TestDiffuseRays( _SOA, 3 );
-	printf( "diffuse: %7.2fMRays/s\n", (float)Nsmall / traceTime * 1e-6f );
-
-#endif
-
 #if defined TRAVERSE_4WAY && defined BVH_USESSE
 
 	// BVH4_CPU
@@ -1490,7 +1461,6 @@ int main()
 	delete ref_bvh;
 	delete bvh_verbose;
 	delete bvh_double;
-	delete bvh_soa;
 	delete bvh_gpu;
 	delete bvh4;
 	delete bvh8;
