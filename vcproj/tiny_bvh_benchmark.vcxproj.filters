@@ -14,6 +14,7 @@
     <ClCompile Include="..\benchmark\experiment.cpp">
       <Filter>tool</Filter>
     </ClCompile>
+    <ClCompile Include="..\benchmark\tiny_bvh.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\tiny_bvh.h" />
@@ -30,6 +31,9 @@
       <Filter>tool</Filter>
     </ClInclude>
     <ClInclude Include="..\benchmark\experiment.h">
+      <Filter>tool</Filter>
+    </ClInclude>
+    <ClInclude Include="..\benchmark\headers.h">
       <Filter>tool</Filter>
     </ClInclude>
   </ItemGroup>
