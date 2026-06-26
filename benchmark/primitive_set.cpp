@@ -1,10 +1,4 @@
-#include "tiny_bvh.h"
-
-using namespace std;
-using namespace tinybvh;
-
-#include "primitive_set.h"
-#include <fstream>
+#include "headers.h"
 
 namespace tinybvh
 {
@@ -66,6 +60,18 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	case Scene::STANFORD_DRAGON: strncpy( desc, "Stanford Dragon", 256 ); break;
 	default: strncpy( desc, "UNKNWON SCENE", 256 ); break;
 	};
+	// convert to madmann91 data
+	bvhvec4* v = verts;
+	for (int verts = (int)primCount, i = 0; i < verts; i += 3) tris.emplace_back(
+		_Vec3( v[i].x, v[i].y, v[i].z ), _Vec3( v[i + 1].x, v[i + 1].y, v[i + 1].z ),
+		_Vec3( v[i + 2].x, v[i + 2].y, v[i + 2].z ) );
+	bvh::v2::ThreadPool thread_pool;
+	bvh::v2::ParallelExecutor executor( thread_pool );
+	bboxes.resize( tris.size() );
+	centers.resize( tris.size() );
+	executor.for_each( 0, tris.size(), [&]( size_t begin, size_t end )
+		{ for (size_t i = begin; i < end; ++i) bboxes[i] = tris[i].get_bbox(),
+		centers[i] = tris[i].get_center(); } );
 }
 
 void PrimitiveSet::AddMesh( const char* file, float scale, bvhvec3 pos, int c, int N )

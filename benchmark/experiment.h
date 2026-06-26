@@ -23,10 +23,10 @@ struct Timer
 class Experiment
 {
 public:
-	Experiment( BVHBase::BVHType layout, BuildFlags flags, Scene prims, RaySet rays = RaySet::UNSPECIFIED, const char* view = 0 );
+	Experiment( BVHLayout layout, BuildFlags flags, Scene prims, RaySet rays = RaySet::UNSPECIFIED, const char* view = 0 );
 	void Run();
 private:
-	RaySet raySet = (RaySet)0;
+	RaySet raySet = UNSPECIFIED;
 	Scene primSet = (Scene)0;
 	AccStruc* bvh = 0;
 	char* title = 0;

@@ -1,49 +1,46 @@
-// Benchmark Suite for TinyBVH. EARLY CODE - UNDER CONSTRUCTION.
-// Combine:
-// 1. Scene (Sponza, Bistro, ..)
-// 2. BVH type (basic, SBVH, BVH8, ..)
-// 3. BVH options (full sweep, presplit, optimize, ..)
-// 4. Ray distribution (primary, shadow, AO, ..)
-// 5. Processor (CPU, GPU)
-// And analyze BVH quality according to various measures:
-// * SAH
-// * EPO
-// * rays/s
-// * single-threaded build time
-// * multi-threaded build time
-// Data is printed to the screen and/or exported to file.
+// Benchmark Suite for TinyBVH. Work in Progress.
+// Construct experiments using:
+// - BVH layout:  
+//   { BVH2, BVH4, BVH4_WIVE, BVH8_WIVE, GPU_BVH, GPU_BVH4, CWBVH } a.k.a. { 0 .. 7 };
+// - Build flags: NO_FLAGS or 
+//   { AVXBUILD, FULLSWEEP, PRESPLIT, SPATIALSPLITS, OPTIMIZE } and combinations thereof;
+// - Scene: 
+//   { CRYTEK_SPONZA, BISTRO_EXTERIOR, CONFERENCE_ROOM, BUNNY_10K, STANFORD_DRAGON } a.k.a. { 0..4 };
+// - Ray distribution: 
+//   { PRIMARY_VIEW1/2/3, FIRST_BOUNCE, SECOND_BOUNCE, AO_RAYS  } a.k.a. { 0..5 }.
+// Specify a valid tga file name as the last parameter to render scene/view to a file.
+// An unspecified ray distribution will analyze the specified BVH builder:
+// - Construction time (average over several runs);
+// - SAH and EPO cost.
+// TODO:
+// - Embree BVH build and traversal for comparison
+// - Madmann91 BVH build and traversal for comparison
+// - GPU traversal for GPU_BVH, GPU_BVH4 and CWBVH
+// - Double-precision BVH experiments
+// - Export to .csv
 
-#define TINYBVH_IMPLEMENTATION
-#include "tiny_bvh.h"
-#include <cstdlib>
-#include <cstdio>
-
-using namespace tinybvh;
-using namespace std;
-
-#include "experiment.h"
-
-vector<Experiment*> experiment;
+#include "headers.h"
 
 int main()
 {
-	uint32_t scene = 0;
+	vector<Experiment*> experiment;
 	// construct list of experiments
+	Scene scene = CRYTEK_SPONZA;
+#if 1
 	// 1. BVH construction
-#if 0
-	experiment.push_back( new Experiment( BVHBase::BVHType::LAYOUT_BVH, BuildFlags::NONE, scene ) );
-	experiment.push_back( new Experiment( BVHBase::BVHType::LAYOUT_BVH, BuildFlags::AVXBUILD, scene ) );
-	experiment.push_back( new Experiment( BVHBase::BVHType::LAYOUT_BVH, BuildFlags::FULLSWEEP, scene ) );
-	experiment.push_back( new Experiment( BVHBase::BVHType::LAYOUT_BVH, BuildFlags::FULLSWEEP | BuildFlags::PRESPLIT, scene ) );
-	experiment.push_back( new Experiment( BVHBase::BVHType::LAYOUT_BVH, BuildFlags::SPATIALSPLITS, scene ) );
-#endif
+	experiment.push_back( new Experiment( BVH2, AVXBUILD, scene ) );
+	experiment.push_back( new Experiment( BVH2, FULLSWEEP, scene ) );
+	experiment.push_back( new Experiment( BVH2, FULLSWEEP|PRESPLIT, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( MADMANN91, NO_FLAGS, scene ) );
+#else
 	// 2. BVH traversal
-	experiment.push_back( new Experiment( BVHBase::BVHType::LAYOUT_BVH, NO_FLAGS, CRYTEK_SPONZA, PRIMARY_VIEW1, "view1.tga" ) );
-	experiment.push_back( new Experiment( BVHBase::BVHType::LAYOUT_BVH, NO_FLAGS, CRYTEK_SPONZA, PRIMARY_VIEW2, "view2.tga" ) );
-	experiment.push_back( new Experiment( BVHBase::BVHType::LAYOUT_BVH, NO_FLAGS, CRYTEK_SPONZA, PRIMARY_VIEW3, "view3.tga" ) );
-	experiment.push_back( new Experiment( BVHBase::BVHType::LAYOUT_BVH, NO_FLAGS, CRYTEK_SPONZA, FIRST_BOUNCE, "view1.tga" ) );
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1, "view1.tga" ) );
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW2, "view2.tga" ) );
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW3, "view3.tga" ) );
+#endif
 	// run experiments
-	for (auto ex : experiment) ex->Run();
+	for( int i = 0; i < experiment.size(); i++ ) experiment[i]->Run();
 	// all done.
 	return 0;
 }

@@ -1,10 +1,4 @@
-#include "tiny_bvh.h"
-
-using namespace std;
-using namespace tinybvh;
-
-#include "primitive_set.h"
-#include "ray_distribution.h"
+#include "headers.h"
 
 namespace tinybvh
 {
@@ -40,7 +34,9 @@ RayDistribution::RayDistribution( RaySet r, PrimitiveSet* p )
 	raySet = r;
 	if (raySet == PRIMARY_VIEW1 || raySet == PRIMARY_VIEW2 || raySet == PRIMARY_VIEW3)
 	{
-		// create RAY_BATCH_SIZE rays in tiles of 4x4
+		// PRIMARY_VIEW ray distribution:
+		// Rays with a common origin, aimed at 4x4 pixel tiles on a square
+		// virtual screen plane.
 		UpdateViewPyramid( p->GetCameraPos( raySet ), p->GetCameraDir( raySet ) );
 		for (int i = 0, ty = 0; ty < tilesPerRow; ty++ ) for( int tx = 0; tx < tilesPerRow; tx++ )
 		{
@@ -57,7 +53,10 @@ RayDistribution::RayDistribution( RaySet r, PrimitiveSet* p )
 	}
 	else if (raySet == FIRST_BOUNCE)
 	{
-		// we need a BVH to generate the rays.
+		// FIRST_BOUNCE ray distribution:
+		// Rays starting at the end of primary rays, reflected with a uniform
+		// random distribution over the hemisphere. For the first bounce, ray
+		// origins are somewhat coherent, but directions are not.
 		BVH bvh;
 		bvh.settings.useSIMDifavailable = true; // fast build is preferred here.
 		bvh.Build( p->verts, p->primCount );
@@ -80,9 +79,46 @@ RayDistribution::RayDistribution( RaySet r, PrimitiveSet* p )
 			if (tinybvh_dot( ray.D, N ) > 1) N *= -1.0f;
 			const bvhvec3 R = DiffuseReflection( N );
 			O[i] = I + epsilon * N, D[i] = R, tmin[i] = 0, tmax[i] = BVH_FAR;
-			if (++i == RAY_BATCH_SIZE) goto batch_full;
+			if (++i == RAY_BATCH_SIZE) goto diffuse_batch_full;
 		}
-	batch_full:
+	diffuse_batch_full:
+		// all done.
+		rayCount = RAY_BATCH_SIZE;
+	}
+	else if (raySet == AO_RAYS)
+	{
+		// AO_RAYS ray distribution:
+		// Short rays in random directions. At the end of each primary ray four
+		// AO rays are generated, which will thus have the same origin.
+		BVH bvh;
+		bvh.settings.useSIMDifavailable = true; // fast build is preferred here.
+		bvh.Build( p->verts, p->primCount );
+		// fire rays from the first camera; use a diffuse bounce at the first hit
+		UpdateViewPyramid( p->GetCameraPos( raySet ), p->GetCameraDir( raySet ) );
+		const bvhvec3 sceneExtent = bvh.aabbMax - bvh.aabbMin;
+		const float sceneSize = sceneExtent[tinybvh_maxdim( sceneExtent )];
+		const float epsilon = sceneSize * 1e-6f;
+		int i = 0;
+		while (1) for( int y = 0; y < scrWidth; y += 4 ) for( int x = 0; x < scrWidth; x += 4 )
+		{
+			const float u = (float)x * uvScale, v = (float)y * uvScale;
+			const bvhvec3 P = p1 + u * (p2 - p1) + v * (p3 - p1);
+			Ray ray( eye, tinybvh_normalize( P - eye ) );
+			bvh.Intersect( ray );
+			if (ray.hit.t > 1e20f) continue;
+			const bvhvec3 I = eye + ray.hit.t * ray.D;
+			const uint32_t t = ray.hit.prim * 3;
+			const bvhvec3 a = p->verts[t], b = p->verts[t + 1], c = p->verts[t + 2];
+			bvhvec3 N = tinybvh_normalize( tinybvh_cross( b - a, a - c ) );
+			if (tinybvh_dot( ray.D, N ) > 1) N *= -1.0f;
+			for( int j = 0; j < 4; j++ )
+			{
+				const bvhvec3 R = DiffuseReflection( N );
+				O[i] = I + epsilon * N, D[i] = R, tmin[i] = 0, tmax[i] = sceneSize * 0.05f;
+				if (++i == RAY_BATCH_SIZE) goto ao_batch_full;
+			}
+		}
+	ao_batch_full:
 		// all done.
 		rayCount = RAY_BATCH_SIZE;
 	}
@@ -97,6 +133,7 @@ RayDistribution::RayDistribution( RaySet r, PrimitiveSet* p )
 	case PRIMARY_VIEW2: strncpy( desc, "primary rays cam2", 256 ); break;
 	case PRIMARY_VIEW3: strncpy( desc, "primary rays cam3", 256 ); break;
 	case FIRST_BOUNCE: strncpy( desc, "first bounce rays", 256 ); break;
+	case AO_RAYS: strncpy( desc, "ambient occlusion rays", 256 ); break;
 	default: strncpy( desc, "UNKNOWN RAY SET", 256 ); break;
 	};
 }

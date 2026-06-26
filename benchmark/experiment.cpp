@@ -1,14 +1,9 @@
-#include "tiny_bvh.h"
-
-using namespace std;
-using namespace tinybvh;
-
-#include "experiment.h"
+#include "headers.h"
 
 namespace tinybvh
 {
 
-Experiment::Experiment( BVHBase::BVHType layout, BuildFlags flags, Scene prims, RaySet rays, const char* view )
+Experiment::Experiment( BVHLayout layout, BuildFlags flags, Scene prims, RaySet rays, const char* view )
 {
 	if (rays == RaySet::UNSPECIFIED)
 	{
@@ -99,7 +94,7 @@ void Experiment::Run()
 		// trace shadow rays
 		t.reset();
 		runs = 0;
-		while (runs < 5 && t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
+		while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
 		{
 			bvh->OcclusionBatch( shadowRays, N );
 			runs++;
@@ -118,10 +113,10 @@ void Experiment::Run()
 		// Accstruc build experiment.
 		// - Build several times for average build time;
 		// - Assess SAH and EPO.
-		bvh->Build( cachedPrimSet[primSet] ); // warm caches
+		BVH* accstruc = (BVH*)bvh->Build( cachedPrimSet[primSet] ); // warm caches
 		Timer t;
 		int runs = 0;
-		while (runs < 5 && t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
+		while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
 		{
 			bvh->Build( cachedPrimSet[primSet] );
 			runs++;
