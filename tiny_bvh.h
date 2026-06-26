@@ -1021,9 +1021,13 @@ public:
 	void Build( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void BuildFullSweep( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* triIdxB );
+#ifdef BVH_USEAVX
 	void BuildAVXSubtree( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void PrepareAVXBuildFragSlice( const uint32_t first, const uint32_t last, const uint32_t* indices,
 		const __m128* verts4, const uint32_t stride4, void* frag4, __m128* rootMin, __m128* rootMax );
+private:
+	void BuildAVXFinalize();
+#endif
 #ifdef BVH_USENEON
 	void BuildNEON( const bvhvec4* vertices, const uint32_t primCount );
 	void BuildNEON( const bvhvec4slice& vertices );
@@ -1033,7 +1037,6 @@ public:
 	void BuildNEON();
 #endif
 private:
-	void BuildAVXFinalize();
 	void PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims );
 	void BuildHQ();
 	void PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
