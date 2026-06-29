@@ -494,11 +494,11 @@ TINYBVH_FORCEINLINE float tinybvh_safercp( const float x )
 #if 1
 	// my version
 	float r = 1 / x;
-	if (!tinybvh_isfinite( r )) r = copysignf( FLT_MAX, x );
+	if (!tinybvh_isfinite( r )) r = copysignf( 3.402823466e+38F /* FLT_MAX */, x );
 	return r;
 #else
 	// Madmann91's version
-	return fabs( x ) <= FLT_EPSILON ? copysign( FLT_MAX, x ) : (1.0f / x );
+	return fabs( x ) <= FLT_EPSILON ? copysign( 3.402823466e+38F /* FLT_MAX */, x ) : (1.0f / x );
 #endif
 }
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_safercp( const bvhvec3 a ) { return bvhvec3( tinybvh_safercp( a.x ), tinybvh_safercp( a.y ), tinybvh_safercp( a.z ) ); }
@@ -4748,7 +4748,7 @@ void BVH_Verbose::Optimize( const uint32_t iterations, const bool extreme, bool 
 		int start = 0;
 		if (stochastic)
 		{
-			float r = (float)rand() / RAND_MAX;
+			float r = (float)rand() / (float)RAND_MAX;
 			r = tinybvh_max( 0.0f, (r * 1.2f) - 0.3f ); // 0 .. 0.9f
 			start = (int)((float)limit * r);
 		}
