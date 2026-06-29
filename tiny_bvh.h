@@ -166,7 +166,7 @@ THE SOFTWARE.
 #endif
 // #define TINYBVH_USE_CUSTOM_VECTOR_TYPES
 // #define TINYBVH_NO_SIMD
-#ifndef NO_INDEXED_GEOMETRY
+#ifndef c
 #define ENABLE_INDEXED_GEOMETRY
 #endif
 #ifndef NO_CUSTOM_GEOMETRY
@@ -231,6 +231,15 @@ __FILE__ "(" EMIT_COMPILER_WARNING_STRINGIFY1(__LINE__) "): " type ": "
 #define EMIT_COMPILER_WARNING_COMPOSE(x) message(EMIT_COMPILER_MESSAGE_PREFACE("warning C0000") x)
 #endif
 #define WARNING(x) _Pragma(EMIT_COMPILER_WARNING_STRINGIFY1(EMIT_COMPILER_WARNING_COMPOSE(x)))
+
+// Inlining.
+#if defined _MSC_VER
+#define TINYBVH_FORCEINLINE __forceinline
+#elif defined __GNUC__ || defined __clang__
+#define TINYBVH_FORCEINLINE __attribute__((always_inline)) inline
+#else
+#define TINYBVH_FORCEINLINE inline
+#endif
 
 // SSE/AVX/AVX2/NEON support.
 // SSE4.2 availability: Since Nehalem (2008)
@@ -333,13 +342,6 @@ inline void free64( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
 #define PRIM_IDX_MASK 0xffffffff // instance index stored separately.
 #else
 #define PRIM_IDX_MASK ((1 << INST_IDX_SHFT) - 1) // instance index stored in top bits of hit.prim.
-#endif
-
-// Forced inlining.
-#ifdef _MSC_VER
-#define __FORCEINLINE __forceinline
-#else
-#define __FORCEINLINE __attribute__((always_inline)) inline
 #endif
 
 namespace tinybvh {
@@ -475,86 +477,109 @@ struct bvhvec4slice
 // Note: Since this header file is expected to be included in a source file
 // of a separate project, the static keyword doesn't provide sufficient
 // isolation; hence the tinybvh_ prefix.
-inline bool tinybvh_isfinite( float f )
+TINYBVH_FORCEINLINE bool tinybvh_isfinite( float f )
 {
 	uint32_t i;
 	std::memcpy( &i, &f, sizeof( i ) );
 	return (i & 0x7F800000) != 0x7F800000; // ieee-754: finite if not all exponent bits are 1.
 }
-inline bool tinybvh_isnan( float f )
+TINYBVH_FORCEINLINE bool tinybvh_isnan( float f )
 {
 	uint32_t i;
 	std::memcpy( &i, &f, sizeof( i ) );
 	return (i & 0x7F800000) == 0x7F800000 && (i & 0x007FFFFF) != 0; // ieee-754
 }
-inline float tinybvh_safercp( const float x ) { float r = 1 / x; if (!tinybvh_isfinite( r )) r = x < 0 ? (-BVH_FAR) : BVH_FAR; return r; }
-inline bvhvec3 tinybvh_safercp( const bvhvec3 a ) { return bvhvec3( tinybvh_safercp( a.x ), tinybvh_safercp( a.y ), tinybvh_safercp( a.z ) ); }
-inline bvhvec3 tinybvh_rcp( const bvhvec3 a ) { return tinybvh_safercp( a ); /* bvhvec3( 1.0f / a.x, 1.0f / a.y, 1.0f / a.z ); */ }
-inline float tinybvh_sqrf( const float x ) { return x * x; }
-inline float tinybvh_min( const float a, const float b ) { return a < b ? a : b; }
-inline float tinybvh_max( const float a, const float b ) { return a > b ? a : b; }
-inline double tinybvh_min( const double a, const double b ) { return a < b ? a : b; }
-inline double tinybvh_max( const double a, const double b ) { return a > b ? a : b; }
-inline int32_t tinybvh_min( const int32_t a, const int32_t b ) { return a < b ? a : b; }
-inline int32_t tinybvh_max( const int32_t a, const int32_t b ) { return a > b ? a : b; }
-inline uint32_t tinybvh_min( const uint32_t a, const uint32_t b ) { return a < b ? a : b; }
-inline uint32_t tinybvh_max( const uint32_t a, const uint32_t b ) { return a > b ? a : b; }
-inline bvhvec3 tinybvh_min( const bvhvec3& a, const bvhvec3& b ) { return bvhvec3( tinybvh_min( a.x, b.x ), tinybvh_min( a.y, b.y ), tinybvh_min( a.z, b.z ) ); }
-inline bvhvec4 tinybvh_min( const bvhvec4& a, const bvhvec4& b ) { return bvhvec4( tinybvh_min( a.x, b.x ), tinybvh_min( a.y, b.y ), tinybvh_min( a.z, b.z ), tinybvh_min( a.w, b.w ) ); }
-inline bvhvec3 tinybvh_max( const bvhvec3& a, const bvhvec3& b ) { return bvhvec3( tinybvh_max( a.x, b.x ), tinybvh_max( a.y, b.y ), tinybvh_max( a.z, b.z ) ); }
-inline bvhvec4 tinybvh_max( const bvhvec4& a, const bvhvec4& b ) { return bvhvec4( tinybvh_max( a.x, b.x ), tinybvh_max( a.y, b.y ), tinybvh_max( a.z, b.z ), tinybvh_max( a.w, b.w ) ); }
-inline float tinybvh_clamp( const float x, const float a, const float b ) { return x > a ? (x < b ? x : b) : a; /* NaN safe */ }
-inline int32_t tinybvh_clamp( const int32_t x, const int32_t a, const int32_t b ) { return x > a ? (x < b ? x : b) : a; /* NaN safe */ }
+TINYBVH_FORCEINLINE float tinybvh_safercp( const float x )
+{
+#if 1
+	// my version
+	float r = 1 / x;
+	if (!tinybvh_isfinite( r )) r = copysignf( FLT_MAX, x );
+	return r;
+#else
+	// Madmann91's version
+	return fabs( x ) <= FLT_EPSILON ? copysign( FLT_MAX, x ) : (1.0f / x );
+#endif
+}
+TINYBVH_FORCEINLINE bvhvec3 tinybvh_safercp( const bvhvec3 a ) { return bvhvec3( tinybvh_safercp( a.x ), tinybvh_safercp( a.y ), tinybvh_safercp( a.z ) ); }
+TINYBVH_FORCEINLINE bvhvec3 tinybvh_rcp( const bvhvec3 a ) { return tinybvh_safercp( a ); /* bvhvec3( 1.0f / a.x, 1.0f / a.y, 1.0f / a.z ); */ }
+TINYBVH_FORCEINLINE float tinybvh_sqrf( const float x ) { return x * x; }
+TINYBVH_FORCEINLINE float tinybvh_fma( const float a, const float b, const float c ) // Madmann91
+{
+#ifdef FP_FAST_FMAF
+    return fmaf(a, b, c);
+#elif defined(__clang__)
+    _Pragma( "clang diagnostic push")
+    _Pragma( "clang diagnostic ignored \"-Wunknown-pragmas\"")
+    _Pragma( "STDC FP_CONTRACT ON" )
+    _Pragma( "clang diagnostic pop" )
+#endif
+    return a * b + c;
+}
+TINYBVH_FORCEINLINE float tinybvh_min( const float a, const float b ) { return a < b ? a : b; }
+TINYBVH_FORCEINLINE float tinybvh_max( const float a, const float b ) { return a > b ? a : b; }
+TINYBVH_FORCEINLINE double tinybvh_min( const double a, const double b ) { return a < b ? a : b; }
+TINYBVH_FORCEINLINE double tinybvh_max( const double a, const double b ) { return a > b ? a : b; }
+TINYBVH_FORCEINLINE int32_t tinybvh_min( const int32_t a, const int32_t b ) { return a < b ? a : b; }
+TINYBVH_FORCEINLINE int32_t tinybvh_max( const int32_t a, const int32_t b ) { return a > b ? a : b; }
+TINYBVH_FORCEINLINE uint32_t tinybvh_min( const uint32_t a, const uint32_t b ) { return a < b ? a : b; }
+TINYBVH_FORCEINLINE uint32_t tinybvh_max( const uint32_t a, const uint32_t b ) { return a > b ? a : b; }
+TINYBVH_FORCEINLINE bvhvec3 tinybvh_min( const bvhvec3& a, const bvhvec3& b ) { return bvhvec3( tinybvh_min( a.x, b.x ), tinybvh_min( a.y, b.y ), tinybvh_min( a.z, b.z ) ); }
+TINYBVH_FORCEINLINE bvhvec4 tinybvh_min( const bvhvec4& a, const bvhvec4& b ) { return bvhvec4( tinybvh_min( a.x, b.x ), tinybvh_min( a.y, b.y ), tinybvh_min( a.z, b.z ), tinybvh_min( a.w, b.w ) ); }
+TINYBVH_FORCEINLINE bvhvec3 tinybvh_max( const bvhvec3& a, const bvhvec3& b ) { return bvhvec3( tinybvh_max( a.x, b.x ), tinybvh_max( a.y, b.y ), tinybvh_max( a.z, b.z ) ); }
+TINYBVH_FORCEINLINE bvhvec4 tinybvh_max( const bvhvec4& a, const bvhvec4& b ) { return bvhvec4( tinybvh_max( a.x, b.x ), tinybvh_max( a.y, b.y ), tinybvh_max( a.z, b.z ), tinybvh_max( a.w, b.w ) ); }
+TINYBVH_FORCEINLINE float tinybvh_clamp( const float x, const float a, const float b ) { return x > a ? (x < b ? x : b) : a; /* NaN safe */ }
+TINYBVH_FORCEINLINE int32_t tinybvh_clamp( const int32_t x, const int32_t a, const int32_t b ) { return x > a ? (x < b ? x : b) : a; /* NaN safe */ }
 template <class T> inline static void tinybvh_swap( T& a, T& b ) { T t = a; a = b; b = t; }
-inline float tinybvh_halfarea( const bvhvec3& v ) { return v.x < -BVH_FAR ? 0 : (v.x * v.y + v.y * v.z + v.z * v.x); } // for SAH calculations
-inline uint32_t tinybvh_maxdim( const bvhvec3& v ) { uint32_t r = fabs( v.x ) > fabs( v.y ) ? 0 : 1; return fabs( v.z ) > fabs( v[r] ) ? 2 : r; }
+TINYBVH_FORCEINLINE float tinybvh_halfarea( const bvhvec3& v ) { return v.x < -BVH_FAR ? 0 : (v.x * v.y + v.y * v.z + v.z * v.x); } // for SAH calculations
+TINYBVH_FORCEINLINE uint32_t tinybvh_maxdim( const bvhvec3& v ) { uint32_t r = fabs( v.x ) > fabs( v.y ) ? 0 : 1; return fabs( v.z ) > fabs( v[r] ) ? 2 : r; }
 
 // Operator overloads.
 // Only a minimal set is provided.
 #ifndef TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
-inline bvhvec2 operator-( const bvhvec2& a ) { return bvhvec2( -a.x, -a.y ); }
-inline bvhvec3 operator-( const bvhvec3& a ) { return bvhvec3( -a.x, -a.y, -a.z ); }
-inline bvhvec4 operator-( const bvhvec4& a ) { return bvhvec4( -a.x, -a.y, -a.z, -a.w ); }
-inline bvhvec2 operator+( const bvhvec2& a, const bvhvec2& b ) { return bvhvec2( a.x + b.x, a.y + b.y ); }
-inline bvhvec3 operator+( const bvhvec3& a, const bvhvec3& b ) { return bvhvec3( a.x + b.x, a.y + b.y, a.z + b.z ); }
-inline bvhvec4 operator+( const bvhvec4& a, const bvhvec4& b ) { return bvhvec4( a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w ); }
-inline bvhvec4 operator+( const bvhvec4& a, const bvhvec3& b ) { return bvhvec4( a.x + b.x, a.y + b.y, a.z + b.z, a.w ); }
-inline bvhvec2 operator-( const bvhvec2& a, const bvhvec2& b ) { return bvhvec2( a.x - b.x, a.y - b.y ); }
-inline bvhvec3 operator-( const bvhvec3& a, const bvhvec3& b ) { return bvhvec3( a.x - b.x, a.y - b.y, a.z - b.z ); }
-inline bvhvec4 operator-( const bvhvec4& a, const bvhvec4& b ) { return bvhvec4( a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w ); }
-inline void operator+=( bvhvec2& a, const bvhvec2& b ) { a.x += b.x; a.y += b.y; }
-inline void operator+=( bvhvec3& a, const bvhvec3& b ) { a.x += b.x; a.y += b.y; a.z += b.z; }
-inline void operator+=( bvhvec4& a, const bvhvec4& b ) { a.x += b.x; a.y += b.y; a.z += b.z; a.w += b.w; }
-inline bvhvec2 operator*( const bvhvec2& a, const bvhvec2& b ) { return bvhvec2( a.x * b.x, a.y * b.y ); }
-inline bvhvec3 operator*( const bvhvec3& a, const bvhvec3& b ) { return bvhvec3( a.x * b.x, a.y * b.y, a.z * b.z ); }
-inline bvhvec4 operator*( const bvhvec4& a, const bvhvec4& b ) { return bvhvec4( a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w ); }
-inline bvhvec2 operator*( const bvhvec2& a, float b ) { return bvhvec2( a.x * b, a.y * b ); }
-inline bvhvec3 operator*( const bvhvec3& a, float b ) { return bvhvec3( a.x * b, a.y * b, a.z * b ); }
-inline bvhvec4 operator*( const bvhvec4& a, float b ) { return bvhvec4( a.x * b, a.y * b, a.z * b, a.w * b ); }
-inline bvhvec2 operator*( float b, const bvhvec2& a ) { return bvhvec2( b * a.x, b * a.y ); }
-inline bvhvec3 operator*( float b, const bvhvec3& a ) { return bvhvec3( b * a.x, b * a.y, b * a.z ); }
-inline bvhvec4 operator*( float b, const bvhvec4& a ) { return bvhvec4( b * a.x, b * a.y, b * a.z, b * a.w ); }
-inline bvhvec2 operator/( float b, const bvhvec2& a ) { return bvhvec2( b / a.x, b / a.y ); }
-inline bvhvec3 operator/( float b, const bvhvec3& a ) { return bvhvec3( b / a.x, b / a.y, b / a.z ); }
-inline bvhvec4 operator/( float b, const bvhvec4& a ) { return bvhvec4( b / a.x, b / a.y, b / a.z, b / a.w ); }
-inline bvhvec3 operator/( bvhvec3 b, const bvhvec3& a ) { return bvhvec3( b.x / a.x, b.y / a.y, b.z / a.z ); }
-inline void operator*=( bvhvec3& a, const float b ) { a.x *= b; a.y *= b; a.z *= b; }
+TINYBVH_FORCEINLINE bvhvec2 operator-( const bvhvec2& a ) { return bvhvec2( -a.x, -a.y ); }
+TINYBVH_FORCEINLINE bvhvec3 operator-( const bvhvec3& a ) { return bvhvec3( -a.x, -a.y, -a.z ); }
+TINYBVH_FORCEINLINE bvhvec4 operator-( const bvhvec4& a ) { return bvhvec4( -a.x, -a.y, -a.z, -a.w ); }
+TINYBVH_FORCEINLINE bvhvec2 operator+( const bvhvec2& a, const bvhvec2& b ) { return bvhvec2( a.x + b.x, a.y + b.y ); }
+TINYBVH_FORCEINLINE bvhvec3 operator+( const bvhvec3& a, const bvhvec3& b ) { return bvhvec3( a.x + b.x, a.y + b.y, a.z + b.z ); }
+TINYBVH_FORCEINLINE bvhvec4 operator+( const bvhvec4& a, const bvhvec4& b ) { return bvhvec4( a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w ); }
+TINYBVH_FORCEINLINE bvhvec4 operator+( const bvhvec4& a, const bvhvec3& b ) { return bvhvec4( a.x + b.x, a.y + b.y, a.z + b.z, a.w ); }
+TINYBVH_FORCEINLINE bvhvec2 operator-( const bvhvec2& a, const bvhvec2& b ) { return bvhvec2( a.x - b.x, a.y - b.y ); }
+TINYBVH_FORCEINLINE bvhvec3 operator-( const bvhvec3& a, const bvhvec3& b ) { return bvhvec3( a.x - b.x, a.y - b.y, a.z - b.z ); }
+TINYBVH_FORCEINLINE bvhvec4 operator-( const bvhvec4& a, const bvhvec4& b ) { return bvhvec4( a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w ); }
+TINYBVH_FORCEINLINE void operator+=( bvhvec2& a, const bvhvec2& b ) { a.x += b.x; a.y += b.y; }
+TINYBVH_FORCEINLINE void operator+=( bvhvec3& a, const bvhvec3& b ) { a.x += b.x; a.y += b.y; a.z += b.z; }
+TINYBVH_FORCEINLINE void operator+=( bvhvec4& a, const bvhvec4& b ) { a.x += b.x; a.y += b.y; a.z += b.z; a.w += b.w; }
+TINYBVH_FORCEINLINE bvhvec2 operator*( const bvhvec2& a, const bvhvec2& b ) { return bvhvec2( a.x * b.x, a.y * b.y ); }
+TINYBVH_FORCEINLINE bvhvec3 operator*( const bvhvec3& a, const bvhvec3& b ) { return bvhvec3( a.x * b.x, a.y * b.y, a.z * b.z ); }
+TINYBVH_FORCEINLINE bvhvec4 operator*( const bvhvec4& a, const bvhvec4& b ) { return bvhvec4( a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w ); }
+TINYBVH_FORCEINLINE bvhvec2 operator*( const bvhvec2& a, float b ) { return bvhvec2( a.x * b, a.y * b ); }
+TINYBVH_FORCEINLINE bvhvec3 operator*( const bvhvec3& a, float b ) { return bvhvec3( a.x * b, a.y * b, a.z * b ); }
+TINYBVH_FORCEINLINE bvhvec4 operator*( const bvhvec4& a, float b ) { return bvhvec4( a.x * b, a.y * b, a.z * b, a.w * b ); }
+TINYBVH_FORCEINLINE bvhvec2 operator*( float b, const bvhvec2& a ) { return bvhvec2( b * a.x, b * a.y ); }
+TINYBVH_FORCEINLINE bvhvec3 operator*( float b, const bvhvec3& a ) { return bvhvec3( b * a.x, b * a.y, b * a.z ); }
+TINYBVH_FORCEINLINE bvhvec4 operator*( float b, const bvhvec4& a ) { return bvhvec4( b * a.x, b * a.y, b * a.z, b * a.w ); }
+TINYBVH_FORCEINLINE bvhvec2 operator/( float b, const bvhvec2& a ) { return bvhvec2( b / a.x, b / a.y ); }
+TINYBVH_FORCEINLINE bvhvec3 operator/( float b, const bvhvec3& a ) { return bvhvec3( b / a.x, b / a.y, b / a.z ); }
+TINYBVH_FORCEINLINE bvhvec4 operator/( float b, const bvhvec4& a ) { return bvhvec4( b / a.x, b / a.y, b / a.z, b / a.w ); }
+TINYBVH_FORCEINLINE bvhvec3 operator/( bvhvec3 b, const bvhvec3& a ) { return bvhvec3( b.x / a.x, b.y / a.y, b.z / a.z ); }
+TINYBVH_FORCEINLINE void operator*=( bvhvec3& a, const float b ) { a.x *= b; a.y *= b; a.z *= b; }
 
 #endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
 // Vector math: cross and dot.
-inline bvhvec3 tinybvh_cross( const bvhvec3& a, const bvhvec3& b )
+TINYBVH_FORCEINLINE bvhvec3 tinybvh_cross( const bvhvec3& a, const bvhvec3& b )
 {
 	return bvhvec3( a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x );
 }
-inline float tinybvh_dot( const bvhvec2& a, const bvhvec2& b ) { return a.x * b.x + a.y * b.y; }
-inline float tinybvh_dot( const bvhvec3& a, const bvhvec3& b ) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-inline float tinybvh_dot( const bvhvec4& a, const bvhvec4& b ) { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; }
+TINYBVH_FORCEINLINE float tinybvh_dot( const bvhvec2& a, const bvhvec2& b ) { return a.x * b.x + a.y * b.y; }
+TINYBVH_FORCEINLINE float tinybvh_dot( const bvhvec3& a, const bvhvec3& b ) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+TINYBVH_FORCEINLINE float tinybvh_dot( const bvhvec4& a, const bvhvec4& b ) { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; }
 
 // Vector math: common operations.
-inline float tinybvh_length( const bvhvec3& a ) { return sqrtf( a.x * a.x + a.y * a.y + a.z * a.z ); }
-inline bvhvec3 tinybvh_normalize( const bvhvec3& a )
+TINYBVH_FORCEINLINE float tinybvh_length( const bvhvec3& a ) { return sqrtf( a.x * a.x + a.y * a.y + a.z * a.z ); }
+TINYBVH_FORCEINLINE bvhvec3 tinybvh_normalize( const bvhvec3& a )
 {
 	float l = tinybvh_length( a ), rl = l == 0 ? 0 : (1.0f / l);
 	return a * rl;
@@ -598,8 +623,8 @@ struct bvhdbl3
 #pragma warning ( pop )
 #endif
 
-inline bvhdbl3 tinybvh_min( const bvhdbl3& a, const bvhdbl3& b ) { return bvhdbl3( tinybvh_min( a.x, b.x ), tinybvh_min( a.y, b.y ), tinybvh_min( a.z, b.z ) ); }
-inline bvhdbl3 tinybvh_max( const bvhdbl3& a, const bvhdbl3& b ) { return bvhdbl3( tinybvh_max( a.x, b.x ), tinybvh_max( a.y, b.y ), tinybvh_max( a.z, b.z ) ); }
+TINYBVH_FORCEINLINE bvhdbl3 tinybvh_min( const bvhdbl3& a, const bvhdbl3& b ) { return bvhdbl3( tinybvh_min( a.x, b.x ), tinybvh_min( a.y, b.y ), tinybvh_min( a.z, b.z ) ); }
+TINYBVH_FORCEINLINE bvhdbl3 tinybvh_max( const bvhdbl3& a, const bvhdbl3& b ) { return bvhdbl3( tinybvh_max( a.x, b.x ), tinybvh_max( a.y, b.y ), tinybvh_max( a.z, b.z ) ); }
 
 #ifndef TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
@@ -616,8 +641,8 @@ constexpr bvhdbl3 operator*=( bvhdbl3& a, const double b ) { return bvhdbl3( a.x
 
 #endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
-inline double tinybvh_length( const bvhdbl3& a ) { return sqrt( a.x * a.x + a.y * a.y + a.z * a.z ); }
-inline bvhdbl3 tinybvh_normalize( const bvhdbl3& a )
+TINYBVH_FORCEINLINE double tinybvh_length( const bvhdbl3& a ) { return sqrt( a.x * a.x + a.y * a.y + a.z * a.z ); }
+TINYBVH_FORCEINLINE bvhdbl3 tinybvh_normalize( const bvhdbl3& a )
 {
 	double l = tinybvh_length( a ), rl = l == 0 ? 0 : (1.0 / l);
 	return a * rl;
@@ -637,13 +662,13 @@ inline bvhdbl3 tinybvh_transform_vector( const bvhdbl3& v, const double* T )
 		T[5] * v.y + T[6] * v.z, T[8] * v.x + T[9] * v.y + T[10] * v.z );
 }
 
-inline bvhdbl3 tinybvh_cross( const bvhdbl3& a, const bvhdbl3& b )
+TINYBVH_FORCEINLINE bvhdbl3 tinybvh_cross( const bvhdbl3& a, const bvhdbl3& b )
 {
 	return bvhdbl3( a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x );
 }
-inline double tinybvh_dot( const bvhdbl3& a, const bvhdbl3& b ) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+TINYBVH_FORCEINLINE double tinybvh_dot( const bvhdbl3& a, const bvhdbl3& b ) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 
-inline double tinybvh_halfarea( const bvhdbl3& v ) { return v.x < -BVH_FAR ? 0 : (v.x * v.y + v.y * v.z + v.z * v.x); } // for SAH calculations
+TINYBVH_FORCEINLINE double tinybvh_halfarea( const bvhdbl3& v ) { return v.x < -BVH_DBL_FAR ? 0 : (v.x * v.y + v.y * v.z + v.z * v.x); } // for SAH calculations
 
 #endif // DOUBLE_PRECISION_SUPPORT
 
@@ -656,22 +681,22 @@ typedef __m128i SIMDIVEC4;
 #elif defined BVH_USENEON
 typedef float32x4_t SIMDVEC4;
 typedef int32x4_t SIMDIVEC4;
-inline float32x4_t SIMD_SETVEC( float w, float z, float y, float x )
+TINYBVH_FORCEINLINE float32x4_t SIMD_SETVEC( float w, float z, float y, float x )
 {
 	ALIGNED( 64 ) float data[4] = { x, y, z, w };
 	return vld1q_f32( data );
 }
-inline float32x4_t SIMD_SETRVEC( float x, float y, float z, float w )
+TINYBVH_FORCEINLINE float32x4_t SIMD_SETRVEC( float x, float y, float z, float w )
 {
 	ALIGNED( 64 ) float data[4] = { x, y, z, w };
 	return vld1q_f32( data );
 }
-inline uint32x4_t SIMD_SETRVECU( uint32_t x, uint32_t y, uint32_t z, uint32_t w )
+TINYBVH_FORCEINLINE uint32x4_t SIMD_SETRVECU( uint32_t x, uint32_t y, uint32_t z, uint32_t w )
 {
 	ALIGNED( 64 ) uint32_t data[4] = { x, y, z, w };
 	return vld1q_u32( data );
 }
-inline int32x4_t SIMD_SETRVECS( int32_t x, int32_t y, int32_t z, int32_t w )
+TINYBVH_FORCEINLINE int32x4_t SIMD_SETRVECS( int32_t x, int32_t y, int32_t z, int32_t w )
 {
 	ALIGNED( 64 ) int32_t data[4] = { x, y, z, w };
 	return vld1q_s32( data );
@@ -936,8 +961,8 @@ public:
 	void CopyBasePropertiesFrom( const BVHBase& original );	// copy flags from one BVH to another
 protected:
 	~BVHBase() {}
-	__FORCEINLINE void IntersectTri( Ray& ray, const uint32_t idx, const bvhvec4slice& verts, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
-	__FORCEINLINE bool TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t triIdx, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
+	TINYBVH_FORCEINLINE void IntersectTri( Ray& ray, const uint32_t idx, const bvhvec4slice& verts, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
+	TINYBVH_FORCEINLINE bool TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t triIdx, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
 	static void PrecomputeTriangle( const bvhvec4slice& vert, const uint32_t ti0, const uint32_t ti1, const uint32_t ti2, float* T );
 	static float SA( const bvhvec3& aabbMin, const bvhvec3& aabbMax );
 };
@@ -1670,7 +1695,7 @@ static constexpr bool customEnabled = false;
 namespace tinybvh {
 
 #if defined BVH_USESSE || defined BVH_USENEON
-inline uint32_t __bfind( uint32_t x ) // https://github.com/mackron/refcode/blob/master/lzcnt.c
+TINYBVH_FORCEINLINE uint32_t __bfind( uint32_t x ) // https://github.com/mackron/refcode/blob/master/lzcnt.c
 {
 #if defined _MSC_VER && !defined __clang__
 	return 31 - __lzcnt( x );
@@ -1841,7 +1866,7 @@ __m128 BVH::mask3 = _mm_cmpeq_ps( _mm_setr_ps( 0, 0, 0, 1 ), _mm_setzero_ps() );
 #define ILANE(a,b) _mm_cvtsi128_si32(_mm_castps_si128( _mm_shuffle_ps(_mm_castsi128_ps( a ), _mm_castsi128_ps( a ), b)))
 #endif
 // AABB halfarea calculation
-inline float halfArea( const __m128 a /* a contains extent of aabb */ )
+TINYBVH_FORCEINLINE float halfArea( const __m128 a /* a contains extent of aabb */ )
 {
 	return LANE( a, 0 ) * LANE( a, 1 ) + LANE( a, 1 ) * LANE( a, 2 ) + LANE( a, 2 ) * LANE( a, 3 );
 }
@@ -2361,7 +2386,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 }
 
 // radix sort
-static inline unsigned FloatToKey( const float value )
+static TINYBVH_FORCEINLINE unsigned FloatToKey( const float value )
 {
 	const unsigned f = *(unsigned*)&value, mask = (unsigned)((int)f >> 31 | (1 << 31));
 	return f ^ mask;
@@ -6189,7 +6214,7 @@ void BVH8_CWBVH::ConvertFrom( MBVH<8>& original, bool )
 
 #ifdef BVH_USESSE
 
-inline __m128 fastrcp4( const __m128 a )
+TINYBVH_FORCEINLINE __m128 fastrcp4( const __m128 a )
 {
 	__m128 res = _mm_rcp_ps( a );
 	__m128 muls = _mm_mul_ps( a, _mm_mul_ps( res, res ) );
@@ -6520,12 +6545,12 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 #else
 #define LANE8(a,b) a[b]
 #endif
-inline __m256 fastrcp8( const __m256 a )
+TINYBVH_FORCEINLINE __m256 fastrcp8( const __m256 a )
 {
 	const __m256 res = _mm256_rcp_ps( a ), muls = _mm256_mul_ps( a, _mm256_mul_ps( res, res ) );
 	return _mm256_sub_ps( _mm256_add_ps( res, res ), muls );
 }
-inline float halfArea( const __m256& a /* a contains aabb itself, with min.xyz negated */ )
+TINYBVH_FORCEINLINE float halfArea( const __m256& a /* a contains aabb itself, with min.xyz negated */ )
 {
 #ifndef _MSC_VER
 	// g++ doesn't seem to like the faster construct
@@ -7235,8 +7260,8 @@ bool BVH_SoA::IsOccluded( const Ray& ray ) const
 // this is just here to test data before it goes to the GPU: MSVC-only for now.
 #define STACK_POP() { ngroup = traversalStack[--stackPtr]; }
 #define STACK_PUSH() { traversalStack[stackPtr++] = ngroup; }
-inline uint32_t extract_byte( const uint32_t i, const uint32_t n ) { return (i >> (n * 8)) & 0xFF; }
-inline uint32_t sign_extend_s8x4( const uint32_t i )
+TINYBVH_FORCEINLINE uint32_t extract_byte( const uint32_t i, const uint32_t n ) { return (i >> (n * 8)) & 0xFF; }
+TINYBVH_FORCEINLINE uint32_t sign_extend_s8x4( const uint32_t i )
 {
 	// asm("prmt.b32 %0, %1, 0x0, 0x0000BA98;" : "=r"(v) : "r"(i)); // BA98: 1011`1010`1001`1000
 	// with the given parameters, prmt will extend the sign to all bits in a byte.
@@ -7677,18 +7702,17 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 
 #define ILANE(a,b) vgetq_lane_s32(a, b)
 
-inline float halfArea( const float32x4_t a /* a contains extent of aabb */ )
+TINYBVH_FORCEINLINE float halfArea( const float32x4_t a /* a contains extent of aabb */ )
 {
 	ALIGNED( 64 ) float v[4];
 	vst1q_f32( v, a );
 	return v[0] * v[1] + v[1] * v[2] + v[2] * v[3];
 }
-inline float halfArea( const float32x4x2_t& a /* a contains aabb itself, with min.xyz negated */ )
+TINYBVH_FORCEINLINE float halfArea( const float32x4x2_t& a /* a contains aabb itself, with min.xyz negated */ )
 {
 	ALIGNED( 64 ) float c[8];
 	vst1q_f32( c, a.val[0] );
 	vst1q_f32( c + 4, a.val[1] );
-
 	float ex = c[4] + c[0], ey = c[5] + c[1], ez = c[6] + c[2];
 	return ex * ey + ey * ez + ez * ex;
 }
@@ -7785,27 +7809,27 @@ void BVH::PrepareNEONBuild( const bvhvec4slice& vertices, const uint32_t* indice
 	bvh_over_indices = indices != nullptr;
 }
 
-inline float32x4x2_t _mm256_set1_ps( float v )
+TINYBVH_FORCEINLINE float32x4x2_t _mm256_set1_ps( float v )
 {
 	float32x4_t v4 = vdupq_n_f32( v );
 	return float32x4x2_t{ v4, v4 };
 }
 
-inline float32x4x2_t _mm256_and_ps( float32x4x2_t v0, float32x4x2_t v1 )
+TINYBVH_FORCEINLINE float32x4x2_t _mm256_and_ps( float32x4x2_t v0, float32x4x2_t v1 )
 {
 	float32x4_t r0 = vreinterpretq_f32_s32( vandq_s32( vreinterpretq_s32_f32( v0.val[0] ), vreinterpretq_s32_f32( v1.val[0] ) ) );
 	float32x4_t r1 = vreinterpretq_f32_s32( vandq_s32( vreinterpretq_s32_f32( v0.val[1] ), vreinterpretq_s32_f32( v1.val[1] ) ) );
 	return float32x4x2_t{ r0, r1 };
 }
 
-inline float32x4x2_t _mm256_max_ps( float32x4x2_t v0, float32x4x2_t v1 )
+TINYBVH_FORCEINLINE float32x4x2_t _mm256_max_ps( float32x4x2_t v0, float32x4x2_t v1 )
 {
 	float32x4_t r0 = vmaxq_f32( v0.val[0], v1.val[0] );
 	float32x4_t r1 = vmaxq_f32( v0.val[1], v1.val[1] );
 	return float32x4x2_t{ r0, r1 };
 }
 
-inline float32x4x2_t _mm256_xor_ps( float32x4x2_t v0, float32x4x2_t v1 )
+TINYBVH_FORCEINLINE float32x4x2_t _mm256_xor_ps( float32x4x2_t v0, float32x4x2_t v1 )
 {
 	float32x4_t r0 = vreinterpretq_f32_s32( veorq_s32( vreinterpretq_s32_f32( v0.val[0] ), vreinterpretq_s32_f32( v1.val[0] ) ) );
 	float32x4_t r1 = vreinterpretq_f32_s32( veorq_s32( vreinterpretq_s32_f32( v0.val[1] ), vreinterpretq_s32_f32( v1.val[1] ) ) );
@@ -9174,7 +9198,7 @@ public:
 		void (*fn)(void*) = nullptr;
 		uint8_t padding[8]; // avoid VS warning.
 		alignas(16) uint8_t payload[JOB_PAYLOAD_MAX]; // inline copy; scheduling never allocates
-		inline uint32_t execute( context& ctx )
+		TINYBVH_FORCEINLINE uint32_t execute( context& ctx )
 		{
 			fn( payload );
 			return ctx.counter.fetch_sub( 1 );
@@ -9184,8 +9208,8 @@ public:
 	{
 		std::deque<Job> queue;
 		std::mutex locker;
-		inline void push_back( const Job& item ) { std::scoped_lock lock( locker ); queue.push_back( item ); }
-		inline bool pop_front( Job& item )
+		TINYBVH_FORCEINLINE void push_back( const Job& item ) { std::scoped_lock lock( locker ); queue.push_back( item ); }
+		TINYBVH_FORCEINLINE bool pop_front( Job& item )
 		{
 			std::scoped_lock lock( locker );
 			if (queue.empty()) return false; else item = std::move( queue.front() );
@@ -9202,7 +9226,7 @@ public:
 		std::condition_variable sleepingCondition, waitingCondition;
 		std::mutex sleepingMutex, waitingMutex;
 		std::atomic_bool alive{ true };
-		inline void work( context& ctx, uint32_t startingQueue )
+		TINYBVH_FORCEINLINE void work( context& ctx, uint32_t startingQueue )
 		{
 			Job job;
 			for (uint32_t i = 0; i < numThreads; ++i) while (jobQueue[startingQueue++ % numThreads].pop_front( job ))
