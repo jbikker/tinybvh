@@ -5447,8 +5447,8 @@ void BVH4_GPU::ConvertFrom( const MBVH<4>& original, bool compact )
 				else
 					ti0 = t * 3, ti1 = t * 3 + 1, ti2 = t * 3 + 2;
 			#ifdef BVH4_GPU_COMPRESSED_TRIS
-				PrecomputeTriangle( verts, ti0, ti1, ti2, (float*)&bvh4Alt[newAlt4Ptr] );
-				bvh4Alt[newAlt4Ptr + 3] = bvhvec4( 0, 0, 0, *(float*)&t );
+				PrecomputeTriangle( bvh4.bvh.verts, ti0, ti1, ti2, (float*)&bvh4Data[newAlt4Ptr] );
+				bvh4Data[newAlt4Ptr + 3] = bvhvec4( 0, 0, 0, *(float*)&t );
 				newAlt4Ptr += 4;
 			#else
 				bvhvec4 v0 = bvh4.bvh.verts[ti0];
