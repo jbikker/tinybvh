@@ -3,6 +3,14 @@
 namespace tinybvh
 {
 
+extern bvh::v2::ThreadPool thread_pool;
+extern bvh::v2::ParallelExecutor executor;
+extern RTCScene embreeScene;
+extern RTCDevice embreeDevice;
+extern RTCGeometry embreeGeom;
+
+BVHContext context; // use a default context for the threading hooks.
+
 AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 {
 	layout = bvhLayout;
@@ -39,6 +47,7 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 	case GPU_BVH4: strncpy( desc, "4-wide GPU BVH", 256 ); break;
 	case CWBVH: strncpy( desc, "8-wide CWBVH", 256 ); break;
 	case MADMANN91: strncpy( desc, "madmann91 BVH", 256 ); break;
+	case EMBREE: strncpy( desc, "embree4 BVH", 256 ); break;
 	default: strncpy( desc, "UNKNOWN LAYOUT", 256 );
 	}
 	uint32_t f = flags;
@@ -47,6 +56,7 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 	{
 		if (first) strncat( desc, " (", 128 ); else strncat( desc, " + ", 128 );
 		if (f & BuildFlags::AVXBUILD) { strncat( desc, "AVX builder", 128 ); f -= BuildFlags::AVXBUILD; }
+		else if (f & BuildFlags::INDEXED) { strncat( desc, "indexed", 128 ); f -= BuildFlags::INDEXED; }
 		else if (f & BuildFlags::FULLSWEEP) { strncat( desc, "full-sweep", 128 ); f -= BuildFlags::FULLSWEEP; }
 		else if (f & BuildFlags::SPATIALSPLITS) { strncat( desc, "SBVH", 128 ); f -= BuildFlags::SPATIALSPLITS; }
 		else if (f & BuildFlags::PRESPLIT) { strncat( desc, "presplit", 128 ); f -= BuildFlags::PRESPLIT; }
@@ -71,45 +81,52 @@ BVHBase* AccStruc::Build( PrimitiveSet* primSet )
 	case BVH2:
 	{
 		BVH* accstruc = (BVH*)bvh;
-		accstruc->Build( primSet->verts, primSet->primCount );
+		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
 #if 0
 	case BVH4:
 	{
 		MBVH<4>* accstruc = (MBVH<4>*)bvh;
-		accstruc->Build( primSet->verts, primSet->primCount );
+		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
 #endif
 	case BVH4_WIVE:
 	{
 		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
-		accstruc->Build( primSet->verts, primSet->primCount );
+		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
 	case BVH8_WIVE:
 	{
 		BVH8_CPU* accstruc = (BVH8_CPU*)bvh;
-		accstruc->Build( primSet->verts, primSet->primCount );
+		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
 	case GPU_BVH:
 	{
 		BVH_GPU* accstruc = (BVH_GPU*)bvh;
-		accstruc->Build( primSet->verts, primSet->primCount );
+		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
 	case GPU_BVH4:
 	{
 		BVH4_GPU* accstruc = (BVH4_GPU*)bvh;
-		accstruc->Build( primSet->verts, primSet->primCount );
+		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
 	case CWBVH:
 	{
 		BVH8_CWBVH* accstruc = (BVH8_CWBVH*)bvh;
-		accstruc->Build( primSet->verts, primSet->primCount );
+		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
 	case MADMANN91:
@@ -122,6 +139,27 @@ BVHBase* AccStruc::Build( PrimitiveSet* primSet )
 		else if (flags & SPATIALSPLITS) config.quality = bvh::v2::DefaultBuilder<_Node>::Quality::High;
 		else config.quality = bvh::v2::DefaultBuilder<_Node>::Quality::Low;
 		madmannbvh = bvh::v2::DefaultBuilder<_Node>::build( thread_pool, primSet->bboxes, primSet->centers, config );
+		// precompute tris if not done yet
+		if (!mmTrisPrecomputed)
+		{
+			std::vector<size_t>& prim_ids = madmannbvh.prim_ids;
+			precomputed_tris.resize( primSet->tris.size() );
+			executor.for_each( 0, primSet->tris.size(), [&]( size_t begin, size_t end )
+				{
+					for (size_t i = begin; i < end; ++i) precomputed_tris[i] = primSet->tris[prim_ids[i]];
+				} );
+			mmTrisPrecomputed = true;
+		}
+		break;
+	}
+	case EMBREE:
+	{
+		rtcSetGeometryBuildQuality( embreeGeom, RTC_BUILD_QUALITY_MEDIUM );
+		rtcCommitGeometry( embreeGeom );
+		rtcAttachGeometry( embreeScene, embreeGeom );
+		rtcReleaseGeometry( embreeGeom );
+		rtcSetSceneBuildQuality( embreeScene, RTC_BUILD_QUALITY_MEDIUM );
+		rtcCommitScene( embreeScene );
 		break;
 	}
 	default:
@@ -167,6 +205,10 @@ float AccStruc::SAHCost()
 		const bvhvec3 rbmax( root.bounds[1], root.bounds[3], root.bounds[5] );
 		return cost / tinybvh_halfarea( rbmax - rbmin );
 	}
+	case EMBREE:
+	{
+		return 0; // TODO; see kernels/bvh/bvh_statistics.h
+	}
 	default: return -1; // unsupported layout.
 	}
 }
@@ -187,44 +229,96 @@ float AccStruc::EPOCost()
 	// We thus have to specialize here for each possible layout.
 }
 
-void AccStruc::IntersectBatch( Ray* raySet, int rayCount )
+struct BatchIntersectArgs { AccStruc* accstruc; __m256* r256; int rayCount; int sliceSize; };
+static void IntersectBatchSlice( uint32_t i, void* payload )
+{
+	BatchIntersectArgs* a  = (BatchIntersectArgs*)payload;
+	a->accstruc->IntersectBatch( a->r256 + a->sliceSize * i, a->sliceSize );
+}
+void AccStruc::IntersectBatchMT( __m256* r256, int rayCount )
+{
+	constexpr int slices = 64;
+	int sliceSize = rayCount / slices;
+	BatchIntersectArgs args = { this, r256, rayCount, sliceSize };
+	tinybvh_parallel_for( context, slices, &IntersectBatchSlice, &args );
+}
+
+void AccStruc::IntersectBatch( __m256* r256, int rayCount )
 {
 	switch (layout)
 	{
 	case BVH2:
 	{
 		BVH* accstruc = (BVH*)bvh;
-		for (int i = 0; i < rayCount; i++) accstruc->Intersect( raySet[i] );
+		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->Intersect( ((Ray*)r256)[0] );
 		break;
 	}
 	case BVH4_WIVE:
 	{
 		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
-		for (int i = 0; i < rayCount; i++) accstruc->Intersect( raySet[i] );
+		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->Intersect( ((Ray*)r256)[0] );
 		break;
 	}
 	case BVH8_WIVE:
 	{
 		BVH8_CPU* accstruc = (BVH8_CPU*)bvh;
-		for (int i = 0; i < rayCount; i++) accstruc->Intersect( raySet[i] );
+		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->Intersect( ((Ray*)r256)[0] );
 		break;
 	}
 	case GPU_BVH:
 	{
 		BVH_GPU* accstruc = (BVH_GPU*)bvh;
-		for (int i = 0; i < rayCount; i++) accstruc->Intersect( raySet[i] );
+		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->Intersect( ((Ray*)r256)[0] );
 		break;
 	}
 	case GPU_BVH4:
 	{
 		BVH4_GPU* accstruc = (BVH4_GPU*)bvh;
-		for (int i = 0; i < rayCount; i++) accstruc->Intersect( raySet[i] );
+		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->Intersect( ((Ray*)r256)[0] );
 		break;
 	}
 	case CWBVH:
 	{
 		BVH8_CWBVH* accstruc = (BVH8_CWBVH*)bvh;
-		for (int i = 0; i < rayCount; i++) accstruc->Intersect( raySet[i] );
+		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->Intersect( ((Ray*)r256)[0] );
+		break;
+	}
+	case MADMANN91:
+	{
+		// for this experiment we use ideal circumstances for the Manmann91 library:
+		// - Precomputed triangle data (Woop?), precomputation not included in timing;
+		// - The fast traversal path (rather than the robust one);
+		static constexpr size_t invalid_id = 9999999;
+		bvh::v2::SmallStack<_Bvh::Index, 64> stack;
+		float u, v;
+		for (int i = 0; i < rayCount; i++)
+		{
+			const Ray& r = ((Ray*)r256)[0];
+			size_t prim_id = invalid_id;
+			_Ray ray( _Vec3( r.O.x, r.O.y, r.O.z ), _Vec3( r.D.x, r.D.y, r.D.z ) );
+			madmannbvh.intersect<false, false>( ray, madmannbvh.get_root().index, stack, [&]( size_t begin, size_t end )
+				{
+					for (size_t i = begin; i < end; ++i)
+						if (auto hit = precomputed_tris[i].intersect( ray )) prim_id = i, std::tie( ray.tmax, u, v ) = *hit;
+					return prim_id != invalid_id;
+				} );
+		}
+		break;
+	}
+	case EMBREE:
+	{
+		RTCRayHit embreeRay;
+		for (int i = 0; i < rayCount; i++)
+		{
+			const Ray& r = ((Ray*)r256)[0];
+			embreeRay.ray.org_x = r.O.x, embreeRay.ray.org_y = r.O.y, embreeRay.ray.org_z = r.O.z;
+			embreeRay.ray.dir_x = r.D.x, embreeRay.ray.dir_y = r.D.y, embreeRay.ray.dir_z = r.D.z;
+			embreeRay.ray.tnear = 0, embreeRay.ray.tfar = r.hit.t;
+			embreeRay.ray.mask = -1, embreeRay.ray.flags = 0;
+			embreeRay.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+			embreeRay.hit.instID[0] = RTC_INVALID_GEOMETRY_ID;
+			rtcIntersect1( embreeScene, &embreeRay );
+		}
 		break;
 	}
 	default: // unsupported layout. See note in constructor.
@@ -232,44 +326,93 @@ void AccStruc::IntersectBatch( Ray* raySet, int rayCount )
 	}
 }
 
-void AccStruc::OcclusionBatch( Ray* raySet, int rayCount )
+struct BatchOcclusionArgs { AccStruc* accstruc; __m256* r256; int rayCount; int sliceSize; };
+static void OcclusionBatchSlice( uint32_t i, void* payload )
+{
+	BatchOcclusionArgs* a  = (BatchOcclusionArgs*)payload;
+	a->accstruc->OcclusionBatch( a->r256 + a->sliceSize * i, a->sliceSize );
+}
+void AccStruc::OcclusionBatchMT( __m256* r256, int rayCount )
+{
+	constexpr int slices = 64;
+	int sliceSize = rayCount / slices;
+	BatchIntersectArgs args = { this, r256, rayCount, sliceSize };
+	tinybvh_parallel_for( context, slices, &OcclusionBatchSlice, &args );
+}
+
+void AccStruc::OcclusionBatch( __m256* r256, int rayCount )
 {
 	switch (layout)
 	{
 	case BVH2:
 	{
 		BVH* accstruc = (BVH*)bvh;
-		for (int i = 0; i < rayCount; i++) accstruc->IsOccluded( raySet[i] );
+		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->IsOccluded( ((Ray*)r256)[0] );
 		break;
 	}
 	case BVH4_WIVE:
 	{
 		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
-		for (int i = 0; i < rayCount; i++) accstruc->IsOccluded( raySet[i] );
+		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->IsOccluded( ((Ray*)r256)[0] );
 		break;
 	}
 	case BVH8_WIVE:
 	{
 		BVH8_CPU* accstruc = (BVH8_CPU*)bvh;
-		for (int i = 0; i < rayCount; i++) accstruc->IsOccluded( raySet[i] );
+		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->IsOccluded( ((Ray*)r256)[0] );
 		break;
 	}
 	case GPU_BVH:
 	{
 		BVH_GPU* accstruc = (BVH_GPU*)bvh;
-		for (int i = 0; i < rayCount; i++) accstruc->IsOccluded( raySet[i] );
+		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->IsOccluded( ((Ray*)r256)[0] );
 		break;
 	}
 	case GPU_BVH4:
 	{
 		BVH4_GPU* accstruc = (BVH4_GPU*)bvh;
-		for (int i = 0; i < rayCount; i++) accstruc->IsOccluded( raySet[i] );
+		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->IsOccluded( ((Ray*)r256)[0] );
 		break;
 	}
 	case CWBVH:
 	{
 		BVH8_CWBVH* accstruc = (BVH8_CWBVH*)bvh;
-		for (int i = 0; i < rayCount; i++) accstruc->IsOccluded( raySet[i] );
+		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->IsOccluded( ((Ray*)r256)[0] );
+		break;
+	}
+	case MADMANN91:
+	{
+		// for this experiment we use ideal circumstances for the Manmann91 library:
+		// - Precomputed triangle data (Woop?), precomputation not included in timing;
+		// - The fast traversal path (rather than the robust one);
+		// - For shadow rays we use the AnyHit code.
+		// NOTE: for now we skip this test as a stack overflow is triggered.
+		bvh::v2::SmallStack<_Bvh::Index, 64> stack;
+		for (int i = 0; i < rayCount; i++)
+		{
+			const Ray& r = ((Ray*)r256)[0];
+			_Ray ray = { _Vec3( r.O.x, r.O.y, r.O.z ), _Vec3( r.D.x, r.D.y, r.D.z ), 0, r.hit.t };
+			madmannbvh.intersect<true, false>( ray, madmannbvh.get_root().index, stack, [&]( size_t begin, size_t end )
+				{
+					for (size_t i = begin; i < end; ++i)
+						if (precomputed_tris[i].intersect( ray )) return false;
+					return true;
+				} );
+		}
+		break;
+	}
+	case EMBREE:
+	{
+		RTCRay embreeRay;
+		for (int i = 0; i < rayCount; i++)
+		{
+			const Ray& r = ((Ray*)r256)[0];
+			embreeRay.org_x = r.O.x, embreeRay.org_y = r.O.y, embreeRay.org_z = r.O.z;
+			embreeRay.dir_x = r.D.x, embreeRay.dir_y = r.D.y, embreeRay.dir_z = r.D.z;
+			embreeRay.tnear = 0, embreeRay.tfar = r.hit.t;
+			embreeRay.mask = -1, embreeRay.flags = RTC_RAY_QUERY_FLAG_COHERENT;
+			rtcOccluded1( embreeScene, &embreeRay );
+		}
 		break;
 	}
 	default: // unsupported layout. See note in constructor.

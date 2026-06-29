@@ -27,6 +27,10 @@ using _Bvh = bvh::v2::Bvh<_Node>;
 using _Ray = bvh::v2::Ray<float, 3>;
 using PrecomputedTri = bvh::v2::PrecomputedTri<float>;
 
+// Embree
+#include "embree4/rtcore.h"
+
+// Benchmark components
 #include "primitive_set.h"
 #include "ray_distribution.h"
 #include "acc_struc.h"

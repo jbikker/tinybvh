@@ -1,2 +1,5 @@
 #define TINYBVH_IMPLEMENTATION
+#define NO_CUSTOM_GEOMETRY
+#define NO_VOXEL_SUPPORT
+#define NO_INDEXED_GEOMETRY
 #include "tiny_bvh.h"

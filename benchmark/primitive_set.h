@@ -21,6 +21,7 @@ public:
 	Scene scene = CRYTEK_SPONZA;
 	uint32_t primCount;
 	bvhvec4* verts = 0;
+	uint32_t* indices = 0;
 	char desc[256];
 private:
 	void AddMesh( const char* file, float scale = 1, bvhvec3 pos = {}, int c = 0, int N = 0 );

@@ -8,6 +8,12 @@
 namespace tinybvh
 {
 
+enum ExperimentFlags : int {
+	DEFAULT = 0,
+	MULTICORE = 1,
+	USE_GPU = 2,
+};
+
 struct Timer
 {
 	Timer() { reset(); }
@@ -23,12 +29,13 @@ struct Timer
 class Experiment
 {
 public:
-	Experiment( BVHLayout layout, BuildFlags flags, Scene prims, RaySet rays = RaySet::UNSPECIFIED, const char* view = 0 );
+	Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays = RaySet::UNSPECIFIED, ExperimentFlags = DEFAULT, const char* view = 0 );
 	void Run();
 private:
 	RaySet raySet = UNSPECIFIED;
 	Scene primSet = (Scene)0;
 	AccStruc* bvh = 0;
+	ExperimentFlags flags;
 	char* title = 0;
 	float buildTime = 0; // in seconds.
 	inline static PrimitiveSet* cachedPrimSet[99] = { 0 };

@@ -3,6 +3,13 @@
 namespace tinybvh
 {
 
+bvh::v2::ThreadPool thread_pool;
+bvh::v2::ParallelExecutor executor( thread_pool );
+RTCScene embreeScene;
+RTCDevice embreeDevice;
+RTCGeometry embreeGeom;
+void embreeError( void* userPtr, enum RTCError error, const char* str ) { printf( "error %d: %s\n", error, str ); }
+
 PrimitiveSet::PrimitiveSet( uint32_t scene )
 {
 	if (scene == Scene::CRYTEK_SPONZA)
@@ -50,6 +57,9 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	{
 		exit( 0 ); // invalid scene.
 	}
+	// build dummy indices: e.g. tri 0 is defined by vertices 0, 1 and 2.
+	indices = new uint32_t[primCount * 3];
+	for( uint32_t i = 0; i < primCount * 3; i++ ) indices[i] = i;
 	// construct description
 	switch (scene)
 	{
@@ -62,16 +72,27 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	};
 	// convert to madmann91 data
 	bvhvec4* v = verts;
-	for (int verts = (int)primCount, i = 0; i < verts; i += 3) tris.emplace_back(
+	for (int N = (int)primCount, i = 0; i < N; i += 3) tris.emplace_back(
 		_Vec3( v[i].x, v[i].y, v[i].z ), _Vec3( v[i + 1].x, v[i + 1].y, v[i + 1].z ),
 		_Vec3( v[i + 2].x, v[i + 2].y, v[i + 2].z ) );
-	bvh::v2::ThreadPool thread_pool;
-	bvh::v2::ParallelExecutor executor( thread_pool );
 	bboxes.resize( tris.size() );
 	centers.resize( tris.size() );
 	executor.for_each( 0, tris.size(), [&]( size_t begin, size_t end )
 		{ for (size_t i = begin; i < end; ++i) bboxes[i] = tris[i].get_bbox(),
 		centers[i] = tris[i].get_center(); } );
+	// convert to Embree data
+	embreeDevice = rtcNewDevice( NULL );
+	rtcSetDeviceErrorFunction( embreeDevice, embreeError, NULL );
+	embreeScene = rtcNewScene( embreeDevice );
+	embreeGeom = rtcNewGeometry( embreeDevice, RTC_GEOMETRY_TYPE_TRIANGLE );
+	float* embVertices = (float*)rtcSetNewGeometryBuffer( embreeGeom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, 3 * sizeof( float ), primCount * 3 );
+	unsigned* embIndices = (unsigned*)rtcSetNewGeometryBuffer( embreeGeom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, 3 * sizeof( unsigned ), primCount );
+	for (uint32_t i = 0; i < primCount * 3; i++)
+	{
+		embVertices[i * 3 + 0] = verts[i].x;
+		embVertices[i * 3 + 1] = verts[i].y;
+		embVertices[i * 3 + 2] = verts[i].z, embIndices[i] = i; // Note: not using shared vertices.
+	}
 }
 
 void PrimitiveSet::AddMesh( const char* file, float scale, bvhvec3 pos, int c, int N )

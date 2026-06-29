@@ -5,11 +5,12 @@ namespace tinybvh
 
 enum BuildFlags : int {
 	NO_FLAGS = 0,
-	AVXBUILD = 1,
-	FULLSWEEP = 2,
-	PRESPLIT = 4,
-	SPATIALSPLITS = 8,
-	OPTIMIZE = 16
+	INDEXED = 1,
+	AVXBUILD = 2,
+	FULLSWEEP = 4,
+	PRESPLIT = 8,
+	SPATIALSPLITS = 16,
+	OPTIMIZE = 32,
 };
 
 enum BVHLayout
@@ -21,7 +22,8 @@ enum BVHLayout
 	GPU_BVH,	// BVH2 optimized for GPU traversal
 	GPU_BVH4,	// BVH4 optimized for GPU traversal
 	CWBVH,		// 'Compressed Wide BVH'
-	MADMANN91,	// for reference: Madmann91's BVH lib
+	MADMANN91,	// for reference: latest madmann91 BVH lib
+	EMBREE		// for reference: latest Embree lib.
 };
 
 class PrimitiveSet;
@@ -33,18 +35,22 @@ public:
 	BVHBase* Build( PrimitiveSet* primSet );
 	float SAHCost();
 	float EPOCost();
-	void IntersectBatch( Ray* raySet, int rayCount );
-	void OcclusionBatch( Ray* raySet, int rayCount );
+	void IntersectBatch( __m256* r256, const int rayCount );
+	void IntersectBatchMT( __m256* r256, const int rayCount );
+	void OcclusionBatch( __m256* r256, const int rayCount );
+	void OcclusionBatchMT( __m256* r256, const int rayCount );
 	bvhvec3 SceneExtent() { return bvh->aabbMax - bvh->aabbMin; }
 	int NodeCount();
-private:
 	BVHLayout layout = BVH2;
+private:
 	PrimitiveSet* primSet = 0;
 	BVHBase* bvh = 0;
-	bvh::v2::Bvh<bvh::v2::Node<float,3>> madmannbvh;
 	BuildFlags flags = NO_FLAGS;
 	float sah = 0, epo = 0;
 	char desc[256];
+	bvh::v2::Bvh<bvh::v2::Node<float,3>> madmannbvh;
+	std::vector<PrecomputedTri> precomputed_tris;
+	bool mmTrisPrecomputed = false;
 };
 
 inline BuildFlags operator|( BuildFlags a, BuildFlags b )
