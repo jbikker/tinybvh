@@ -229,17 +229,20 @@ float AccStruc::EPOCost()
 	// We thus have to specialize here for each possible layout.
 }
 
-struct BatchIntersectArgs { AccStruc* accstruc; __m256* r256; int rayCount; int sliceSize; };
+struct BatchIntersectArgs { AccStruc* accstruc; __m256* r256; int rayCount; int slices; int sliceSize; };
 static void IntersectBatchSlice( uint32_t i, void* payload )
 {
 	BatchIntersectArgs* a  = (BatchIntersectArgs*)payload;
-	a->accstruc->IntersectBatch( a->r256 + a->sliceSize * i, a->sliceSize );
+	__m256* first = a->r256 + a->sliceSize * i;
+	int size = a->sliceSize;
+	if (i == a->slices - 1) size = a->rayCount - (a->slices - 1) * a->sliceSize;
+	a->accstruc->IntersectBatch( a->r256 + a->sliceSize * i, size );
 }
 void AccStruc::IntersectBatchMT( __m256* r256, int rayCount )
 {
-	constexpr int slices = 64;
+	int slices = std::thread::hardware_concurrency() * 4;
 	int sliceSize = rayCount / slices;
-	BatchIntersectArgs args = { this, r256, rayCount, sliceSize };
+	BatchIntersectArgs args = { this, r256, rayCount, slices, sliceSize };
 	tinybvh_parallel_for( context, slices, &IntersectBatchSlice, &args );
 }
 

@@ -2,6 +2,9 @@
 
 #include "tiny_bvh.h"
 
+// Settings
+#define ENABLE_OPENCL // required for GPU traversal experiments.
+
 using namespace std;
 using namespace tinybvh;
 
@@ -9,7 +12,7 @@ using namespace tinybvh;
 #include <cstdlib>
 #include <cstdio>
 
-// madmann91's BVH traversal
+// Madmann91's BVH traversal
 #include "bvh/v2/bvh.h"
 #include "bvh/v2/vec.h"
 #include "bvh/v2/ray.h"
@@ -35,3 +38,25 @@ using PrecomputedTri = bvh::v2::PrecomputedTri<float>;
 #include "ray_distribution.h"
 #include "acc_struc.h"
 #include "experiment.h"
+
+// Low-level
+#ifdef _WIN32
+#include <intrin.h>		// for __cpuidex
+#elif defined(__APPLE__) && defined(__MACH__)
+// Keep ENABLE_OPENCL for APPLE
+#elif defined ENABLE_OPENCL
+#undef ENABLE_OPENCL
+#endif
+#if defined(__GNUC__) && defined(__x86_64__)
+#include <cpuid.h>
+#endif
+#ifdef __EMSCRIPTEN__
+#include <emscripten/version.h> // for __EMSCRIPTEN_major__, __EMSCRIPTEN_minor__
+#endif
+#ifdef ENABLE_OPENCL
+#include "tiny_ocl.h"
+#endif
+
+// Forward declarations
+void PrintHeader();
+void InitOpenCL();

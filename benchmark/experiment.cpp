@@ -1,5 +1,16 @@
 #include "headers.h"
 
+#ifdef ENABLE_OPENCL
+extern tinyocl::Kernel* ailalaine_kernel;
+extern tinyocl::Kernel* ailalaine_kernel_any;
+extern tinyocl::Kernel* gpu4way_kernel;
+extern tinyocl::Kernel* gpu4way_kernel_any;
+extern tinyocl::Kernel* cwbvh_kernel;
+extern tinyocl::Kernel* cwbvh_kernel_any;
+cl_event event;
+cl_ulong startTime, endTime;
+#endif
+
 namespace tinybvh
 {
 
@@ -14,10 +25,11 @@ Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, Ra
 		bvh = new AccStruc( layout, buildFlags ); // actual construction is postponed until ::Run.
 		// Create description.
 		title = new char[1024];
-		snprintf( title, 1024, "BVH build measurement - Layout: %s - Scene: %s (%i tris)",
+		snprintf( title, 1024, "BVH BUILD%s - %s - %s (%ik tris)",
+			(flags & MULTICORE) ? " (MT)" : ((flags & USE_GPU) ? " (GPU)" : ""),
 			bvh->GetDescription(),
 			cachedPrimSet[primSet]->GetDescription(),
-			cachedPrimSet[primSet]->primCount );
+			cachedPrimSet[primSet]->primCount / 1000 );
 	}
 	else
 	{
@@ -30,10 +42,11 @@ Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, Ra
 		bvh = new AccStruc( layout, buildFlags ); // actual construction is postponed until ::Run.
 		// Create description.
 		title = new char[1024];
-		snprintf( title, 1024, "BVH traversal measurement - Layout: %s - Scene: %s (%i tris) - %s",
+		snprintf( title, 1024, "BVH TRACE%s - %s - %s (%ik tris) - %s",
+			(flags & MULTICORE) ? " (MT)" : ((flags & USE_GPU) ? " (GPU)" : ""),
 			bvh->GetDescription(),
 			cachedPrimSet[primSet]->GetDescription(),
-			cachedPrimSet[primSet]->primCount,
+			cachedPrimSet[primSet]->primCount / 1000,
 			cachedRaySet[raySet]->GetDescription() );
 		// Save a thumbnail of the scene / rayset if requested. Must be .tga.
 		if (view)
@@ -49,8 +62,8 @@ Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, Ra
 			{
 				int x = i % imgSize, y = i / imgSize, p = x + (imgSize - 1 - y) * imgSize; // flip over y
 				Ray r( cachedRaySet[raySet]->O[p], cachedRaySet[raySet]->D[p], 1e34f );
-				bvh->IntersectBatch( (__m256*)&r, 1 );
-				int c = (int)(255 - tinybvh_min( 255.0f, r.hit.t * distScale ) );
+				bvh->IntersectBatch( (__m256*) & r, 1 );
+				int c = (int)(255 - tinybvh_min( 255.0f, r.hit.t * distScale ));
 				fputc( c, f );
 			}
 			fclose( f );
@@ -71,8 +84,8 @@ void Experiment::Run()
 		int N = cachedRaySet[raySet]->rayCount;
 		__m256* extensionRays = (__m256*)malloc64( N * sizeof( Ray ) );
 		__m256* shadowRays = (__m256*)malloc64( N * sizeof( Ray ) );
-		bvhvec3* O = cachedRaySet[raySet]->O, *D = cachedRaySet[raySet]->D;
-		float* tmin = cachedRaySet[raySet]->tmin, *tmax = cachedRaySet[raySet]->tmax;
+		bvhvec3* O = cachedRaySet[raySet]->O, * D = cachedRaySet[raySet]->D;
+		float* tmin = cachedRaySet[raySet]->tmin, * tmax = cachedRaySet[raySet]->tmax;
 		for (int i = 0; i < N; i++)
 		{
 			Ray r( O[i] + D[i] * tmin[i], D[i], tmax[i] - tmin[i] );
@@ -81,34 +94,228 @@ void Experiment::Run()
 			memcpy( shadowRays + 2 * i, &r, 64 );
 		}
 		// trace extension rays
-		bvh->IntersectBatch( extensionRays, N ); // warm caches, precompute data
-		int runs = 0;
+		float traceTime;
 		Timer t;
-		while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
+		if (flags & USE_GPU && bvh->layout == GPU_BVH)
 		{
-			if (flags & MULTICORE) bvh->IntersectBatchMT( extensionRays, N ); else bvh->IntersectBatch( extensionRays, N );
-			runs++;
+			// trace 'first hit' rays on GPU
+			BVH_GPU* bvh_gpu = (BVH_GPU*)bvh->GetBVH();
+			// create OpenCL buffers for the BVH data calculated by tiny_bvh.h
+			tinyocl::Buffer gpuNodes( bvh_gpu->usedNodes * sizeof( BVH_GPU::BVHNode ), bvh_gpu->bvhNode );
+			tinyocl::Buffer idxData( bvh_gpu->idxCount * sizeof( unsigned ), bvh_gpu->bvh.primIdx );
+			tinyocl::Buffer triData( bvh_gpu->triCount * 3 * sizeof( tinybvh::bvhvec4 ), cachedPrimSet[primSet]->verts );
+			gpuNodes.CopyToDevice();
+			idxData.CopyToDevice();
+			triData.CopyToDevice();
+			// create rays and send them to the gpu side
+			tinyocl::Buffer rayData( N * 64 /* size of Ray on GPU */ );
+			for (int i = 0; i < N; i++)
+				memcpy( (unsigned char*)rayData.GetHostPtr() + 64 * i, &extensionRays[i], 64 );
+			rayData.CopyToDevice();
+			// start timer and start kernel on gpu
+			traceTime = 0;
+			ailalaine_kernel->SetArguments( &gpuNodes, &idxData, &triData, &rayData );
+			for (int pass = 0; pass < 25; pass++)
+			{
+				ailalaine_kernel->Run( N, 64, 0, &event );
+				clWaitForEvents( 1, &event ); // OpenCL kernsl run asynchronously
+				clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
+				clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );
+				if (pass == 0) continue; // first pass is for cache warming
+				traceTime += (endTime - startTime) * 1e-9f; // event timing is in nanoseconds
+			}
+			// get results from GPU for verification.
+			// rayData.CopyFromDevice();
+			traceTime /= 24.0f;
 		}
-		float traceTime = t.elapsed() * (1.0f / runs); // average of runs.
+		else if (flags & USE_GPU && bvh->layout == GPU_BVH4)
+		{
+			// trace 'first hit' rays on GPU using a 4-wide BVH
+			BVH4_GPU* bvh4_gpu = (BVH4_GPU*)bvh->GetBVH();
+			tinyocl::Buffer gpuNodes( bvh4_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh4_gpu->bvh4Data );
+			gpuNodes.CopyToDevice();
+			// create rays and send them to the gpu side
+			tinyocl::Buffer rayData( N * 64 /* size of Ray on GPU */ );
+			for (int i = 0; i < N; i++)
+				memcpy( (unsigned char*)rayData.GetHostPtr() + 64 * i, &extensionRays[i], 64 );
+			rayData.CopyToDevice();
+			// start timer and start kernel on gpu
+			traceTime = 0;
+			gpu4way_kernel->SetArguments( &gpuNodes, &rayData );
+			for (int pass = 0; pass < 25; pass++)
+			{
+				gpu4way_kernel->Run( N, 64, 0, &event );
+				clWaitForEvents( 1, &event ); // OpenCL kernsl run asynchronously
+				clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
+				clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );
+				if (pass == 0) continue; // first pass is for cache warming
+				traceTime += (endTime - startTime) * 1e-9f; // event timing is in nanoseconds
+			}
+			// get results from GPU for verification.
+			// rayData.CopyFromDevice();
+			traceTime /= 24.0f;
+		}
+		else if (flags & USE_GPU && bvh->layout == CWBVH)
+		{
+			// trace 'first hit' rays on GPU using CWBVH
+			BVH8_CWBVH* cwbvh = (BVH8_CWBVH*)bvh->GetBVH();
+			tinyocl::Buffer cwbvhNodes( cwbvh->usedBlocks * sizeof( tinybvh::bvhvec4 ), cwbvh->bvh8Data );
+		#ifdef CWBVH_COMPRESSED_TRIS
+			tinyocl::Buffer cwbvhTris( cwbvh->idxCount * 4 * sizeof( tinybvh::bvhvec4 ), cwbvh->bvh8Tris );
+		#else
+			tinyocl::Buffer cwbvhTris( cwbvh->idxCount * 3 * sizeof( tinybvh::bvhvec4 ), cwbvh->bvh8Tris );
+		#endif
+			cwbvhNodes.CopyToDevice();
+			cwbvhTris.CopyToDevice();
+			// create rays and send them to the gpu side
+			tinyocl::Buffer rayData( N * 64 /* size of Ray on GPU */ );
+			for (int i = 0; i < N; i++)
+				memcpy( (unsigned char*)rayData.GetHostPtr() + 64 * i, &extensionRays[i], 64 );
+			rayData.CopyToDevice();
+			// start timer and start kernel on gpu
+			traceTime = 0;
+			cwbvh_kernel->SetArguments( &cwbvhNodes, &cwbvhTris, &rayData );
+			for (int pass = 0; pass < 25; pass++)
+			{
+				cwbvh_kernel->Run( N, 64, 0, &event ); // for now, todo.
+				clWaitForEvents( 1, &event ); // OpenCL kernsl run asynchronously
+				clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
+				clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );
+				if (pass == 0) continue; // first pass is for cache warming
+				traceTime += (endTime - startTime) * 1e-9f; // event timing is in nanoseconds
+			}
+			// get results from GPU for verification.
+			// rayData.CopyFromDevice();
+			traceTime /= 24.0f;
+		}
+		else
+		{
+			// trace 'first hit' rays on CPU
+			bvh->IntersectBatch( extensionRays, N ); // warm caches, precompute data
+			int runs = 0;
+			t.reset();
+			while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
+			{
+				if (flags & MULTICORE) bvh->IntersectBatchMT( extensionRays, N ); else bvh->IntersectBatch( extensionRays, N );
+				runs++;
+			}
+			traceTime = t.elapsed() * (1.0f / runs); // average of runs.
+		}
 		float raysPerSecond = (float)N / traceTime;
 		float mraysPerSecond = raysPerSecond / RAY_BATCH_SIZE;
 		printf( "%s\nfind nearest: %.2fM, ", title, mraysPerSecond );
-		// trace shadow rays
+		// trace 'any hit' rays
 		if (bvh->layout == MADMANN91)
 		{
 			printf( "any hit: n/a\n" );
 		}
 		else
 		{
-			runs = 0;
-			bvh->OcclusionBatch( shadowRays, N ); // warm caches
-			t.reset();
-			while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
+			if (flags & USE_GPU && bvh->layout == GPU_BVH)
 			{
-				if (flags & MULTICORE) bvh->OcclusionBatchMT( extensionRays, N ); else bvh->OcclusionBatch( shadowRays, N );
-				runs++;
+				// trace 'any hit' rays on GPU
+				BVH_GPU* bvh_gpu = (BVH_GPU*)bvh->GetBVH();
+				// create OpenCL buffers for the BVH data calculated by tiny_bvh.h
+				tinyocl::Buffer gpuNodes( bvh_gpu->usedNodes * sizeof( BVH_GPU::BVHNode ), bvh_gpu->bvhNode );
+				tinyocl::Buffer idxData( bvh_gpu->idxCount * sizeof( unsigned ), bvh_gpu->bvh.primIdx );
+				tinyocl::Buffer triData( bvh_gpu->triCount * 3 * sizeof( tinybvh::bvhvec4 ), cachedPrimSet[primSet]->verts );
+				gpuNodes.CopyToDevice();
+				idxData.CopyToDevice();
+				triData.CopyToDevice();
+				// create rays and send them to the gpu side
+				tinyocl::Buffer rayData( N * 64 /* size of Ray on GPU */ );
+				for (int i = 0; i < N; i++)
+					memcpy( (unsigned char*)rayData.GetHostPtr() + 64 * i, &shadowRays[i], 64 );
+				rayData.CopyToDevice();
+				// start timer and start kernel on gpu
+				traceTime = 0;
+				ailalaine_kernel_any->SetArguments( &gpuNodes, &idxData, &triData, &rayData );
+				for (int pass = 0; pass < 25; pass++)
+				{
+					ailalaine_kernel_any->Run( N, 64, 0, &event );
+					clWaitForEvents( 1, &event ); // OpenCL kernsl run asynchronously
+					clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
+					clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );
+					if (pass == 0) continue; // first pass is for cache warming
+					traceTime += (endTime - startTime) * 1e-9f; // event timing is in nanoseconds
+				}
+				// get results from GPU for verification.
+				// rayData.CopyFromDevice();
+				traceTime /= 24.0f;
 			}
-			traceTime = t.elapsed() * (1.0f / runs); // average of runs.
+			else if (flags & USE_GPU && bvh->layout == GPU_BVH4)
+			{
+				// trace 'any hit' rays on GPU, using a 4-way BVH
+				BVH4_GPU* bvh4_gpu = (BVH4_GPU*)bvh->GetBVH();
+				tinyocl::Buffer gpuNodes( bvh4_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh4_gpu->bvh4Data );
+				gpuNodes.CopyToDevice();
+				// create rays and send them to the gpu side
+				tinyocl::Buffer rayData( N * 64 /* size of Ray on GPU */ );
+				for (int i = 0; i < N; i++)
+					memcpy( (unsigned char*)rayData.GetHostPtr() + 64 * i, &extensionRays[i], 64 );
+				rayData.CopyToDevice();
+				// start timer and start kernel on gpu
+				traceTime = 0;
+				gpu4way_kernel_any->SetArguments( &gpuNodes, &rayData );
+				for (int pass = 0; pass < 25; pass++)
+				{
+					gpu4way_kernel_any->Run( N, 64, 0, &event );
+					clWaitForEvents( 1, &event ); // OpenCL kernsl run asynchronously
+					clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
+					clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );
+					if (pass == 0) continue; // first pass is for cache warming
+					traceTime += (endTime - startTime) * 1e-9f; // event timing is in nanoseconds
+				}
+				// get results from GPU for verification.
+				// rayData.CopyFromDevice();
+				traceTime /= 24.0f;
+			}
+			else if (flags & USE_GPU && bvh->layout == CWBVH)
+			{
+				// trace 'first hit' rays on GPU using CWBVH
+				BVH8_CWBVH* cwbvh = (BVH8_CWBVH*)bvh->GetBVH();
+				tinyocl::Buffer cwbvhNodes( cwbvh->usedBlocks * sizeof( tinybvh::bvhvec4 ), cwbvh->bvh8Data );
+			#ifdef CWBVH_COMPRESSED_TRIS
+				tinyocl::Buffer cwbvhTris( cwbvh->idxCount * 4 * sizeof( tinybvh::bvhvec4 ), cwbvh->bvh8Tris );
+			#else
+				tinyocl::Buffer cwbvhTris( cwbvh->idxCount * 3 * sizeof( tinybvh::bvhvec4 ), cwbvh->bvh8Tris );
+			#endif
+				cwbvhNodes.CopyToDevice();
+				cwbvhTris.CopyToDevice();
+				// create rays and send them to the gpu side
+				tinyocl::Buffer rayData( N * 64 /* size of Ray on GPU */ );
+				for (int i = 0; i < N; i++)
+					memcpy( (unsigned char*)rayData.GetHostPtr() + 64 * i, &extensionRays[i], 64 );
+				rayData.CopyToDevice();
+				// start timer and start kernel on gpu
+				traceTime = 0;
+				cwbvh_kernel_any->SetArguments( &cwbvhNodes, &cwbvhTris, &rayData );
+				for (int pass = 0; pass < 25; pass++)
+				{
+					cwbvh_kernel_any->Run( N, 64, 0, &event ); // for now, todo.
+					clWaitForEvents( 1, &event ); // OpenCL kernsl run asynchronously
+					clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
+					clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );
+					if (pass == 0) continue; // first pass is for cache warming
+					traceTime += (endTime - startTime) * 1e-9f; // event timing is in nanoseconds
+				}
+				// get results from GPU for verification.
+				// rayData.CopyFromDevice();
+				traceTime /= 24.0f;
+			}
+			else
+			{
+				// trace 'any hit' rays on CPU
+				int runs = 0;
+				bvh->OcclusionBatch( shadowRays, N ); // warm caches
+				t.reset();
+				while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
+				{
+					if (flags & MULTICORE) bvh->OcclusionBatchMT( extensionRays, N ); else bvh->OcclusionBatch( shadowRays, N );
+					runs++;
+				}
+				traceTime = t.elapsed() * (1.0f / runs); // average of runs.
+			}
 			raysPerSecond = (float)N / traceTime;
 			mraysPerSecond = raysPerSecond / RAY_BATCH_SIZE;
 			printf( "any hit: %.2fM\n", mraysPerSecond );

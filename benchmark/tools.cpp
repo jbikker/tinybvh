@@ -1,0 +1,66 @@
+#include "headers.h"
+
+#ifdef ENABLE_OPENCL
+#define TINY_OCL_IMPLEMENTATION
+#include "tiny_ocl.h"
+tinyocl::Kernel* ailalaine_kernel = 0;
+tinyocl::Kernel* ailalaine_kernel_any = 0;
+tinyocl::Kernel* gpu4way_kernel = 0;
+tinyocl::Kernel* gpu4way_kernel_any = 0;
+tinyocl::Kernel* cwbvh_kernel = 0;
+tinyocl::Kernel* cwbvh_kernel_any = 0;
+#endif
+
+void PrintHeader()
+{
+	int minor = TINY_BVH_VERSION_MINOR;
+	int major = TINY_BVH_VERSION_MAJOR;
+	int sub = TINY_BVH_VERSION_SUB;
+	printf( "TINY_BVH BENCHMARK TOOL\n" );
+	printf( "library version: %i.%i.%i performance statistics ", major, minor, sub );
+
+	// determine compiler
+#ifdef _MSC_VER
+	printf( "(MSVC %i build)\n", _MSC_VER );
+#elif defined __EMSCRIPTEN__
+	// EMSCRIPTEN needs to be before clang or gcc
+	printf( "(emcc %i.%i build)\n", __EMSCRIPTEN_major__, __EMSCRIPTEN_minor__ );
+#elif defined __clang__
+	printf( "(clang %i.%i build)\n", __clang_major__, __clang_minor__ );
+#elif defined __GNUC__
+	printf( "(gcc %i.%i build)\n", __GNUC__, __GNUC_MINOR__ );
+#else
+	printf( "\n" );
+#endif
+
+	// determine what CPU is running the tests.
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined (_WIN32) || defined(__GNUC__))
+	char model[64]{};
+	for (unsigned i = 0; i < 3; ++i)
+	{
+	#ifdef _WIN32
+		__cpuidex( (int*)(model + i * 16), i + 0x80000002, 0 );
+	#elif defined(__GNUC__)
+		__get_cpuid( i + 0x80000002,
+			(unsigned*)model + i * 4 + 0, (unsigned*)model + i * 4 + 1,
+			(unsigned*)model + i * 4 + 2, (unsigned*)model + i * 4 + 3 );
+	#endif
+	}
+	printf( "running on %s\n", model );
+#endif
+	printf( "----------------------------------------------------------------\n" );
+}
+
+void InitOpenCL()
+{
+#ifdef ENABLE_OPENCL
+	// load and compile the OpenCL kernel code
+	ailalaine_kernel = new tinyocl::Kernel( "traverse.cl", "batch_ailalaine" );
+	ailalaine_kernel_any = new tinyocl::Kernel( "traverse.cl", "batch_ailalaine_any" );
+	gpu4way_kernel = new tinyocl::Kernel( "traverse.cl", "batch_gpu4way" );
+	gpu4way_kernel_any = new tinyocl::Kernel( "traverse.cl", "batch_gpu4way_any" );
+	cwbvh_kernel = new tinyocl::Kernel( "traverse.cl", "batch_cwbvh" );
+	cwbvh_kernel_any = new tinyocl::Kernel( "traverse.cl", "batch_cwbvh_any" );
+	printf( "----------------------------------------------------------------\n" );
+#endif
+}

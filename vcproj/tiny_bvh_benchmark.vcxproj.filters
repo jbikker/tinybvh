@@ -15,6 +15,9 @@
       <Filter>tool</Filter>
     </ClCompile>
     <ClCompile Include="..\benchmark\tiny_bvh.cpp" />
+    <ClCompile Include="..\benchmark\tools.cpp">
+      <Filter>tool</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\tiny_bvh.h" />

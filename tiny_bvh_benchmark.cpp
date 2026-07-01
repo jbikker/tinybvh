@@ -23,9 +23,11 @@
 
 int main()
 {
+	PrintHeader(); // see tools.cpp
+	InitOpenCL(); // does nothing if disabled; see tools.cpp
 	vector<Experiment*> experiment;
 	// construct list of experiments
-	Scene scene = BISTRO_EXTERIOR;
+	Scene scene = CRYTEK_SPONZA;
 #if 0
 	// 1. BVH construction
 	experiment.push_back( new Experiment( BVH2, AVXBUILD, scene ) );
@@ -36,7 +38,9 @@ int main()
 	experiment.push_back( new Experiment( MADMANN91, NO_FLAGS, scene ) );
 #else
 	// 2. BVH traversal
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( GPU_BVH, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU ) );
 	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1, MULTICORE ) );
 	experiment.push_back( new Experiment( EMBREE, NO_FLAGS, scene, PRIMARY_VIEW1  ) );
 	experiment.push_back( new Experiment( EMBREE, NO_FLAGS, scene, PRIMARY_VIEW1, MULTICORE  ) );

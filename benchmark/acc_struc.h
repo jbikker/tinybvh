@@ -33,6 +33,7 @@ public:
 	AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags );
 	char* GetDescription() { return desc; }
 	BVHBase* Build( PrimitiveSet* primSet );
+	BVHBase* GetBVH() { return bvh; }
 	float SAHCost();
 	float EPOCost();
 	void IntersectBatch( __m256* r256, const int rayCount );
