@@ -32,6 +32,7 @@ public:
 	Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays = RaySet::UNSPECIFIED, ExperimentFlags = DEFAULT, const char* view = 0 );
 	void Run();
 private:
+	void WriteImage( char* raySet );
 	float RunGPU_BVH2( char* raySet, const int N );
 	float RunGPU_BVH2_Any( char* raySet, const int N );
 	float RunGPU_BVH4( char* raySet, const int N );

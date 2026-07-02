@@ -16,7 +16,7 @@ bvhvec3 DiffuseReflection( const bvhvec3 N )
 	{
 		R = bvhvec3( RandomFloat() * 2 - 1, RandomFloat() * 2 - 1, RandomFloat() * 2 - 1 );
 	} while (tinybvh_dot( R, R ) > 1);
-	return tinybvh_normalize( tinybvh_dot( R, N ) < 0 ? R : -R );
+	return tinybvh_normalize( tinybvh_dot( R, N ) > 0 ? R : -R );
 }
 
 RayDistribution::RayDistribution( RaySet r, PrimitiveSet* p )
@@ -76,7 +76,7 @@ RayDistribution::RayDistribution( RaySet r, PrimitiveSet* p )
 			const uint32_t t = ray.hit.prim * 3;
 			const bvhvec3 a = p->verts[t], b = p->verts[t + 1], c = p->verts[t + 2];
 			bvhvec3 N = tinybvh_normalize( tinybvh_cross( b - a, a - c ) );
-			if (tinybvh_dot( ray.D, N ) > 1) N *= -1.0f;
+			if (tinybvh_dot( ray.D, N ) > 0) N *= -1.0f;
 			const bvhvec3 R = DiffuseReflection( N );
 			O[i] = I + epsilon * N, D[i] = R, tmin[i] = 0, tmax[i] = BVH_FAR;
 			if (++i == RAY_BATCH_SIZE) goto diffuse_batch_full;
@@ -110,7 +110,7 @@ RayDistribution::RayDistribution( RaySet r, PrimitiveSet* p )
 			const uint32_t t = ray.hit.prim * 3;
 			const bvhvec3 a = p->verts[t], b = p->verts[t + 1], c = p->verts[t + 2];
 			bvhvec3 N = tinybvh_normalize( tinybvh_cross( b - a, a - c ) );
-			if (tinybvh_dot( ray.D, N ) > 1) N *= -1.0f;
+			if (tinybvh_dot( ray.D, N ) > 0) N *= -1.0f;
 			for( int j = 0; j < 4; j++ )
 			{
 				const bvhvec3 R = DiffuseReflection( N );

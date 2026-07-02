@@ -11,6 +11,9 @@ enum BuildFlags : int {
 	PRESPLIT = 8,
 	SPATIALSPLITS = 16,
 	OPTIMIZE = 32,
+	LOW = 64, // low, medium, high: For Embree and Madmann91.
+	MEDIUM = 128,
+	HIGH = 256 
 };
 
 enum BVHLayout

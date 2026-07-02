@@ -61,6 +61,9 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		else if (f & BuildFlags::SPATIALSPLITS) { strncat( desc, "SBVH", 128 ); f -= BuildFlags::SPATIALSPLITS; }
 		else if (f & BuildFlags::PRESPLIT) { strncat( desc, "presplit", 128 ); f -= BuildFlags::PRESPLIT; }
 		else if (f & BuildFlags::OPTIMIZE) { strncat( desc, "optimize", 128 ); f -= BuildFlags::OPTIMIZE; }
+		else if (f & BuildFlags::LOW) { strncat( desc, "LOW", 128 ); f -= BuildFlags::LOW; }
+		else if (f & BuildFlags::MEDIUM) { strncat( desc, "MEDIUM", 128 ); f -= BuildFlags::MEDIUM; }
+		else if (f & BuildFlags::HIGH) { strncat( desc, "HIGH", 128 ); f -= BuildFlags::HIGH; }
 		first = false;
 	}
 	if (flags) strncat( desc, ")", 128 );
@@ -136,8 +139,8 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 		bvh::v2::ParallelExecutor executor( thread_pool );
 		typename bvh::v2::DefaultBuilder<_Node>::Config config;
 		// abuse tinybvh flags to steer madmann91 build speed / quality tradeoff.
-		if (flags & OPTIMIZE) config.quality = bvh::v2::DefaultBuilder<_Node>::Quality::Medium;
-		else if (flags & SPATIALSPLITS) config.quality = bvh::v2::DefaultBuilder<_Node>::Quality::High;
+		if (flags & MEDIUM) config.quality = bvh::v2::DefaultBuilder<_Node>::Quality::Medium;
+		else if (flags & HIGH) config.quality = bvh::v2::DefaultBuilder<_Node>::Quality::High;
 		else config.quality = bvh::v2::DefaultBuilder<_Node>::Quality::Low;
 		madmannbvh = bvh::v2::DefaultBuilder<_Node>::build( thread_pool, primSet->bboxes, primSet->centers, config );
 		// precompute tris if not done yet
@@ -155,11 +158,14 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	}
 	case EMBREE:
 	{
-		rtcSetGeometryBuildQuality( embreeGeom, RTC_BUILD_QUALITY_MEDIUM );
+		RTCBuildQuality q = RTC_BUILD_QUALITY_LOW;
+		if (flags & MEDIUM) q = RTC_BUILD_QUALITY_MEDIUM;
+		if (flags & HIGH) q = RTC_BUILD_QUALITY_HIGH;
+		rtcSetGeometryBuildQuality( embreeGeom, q );
 		rtcCommitGeometry( embreeGeom );
 		rtcAttachGeometry( embreeScene, embreeGeom );
 		rtcReleaseGeometry( embreeGeom );
-		rtcSetSceneBuildQuality( embreeScene, RTC_BUILD_QUALITY_MEDIUM );
+		rtcSetSceneBuildQuality( embreeScene, q );
 		rtcCommitScene( embreeScene );
 		break;
 	}
@@ -248,8 +254,8 @@ void AccStruc::IntersectBatchMT( char* rayData, int rayCount )
 
 float AccStruc::IntersectBatch( char* rayData, int rayCount )
 {
-	Intersection origHit = ((Ray*)rayData)[0].hit;
-	float dist = origHit.t;
+	float origDist = ((Ray*)rayData)[0].hit.t;
+	float dist = origDist;
 	switch (layout)
 	{
 	case BVH2:
@@ -258,12 +264,12 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 		if (rayCount == 1)
 		{
 			accstruc->Intersect( ((Ray*)rayData)[0] );
-			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit = origHit; // reset
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit.t = origDist; // reset
 		}
 		else for (int i = 0; i < rayCount; i++, rayData += 64)
 		{
 			accstruc->Intersect( ((Ray*)rayData)[0] );
-			((Ray*)rayData)[0].hit = origHit; // reset
+			((Ray*)rayData)[0].hit.t = origDist; // reset
 		}
 		break;
 	}
@@ -273,12 +279,12 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 		if (rayCount == 1)
 		{
 			accstruc->Intersect( ((Ray*)rayData)[0] );
-			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit = origHit; // reset
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit.t = origDist; // reset
 		}
 		else for (int i = 0; i < rayCount; i++, rayData += 64)
 		{
 			accstruc->Intersect( ((Ray*)rayData)[0] );
-			((Ray*)rayData)[0].hit = origHit; // reset
+			((Ray*)rayData)[0].hit.t = origDist; // reset
 		}
 		break;
 	}
@@ -288,12 +294,12 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 		if (rayCount == 1)
 		{
 			accstruc->Intersect( ((Ray*)rayData)[0] );
-			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit = origHit; // reset
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit.t = origDist; // reset
 		}
 		else for (int i = 0; i < rayCount; i++, rayData += 64)
 		{
 			accstruc->Intersect( ((Ray*)rayData)[0] );
-			((Ray*)rayData)[0].hit = origHit; // reset
+			((Ray*)rayData)[0].hit.t = origDist; // reset
 		}
 		break;
 	}
@@ -303,12 +309,12 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 		if (rayCount == 1)
 		{
 			accstruc->Intersect( ((Ray*)rayData)[0] );
-			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit = origHit; // reset
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit.t = origDist; // reset
 		}
 		else for (int i = 0; i < rayCount; i++, rayData += 64)
 		{
 			accstruc->Intersect( ((Ray*)rayData)[0] );
-			((Ray*)rayData)[0].hit = origHit; // reset
+			((Ray*)rayData)[0].hit.t = origDist; // reset
 		}
 		break;
 	}
@@ -318,12 +324,12 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 		if (rayCount == 1)
 		{
 			accstruc->Intersect( ((Ray*)rayData)[0] );
-			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit = origHit; // reset
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit.t = origDist; // reset
 		}
 		else for (int i = 0; i < rayCount; i++, rayData += 64)
 		{
 			accstruc->Intersect( ((Ray*)rayData)[0] );
-			((Ray*)rayData)[0].hit = origHit; // reset
+			((Ray*)rayData)[0].hit.t = origDist; // reset
 		}
 		break;
 	}
@@ -333,12 +339,12 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 		if (rayCount == 1)
 		{
 			accstruc->Intersect( ((Ray*)rayData)[0] );
-			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit = origHit; // reset
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit.t = origDist; // reset
 		}
 		else for (int i = 0; i < rayCount; i++, rayData += 64)
 		{
 			accstruc->Intersect( ((Ray*)rayData)[0] );
-			((Ray*)rayData)[0].hit = origHit; // reset
+			((Ray*)rayData)[0].hit.t = origDist; // reset
 		}
 		break;
 	}
