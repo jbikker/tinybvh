@@ -66,8 +66,9 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 	if (flags) strncat( desc, ")", 128 );
 }
 
-BVHBase* AccStruc::Build( PrimitiveSet* primSet )
+BVHBase* AccStruc::Build( PrimitiveSet* prims )
 {
+	primSet = prims;
 	if (bvh)
 	{
 		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
@@ -229,83 +230,140 @@ float AccStruc::EPOCost()
 	// We thus have to specialize here for each possible layout.
 }
 
-struct BatchIntersectArgs { AccStruc* accstruc; __m256* r256; int rayCount; int slices; int sliceSize; };
+struct BatchIntersectArgs { AccStruc* accstruc; char* rayData; int rayCount; int slices; int sliceSize; };
 static void IntersectBatchSlice( uint32_t i, void* payload )
 {
-	BatchIntersectArgs* a  = (BatchIntersectArgs*)payload;
-	__m256* first = a->r256 + a->sliceSize * i;
+	BatchIntersectArgs* a = (BatchIntersectArgs*)payload;
 	int size = a->sliceSize;
 	if (i == a->slices - 1) size = a->rayCount - (a->slices - 1) * a->sliceSize;
-	a->accstruc->IntersectBatch( a->r256 + a->sliceSize * i, size );
+	a->accstruc->IntersectBatch( a->rayData + a->sliceSize * i * 64, size );
 }
-void AccStruc::IntersectBatchMT( __m256* r256, int rayCount )
+void AccStruc::IntersectBatchMT( char* rayData, int rayCount )
 {
 	int slices = std::thread::hardware_concurrency() * 4;
 	int sliceSize = rayCount / slices;
-	BatchIntersectArgs args = { this, r256, rayCount, slices, sliceSize };
+	BatchIntersectArgs args = { this, rayData, rayCount, slices, sliceSize };
 	tinybvh_parallel_for( context, slices, &IntersectBatchSlice, &args );
 }
 
-void AccStruc::IntersectBatch( __m256* r256, int rayCount )
+float AccStruc::IntersectBatch( char* rayData, int rayCount )
 {
+	Intersection origHit = ((Ray*)rayData)[0].hit;
+	float dist = origHit.t;
 	switch (layout)
 	{
 	case BVH2:
 	{
 		BVH* accstruc = (BVH*)bvh;
-		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->Intersect( ((Ray*)r256)[0] );
+		if (rayCount == 1)
+		{
+			accstruc->Intersect( ((Ray*)rayData)[0] );
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit = origHit; // reset
+		}
+		else for (int i = 0; i < rayCount; i++, rayData += 64)
+		{
+			accstruc->Intersect( ((Ray*)rayData)[0] );
+			((Ray*)rayData)[0].hit = origHit; // reset
+		}
 		break;
 	}
 	case BVH4_WIVE:
 	{
 		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
-		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->Intersect( ((Ray*)r256)[0] );
+		if (rayCount == 1)
+		{
+			accstruc->Intersect( ((Ray*)rayData)[0] );
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit = origHit; // reset
+		}
+		else for (int i = 0; i < rayCount; i++, rayData += 64)
+		{
+			accstruc->Intersect( ((Ray*)rayData)[0] );
+			((Ray*)rayData)[0].hit = origHit; // reset
+		}
 		break;
 	}
 	case BVH8_WIVE:
 	{
 		BVH8_CPU* accstruc = (BVH8_CPU*)bvh;
-		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->Intersect( ((Ray*)r256)[0] );
+		if (rayCount == 1)
+		{
+			accstruc->Intersect( ((Ray*)rayData)[0] );
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit = origHit; // reset
+		}
+		else for (int i = 0; i < rayCount; i++, rayData += 64)
+		{
+			accstruc->Intersect( ((Ray*)rayData)[0] );
+			((Ray*)rayData)[0].hit = origHit; // reset
+		}
 		break;
 	}
 	case GPU_BVH:
 	{
 		BVH_GPU* accstruc = (BVH_GPU*)bvh;
-		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->Intersect( ((Ray*)r256)[0] );
+		if (rayCount == 1)
+		{
+			accstruc->Intersect( ((Ray*)rayData)[0] );
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit = origHit; // reset
+		}
+		else for (int i = 0; i < rayCount; i++, rayData += 64)
+		{
+			accstruc->Intersect( ((Ray*)rayData)[0] );
+			((Ray*)rayData)[0].hit = origHit; // reset
+		}
 		break;
 	}
 	case GPU_BVH4:
 	{
 		BVH4_GPU* accstruc = (BVH4_GPU*)bvh;
-		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->Intersect( ((Ray*)r256)[0] );
+		if (rayCount == 1)
+		{
+			accstruc->Intersect( ((Ray*)rayData)[0] );
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit = origHit; // reset
+		}
+		else for (int i = 0; i < rayCount; i++, rayData += 64)
+		{
+			accstruc->Intersect( ((Ray*)rayData)[0] );
+			((Ray*)rayData)[0].hit = origHit; // reset
+		}
 		break;
 	}
 	case CWBVH:
 	{
 		BVH8_CWBVH* accstruc = (BVH8_CWBVH*)bvh;
-		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->Intersect( ((Ray*)r256)[0] );
+		if (rayCount == 1)
+		{
+			accstruc->Intersect( ((Ray*)rayData)[0] );
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit = origHit; // reset
+		}
+		else for (int i = 0; i < rayCount; i++, rayData += 64)
+		{
+			accstruc->Intersect( ((Ray*)rayData)[0] );
+			((Ray*)rayData)[0].hit = origHit; // reset
+		}
 		break;
 	}
 	case MADMANN91:
 	{
 		// for this experiment we use ideal circumstances for the Manmann91 library:
 		// - Precomputed triangle data (Woop?), precomputation not included in timing;
-		// - The fast traversal path (rather than the robust one);
+		// - The fast traversal path (rather than the robust one).
 		static constexpr size_t invalid_id = 9999999;
 		bvh::v2::SmallStack<_Bvh::Index, 64> stack;
 		float u, v;
+		std::optional<std::tuple<float,float,float>> hit;
 		for (int i = 0; i < rayCount; i++)
 		{
-			const Ray& r = ((Ray*)r256)[0];
+			const Ray& r = *(Ray*)(rayData + i * 64);
 			size_t prim_id = invalid_id;
 			_Ray ray( _Vec3( r.O.x, r.O.y, r.O.z ), _Vec3( r.D.x, r.D.y, r.D.z ) );
 			madmannbvh.intersect<false, false>( ray, madmannbvh.get_root().index, stack, [&]( size_t begin, size_t end )
 				{
 					for (size_t i = begin; i < end; ++i)
-						if (auto hit = precomputed_tris[i].intersect( ray )) prim_id = i, std::tie( ray.tmax, u, v ) = *hit;
+						if (hit = precomputed_tris[i].intersect( ray )) prim_id = i, std::tie( ray.tmax, u, v ) = *hit;
 					return prim_id != invalid_id;
 				} );
 		}
+		dist = hit.has_value() ? get<0>(hit.value()) : 1e30f;
 		break;
 	}
 	case EMBREE:
@@ -313,7 +371,7 @@ void AccStruc::IntersectBatch( __m256* r256, int rayCount )
 		RTCRayHit embreeRay;
 		for (int i = 0; i < rayCount; i++)
 		{
-			const Ray& r = ((Ray*)r256)[0];
+			const Ray& r = *(Ray*)(rayData + i * 64);
 			embreeRay.ray.org_x = r.O.x, embreeRay.ray.org_y = r.O.y, embreeRay.ray.org_z = r.O.z;
 			embreeRay.ray.dir_x = r.D.x, embreeRay.ray.dir_y = r.D.y, embreeRay.ray.dir_z = r.D.z;
 			embreeRay.ray.tnear = 0, embreeRay.ray.tfar = r.hit.t;
@@ -322,65 +380,67 @@ void AccStruc::IntersectBatch( __m256* r256, int rayCount )
 			embreeRay.hit.instID[0] = RTC_INVALID_GEOMETRY_ID;
 			rtcIntersect1( embreeScene, &embreeRay );
 		}
+		dist = embreeRay.ray.tfar;
 		break;
 	}
 	default: // unsupported layout. See note in constructor.
 		break;
 	}
+	return dist;
 }
 
-struct BatchOcclusionArgs { AccStruc* accstruc; __m256* r256; int rayCount; int sliceSize; };
+struct BatchOcclusionArgs { AccStruc* accstruc; char* rayData; int rayCount; int sliceSize; };
 static void OcclusionBatchSlice( uint32_t i, void* payload )
 {
-	BatchOcclusionArgs* a  = (BatchOcclusionArgs*)payload;
-	a->accstruc->OcclusionBatch( a->r256 + a->sliceSize * i, a->sliceSize );
+	BatchOcclusionArgs* a = (BatchOcclusionArgs*)payload;
+	a->accstruc->OcclusionBatch( a->rayData + a->sliceSize * i * 64, a->sliceSize );
 }
-void AccStruc::OcclusionBatchMT( __m256* r256, int rayCount )
+void AccStruc::OcclusionBatchMT( char* rayData, int rayCount )
 {
 	constexpr int slices = 64;
 	int sliceSize = rayCount / slices;
-	BatchIntersectArgs args = { this, r256, rayCount, sliceSize };
+	BatchIntersectArgs args = { this, rayData, rayCount, sliceSize };
 	tinybvh_parallel_for( context, slices, &OcclusionBatchSlice, &args );
 }
 
-void AccStruc::OcclusionBatch( __m256* r256, int rayCount )
+void AccStruc::OcclusionBatch( char* rayData, int rayCount )
 {
 	switch (layout)
 	{
 	case BVH2:
 	{
 		BVH* accstruc = (BVH*)bvh;
-		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->IsOccluded( ((Ray*)r256)[0] );
+		for (int i = 0; i < rayCount; i++, rayData += 64) accstruc->IsOccluded( ((Ray*)rayData)[0] );
 		break;
 	}
 	case BVH4_WIVE:
 	{
 		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
-		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->IsOccluded( ((Ray*)r256)[0] );
+		for (int i = 0; i < rayCount; i++, rayData += 64) accstruc->IsOccluded( ((Ray*)rayData)[0] );
 		break;
 	}
 	case BVH8_WIVE:
 	{
 		BVH8_CPU* accstruc = (BVH8_CPU*)bvh;
-		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->IsOccluded( ((Ray*)r256)[0] );
+		for (int i = 0; i < rayCount; i++, rayData += 64) accstruc->IsOccluded( ((Ray*)rayData)[0] );
 		break;
 	}
 	case GPU_BVH:
 	{
 		BVH_GPU* accstruc = (BVH_GPU*)bvh;
-		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->IsOccluded( ((Ray*)r256)[0] );
+		for (int i = 0; i < rayCount; i++, rayData += 64) accstruc->IsOccluded( ((Ray*)rayData)[0] );
 		break;
 	}
 	case GPU_BVH4:
 	{
 		BVH4_GPU* accstruc = (BVH4_GPU*)bvh;
-		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->IsOccluded( ((Ray*)r256)[0] );
+		for (int i = 0; i < rayCount; i++, rayData += 64) accstruc->IsOccluded( ((Ray*)rayData)[0] );
 		break;
 	}
 	case CWBVH:
 	{
 		BVH8_CWBVH* accstruc = (BVH8_CWBVH*)bvh;
-		for (int i = 0; i < rayCount; i++, r256 += 2) accstruc->IsOccluded( ((Ray*)r256)[0] );
+		for (int i = 0; i < rayCount; i++, rayData += 64) accstruc->IsOccluded( ((Ray*)rayData)[0] );
 		break;
 	}
 	case MADMANN91:
@@ -393,7 +453,7 @@ void AccStruc::OcclusionBatch( __m256* r256, int rayCount )
 		bvh::v2::SmallStack<_Bvh::Index, 64> stack;
 		for (int i = 0; i < rayCount; i++)
 		{
-			const Ray& r = ((Ray*)r256)[0];
+			const Ray& r = *(Ray*)(rayData + 64 * i);
 			_Ray ray = { _Vec3( r.O.x, r.O.y, r.O.z ), _Vec3( r.D.x, r.D.y, r.D.z ), 0, r.hit.t };
 			madmannbvh.intersect<true, false>( ray, madmannbvh.get_root().index, stack, [&]( size_t begin, size_t end )
 				{
@@ -409,7 +469,7 @@ void AccStruc::OcclusionBatch( __m256* r256, int rayCount )
 		RTCRay embreeRay;
 		for (int i = 0; i < rayCount; i++)
 		{
-			const Ray& r = ((Ray*)r256)[0];
+			const Ray& r = *(Ray*)(rayData + 64 * i);
 			embreeRay.org_x = r.O.x, embreeRay.org_y = r.O.y, embreeRay.org_z = r.O.z;
 			embreeRay.dir_x = r.D.x, embreeRay.dir_y = r.D.y, embreeRay.dir_z = r.D.z;
 			embreeRay.tnear = 0, embreeRay.tfar = r.hit.t;
@@ -421,6 +481,20 @@ void AccStruc::OcclusionBatch( __m256* r256, int rayCount )
 	default: // unsupported layout. See note in constructor.
 		break;
 	}
+}
+
+bvhvec3 AccStruc::SceneExtent()
+{ 
+	if (layout == EMBREE || layout == MADMANN91)
+	{
+		// hacky way to get scene extents, via a TinyBVH bvh.
+		BVH bvh;
+		if (flags & INDEXED) bvh.Build( primSet->verts, primSet->indices, primSet->primCount );
+		else bvh.Build( primSet->verts, primSet->primCount );
+		bvhvec3 extent = bvh.aabbMax - bvh.aabbMin;
+		return extent;
+	}
+	else return bvh->aabbMax - bvh->aabbMin;
 }
 
 }; // namespace tinybvh

@@ -37,21 +37,46 @@ int main()
 	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
 	experiment.push_back( new Experiment( MADMANN91, NO_FLAGS, scene ) );
 #else
+
 	// 2. BVH traversal
+
+#if 0
+
 	experiment.push_back( new Experiment( GPU_BVH, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU ) );
 	experiment.push_back( new Experiment( GPU_BVH4, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU ) );
 	experiment.push_back( new Experiment( CWBVH, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU ) );
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1, MULTICORE ) );
-	experiment.push_back( new Experiment( EMBREE, NO_FLAGS, scene, PRIMARY_VIEW1  ) );
-	experiment.push_back( new Experiment( EMBREE, NO_FLAGS, scene, PRIMARY_VIEW1, MULTICORE  ) );
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
+
+	experiment.push_back( new Experiment( GPU_BVH, NO_FLAGS, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, NO_FLAGS, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, NO_FLAGS, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
+
+	experiment.push_back( new Experiment( GPU_BVH, NO_FLAGS, scene, AO_RAYS, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, NO_FLAGS, scene, AO_RAYS, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, NO_FLAGS, scene, AO_RAYS, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS, scene, AO_RAYS, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
+
+#else
+
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1, DEFAULT, "dbg_bvh2.tga" ) );
 	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene, PRIMARY_VIEW1 ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS, scene, PRIMARY_VIEW1 ) );
-	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene, PRIMARY_VIEW1, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, NO_FLAGS, scene, PRIMARY_VIEW1, DEFAULT, "dbg_bvh4wive.tga" ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS, scene, PRIMARY_VIEW1, DEFAULT, "dbg_bvh4wive_spatial.tga" ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, DEFAULT, "dbg_bvh8wive_spatial.tga" ) );
 	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, MULTICORE ) );
-	experiment.push_back( new Experiment( MADMANN91, NO_FLAGS, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( MADMANN91, NO_FLAGS, scene, PRIMARY_VIEW1, DEFAULT, "dbg_madmann91.tga" ) );
 	experiment.push_back( new Experiment( MADMANN91, SPATIALSPLITS, scene, PRIMARY_VIEW1 ) );
 	experiment.push_back( new Experiment( MADMANN91, SPATIALSPLITS, scene, PRIMARY_VIEW1, MULTICORE ) );
+	experiment.push_back( new Experiment( EMBREE, NO_FLAGS, scene, PRIMARY_VIEW1, DEFAULT, "dbg_embree.tga" ) );
+	experiment.push_back( new Experiment( EMBREE, NO_FLAGS, scene, PRIMARY_VIEW1, MULTICORE  ) );
+
+#endif
+
 #endif
 	// run experiments
 	for( int i = 0; i < experiment.size(); i++ ) experiment[i]->Run();

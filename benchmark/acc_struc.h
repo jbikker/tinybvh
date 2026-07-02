@@ -36,11 +36,11 @@ public:
 	BVHBase* GetBVH() { return bvh; }
 	float SAHCost();
 	float EPOCost();
-	void IntersectBatch( __m256* r256, const int rayCount );
-	void IntersectBatchMT( __m256* r256, const int rayCount );
-	void OcclusionBatch( __m256* r256, const int rayCount );
-	void OcclusionBatchMT( __m256* r256, const int rayCount );
-	bvhvec3 SceneExtent() { return bvh->aabbMax - bvh->aabbMin; }
+	float IntersectBatch( char* rayData, const int rayCount );
+	void IntersectBatchMT( char* rayData, const int rayCount );
+	void OcclusionBatch( char* rayData, const int rayCount );
+	void OcclusionBatchMT( char* rayData, const int rayCount );
+	bvhvec3 SceneExtent();
 	int NodeCount();
 	BVHLayout layout = BVH2;
 private:
