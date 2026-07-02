@@ -9255,7 +9255,7 @@ public:
 			int core = threadID + 1;
 		#if defined _WIN32 && defined _MSC_VER // TODO: get this working with gcc.
 			// windows-specific thread setup
-			uint64_t affinity_result = SetThreadAffinityMask( handle, 1ull << core );
+			SetThreadAffinityMask( handle, 1ull << core );
 			SetThreadPriority( handle, 0 /* THREAD_PRIORITY_NORMAL */ );
 			SetThreadDescription( handle, L"wi::job" );
 		#elif defined PLATFORM_LINUX
