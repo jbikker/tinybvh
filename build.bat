@@ -1,2 +1,3 @@
 REM g++ -std=c++20 -mavx2 -mfma -Ofast -fopenmp tiny_bvh_speedtest.cpp -Iexternal/embree/include -Iexternal/madmann91 -Iexternal/OpenCL/inc -o tiny_bvh_speedtest -Lexternal/embree/lib -Lexternal/OpenCL/lib -l embree4 -l tbb -l OpenCL
-g++ -std=c++20 -g -Wdeprecated-declarations -mavx2 -mfma -Ofast tiny_bvh_benchmark.cpp benchmark/acc_struc.cpp benchmark/experiment.cpp benchmark/primitive_set.cpp benchmark/ray_distribution.cpp benchmark/tiny_bvh.cpp -Iexternal/madmann91 -Ibenchmark -I. -o tiny_bvh_benchmark
+
+g++ -std=c++20 -mavx2 -mfma -Ofast tiny_bvh_benchmark.cpp benchmark/acc_struc.cpp benchmark/experiment.cpp benchmark/primitive_set.cpp benchmark/ray_distribution.cpp benchmark/tiny_bvh.cpp benchmark/tools.cpp -Iexternal/embree/include -Iexternal/madmann91 -Iexternal/OpenCL/inc -Ibenchmark -I. -o tiny_bvh_benchmark -Lexternal/embree/lib -Lexternal/OpenCL/lib -l embree4 -l tbb -l OpenCL
