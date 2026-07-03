@@ -1,5 +1,8 @@
 #include "headers.h"
 
+#define WIN32_LEAN_AND_MEAN
+#include "windows.h"
+
 #ifdef ENABLE_OPENCL
 extern tinyocl::Kernel* ailalaine_kernel;
 extern tinyocl::Kernel* ailalaine_kernel_any;
@@ -61,6 +64,11 @@ Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, Ra
 
 void Experiment::Run()
 {
+#if defined _WIN32 && defined _MSC_VER
+	// force processing to one core to improve cache coherence - TODO: gcc.
+	SetThreadAffinityMask( GetCurrentProcess(), 1 );
+#endif
+	// run actual experiment
 	if (raySet != UNSPECIFIED)
 	{
 		// Traversal experiment.
@@ -85,19 +93,19 @@ void Experiment::Run()
 		float traceTime, raysPerSecond;
 		Timer t;
 	#ifdef ENABLE_OPENCL
-		if (flags & USE_GPU && bvh->layout == GPU_BVH) 
+		if (flags & USE_GPU && bvh->layout == GPU_BVH)
 		{
 			traceTime = RunGPU_BVH2( extensionRays, N, tgaFile );
 			raysPerSecond = (float)(N * 8) / traceTime;
 			WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 		}
-		else if (flags & USE_GPU && bvh->layout == GPU_BVH4) 
+		else if (flags & USE_GPU && bvh->layout == GPU_BVH4)
 		{
 			traceTime = RunGPU_BVH4( extensionRays, N, tgaFile );
 			raysPerSecond = (float)(N * 8) / traceTime;
 			WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 		}
-		else if (flags & USE_GPU && bvh->layout == CWBVH) 
+		else if (flags & USE_GPU && bvh->layout == CWBVH)
 		{
 			traceTime = RunGPU_CWBVH( extensionRays, N, tgaFile );
 			raysPerSecond = (float)(N * 8) / traceTime;
@@ -109,8 +117,6 @@ void Experiment::Run()
 			// dump image for the ray set, if requested
 			if (tgaFile) WriteImage( extensionRays );
 			// trace 'first hit' rays on CPU
-			// force processing to core 0 to improve cache coherence
-			// SetThreadAffinityMask( GetCurrentProcess(), 1 );
 			bvh->IntersectBatch( extensionRays, N ); // warm caches, precompute data
 			int runs = 0;
 			t.reset();
@@ -132,17 +138,17 @@ void Experiment::Run()
 		else
 		{
 		#ifdef ENABLE_OPENCL
-			if (flags & USE_GPU && bvh->layout == GPU_BVH) 
+			if (flags & USE_GPU && bvh->layout == GPU_BVH)
 			{
 				traceTime = RunGPU_BVH2_Any( extensionRays, N );
 				raysPerSecond = (float)(N * 8) / traceTime;
 			}
-			else if (flags & USE_GPU && bvh->layout == GPU_BVH4) 
+			else if (flags & USE_GPU && bvh->layout == GPU_BVH4)
 			{
 				traceTime = RunGPU_BVH4_Any( extensionRays, N );
 				raysPerSecond = (float)(N * 8) / traceTime;
 			}
-			else if (flags & USE_GPU && bvh->layout == CWBVH) 
+			else if (flags & USE_GPU && bvh->layout == CWBVH)
 			{
 				traceTime = RunGPU_CWBVH_Any( extensionRays, N );
 				raysPerSecond = (float)(N * 8) / traceTime;
@@ -223,13 +229,13 @@ float Experiment::RunGPU_BVH2( char* raySet, const int N, const char* tgaFile )
 	// create OpenCL buffers for the BVH data calculated by tiny_bvh.h
 	tinyocl::Buffer gpuNodes( bvh_gpu->usedNodes * sizeof( BVH_GPU::BVHNode ), bvh_gpu->bvhNode );
 	tinyocl::Buffer idxData( bvh_gpu->idxCount * sizeof( unsigned ), bvh_gpu->bvh.primIdx );
-	tinyocl::Buffer triData( cachedPrimSet[primSet]->primCount * sizeof( tinybvh::bvhvec4 ), cachedPrimSet[primSet]->verts );
+	tinyocl::Buffer triData( cachedPrimSet[primSet]->primCount * sizeof( tinybvh::bvhvec4 ) * 3, cachedPrimSet[primSet]->verts );
 	gpuNodes.CopyToDevice();
 	idxData.CopyToDevice();
 	triData.CopyToDevice();
 	// create rays and send them to the gpu side
 	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
-	for ( int o = 0, j = 0; j < 8; j++ ) for (int i = 0; i < N; i++, o += 64)
+	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
@@ -263,7 +269,7 @@ float Experiment::RunGPU_BVH2_Any( char* raySet, const int N )
 	triData.CopyToDevice();
 	// create rays and send them to the gpu side
 	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
-	for ( int o = 0, j = 0; j < 8; j++ ) for (int i = 0; i < N; i++, o += 64)
+	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
@@ -292,7 +298,7 @@ float Experiment::RunGPU_BVH4( char* raySet, const int N, const char* tgaFile )
 	gpuNodes.CopyToDevice();
 	// create rays and send them to the gpu side
 	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
-	for ( int o = 0, j = 0; j < 8; j++ ) for (int i = 0; i < N; i++, o += 64)
+	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
@@ -321,7 +327,7 @@ float Experiment::RunGPU_BVH4_Any( char* raySet, const int N )
 	gpuNodes.CopyToDevice();
 	// create rays and send them to the gpu side
 	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
-	for ( int o = 0, j = 0; j < 8; j++ ) for (int i = 0; i < N; i++, o += 64)
+	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
@@ -356,7 +362,7 @@ float Experiment::RunGPU_CWBVH( char* raySet, const int N, const char* tgaFile )
 	cwbvhTris.CopyToDevice();
 	// create rays (duplicated 8x) and send them to the gpu side
 	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
-	for ( int o = 0, j = 0; j < 8; j++ ) for (int i = 0; i < N; i++, o += 64)
+	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
@@ -391,7 +397,7 @@ float Experiment::RunGPU_CWBVH_Any( char* raySet, const int N )
 	cwbvhTris.CopyToDevice();
 	// create rays and send them to the gpu side
 	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
-	for ( int o = 0, j = 0; j < 8; j++ ) for (int i = 0; i < N; i++, o += 64)
+	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
