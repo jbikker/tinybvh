@@ -5026,11 +5026,9 @@ int32_t BVH_GPU::Intersect( Ray& ray ) const
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
 		}
-		const bvhvec3 lmin = node->lmin - ray.O, lmax = node->lmax - ray.O;
-		const bvhvec3 rmin = node->rmin - ray.O, rmax = node->rmax - ray.O;
 		float dist1 = BVH_FAR, dist2 = BVH_FAR;
-		const bvhvec3 t1a = lmin * ray.rD, t2a = lmax * ray.rD;
-		const bvhvec3 t1b = rmin * ray.rD, t2b = rmax * ray.rD;
+		const bvhvec3 t1a = (node->lmin - ray.O) * ray.rD, t2a = (node->lmax - ray.O) * ray.rD;
+		const bvhvec3 t1b = (node->rmin - ray.O) * ray.rD, t2b = (node->rmax - ray.O) * ray.rD;
 		const float tmina = tinybvh_max( tinybvh_max( tinybvh_min( t1a.x, t2a.x ), tinybvh_min( t1a.y, t2a.y ) ), tinybvh_min( t1a.z, t2a.z ) );
 		const float tmaxa = tinybvh_min( tinybvh_min( tinybvh_max( t1a.x, t2a.x ), tinybvh_max( t1a.y, t2a.y ) ), tinybvh_max( t1a.z, t2a.z ) );
 		const float tminb = tinybvh_max( tinybvh_max( tinybvh_min( t1b.x, t2b.x ), tinybvh_min( t1b.y, t2b.y ) ), tinybvh_min( t1b.z, t2b.z ) );
