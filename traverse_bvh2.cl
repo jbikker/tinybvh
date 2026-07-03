@@ -55,23 +55,19 @@ uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global uint*
 		const float tminb = fmax( fmax( fmax( mintb.x, mintb.y ), mintb.z ), 0 );
 		const float tmaxa = fmin( fmin( fmin( maxta.x, maxta.y ), maxta.z ), hit.x );
 		const float tmaxb = fmin( fmin( fmin( maxtb.x, maxtb.y ), maxtb.z ), hit.x );
-		float dist1 = tmina > tmaxa ? 1e30f : tmina;
-		float dist2 = tminb > tmaxb ? 1e30f : tminb;
-		// traverse nearest child first
+		const float dist1 = tmina > tmaxa ? 1e30f : tmina;
+		const float dist2 = tminb > tmaxb ? 1e30f : tminb;
 		if (dist1 > dist2)
 		{
-			float h = dist1; dist1 = dist2; dist2 = h;
-			uint t = left; left = right; right = t;
-		}
-		if (dist1 == 1e30f)
-		{
-			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			if (dist2 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
+			else { node = right; if (dist1 < 1e30f) stack[stackPtr++] = left; }
 		}
 		else
 		{
-			node = left;
-			if (dist2 != 1e30f) stack[stackPtr++] = right;
+			if (dist1 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
+			else { node = left; if (dist2 < 1e30f) stack[stackPtr++] = right; }
 		}
+
 	}
 	// write back intersection result
 	return (uint)cost;
@@ -89,7 +85,6 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 	while (1)
 	{
 		steps++;
-		const float4 lmin = bvhNode[node].lmin, lmax = bvhNode[node].lmax;
 		const float4 rmin = bvhNode[node].rmin, rmax = bvhNode[node].rmax;
 		const uint triCount = as_uint( rmin.w );
 		if (triCount > 0 /* leaf */)
@@ -101,7 +96,9 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 				const global float4* tri = verts + 3 * triIdx;
 				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
 				const float3 h = cross( D, edge2.xyz );
-				const float f = 1 / dot( edge1.xyz, h );
+				const float a = dot( edge1.xyz, h );
+				if (fabs( a ) < 0.0000001f) continue;
+				const float f = native_recip( a );
 				const float3 s = O - tri[0].xyz;
 				const float u = f * dot( s, h );
 				const float3 q = cross( s, edge1.xyz );
@@ -121,6 +118,7 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 			node = stack[--stackPtr];
 			continue;
 		}
+		const float4 lmin = bvhNode[node].lmin, lmax = bvhNode[node].lmax;
 		uint left = as_uint( lmin.w ), right = as_uint( lmax.w );
 		const float3 t1a = fma( lmin.xyz, rD, rO ), t2a = fma( lmax.xyz, rD, rO );
 		const float3 t1b = fma( rmin.xyz, rD, rO ), t2b = fma( rmax.xyz, rD, rO );
@@ -130,15 +128,18 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 		const float tminb = fmax( fmax( fmax( mintb.x, mintb.y ), mintb.z ), 0 );
 		const float tmaxa = fmin( fmin( fmin( maxta.x, maxta.y ), maxta.z ), hit.x );
 		const float tmaxb = fmin( fmin( fmin( maxtb.x, maxtb.y ), maxtb.z ), hit.x );
-		float dist1 = tmina > tmaxa ? 1e30f : tmina;
-		float dist2 = tminb > tmaxb ? 1e30f : tminb;
+		const float dist1 = tmina > tmaxa ? 1e30f : tmina;
+		const float dist2 = tminb > tmaxb ? 1e30f : tminb;
 		if (dist1 > dist2)
 		{
-			float h = dist1; dist1 = dist2; dist2 = h;
-			uint t = left; left = right; right = t;
+			if (dist2 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
+			else { node = right; if (dist1 < 1e30f) stack[stackPtr++] = left; }
 		}
-		if (dist1 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
-		else { node = left; if (dist2 != 1e30f) stack[stackPtr++] = right; }
+		else
+		{
+			if (dist1 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
+			else { node = left; if (dist2 < 1e30f) stack[stackPtr++] = right; }
+		}
 	}
 	if (stepCount) *stepCount += steps;
 	return hit;
@@ -149,6 +150,9 @@ bool isoccluded_ailalaine(
 	const global uint* idx, const global float4* verts, const global uint* opmap, 
 	const float3 O, const float3 D, const float3 rD, const float tmax )
 {
+	// prepare slab test
+	const float3 rO = O * -rD;
+	// traverse BVH
 	uint node = 0, stack[STACK_SIZE], stackPtr = 0;
 	while (1)
 	{
@@ -185,23 +189,26 @@ bool isoccluded_ailalaine(
 			continue;
 		}
 		uint left = as_uint( lmin.w ), right = as_uint( lmax.w );
-		const float3 t1a = (lmin.xyz - O) * rD, t2a = (lmax.xyz - O) * rD;
-		const float3 t1b = (rmin.xyz - O) * rD, t2b = (rmax.xyz - O) * rD;
+		const float3 t1a = fma( lmin.xyz, rD, rO ), t2a = fma( lmax.xyz, rD, rO );
+		const float3 t1b = fma( rmin.xyz, rD, rO ), t2b = fma( rmax.xyz, rD, rO );
 		const float3 minta = fmin( t1a, t2a ), maxta = fmax( t1a, t2a );
 		const float3 mintb = fmin( t1b, t2b ), maxtb = fmax( t1b, t2b );
 		const float tmina = fmax( fmax( fmax( minta.x, minta.y ), minta.z ), 0 );
 		const float tminb = fmax( fmax( fmax( mintb.x, mintb.y ), mintb.z ), 0 );
 		const float tmaxa = fmin( fmin( fmin( maxta.x, maxta.y ), maxta.z ), tmax );
 		const float tmaxb = fmin( fmin( fmin( maxtb.x, maxtb.y ), maxtb.z ), tmax );
-		float dist1 = tmina > tmaxa ? 1e30f : tmina;
-		float dist2 = tminb > tmaxb ? 1e30f : tminb;
+		const float dist1 = tmina > tmaxa ? 1e30f : tmina;
+		const float dist2 = tminb > tmaxb ? 1e30f : tminb;
 		if (dist1 > dist2)
 		{
-			float h = dist1; dist1 = dist2; dist2 = h;
-			uint t = left; left = right; right = t;
+			if (dist2 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
+			else { node = right; if (dist1 < 1e30f) stack[stackPtr++] = left; }
 		}
-		if (dist1 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
-		else { node = left; if (dist2 != 1e30f) stack[stackPtr++] = right; }
+		else
+		{
+			if (dist1 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
+			else { node = left; if (dist2 < 1e30f) stack[stackPtr++] = right; }
+		}
 	}
 	return false;
 }
