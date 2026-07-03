@@ -45,10 +45,9 @@ int main()
 
 #if 1
 
-	experiment.push_back( new Experiment( GPU_BVH, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH4, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH, OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH4, OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU, "dbg_gpubvh2.tga" ) );
+	experiment.push_back( new Experiment( GPU_BVH4, OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU, "dbg_gpubvh4.tga" ) );
+	experiment.push_back( new Experiment( CWBVH, OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU, "dbg_cwbvh.tga" ) );
 
 #else
 
