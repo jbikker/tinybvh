@@ -27,7 +27,7 @@ int main()
 	InitOpenCL(); // does nothing if disabled; see tools.cpp
 	vector<Experiment*> experiment;
 	// construct list of experiments
-	Scene scene = CRYTEK_SPONZA;
+	Scene scene = CONFERENCE_ROOM;
 
 #if 0
 
@@ -45,9 +45,9 @@ int main()
 
 #if 1
 
-	experiment.push_back( new Experiment( GPU_BVH, OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU, "dbg_gpubvh2.tga" ) );
-	experiment.push_back( new Experiment( GPU_BVH4, OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU, "dbg_gpubvh4.tga" ) );
-	experiment.push_back( new Experiment( CWBVH, OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU, "dbg_cwbvh.tga" ) );
+	experiment.push_back( new Experiment( GPU_BVH, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU, "dbg_gpubvh2.tga" ) );
+	experiment.push_back( new Experiment( GPU_BVH4, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU, "dbg_gpubvh4.tga" ) );
+	experiment.push_back( new Experiment( CWBVH, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU, "dbg_cwbvh.tga" ) );
 
 #else
 
