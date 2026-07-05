@@ -46,12 +46,12 @@ public:
 	bvhvec3 SceneExtent();
 	int NodeCount();
 	BVHLayout layout = BVH2;
+	char desc[128], shrt[64], flagShrt[64];
 private:
 	PrimitiveSet* primSet = 0;
 	BVHBase* bvh = 0;
 	BuildFlags flags = NO_FLAGS;
 	float sah = 0, epo = 0;
-	char desc[256];
 	bvh::v2::Bvh<bvh::v2::Node<float,3>> madmannbvh;
 	std::vector<PrecomputedTri> precomputed_tris;
 	bool mmTrisPrecomputed = false;

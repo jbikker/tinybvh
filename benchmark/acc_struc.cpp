@@ -39,31 +39,82 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 	// construct description
 	switch (layout)
 	{
-	case BVH2: strncpy( desc, "2-wide BVH", 256 ); break;
-	case BVH4: strncpy( desc, "4-wide BVH", 256 ); break;
-	case BVH4_WIVE: strncpy( desc, "SSE 4-wide CPU BVH", 256 ); break;
-	case BVH8_WIVE: strncpy( desc, "AVX2 8-wide CPU BVH", 256 ); break;
-	case GPU_BVH: strncpy( desc, "2-wide GPU BVH", 256 ); break;
-	case GPU_BVH4: strncpy( desc, "4-wide GPU BVH", 256 ); break;
-	case CWBVH: strncpy( desc, "8-wide CWBVH", 256 ); break;
-	case MADMANN91: strncpy( desc, "madmann91 BVH", 256 ); break;
-	case EMBREE: strncpy( desc, "embree4 BVH", 256 ); break;
-	default: strncpy( desc, "UNKNOWN LAYOUT", 256 );
+	case BVH2: 
+	{
+		strncpy( desc, "2-wide BVH", 128 ); 
+		strncpy( shrt, "BVH2", 128 ); 
+		break;
+	}
+	case BVH4: 
+	{
+		strncpy( desc, "4-wide BVH", 128 ); 
+		strncpy( shrt, "BVH4", 128 ); 
+		break;
+	}
+	case BVH4_WIVE: 
+	{
+		strncpy( desc, "SSE 4-wide CPU BVH", 128 ); 
+		strncpy( shrt, "WiVe4", 128 ); 
+		break;
+	}
+	case BVH8_WIVE: 
+	{
+		strncpy( desc, "AVX2 8-wide CPU BVH", 128 ); 
+		strncpy( shrt, "Wive8", 128 ); 
+		break;
+	}
+	case GPU_BVH: 
+	{
+		strncpy( desc, "2-wide GPU BVH", 128 ); 
+		strncpy( shrt, "GPUBVH2", 128 ); 
+		break;
+	}
+	case GPU_BVH4: 
+	{
+		strncpy( desc, "4-wide GPU BVH", 128 ); 
+		strncpy( shrt, "GPUBVH4", 128 ); 
+		break;
+	}
+	case CWBVH: 
+	{
+		strncpy( desc, "8-wide CWBVH", 128 ); 
+		strncpy( shrt, "CWBVH", 128 ); 
+		break;
+	}
+	case MADMANN91: 
+	{
+		strncpy( desc, "madmann91 BVH", 128 ); 
+		strncpy( shrt, "MM'91", 128 ); 
+		break;
+	}
+	case EMBREE:
+	{
+		strncpy( desc, "embree4 BVH", 128 ); 
+		strncpy( shrt, "Embree", 128 ); 
+		break;
+	}
+	default: 
+	{
+		strncpy( desc, "UNKNOWN LAYOUT", 128 );
+		strncpy( shrt, "Unkown", 128 ); 
+		break;
+	}
 	}
 	uint32_t f = flags;
 	bool first = true;
+	flagShrt[0] = 0;
 	while (f != BuildFlags::NO_FLAGS)
 	{
-		if (first) strncat( desc, " (", 128 ); else strncat( desc, " + ", 128 );
-		if (f & BuildFlags::AVXBUILD) { strncat( desc, "AVX builder", 128 ); f -= BuildFlags::AVXBUILD; }
-		else if (f & BuildFlags::INDEXED) { strncat( desc, "indexed", 128 ); f -= BuildFlags::INDEXED; }
-		else if (f & BuildFlags::FULLSWEEP) { strncat( desc, "full-sweep", 128 ); f -= BuildFlags::FULLSWEEP; }
-		else if (f & BuildFlags::SPATIALSPLITS) { strncat( desc, "SBVH", 128 ); f -= BuildFlags::SPATIALSPLITS; }
-		else if (f & BuildFlags::PRESPLIT) { strncat( desc, "presplit", 128 ); f -= BuildFlags::PRESPLIT; }
-		else if (f & BuildFlags::OPTIMIZE) { strncat( desc, "optimize", 128 ); f -= BuildFlags::OPTIMIZE; }
-		else if (f & BuildFlags::LOW) { strncat( desc, "LOW", 128 ); f -= BuildFlags::LOW; }
-		else if (f & BuildFlags::MEDIUM) { strncat( desc, "MEDIUM", 128 ); f -= BuildFlags::MEDIUM; }
-		else if (f & BuildFlags::HIGH) { strncat( desc, "HIGH", 128 ); f -= BuildFlags::HIGH; }
+		if (first) strncat( desc, " (", 100 ); else { strncat( desc, " + ", 100 ); strncat( flagShrt, "+", 32 ); }
+		if (f & BuildFlags::AVXBUILD) { strncat( desc, "AVX builder", 100 ); strncat( flagShrt, "A", 32 ); f -= BuildFlags::AVXBUILD; }
+		else if (f & BuildFlags::INDEXED) { strncat( desc, "indexed", 100 ); strncat( flagShrt, "I", 32 ); f -= BuildFlags::INDEXED; }
+		else if (f & BuildFlags::FULLSWEEP) { strncat( desc, "full-sweep", 100 ); strncat( flagShrt, "F", 32 ); f -= BuildFlags::FULLSWEEP; }
+		else if (f & BuildFlags::SPATIALSPLITS) { strncat( desc, "SBVH", 100 ); strncat( flagShrt, "S", 32 ); f -= BuildFlags::SPATIALSPLITS; }
+		else if (f & BuildFlags::PRESPLIT) { strncat( desc, "presplit", 100 ); strncat( flagShrt, "P", 32 ); f -= BuildFlags::PRESPLIT; }
+		else if (f & BuildFlags::OPTIMIZE) { strncat( desc, "optimize", 100 ); strncat( flagShrt, "O", 32 ); f -= BuildFlags::OPTIMIZE; }
+		else if (f & BuildFlags::LOW) { strncat( desc, "LOW", 100 ); strncpy( flagShrt, "LOW", 32 ); f -= BuildFlags::LOW; }
+		else if (f & BuildFlags::MEDIUM) { strncat( desc, "MEDIUM", 100 ); strncat( flagShrt, "MED", 32 ); f -= BuildFlags::MEDIUM; }
+		else if (f & BuildFlags::HIGH) { strncat( desc, "HIGH", 100 ); strncat( flagShrt, "HI", 32 ); f -= BuildFlags::HIGH; }
 		first = false;
 	}
 	if (flags) strncat( desc, ")", 128 );

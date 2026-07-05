@@ -22,7 +22,7 @@ public:
 	uint32_t primCount;
 	bvhvec4* verts = 0;
 	uint32_t* indices = 0;
-	char desc[256];
+	char desc[128], shrt[64];
 private:
 	void AddMesh( const char* file, float scale = 1, bvhvec3 pos = {}, int c = 0, int N = 0 );
 	bvhvec3 camPos[3], camDir[3];

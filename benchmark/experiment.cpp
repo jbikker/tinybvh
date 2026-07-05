@@ -15,6 +15,8 @@ cl_ulong startTime, endTime;
 tinyocl::Buffer* gpuRayData = 0;
 #endif
 
+extern FILE* csv;
+
 namespace tinybvh
 {
 
@@ -62,6 +64,8 @@ Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, Ra
 	}
 }
 
+static bool lastWasTrav = false, firstExperiment = true;
+
 void Experiment::Run()
 {
 #if defined _WIN32 && defined _MSC_VER
@@ -69,132 +73,170 @@ void Experiment::Run()
 	SetThreadAffinityMask( GetCurrentProcess(), 1 );
 #endif
 	// run actual experiment
-	if (raySet != UNSPECIFIED)
+	if (raySet != UNSPECIFIED) RunTraceExperiment(); else RunBuildExperiment();
+}
+
+void Experiment::RunTraceExperiment()
+{
+	// Traversal experiment.
+	// - Build once - time is irrelevant;
+	// - Trace on a single core;
+	// - Trace one million rays several times for average trace time.
+	bvh->Build( cachedPrimSet[primSet] );
+	// emit header
+	if (firstExperiment || !lastWasTrav)
 	{
-		// Traversal experiment.
-		// - Build once, time is irrelevant;
-		// - Trace on a single core;
-		// - Trace one million rays several times for average trace time.
-		bvh->Build( cachedPrimSet[primSet] );
-		// setup rays
-		int N = cachedRaySet[raySet]->rayCount;
-		char* extensionRays = (char*)malloc64( N * 64 );
-		char* shadowRays = (char*)malloc64( N * 64 );
-		bvhvec3* O = cachedRaySet[raySet]->O, * D = cachedRaySet[raySet]->D;
-		float* tmin = cachedRaySet[raySet]->tmin, * tmax = cachedRaySet[raySet]->tmax;
-		for (int i = 0; i < N; i++)
+		if (csv) fprintf( csv, "ray traversal measurements\n" );
+		if (csv) fprintf( csv, "device,scene,tris,bvh,flags,ray set,nearest,runs,any hit,runs,unit\n" );
+	}
+	lastWasTrav = true;
+	firstExperiment = false;
+	// write experiment settings to csv
+	if (csv)
+	{
+		if (flags & USE_GPU) fprintf( csv, "gpu," ); else if (flags & MULTICORE) fprintf( csv, "cpu (MT)," ); else fprintf( csv, "cpu," );
+		fprintf( csv, "%s,%i,", cachedPrimSet[primSet]->shrt, cachedPrimSet[primSet]->primCount );
+		fprintf( csv, "%s,%s,", bvh->shrt, bvh->flagShrt );
+		fprintf( csv, "%s,", cachedRaySet[raySet]->shrt );
+		if (csv) fflush( csv );
+	}
+	// setup rays
+	int N = cachedRaySet[raySet]->rayCount;
+	char* extensionRays = (char*)malloc64( N * 64 );
+	char* shadowRays = (char*)malloc64( N * 64 );
+	bvhvec3* O = cachedRaySet[raySet]->O, * D = cachedRaySet[raySet]->D;
+	float* tmin = cachedRaySet[raySet]->tmin, * tmax = cachedRaySet[raySet]->tmax;
+	for (int i = 0; i < N; i++)
+	{
+		Ray r( O[i] + D[i] * tmin[i], D[i], tmax[i] - tmin[i] );
+		Ray s( O[i] + D[i] * tmin[i], D[i], tmax[i] - tmin[i] );
+		memcpy( extensionRays + 64 * i, &r, 64 );
+		memcpy( shadowRays + 64 * i, &r, 64 );
+	}
+	// trace extension rays
+	float traceTime, raysPerSecond;
+	Timer t;
+	int runs = 0;
+#ifdef ENABLE_OPENCL
+	if (flags & USE_GPU && bvh->layout == GPU_BVH)
+	{
+		traceTime = RunGPU_BVH2( extensionRays, N, tgaFile );
+		raysPerSecond = (float)(N * 8) / traceTime;
+		WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
+	}
+	else if (flags & USE_GPU && bvh->layout == GPU_BVH4)
+	{
+		traceTime = RunGPU_BVH4( extensionRays, N, tgaFile );
+		raysPerSecond = (float)(N * 8) / traceTime;
+		WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
+	}
+	else if (flags & USE_GPU && bvh->layout == CWBVH)
+	{
+		traceTime = RunGPU_CWBVH( extensionRays, N, tgaFile );
+		raysPerSecond = (float)(N * 8) / traceTime;
+		WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
+	}
+	else
+	#endif
+	{
+		// dump image for the ray set, if requested
+		if (tgaFile) WriteImage( extensionRays );
+		// trace 'first hit' rays on CPU
+		bvh->IntersectBatch( extensionRays, N ); // warm caches, precompute data
+		t.reset();
+		while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
 		{
-			Ray r( O[i] + D[i] * tmin[i], D[i], tmax[i] - tmin[i] );
-			Ray s( O[i] + D[i] * tmin[i], D[i], tmax[i] - tmin[i] );
-			memcpy( extensionRays + 64 * i, &r, 64 );
-			memcpy( shadowRays + 64 * i, &r, 64 );
+			if (flags & MULTICORE) bvh->IntersectBatchMT( extensionRays, N ); else bvh->IntersectBatch( extensionRays, N );
+			runs++;
 		}
-		// trace extension rays
-		float traceTime, raysPerSecond;
-		Timer t;
+		traceTime = t.elapsed() * (1.0f / runs); // average of runs.
+		raysPerSecond = (float)N / traceTime;
+	}
+	float mraysPerSecond = raysPerSecond / RAY_BATCH_SIZE;
+	printf( "%s\nfind nearest: %.2fM, ", title, mraysPerSecond );
+	int mag = 6; // use the same scale for shadows rays.
+	if (csv) 
+	{
+		if (raysPerSecond < 99000) { mag = 3; fprintf( csv, "%.2f,", raysPerSecond / 1000 ); } // report in KRays/s
+		else if (raysPerSecond < 99000000) fprintf( csv, "%.2f,", raysPerSecond / 1000000 ); // report in MRays/s
+		else { mag = 9; fprintf( csv, "%.2f,", raysPerSecond / 1000000000 ); } // report in BRays/s
+		fprintf( csv, "%i,", runs );
+		fflush( csv );
+	}
+	// trace 'any hit' rays
+	runs = 0;
+	if (bvh->layout == MADMANN91)
+	{
+		printf( "any hit: n/a\n" );
+		if (csv) fprintf( csv, "n/a\n" );
+		if (csv) fflush( csv );
+	}
+	else
+	{
 	#ifdef ENABLE_OPENCL
 		if (flags & USE_GPU && bvh->layout == GPU_BVH)
 		{
-			traceTime = RunGPU_BVH2( extensionRays, N, tgaFile );
+			traceTime = RunGPU_BVH2_Any( extensionRays, N );
 			raysPerSecond = (float)(N * 8) / traceTime;
-			WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 		}
 		else if (flags & USE_GPU && bvh->layout == GPU_BVH4)
 		{
-			traceTime = RunGPU_BVH4( extensionRays, N, tgaFile );
+			traceTime = RunGPU_BVH4_Any( extensionRays, N );
 			raysPerSecond = (float)(N * 8) / traceTime;
-			WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 		}
 		else if (flags & USE_GPU && bvh->layout == CWBVH)
 		{
-			traceTime = RunGPU_CWBVH( extensionRays, N, tgaFile );
+			traceTime = RunGPU_CWBVH_Any( extensionRays, N );
 			raysPerSecond = (float)(N * 8) / traceTime;
-			WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 		}
 		else
 		#endif
 		{
-			// dump image for the ray set, if requested
-			if (tgaFile) WriteImage( extensionRays );
-			// trace 'first hit' rays on CPU
-			bvh->IntersectBatch( extensionRays, N ); // warm caches, precompute data
-			int runs = 0;
+			// trace 'any hit' rays on CPU
+			bvh->OcclusionBatch( shadowRays, N ); // warm caches
 			t.reset();
 			while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
 			{
-				if (flags & MULTICORE) bvh->IntersectBatchMT( extensionRays, N ); else bvh->IntersectBatch( extensionRays, N );
+				if (flags & MULTICORE) bvh->OcclusionBatchMT( extensionRays, N ); else bvh->OcclusionBatch( shadowRays, N );
 				runs++;
 			}
 			traceTime = t.elapsed() * (1.0f / runs); // average of runs.
 			raysPerSecond = (float)N / traceTime;
 		}
-		float mraysPerSecond = raysPerSecond / RAY_BATCH_SIZE;
-		printf( "%s\nfind nearest: %.2fM, ", title, mraysPerSecond );
-		// trace 'any hit' rays
-		if (bvh->layout == MADMANN91)
+		mraysPerSecond = raysPerSecond / RAY_BATCH_SIZE;
+		printf( "any hit: %.2fM\n", mraysPerSecond );
+		if (csv) 
 		{
-			printf( "any hit: n/a\n" );
+			if (mag == 3) fprintf( csv, "%.2f,%i,K\n", raysPerSecond / 1000, runs );
+			else if (mag == 6) fprintf( csv, "%.2f,%i,M\n", raysPerSecond / 1000000, runs );
+			else if (mag == 9) fprintf( csv, "%.2f,%i,B\n", raysPerSecond / 1000000000, runs );
+			fflush( csv );
 		}
-		else
-		{
-		#ifdef ENABLE_OPENCL
-			if (flags & USE_GPU && bvh->layout == GPU_BVH)
-			{
-				traceTime = RunGPU_BVH2_Any( extensionRays, N );
-				raysPerSecond = (float)(N * 8) / traceTime;
-			}
-			else if (flags & USE_GPU && bvh->layout == GPU_BVH4)
-			{
-				traceTime = RunGPU_BVH4_Any( extensionRays, N );
-				raysPerSecond = (float)(N * 8) / traceTime;
-			}
-			else if (flags & USE_GPU && bvh->layout == CWBVH)
-			{
-				traceTime = RunGPU_CWBVH_Any( extensionRays, N );
-				raysPerSecond = (float)(N * 8) / traceTime;
-			}
-			else
-			#endif
-			{
-				// trace 'any hit' rays on CPU
-				int runs = 0;
-				bvh->OcclusionBatch( shadowRays, N ); // warm caches
-				t.reset();
-				while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
-				{
-					if (flags & MULTICORE) bvh->OcclusionBatchMT( extensionRays, N ); else bvh->OcclusionBatch( shadowRays, N );
-					runs++;
-				}
-				traceTime = t.elapsed() * (1.0f / runs); // average of runs.
-				raysPerSecond = (float)N / traceTime;
-			}
-			mraysPerSecond = raysPerSecond / RAY_BATCH_SIZE;
-			printf( "any hit: %.2fM\n", mraysPerSecond );
-		}
-		// cleanup
-		free64( extensionRays );
-		free64( shadowRays );
 	}
-	else
+	// cleanup
+	free64( extensionRays );
+	free64( shadowRays );
+}
+
+void Experiment::RunBuildExperiment()
+{
+	// Accstruc build experiment.
+	// - Build several times for average build time;
+	// - Assess SAH and EPO.
+	BVH* accstruc = (BVH*)bvh->Build( cachedPrimSet[primSet] ); // warm caches
+	Timer t;
+	int runs = 0;
+	while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
 	{
-		// Accstruc build experiment.
-		// - Build several times for average build time;
-		// - Assess SAH and EPO.
-		BVH* accstruc = (BVH*)bvh->Build( cachedPrimSet[primSet] ); // warm caches
-		Timer t;
-		int runs = 0;
-		while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
-		{
-			bvh->Build( cachedPrimSet[primSet] );
-			runs++;
-		}
-		buildTime = t.elapsed() * (1.0f / runs); // average of runs.
-		// report
-		printf( "%s\nbuild time: %.2fms ", title, buildTime * 1000.0f );
-		float sahCost = bvh->SAHCost();
-		float epoCost = bvh->EPOCost();
-		printf( "SAH: %.3f, EPO: %.2f\n", sahCost, epoCost );
+		bvh->Build( cachedPrimSet[primSet] );
+		runs++;
 	}
+	buildTime = t.elapsed() * (1.0f / runs); // average of runs.
+	// report
+	printf( "%s\nbuild time: %.2fms ", title, buildTime * 1000.0f );
+	float sahCost = bvh->SAHCost();
+	float epoCost = bvh->EPOCost();
+	printf( "SAH: %.3f, EPO: %.2f\n", sahCost, epoCost );
 }
 
 void Experiment::WriteImage( char* raySet, const char* tracedRays )

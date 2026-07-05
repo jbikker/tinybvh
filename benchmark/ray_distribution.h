@@ -28,9 +28,10 @@ public:
 	bvhvec3* D = 0;			// ray directions
 	float* tmin, *tmax = 0;	// ray start and end
 private:
-	char desc[256];
 	void UpdateViewPyramid( const bvhvec3 camPos, const bvhvec3 camDir );
 	bvhvec3 eye, p1, p2, p3;
+public:
+	char desc[128], shrt[64];
 };
 
 }; // namespace tinybvh

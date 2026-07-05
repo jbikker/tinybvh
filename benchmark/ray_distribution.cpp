@@ -129,12 +129,42 @@ RayDistribution::RayDistribution( RaySet r, PrimitiveSet* p )
 	// construct description
 	switch (raySet)
 	{
-	case PRIMARY_VIEW1: strncpy( desc, "cam1 primary", 256 ); break;
-	case PRIMARY_VIEW2: strncpy( desc, "cam2 primary", 256 ); break;
-	case PRIMARY_VIEW3: strncpy( desc, "cam3 prima", 256 ); break;
-	case FIRST_BOUNCE: strncpy( desc, "first bounce", 256 ); break;
-	case AO_RAYS: strncpy( desc, "AO rays", 256 ); break;
-	default: strncpy( desc, "UNKNOWN RAY SET", 256 ); break;
+	case PRIMARY_VIEW1: 
+	{
+		strncpy( desc, "cam1 primary", 128 ); 
+		strncpy( shrt, "cam1pri", 64 ); 
+		break;
+	}
+	case PRIMARY_VIEW2: 
+	{
+		strncpy( desc, "cam2 primary", 128 ); 
+		strncpy( shrt, "cam2pri", 64 ); 
+		break;
+	}
+	case PRIMARY_VIEW3: 
+	{
+		strncpy( desc, "cam3 primary", 128 ); 
+		strncpy( shrt, "cam3pri", 64 ); 
+		break;
+	}
+	case FIRST_BOUNCE: 
+	{
+		strncpy( desc, "first bounce", 128 ); 
+		strncpy( shrt, "1 bounce", 64 ); 
+		break;
+	}
+	case AO_RAYS: 
+	{
+		strncpy( desc, "AO rays", 128 ); 
+		strncpy( shrt, "AO rays", 64 ); 
+		break;
+	}
+	default: 
+	{
+		strncpy( desc, "UNKNOWN RAY SET", 128 ); 
+		strncpy( shrt, "unkown", 64 ); 
+		break;
+	}
 	};
 }
 

@@ -11,24 +11,39 @@ tinyocl::Kernel* cwbvh_kernel = 0;
 tinyocl::Kernel* cwbvh_kernel_any = 0;
 #endif
 
+FILE* csv = 0;
+
 void PrintHeader()
 {
-	int minor = TINY_BVH_VERSION_MINOR;
+	// open csv file for appending
+	csv = fopen( "benchmark_results.csv", "a" );
+
+	// report TinyBVH version
 	int major = TINY_BVH_VERSION_MAJOR;
+	int minor = TINY_BVH_VERSION_MINOR;
 	int sub = TINY_BVH_VERSION_SUB;
 	printf( "TINY_BVH BENCHMARK TOOL\n" );
 	printf( "library version: %i.%i.%i performance statistics ", major, minor, sub );
+	if (csv) fprintf( csv, "\ntinybvh,v %i.%i.%i\n", major, minor, sub );
+	std::time_t time = std::time({});
+	char buffer[128];
+    std::strftime( std::data( buffer ), 128, "time:,%T,%F", std::gmtime( &time ) );
+	if (csv) fprintf( csv, "%s\n", buffer );
 
 	// determine compiler
 #ifdef _MSC_VER
 	printf( "(MSVC %i build)\n", _MSC_VER );
+	if (csv) fprintf( csv, "compiler:,msc,v %i\n", _MSC_VER );
 #elif defined __EMSCRIPTEN__
 	// EMSCRIPTEN needs to be before clang or gcc
 	printf( "(emcc %i.%i build)\n", __EMSCRIPTEN_major__, __EMSCRIPTEN_minor__ );
+	if (csv) fprintf( csv, "compiler:,emcc,v %i.%i\n", __EMSCRIPTEN_major__, __EMSCRIPTEN_minor__ );
 #elif defined __clang__
 	printf( "(clang %i.%i build)\n", __clang_major__, __clang_minor__ );
+	if (csv) fprintf( csv, "compiler:,clang,v %i.%i\n", __clang_major__, __clang_minor__ );
 #elif defined __GNUC__
 	printf( "(gcc %i.%i build)\n", __GNUC__, __GNUC_MINOR__ );
+	if (csv) fprintf( csv, "compiler:,gcc,v %i.%i\n", __GNUC__, __GNUC_MINOR__ );
 #else
 	printf( "\n" );
 #endif
@@ -47,8 +62,10 @@ void PrintHeader()
 	#endif
 	}
 	printf( "running on %s\n", model );
+	if (csv) fprintf( csv, "cpu:,%s\n", model );
 #endif
 	printf( "----------------------------------------------------------------\n" );
+	if (csv) fflush( csv );
 }
 
 void InitOpenCL()
@@ -62,5 +79,14 @@ void InitOpenCL()
 	cwbvh_kernel = new tinyocl::Kernel( "traverse.cl", "batch_cwbvh" );
 	cwbvh_kernel_any = new tinyocl::Kernel( "traverse.cl", "batch_cwbvh_any" );
 	printf( "----------------------------------------------------------------\n" );
+	if (csv)
+	{
+		if (Kernel::isAMD) fprintf( csv, "gpu:,AMD\n" );
+		else if (Kernel::isIntel) fprintf( csv, "gpu:,INTEL\n" );
+		else if (Kernel::isNVidia) fprintf( csv, "gpu:,NVIDIA\n" );
+		else if (Kernel::isApple) fprintf( csv, "gpu:,APPLE\n" );
+		else fprintf( csv, "gpu:,UNKOWN\n" );	
+	}
 #endif
+	if (csv) fflush( csv );
 }

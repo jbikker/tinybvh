@@ -32,6 +32,8 @@ public:
 	Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays = RaySet::UNSPECIFIED, ExperimentFlags = DEFAULT, const char* view = 0 );
 	void Run();
 private:
+	void RunBuildExperiment();
+	void RunTraceExperiment();
 	void WriteImage( char* raySet, const char* tracedRays = 0 );
 	float RunGPU_BVH2( char* raySet, const int N, const char* tgaFile );
 	float RunGPU_BVH2_Any( char* raySet, const int N );

@@ -63,12 +63,42 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	// construct description
 	switch (scene)
 	{
-	case Scene::CRYTEK_SPONZA: strncpy( desc, "Crytek Sponza", 256 ); break;
-	case Scene::BISTRO_EXTERIOR: strncpy( desc, "Bistro Exterior", 256 ); break;
-	case Scene::CONFERENCE_ROOM: strncpy( desc, "Conference Room", 256 ); break;
-	case Scene::BUNNY_10K: strncpy( desc, "Stanford Bunny (10k)", 256 ); break;
-	case Scene::STANFORD_DRAGON: strncpy( desc, "Stanford Dragon", 256 ); break;
-	default: strncpy( desc, "UNKNWON SCENE", 256 ); break;
+	case Scene::CRYTEK_SPONZA: 
+	{
+		strncpy( desc, "Crytek Sponza", 128 );
+		strncmp( shrt, "sponza", 64 );
+		break;
+	}
+	case Scene::BISTRO_EXTERIOR: 
+	{
+		strncpy( desc, "Bistro Exterior", 128 ); 
+		strncpy( shrt, "bistro", 64 ); 
+		break;
+	}
+	case Scene::CONFERENCE_ROOM: 
+	{
+		strncpy( desc, "Conference Room", 128 ); 
+		strncpy( shrt, "confroom", 64 ); 
+		break;
+	}
+	case Scene::BUNNY_10K: 
+	{
+		strncpy( desc, "Stanford Bunny (10k)", 128 ); 
+		strncpy( shrt, "bunny", 64 ); 
+		break;
+	}
+	case Scene::STANFORD_DRAGON: 
+	{
+		strncpy( desc, "Stanford Dragon", 128 ); 
+		strncpy( shrt, "dragon", 64 ); 
+		break;
+	}
+	default: 
+	{
+		strncpy( desc, "UNKNWON SCENE", 128 ); 
+		strncpy( shrt, "unkown", 64 ); 
+		break;
+	}
 	};
 	// convert to madmann91 data
 	bvhvec4* v = verts;

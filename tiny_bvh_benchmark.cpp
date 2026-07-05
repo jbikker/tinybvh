@@ -43,7 +43,7 @@ int main()
 
 	// 2. BVH traversal
 
-#if 1
+#if 0
 
 	experiment.push_back( new Experiment( GPU_BVH, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU, "dbg_gpubvh2.tga" ) );
 	experiment.push_back( new Experiment( GPU_BVH4, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU, "dbg_gpubvh4.tga" ) );
@@ -52,7 +52,7 @@ int main()
 #else
 
 	// traversal performance for 'low', 'medium' and 'high', in TinyBVH, Madmann91 and Embree.
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1, MULTICORE ) );
 	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW1 ) );
 	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1 ) );
 	experiment.push_back( new Experiment( MADMANN91, LOW, scene, PRIMARY_VIEW1 ) );
