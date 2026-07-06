@@ -124,18 +124,21 @@ void Experiment::RunTraceExperiment()
 	{
 		traceTime = RunGPU_BVH2( extensionRays, N, tgaFile );
 		raysPerSecond = (float)(N * 8) / traceTime;
+		runs = 40;
 		WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 	}
 	else if (flags & USE_GPU && bvh->layout == GPU_BVH4)
 	{
 		traceTime = RunGPU_BVH4( extensionRays, N, tgaFile );
 		raysPerSecond = (float)(N * 8) / traceTime;
+		runs = 40;
 		WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 	}
 	else if (flags & USE_GPU && bvh->layout == CWBVH)
 	{
 		traceTime = RunGPU_CWBVH( extensionRays, N, tgaFile );
 		raysPerSecond = (float)(N * 8) / traceTime;
+		runs = 40;
 		WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 	}
 	else
@@ -160,8 +163,8 @@ void Experiment::RunTraceExperiment()
 	if (csv)
 	{
 		if (raysPerSecond < 99000) { mag = 3; fprintf( csv, "%.2f,", raysPerSecond / 1000 ); } // report in KRays/s
-		else if (raysPerSecond < 99000000) fprintf( csv, "%.2f,", raysPerSecond / 1000000 ); // report in MRays/s
-		else { mag = 9; fprintf( csv, "%.2f,", raysPerSecond / 1000000000 ); } // report in BRays/s
+		else /* if (raysPerSecond < 99000000) */ fprintf( csv, "%.2f,", raysPerSecond / 1000000 ); // report in MRays/s
+		// else { mag = 9; fprintf( csv, "%.2f,", raysPerSecond / 1000000000 ); } // report in BRays/s
 		fprintf( csv, "%i,", runs );
 		fflush( csv );
 	}
@@ -180,16 +183,19 @@ void Experiment::RunTraceExperiment()
 		{
 			traceTime = RunGPU_BVH2_Any( extensionRays, N );
 			raysPerSecond = (float)(N * 8) / traceTime;
+			runs = 40;
 		}
 		else if (flags & USE_GPU && bvh->layout == GPU_BVH4)
 		{
 			traceTime = RunGPU_BVH4_Any( extensionRays, N );
 			raysPerSecond = (float)(N * 8) / traceTime;
+			runs = 40;
 		}
 		else if (flags & USE_GPU && bvh->layout == CWBVH)
 		{
 			traceTime = RunGPU_CWBVH_Any( extensionRays, N );
 			raysPerSecond = (float)(N * 8) / traceTime;
+			runs = 40;
 		}
 		else
 		#endif
@@ -210,8 +216,8 @@ void Experiment::RunTraceExperiment()
 		if (csv)
 		{
 			if (mag == 3) fprintf( csv, "%.2f,%i,K\n", raysPerSecond / 1000, runs );
-			else if (mag == 6) fprintf( csv, "%.2f,%i,M\n", raysPerSecond / 1000000, runs );
-			else if (mag == 9) fprintf( csv, "%.2f,%i,B\n", raysPerSecond / 1000000000, runs );
+			else /* if (mag == 6) */ fprintf( csv, "%.2f,%i,M\n", raysPerSecond / 1000000, runs );
+			// else if (mag == 9) fprintf( csv, "%.2f,%i,B\n", raysPerSecond / 1000000000, runs );
 			fflush( csv );
 		}
 	}
