@@ -29,52 +29,126 @@ int main()
 	// construct list of experiments
 	Scene scene = CRYTEK_SPONZA;
 
-#if 1
+#if 1 // run one block at a time to reduce throttling effects.
 
 	// 1. BVH construction
+	// PART 1 - TinyBVH, from ultra-fast to ultra-quality
 	experiment.push_back( new Experiment( BVH2, AVXBUILD, scene ) );
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene ) );
-	experiment.push_back( new Experiment( EMBREE, NO_FLAGS, scene ) );
+	experiment.push_back( new Experiment( BVH2, PRESPLIT, scene ) );
 	experiment.push_back( new Experiment( BVH2, FULLSWEEP, scene ) );
-	experiment.push_back( new Experiment( BVH2, FULLSWEEP|PRESPLIT, scene ) );
 	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
-	experiment.push_back( new Experiment( MADMANN91, NO_FLAGS, scene ) );
+	experiment.push_back( new Experiment( BVH2, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene ) );
+	// PART 2 - Embree, low-medium-high
+	experiment.push_back( new Experiment( EMBREE, LOW, scene ) );
+	experiment.push_back( new Experiment( EMBREE, MEDIUM, scene ) );
+	experiment.push_back( new Experiment( EMBREE, HIGH, scene ) );
+	// PART 3 - Madmann91, low-medium-high
+	experiment.push_back( new Experiment( MADMANN91, LOW, scene ) );
+	experiment.push_back( new Experiment( MADMANN91, MEDIUM, scene ) );
+	experiment.push_back( new Experiment( MADMANN91, HIGH, scene ) );
 
-#else
+#endif
 
-	// 2. BVH traversal
+#if 0
+	// 2. CPU BVH traversal
+	// PART 1 - TinyBVH, from default bvh via quick bvh builds to ultra-quality
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1 ) ); // basic BVH
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, AO_RAYS ) );
+	experiment.push_back( new Experiment( BVH2, AVXBUILD, scene, PRIMARY_VIEW1 ) ); // fast build, good quality
+	experiment.push_back( new Experiment( BVH2, AVXBUILD, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( BVH2, AVXBUILD, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( BVH2, AVXBUILD, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( BVH2, AVXBUILD, scene, AO_RAYS ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW1 ) ); // BVH for fast traversal
+	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, AO_RAYS ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1 ) ); // HQ BVH
+	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS ) );
+#endif
+#if 0
+	// PART 2 - Embree: low, medium, high
+	experiment.push_back( new Experiment( EMBREE, LOW, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( EMBREE, LOW, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( EMBREE, LOW, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( EMBREE, LOW, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( EMBREE, LOW, scene, AO_RAYS ) );
+	experiment.push_back( new Experiment( EMBREE, MEDIUM, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( EMBREE, MEDIUM, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( EMBREE, MEDIUM, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( EMBREE, MEDIUM, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( EMBREE, MEDIUM, scene, AO_RAYS ) );
+	experiment.push_back( new Experiment( EMBREE, HIGH, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( EMBREE, HIGH, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( EMBREE, HIGH, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( EMBREE, HIGH, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( EMBREE, HIGH, scene, AO_RAYS ) );
+#endif
+#if 0
+	// PART 3 - Madmann91: low, medium, high
+	experiment.push_back( new Experiment( MADMANN91, LOW, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( MADMANN91, LOW, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( MADMANN91, LOW, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( MADMANN91, LOW, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( MADMANN91, LOW, scene, AO_RAYS ) );
+	experiment.push_back( new Experiment( MADMANN91, MEDIUM, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( MADMANN91, MEDIUM, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( MADMANN91, MEDIUM, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( MADMANN91, MEDIUM, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( MADMANN91, MEDIUM, scene, AO_RAYS ) );
+	experiment.push_back( new Experiment( MADMANN91, HIGH, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( MADMANN91, HIGH, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( MADMANN91, HIGH, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( MADMANN91, HIGH, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( MADMANN91, HIGH, scene, AO_RAYS ) );
+#endif
 
 #if 0
 
-	experiment.push_back( new Experiment( GPU_BVH, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU, "dbg_gpubvh2.tga" ) );
-	experiment.push_back( new Experiment( GPU_BVH4, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU, "dbg_gpubvh4.tga" ) );
-	experiment.push_back( new Experiment( CWBVH, NO_FLAGS, scene, PRIMARY_VIEW1, USE_GPU, "dbg_cwbvh.tga" ) );
-
-#else
-
-	// traversal performance for 'low', 'medium' and 'high', in TinyBVH, Madmann91 and Embree.
+	// 3. MULTI-CORE CPU TRAVERSAL
 	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH2, AVXBUILD, scene, PRIMARY_VIEW1, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW1 ) );
-	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1 ) );
-	experiment.push_back( new Experiment( MADMANN91, LOW, scene, PRIMARY_VIEW1 ) );
-	experiment.push_back( new Experiment( MADMANN91, MEDIUM, scene, PRIMARY_VIEW1 ) );
-	experiment.push_back( new Experiment( MADMANN91, HIGH, scene, PRIMARY_VIEW1 ) );
-	experiment.push_back( new Experiment( EMBREE, LOW, scene, PRIMARY_VIEW1 ) );
-	experiment.push_back( new Experiment( EMBREE, MEDIUM, scene, PRIMARY_VIEW1 ) );
-	experiment.push_back( new Experiment( EMBREE, HIGH, scene, PRIMARY_VIEW1 ) );
-	
-	// traversal performance for first-bounce diffuse rays.
-	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, DEFAULT, "noise_tinybvh.tga" ) );
-	experiment.push_back( new Experiment( MADMANN91, HIGH, scene, FIRST_BOUNCE, DEFAULT, "noise_madmann.tga" ) );
-	experiment.push_back( new Experiment( EMBREE, HIGH, scene, FIRST_BOUNCE, DEFAULT, "noise_embree.tga" ) );
-	
-	// traversal performance for ambient occlusion rays.
-	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS ) );
-	experiment.push_back( new Experiment( MADMANN91, HIGH, scene, AO_RAYS ) );
-	experiment.push_back( new Experiment( EMBREE, HIGH, scene, AO_RAYS ) );
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW2, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW3, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, FIRST_BOUNCE, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, AO_RAYS, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW1, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW2, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW3, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, FIRST_BOUNCE, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, AO_RAYS, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, MULTICORE ) );
 
 #endif
+
+#if 0
+
+	// 4. GPU TRAVERSAL
+	experiment.push_back( new Experiment( GPU_BVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
 
 #endif
 
