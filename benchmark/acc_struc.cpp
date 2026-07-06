@@ -36,6 +36,11 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		if (flags & BuildFlags::AVXBUILD) bvh->settings.useSIMDifavailable = true;
 		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
 	}
+	// fix flags for Embree / Madmann91
+	if (layout == EMBREE || layout == MADMANN91)
+	{
+		if ((flags & (MEDIUM|HIGH)) == 0) flags = LOW;
+	}
 	// construct description
 	switch (layout)
 	{
@@ -120,6 +125,22 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 	if (flags) strncat( desc, ")", 128 );
 }
 
+void AccStruc::PrepareBuild()
+{
+	// for Embree; so we can detach setting geometry etc. from actual build.
+	if (layout == EMBREE)
+	{
+		RTCBuildQuality q = RTC_BUILD_QUALITY_LOW;
+		if (flags & MEDIUM) q = RTC_BUILD_QUALITY_MEDIUM;
+		if (flags & HIGH) q = RTC_BUILD_QUALITY_HIGH;
+		rtcSetGeometryBuildQuality( embreeGeom, q );
+		rtcCommitGeometry( embreeGeom );
+		rtcAttachGeometry( embreeScene, embreeGeom );
+		rtcReleaseGeometry( embreeGeom );
+		rtcSetSceneBuildQuality( embreeScene, q );
+	}
+}
+
 BVHBase* AccStruc::Build( PrimitiveSet* prims )
 {
 	primSet = prims;
@@ -194,7 +215,26 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 		else if (flags & HIGH) config.quality = bvh::v2::DefaultBuilder<_Node>::Quality::High;
 		else config.quality = bvh::v2::DefaultBuilder<_Node>::Quality::Low;
 		madmannbvh = bvh::v2::DefaultBuilder<_Node>::build( thread_pool, primSet->bboxes, primSet->centers, config );
-		// precompute tris if not done yet
+		break;
+	}
+	case EMBREE:
+	{
+		// this command presumably does the actual build.
+		rtcCommitGeometry( embreeGeom );
+		rtcCommitScene( embreeScene );
+		break;
+	}
+	default:
+		exit( 0 ); // unsupported layout. See note in constructor.
+	};
+	return bvh;
+}
+
+void AccStruc::PostBuild()
+{
+	// for Madmann91; triangle precomputations are needed for intersection.
+	if (layout == MADMANN91)
+	{
 		if (!mmTrisPrecomputed)
 		{
 			std::vector<size_t>& prim_ids = madmannbvh.prim_ids;
@@ -205,25 +245,7 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 				} );
 			mmTrisPrecomputed = true;
 		}
-		break;
 	}
-	case EMBREE:
-	{
-		RTCBuildQuality q = RTC_BUILD_QUALITY_LOW;
-		if (flags & MEDIUM) q = RTC_BUILD_QUALITY_MEDIUM;
-		if (flags & HIGH) q = RTC_BUILD_QUALITY_HIGH;
-		rtcSetGeometryBuildQuality( embreeGeom, q );
-		rtcCommitGeometry( embreeGeom );
-		rtcAttachGeometry( embreeScene, embreeGeom );
-		rtcReleaseGeometry( embreeGeom );
-		rtcSetSceneBuildQuality( embreeScene, q );
-		rtcCommitScene( embreeScene );
-		break;
-	}
-	default:
-		exit( 0 ); // unsupported layout. See note in constructor.
-	};
-	return bvh;
 }
 
 float AccStruc::SAHCost()

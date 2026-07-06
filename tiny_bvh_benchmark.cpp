@@ -27,12 +27,13 @@ int main()
 	InitOpenCL(); // does nothing if disabled; see tools.cpp
 	vector<Experiment*> experiment;
 	// construct list of experiments
-	Scene scene = CONFERENCE_ROOM;
+	Scene scene = CRYTEK_SPONZA;
 
-#if 0
+#if 1
 
 	// 1. BVH construction
 	experiment.push_back( new Experiment( BVH2, AVXBUILD, scene ) );
+	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene ) );
 	experiment.push_back( new Experiment( EMBREE, NO_FLAGS, scene ) );
 	experiment.push_back( new Experiment( BVH2, FULLSWEEP, scene ) );
 	experiment.push_back( new Experiment( BVH2, FULLSWEEP|PRESPLIT, scene ) );
@@ -53,6 +54,7 @@ int main()
 
 	// traversal performance for 'low', 'medium' and 'high', in TinyBVH, Madmann91 and Embree.
 	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH2, AVXBUILD, scene, PRIMARY_VIEW1, MULTICORE ) );
 	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW1 ) );
 	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1 ) );
 	experiment.push_back( new Experiment( MADMANN91, LOW, scene, PRIMARY_VIEW1 ) );

@@ -66,7 +66,7 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	case Scene::CRYTEK_SPONZA: 
 	{
 		strncpy( desc, "Crytek Sponza", 128 );
-		strncmp( shrt, "sponza", 64 );
+		strncpy( shrt, "sponza", 64 );
 		break;
 	}
 	case Scene::BISTRO_EXTERIOR: 
@@ -102,7 +102,7 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	};
 	// convert to madmann91 data
 	bvhvec4* v = verts;
-	for (int N = (int)primCount, i = 0; i < N; i += 3) tris.emplace_back(
+	for (int N = (int)primCount * 3, i = 0; i < N; i += 3) tris.emplace_back(
 		_Vec3( v[i].x, v[i].y, v[i].z ), _Vec3( v[i + 1].x, v[i + 1].y, v[i + 1].z ),
 		_Vec3( v[i + 2].x, v[i + 2].y, v[i + 2].z ) );
 	bboxes.resize( tris.size() );

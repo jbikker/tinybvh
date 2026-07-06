@@ -35,7 +35,9 @@ class AccStruc
 public:
 	AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags );
 	char* GetDescription() { return desc; }
+	void PrepareBuild();
 	BVHBase* Build( PrimitiveSet* primSet );
+	void PostBuild();
 	BVHBase* GetBVH() { return bvh; }
 	float SAHCost();
 	float EPOCost();

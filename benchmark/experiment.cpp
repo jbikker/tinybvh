@@ -82,7 +82,9 @@ void Experiment::RunTraceExperiment()
 	// - Build once - time is irrelevant;
 	// - Trace on a single core;
 	// - Trace one million rays several times for average trace time.
+	bvh->PrepareBuild();
 	bvh->Build( cachedPrimSet[primSet] );
+	bvh->PostBuild();
 	// emit header
 	if (firstExperiment || !lastWasTrav)
 	{
@@ -155,7 +157,7 @@ void Experiment::RunTraceExperiment()
 	float mraysPerSecond = raysPerSecond / RAY_BATCH_SIZE;
 	printf( "%s\nfind nearest: %.2fM, ", title, mraysPerSecond );
 	int mag = 6; // use the same scale for shadows rays.
-	if (csv) 
+	if (csv)
 	{
 		if (raysPerSecond < 99000) { mag = 3; fprintf( csv, "%.2f,", raysPerSecond / 1000 ); } // report in KRays/s
 		else if (raysPerSecond < 99000000) fprintf( csv, "%.2f,", raysPerSecond / 1000000 ); // report in MRays/s
@@ -205,7 +207,7 @@ void Experiment::RunTraceExperiment()
 		}
 		mraysPerSecond = raysPerSecond / RAY_BATCH_SIZE;
 		printf( "any hit: %.2fM\n", mraysPerSecond );
-		if (csv) 
+		if (csv)
 		{
 			if (mag == 3) fprintf( csv, "%.2f,%i,K\n", raysPerSecond / 1000, runs );
 			else if (mag == 6) fprintf( csv, "%.2f,%i,M\n", raysPerSecond / 1000000, runs );
@@ -223,7 +225,26 @@ void Experiment::RunBuildExperiment()
 	// Accstruc build experiment.
 	// - Build several times for average build time;
 	// - Assess SAH and EPO.
-	BVH* accstruc = (BVH*)bvh->Build( cachedPrimSet[primSet] ); // warm caches
+	bvh->PrepareBuild();
+	bvh->Build( cachedPrimSet[primSet] ); // warm caches
+	bvh->PostBuild();
+	// emit header
+	if (firstExperiment || lastWasTrav)
+	{
+		if (csv) fprintf( csv, "bvh build measurements\n" );
+		if (csv) fprintf( csv, "device,scene,tris,bvh,flags,time (ms),sah,epo,runs\n" );
+	}
+	lastWasTrav = false;
+	firstExperiment = false;
+	// write experiment settings to csv
+	if (csv)
+	{
+		if (flags & USE_GPU) fprintf( csv, "gpu," ); else if (flags & MULTICORE) fprintf( csv, "cpu (MT)," ); else fprintf( csv, "cpu," );
+		fprintf( csv, "%s,%i,", cachedPrimSet[primSet]->shrt, cachedPrimSet[primSet]->primCount );
+		fprintf( csv, "%s,%s,", bvh->shrt, bvh->flagShrt );
+		if (csv) fflush( csv );
+	}
+	bvh->PrepareBuild();
 	Timer t;
 	int runs = 0;
 	while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
@@ -232,11 +253,21 @@ void Experiment::RunBuildExperiment()
 		runs++;
 	}
 	buildTime = t.elapsed() * (1.0f / runs); // average of runs.
+	bvh->PostBuild();
 	// report
 	printf( "%s\nbuild time: %.2fms ", title, buildTime * 1000.0f );
 	float sahCost = bvh->SAHCost();
 	float epoCost = bvh->EPOCost();
-	printf( "SAH: %.3f, EPO: %.2f\n", sahCost, epoCost );
+	if (bvh->layout == EMBREE) printf( "SAH: n/a, EPO: n/a\n" );
+	else if (bvh->layout == MADMANN91) printf( "SAH: %.3f, EPO: n/a\n", sahCost );
+	else printf( "SAH: %.3f, EPO: %.2f\n", sahCost, epoCost );
+	if (csv) 
+	{
+		if (bvh->layout == EMBREE) fprintf( csv, "%.2f,n/a,n/a,%i\n", buildTime * 1000.0f, runs );
+		else if (bvh->layout == MADMANN91) fprintf( csv, "%.2f,%.3f,n/a,%i\n", buildTime * 1000.0f, sahCost, runs );
+		else fprintf( csv, "%.2f,%.3f,%.3f,%i\n", buildTime * 1000.0f, sahCost, epoCost, runs );
+		fflush( csv );
+	}
 }
 
 void Experiment::WriteImage( char* raySet, const char* tracedRays )
