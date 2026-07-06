@@ -6599,14 +6599,23 @@ void BVH::PrepareAVXBuildFragSlice( const uint32_t first, const uint32_t last,
 	const uint32_t* indices, const __m128* verts4, const uint32_t stride4, void* f4, __m128* rootMin, __m128* rootMax )
 {
 	FragSSE* frag4 = (FragSSE*)f4;
-	for (uint32_t i = 0; i < triCount; i++)
+	__m128 rmin = _mm_set1_ps( BVH_FAR ), rmax = _mm_set1_ps( -BVH_FAR );
+	if (indices) for (uint32_t i = first; i < last; i++)
 	{
 		const uint32_t i0 = indices[i * 3], i1 = indices[i * 3 + 1], i2 = indices[i * 3 + 2];
 		const __m128 v0 = verts4[i0 * stride4], v1 = verts4[i1 * stride4], v2 = verts4[i2 * stride4];
 		const __m128 t1 = _mm_min_ps( _mm_min_ps( v0, v1 ), v2 ), t2 = _mm_max_ps( _mm_max_ps( v0, v1 ), v2 );
-		frag4[i].bmin4 = t1, frag4[i].bmax4 = t2, * rootMin = _mm_min_ps( *rootMin, t1 ), * rootMax = _mm_max_ps( *rootMax, t2 );
+		frag4[i].bmin4 = t1, frag4[i].bmax4 = t2, rmin = _mm_min_ps( rmin, t1 ), rmax = _mm_max_ps( rmax, t2 );
 		primIdx[i] = i;
 	}
+	else for (uint32_t i = first; i < last; i++)
+	{
+		const __m128 v0 = verts4[(i * 3) * stride4], v1 = verts4[(i * 3 + 1) * stride4], v2 = verts4[(i * 3 + 2) * stride4];
+		const __m128 t1 = _mm_min_ps( _mm_min_ps( v0, v1 ), v2 ), t2 = _mm_max_ps( _mm_max_ps( v0, v1 ), v2 );
+		frag4[i].bmin4 = t1, frag4[i].bmax4 = t2, rmin = _mm_min_ps( rmin, t1 ), rmax = _mm_max_ps( rmax, t2 );
+		primIdx[i] = i;
+	}
+	*rootMin = rmin, *rootMax = rmax; // warning: some false sharing.
 }
 
 void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
@@ -6645,36 +6654,19 @@ void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices
 	// initialize fragments
 	__m128 rootMin = min4, rootMax = max4;
 	uint32_t stride4 = verts.stride / 16;
-	if (indices)
+	BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH::PrepareAVXBuild( .. ), empty vertex slice." );
+	BVH_FATAL_ERROR_IF( primCount == 0, "BVH::PrepareAVXBuild( .. ), primCount == 0." );
+	// build the BVH over indexed triangles
+	if (threadedBuild)
 	{
-		BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH::PrepareAVXBuild( .. ), empty vertex slice." );
-		BVH_FATAL_ERROR_IF( prims == 0, "BVH::PrepareAVXBuild( .. ), prims == 0." );
-		// build the BVH over indexed triangles
-		if (threadedBuild)
-		{
-			constexpr int slices = 16;
-			__m128 sliceMin[slices], sliceMax[slices];
-			BuildAVXFragSliceArgs args = { this, triCount, triCount / slices, slices, indices, stride4, verts4, sliceMin, sliceMax };
-			tinybvh_parallel_for( context, slices, &BuildAVXFragSlice, &args );
-			rootMin = sliceMin[0], rootMax = sliceMax[0];
-			for (int i = 1; i < slices; i++) rootMin = _mm_min_ps( rootMin, sliceMin[i] ), rootMax = _mm_max_ps( rootMax, sliceMax[i] );
-		}
-		else PrepareAVXBuildFragSlice( 0, triCount, indices, verts4, stride4, (void*)frag4, &rootMin, &rootMax );
+		constexpr int slices = 4;
+		__m128 sliceMin[slices], sliceMax[slices];
+		BuildAVXFragSliceArgs args = { this, triCount, triCount / slices, slices, indices, stride4, verts4, sliceMin, sliceMax, frag4 };
+		tinybvh_parallel_for( context, slices, &BuildAVXFragSlice, &args );
+		rootMin = sliceMin[0], rootMax = sliceMax[0];
+		for (int i = 1; i < slices; i++) rootMin = _mm_min_ps( rootMin, sliceMin[i] ), rootMax = _mm_max_ps( rootMax, sliceMax[i] );
 	}
-	else
-	{
-		BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH::PrepareAVXBuild( .. ), empty vertex slice." );
-		BVH_FATAL_ERROR_IF( prims != 0, "BVH::PrepareAVXBuild( .. ), indices == 0." );
-		// build the BVH over a list of vertices: three per triangle
-		for (uint32_t i = 0; i < triCount; i++)
-		{
-			const __m128 v0 = verts4[(i * 3) * stride4], v1 = verts4[(i * 3 + 1) * stride4], v2 = verts4[(i * 3 + 2) * stride4];
-			const __m128 t1 = _mm_min_ps( _mm_min_ps( v0, v1 ), v2 );
-			const __m128 t2 = _mm_max_ps( _mm_max_ps( v0, v1 ), v2 );
-			frag4[i].bmin4 = t1, frag4[i].bmax4 = t2, rootMin = _mm_min_ps( rootMin, t1 ), rootMax = _mm_max_ps( rootMax, t2 );
-			primIdx[i] = i;
-		}
-	}
+	else PrepareAVXBuildFragSlice( 0, triCount, indices, verts4, stride4, (void*)frag4, &rootMin, &rootMax );
 	BVHNode& root = bvhNode[0];
 	root.aabbMin = *(bvhvec3*)&rootMin, root.aabbMax = *(bvhvec3*)&rootMax;
 	// presplitting
