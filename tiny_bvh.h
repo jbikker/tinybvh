@@ -4988,12 +4988,27 @@ void BVH_GPU::ConvertFrom( const BVH& original, bool compact )
 		{
 			const BVH::BVHNode& left = original.bvhNode[orig.leftFirst];
 			const BVH::BVHNode& right = original.bvhNode[orig.leftFirst + 1];
-			this->bvhNode[idx].lmin = left.aabbMin, this->bvhNode[idx].rmin = right.aabbMin;
-			this->bvhNode[idx].lmax = left.aabbMax, this->bvhNode[idx].rmax = right.aabbMax;
-			this->bvhNode[idx].left = newNodePtr; // right will be filled when popped
-			stack[stackPtr++] = idx;
-			stack[stackPtr++] = orig.leftFirst + 1;
-			nodeIdx = orig.leftFirst;
+			const float leftArea = tinybvh_halfarea( left.aabbMax - left.aabbMin );
+			const float rightArea = tinybvh_halfarea( right.aabbMax - right.aabbMin );
+			// put the larger node to the left to improve cache coherence during traversal
+			if (leftArea > rightArea)
+			{
+				this->bvhNode[idx].lmin = left.aabbMin, this->bvhNode[idx].rmin = right.aabbMin;
+				this->bvhNode[idx].lmax = left.aabbMax, this->bvhNode[idx].rmax = right.aabbMax;
+				this->bvhNode[idx].left = newNodePtr; // right will be filled when popped
+				stack[stackPtr++] = idx;
+				stack[stackPtr++] = orig.leftFirst + 1;
+				nodeIdx = orig.leftFirst;
+			}
+			else
+			{
+				this->bvhNode[idx].lmin = right.aabbMin, this->bvhNode[idx].rmin = left.aabbMin;
+				this->bvhNode[idx].lmax = right.aabbMax, this->bvhNode[idx].rmax = left.aabbMax;
+				this->bvhNode[idx].left = newNodePtr + 1; // right will be filled when popped
+				stack[stackPtr++] = idx;
+				stack[stackPtr++] = orig.leftFirst;
+				nodeIdx = orig.leftFirst + 1;
+			}
 		}
 	}
 	usedNodes = newNodePtr;
