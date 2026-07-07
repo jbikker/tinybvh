@@ -27,6 +27,7 @@ A Bounding Volume Hierarchy is a data structure used to quickly find intersectio
 
 To build a BVH using TinyBVH, simply call ````BVH::Build```` on an instantiated ````BVH````. See [````tiny_bvh_minimal.cpp````](https://github.com/jbikker/tinybvh/blob/dev/tiny_bvh_minimal.cpp) for a (really) small example.
 Internally, the call will get forwarded to a specialized builder. There are fast builders, builders for 'high quality' BVHs and experimental builders for research and development. 
+
 A selection:
 * ````BVH::Build```` : Efficient plain-C/C+ binned SAH BVH builder which should run on any platform.
 * ````BVH::BuildAVX```` : A highly optimized version of BVH::Build for Intel and AMD CPUs. 
@@ -60,7 +61,7 @@ The cross-platform fenster-based single-source **bitmap renderer** can be compil
 ````g++ -mwindows -O3 tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on Linux and Windows)
 
 ````c++ --std=c++17 -framework Cocoa -O3 tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on macOS)
-
+09:05 07/07/2026
 The multi-threaded **path tracing** demo can be compiled with
 
 ````g++ -mwindows -O3 tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on Linux and Windows)
