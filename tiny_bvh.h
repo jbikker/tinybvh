@@ -172,8 +172,8 @@ THE SOFTWARE.
 #ifndef NO_CUSTOM_GEOMETRY
 #define ENABLE_CUSTOM_GEOMETRY
 #endif
-#ifndef NO_THREADED_BUILDS
-#define ENABLE_THREADED_BUILDS
+#ifndef NO_THREADED_BUILDS // if defined, TinyBVH compiles using C++11.
+#define ENABLE_THREADED_BUILDS 
 #endif
 #ifndef NO_VOXEL_SUPPORT
 #define ENABLE_VOXEL_SUPPORT
@@ -828,7 +828,7 @@ struct RayEx
 
 #endif
 
-#ifndef TINYBVH_NO_BUILTIN_POOL
+#if defined ENABLE_THREADED_BUILDS && !defined TINYBVH_NO_BUILTIN_POOL
 // Default build hooks: a process-wide std::thread pool (tiny_bvh_threadpool.h).
 // Define TINYBVH_NO_BUILTIN_POOL if you prefer to provide your own interface.
 void tinybvh_builtin_spawn( void (*fn)(void* payload), const void* payload, uint32_t payload_size, void* userdata );
@@ -9162,7 +9162,7 @@ void BVH_Verbose::MergeSubtree( const uint32_t nodeIdx, uint32_t* newIdx, uint32
 // built-in std::thread pool backing the default BVHContext hooks; define
 // TINYBVH_NO_BUILTIN_POOL to leave this out, in which case builds are serial
 // unless you hook your own.
-#ifndef TINYBVH_NO_BUILTIN_POOL
+#if defined ENABLE_THREADED_BUILDS && !defined TINYBVH_NO_BUILTIN_POOL
 
 #if defined _WIN32 && defined _MSC_VER
 #define WIN32_LEAN_AND_MEAN
