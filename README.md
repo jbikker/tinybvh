@@ -3,6 +3,7 @@ This is the *development branch* for TinyBVH. New features are tested here first
 
 # TinyBVH
 Single-header BVH construction and traversal library written as "Sane C++" (or "C with classes"). Some C++17 is used, e.g. for threading. **This library has no dependencies.** 
+
 TinyBVH is _fast_. Here is, in a nutshell, how it compares to [Intel's Embree](https://www.embree.org) and [Madmann91's BVH library](https://github.com/madmann91/bvh).
 ![Performance](images/perfgraphs.png)
 TinyBVH currently builds a SAH BVH faster than Embree and Maddmann91. It traces individual primary rays faster than both alternatives. Embree outperforms TinyBVH for _any hit_ rays. Note: These results are based on the new ````tiny_bvh_benchmark.cpp```` application and are cautiously presented as 'preliminary'. If you suspect an inperfection in the experiment setup, please [let me know](mailto:bikker.j@protonmail.com).
