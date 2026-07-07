@@ -6,7 +6,7 @@ Single-header BVH construction and traversal library written as "Sane C++" (or "
 
 TinyBVH is _fast_. Here is, in a nutshell, how it compares to [Intel's Embree](https://www.embree.org) and [Madmann91's BVH library](https://github.com/madmann91/bvh).
 ![Performance](images/perfgraphs.png)
-TinyBVH currently builds a SAH BVH faster than Embree and Maddmann91. It traces individual primary rays faster than both alternatives. Embree outperforms TinyBVH for _any hit_ rays. Note: These results are based on the new ````tiny_bvh_benchmark.cpp```` application and are cautiously presented as 'preliminary'. If you suspect an inperfection in the experiment setup, please [let me know](mailto:bikker.j@protonmail.com).
+TinyBVH currently builds a SAH BVH faster than Embree and Maddmann91. It traces individual primary rays faster than both alternatives. Embree outperforms TinyBVH for _any hit_ rays. Note: These results are based on the new ````tiny_bvh_benchmark.cpp```` application and are cautiously presented as 'preliminary'. Note that single-ray traversal is only a small part of Embree. If you suspect an inperfection in the experiment setup, please [let me know](mailto:bikker.j@protonmail.com).
 ![Performance](images/cpu_vs_gpu.png)
 When tracing rays on the GPU, (multicore) CPU performance is dwarfed. TinyBVH traces up to 4 billion rays per second in Crytek's Sponza scene using the straight-forward binary BVH format, regardless of graphics API and without using specialized ray tracing hardware. That is 4 rays per pixel at 4k@120Hz, enough for most purposes.
 # TinyOCL
@@ -40,7 +40,7 @@ Apart from the default BVH layout (simply named ````BVH````), several other layo
 * ````BVH```` : A compact format that stores the AABB for a node, along with child pointers and leaf information in a cross-platform-friendly way. The 32-byte size allows for cache-line alignment.
 * ````BVH_Double```` : Double-precision version of ````BVH````.
 * ````MBVH<M>```` : In this (templated) format, each node stores M child pointers, reducing the depth of the tree. This improves performance for divergent rays. Based on the [2008 paper](https://graphics.stanford.edu/~boulos/papers/multi_rt08.pdf) by Ingo Wald et al.
-* ````BVH4_CPU```` : SSE-optimzied wide BVH traversal (["WiVe"](https://web.cs.ucdavis.edu/~hamann/FuetterlingLojewskiPfreundtHamannEbertHPG2017PaperFinal06222017.pdf)). The fastest option for CPUs that do not support AVX.
+* ````BVH4_CPU```` : SSE-optimized wide BVH traversal (["WiVe"](https://web.cs.ucdavis.edu/~hamann/FuetterlingLojewskiPfreundtHamannEbertHPG2017PaperFinal06222017.pdf)). The fastest option for CPUs that do not support AVX.
 * ````BVH8_CPU```` : AVX2-optimized wide BVH traversal (["WiVe"](https://web.cs.ucdavis.edu/~hamann/FuetterlingLojewskiPfreundtHamannEbertHPG2017PaperFinal06222017.pdf)). This is the fastest option on CPU.
 * ````BVH_GPU```` : This format uses 64 bytes per node and stores the AABBs of the two child nodes. This is the format presented in the [2009 Aila & Laine paper](https://research.nvidia.com/sites/default/files/pubs/2009-08_Understanding-the-Efficiency/aila2009hpg_paper.pdf). It can be traversed with a simple GPU kernel.
 * ````BVH4_GPU```` : A compact version of the ````BVH4```` format, which may be faster for GPU ray tracing.
