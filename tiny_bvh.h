@@ -172,7 +172,7 @@ THE SOFTWARE.
 #ifndef NO_CUSTOM_GEOMETRY
 #define ENABLE_CUSTOM_GEOMETRY
 #endif
-#ifndef NO_THREADED_BUILDS // if defined, TinyBVH compiles using C++11.
+#ifndef NO_THREADED_BUILDS // if defined, TinyBVH compiles using C++14.
 #define ENABLE_THREADED_BUILDS 
 #endif
 #ifndef NO_VOXEL_SUPPORT
