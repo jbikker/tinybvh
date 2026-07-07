@@ -115,13 +115,14 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	rtcSetDeviceErrorFunction( embreeDevice, embreeError, NULL );
 	embreeScene = rtcNewScene( embreeDevice );
 	embreeGeom = rtcNewGeometry( embreeDevice, RTC_GEOMETRY_TYPE_TRIANGLE );
-	float* embVertices = (float*)rtcSetNewGeometryBuffer( embreeGeom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, 3 * sizeof( float ), primCount * 3 );
+	float* embVertices = (float*)rtcSetNewGeometryBuffer( embreeGeom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, 4 * sizeof( float ), primCount * 3 );
 	unsigned* embIndices = (unsigned*)rtcSetNewGeometryBuffer( embreeGeom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, 3 * sizeof( unsigned ), primCount );
 	for (uint32_t i = 0; i < primCount * 3; i++)
 	{
-		embVertices[i * 3 + 0] = verts[i].x;
-		embVertices[i * 3 + 1] = verts[i].y;
-		embVertices[i * 3 + 2] = verts[i].z, embIndices[i] = i; // Note: not using shared vertices.
+		embVertices[i * 4 + 0] = verts[i].x;
+		embVertices[i * 4 + 1] = verts[i].y;
+		embVertices[i * 4 + 2] = verts[i].z, embIndices[i] = i; // Note: not using shared vertices.
+		embVertices[i * 4 + 3] = 0;
 	}
 }
 

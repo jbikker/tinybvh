@@ -138,6 +138,7 @@ void AccStruc::PrepareBuild()
 		rtcAttachGeometry( embreeScene, embreeGeom );
 		rtcReleaseGeometry( embreeGeom );
 		rtcSetSceneBuildQuality( embreeScene, q );
+		rtcSetSceneFlags( embreeScene, RTC_SCENE_FLAG_NONE );
 	}
 }
 

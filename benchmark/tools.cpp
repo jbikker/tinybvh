@@ -29,6 +29,7 @@ void PrintHeader()
 	char buffer[128];
     std::strftime( std::data( buffer ), 128, "time:,%T,%F", std::gmtime( &time ) );
 	if (csv) fprintf( csv, "%s\n", buffer );
+	if (csv) fflush( csv );
 
 	// determine compiler
 #ifdef _MSC_VER

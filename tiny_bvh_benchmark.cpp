@@ -29,7 +29,7 @@ int main()
 	// construct list of experiments
 	Scene scene = CRYTEK_SPONZA;
 
-#if 1 // run one block at a time to reduce throttling effects.
+#if 0 // run one block at a time to reduce throttling effects.
 
 	// 1. BVH construction
 	// PART 1 - TinyBVH, from ultra-fast to ultra-quality
@@ -131,7 +131,7 @@ int main()
 
 #endif
 
-#if 0
+#if 1
 
 	// 4. GPU TRAVERSAL
 	experiment.push_back( new Experiment( GPU_BVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );

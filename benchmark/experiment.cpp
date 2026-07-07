@@ -20,6 +20,8 @@ extern FILE* csv;
 namespace tinybvh
 {
 
+extern RTCScene embreeScene;
+
 Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays, ExperimentFlags expFlags, const char* view )
 {
 	if (rays == RaySet::UNSPECIFIED)
@@ -125,37 +127,69 @@ void Experiment::RunTraceExperiment()
 		traceTime = RunGPU_BVH2( extensionRays, N, tgaFile );
 		raysPerSecond = (float)(N * 8) / traceTime;
 		runs = 40;
-		WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
+		if (tgaFile) WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 	}
 	else if (flags & USE_GPU && bvh->layout == GPU_BVH4)
 	{
 		traceTime = RunGPU_BVH4( extensionRays, N, tgaFile );
 		raysPerSecond = (float)(N * 8) / traceTime;
 		runs = 40;
-		WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
+		if (tgaFile) WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 	}
 	else if (flags & USE_GPU && bvh->layout == CWBVH)
 	{
 		traceTime = RunGPU_CWBVH( extensionRays, N, tgaFile );
 		raysPerSecond = (float)(N * 8) / traceTime;
 		runs = 40;
-		WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
+		if (tgaFile) WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 	}
 	else
 	#endif
 	{
-		// dump image for the ray set, if requested
-		if (tgaFile) WriteImage( extensionRays );
-		// trace 'first hit' rays on CPU
-		bvh->IntersectBatch( extensionRays, N ); // warm caches, precompute data
-		t.reset();
-		while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
+		if (bvh->layout == EMBREE)
 		{
-			if (flags & MULTICORE) bvh->IntersectBatchMT( extensionRays, N ); else bvh->IntersectBatch( extensionRays, N );
-			runs++;
+			// Embree needs to be handled separately: 
+			// we don't want to include ray translation in the measurement.
+			RTCRayHit* embreeRay = (RTCRayHit*)malloc64( N * sizeof( RTCRayHit ) );
+			for (int i = 0; i < N; i++)
+			{
+				const Ray& r = *(Ray*)(shadowRays + i * 64);
+				embreeRay[i].ray.org_x = r.O.x, embreeRay[i].ray.org_y = r.O.y, embreeRay[i].ray.org_z = r.O.z;
+				embreeRay[i].ray.dir_x = r.D.x, embreeRay[i].ray.dir_y = r.D.y, embreeRay[i].ray.dir_z = r.D.z;
+				embreeRay[i].ray.tnear = 0, embreeRay[i].ray.tfar = r.hit.t;
+				embreeRay[i].ray.mask = -1, embreeRay[i].ray.flags = 0;
+				embreeRay[i].hit.geomID = RTC_INVALID_GEOMETRY_ID;
+				embreeRay[i].hit.instID[0] = RTC_INVALID_GEOMETRY_ID;
+			}
+			t.reset();
+			while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
+			{
+				for (int i = 0; i < N; i++)
+				{
+					embreeRay[i].ray.tfar = BVH_FAR; // reset
+					rtcIntersect1( embreeScene, &embreeRay[i] );
+				}
+				runs++;
+			}
+			traceTime = t.elapsed() * (1.0f / runs); // average of runs.
+			raysPerSecond = (float)N / traceTime;
+			free64( embreeRay );
 		}
-		traceTime = t.elapsed() * (1.0f / runs); // average of runs.
-		raysPerSecond = (float)N / traceTime;
+		else
+		{
+			// dump image for the ray set, if requested
+			if (tgaFile) WriteImage( extensionRays );
+			// trace 'first hit' rays on CPU
+			bvh->IntersectBatch( extensionRays, N ); // warm caches, precompute data
+			t.reset();
+			while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
+			{
+				if (flags & MULTICORE) bvh->IntersectBatchMT( extensionRays, N ); else bvh->IntersectBatch( extensionRays, N );
+				runs++;
+			}
+			traceTime = t.elapsed() * (1.0f / runs); // average of runs.
+			raysPerSecond = (float)N / traceTime;
+		}
 	}
 	float mraysPerSecond = raysPerSecond / RAY_BATCH_SIZE;
 	printf( "%s\nfind nearest: %.2fM, ", title, mraysPerSecond );
@@ -199,18 +233,46 @@ void Experiment::RunTraceExperiment()
 		}
 		else
 		#endif
-		{
-			// trace 'any hit' rays on CPU
-			bvh->OcclusionBatch( shadowRays, N ); // warm caches
-			t.reset();
-			while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
+			if (bvh->layout == EMBREE)
 			{
-				if (flags & MULTICORE) bvh->OcclusionBatchMT( extensionRays, N ); else bvh->OcclusionBatch( shadowRays, N );
-				runs++;
+				// Embree needs to be handled separately: 
+				// we don't want to include ray translation in the measurement.
+				RTCRay* embreeRay = (RTCRay*)malloc64( N * sizeof( RTCRay ) );
+				for (int i = 0; i < N; i++)
+				{
+					const Ray& r = *(Ray*)(shadowRays + i * 64);
+					embreeRay[i].org_x = r.O.x, embreeRay[i].org_y = r.O.y, embreeRay[i].org_z = r.O.z;
+					embreeRay[i].dir_x = r.D.x, embreeRay[i].dir_y = r.D.y, embreeRay[i].dir_z = r.D.z;
+					embreeRay[i].tnear = 0, embreeRay[i].tfar = r.hit.t;
+					embreeRay[i].mask = -1, embreeRay[i].flags = RTC_RAY_QUERY_FLAG_COHERENT;
+				}
+				t.reset();
+				while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
+				{
+					for (int i = 0; i < N; i++)
+					{
+						embreeRay[i].tfar = BVH_FAR; // reset
+						rtcOccluded1( embreeScene, &embreeRay[i] );
+					}
+					runs++;
+				}
+				traceTime = t.elapsed() * (1.0f / runs); // average of runs.
+				raysPerSecond = (float)N / traceTime;
+				free64( embreeRay );
 			}
-			traceTime = t.elapsed() * (1.0f / runs); // average of runs.
-			raysPerSecond = (float)N / traceTime;
-		}
+			else
+			{
+				// trace 'any hit' rays on CPU
+				bvh->OcclusionBatch( shadowRays, N ); // warm caches
+				t.reset();
+				while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
+				{
+					if (flags & MULTICORE) bvh->OcclusionBatchMT( extensionRays, N ); else bvh->OcclusionBatch( shadowRays, N );
+					runs++;
+				}
+				traceTime = t.elapsed() * (1.0f / runs); // average of runs.
+				raysPerSecond = (float)N / traceTime;
+			}
 		mraysPerSecond = raysPerSecond / RAY_BATCH_SIZE;
 		printf( "any hit: %.2fM\n", mraysPerSecond );
 		if (csv)
@@ -267,7 +329,7 @@ void Experiment::RunBuildExperiment()
 	if (bvh->layout == EMBREE) printf( "SAH: n/a, EPO: n/a\n" );
 	else if (bvh->layout == MADMANN91) printf( "SAH: %.3f, EPO: n/a\n", sahCost );
 	else printf( "SAH: %.3f, EPO: %.2f\n", sahCost, epoCost );
-	if (csv) 
+	if (csv)
 	{
 		if (bvh->layout == EMBREE) fprintf( csv, "%.2f,n/a,n/a,%i\n", buildTime * 1000.0f, runs );
 		else if (bvh->layout == MADMANN91) fprintf( csv, "%.2f,%.3f,n/a,%i\n", buildTime * 1000.0f, sahCost, runs );
