@@ -99,10 +99,10 @@ THE SOFTWARE.
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
 #define TINY_BVH_VERSION_MINOR	7
-#define TINY_BVH_VERSION_SUB	2
+#define TINY_BVH_VERSION_SUB	3
 
 // Cached BVH file version - increases only when file layout changes.
-#define TINY_BVH_CACHE_VERSION	172
+#define TINY_BVH_CACHE_VERSION	173
 
 // Run-time checks / debugging.
 // #define PARANOID // checks out-of-bound access of slices
