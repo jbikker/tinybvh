@@ -93,21 +93,21 @@ if (NOT MSVC)
 	target_link_options(tiny_bvh_double_test PRIVATE ${common_link_flags})
 
 	# No openmp support in default compiler
-	set(tiny_bvh_speedtest_cxx_flags ${common_cxx_flags})
-	set(tiny_bvh_speedtest_link_flags ${common_link_flags})
+	# set(tiny_bvh_speedtest_cxx_flags ${common_cxx_flags})
+	# set(tiny_bvh_speedtest_link_flags ${common_link_flags})
 
-	if (NOT APPLE AND NOT EMSCRIPTEN)
-		set(tiny_bvh_speedtest_cxx_flags ${tiny_bvh_speedtest_cxx_flags})
-		set(tiny_bvh_speedtest_link_flags ${tiny_bvh_speedtest_link_flags})
-		target_link_libraries(tiny_bvh_speedtest ${CMAKE_CURRENT_LIST_DIR}/external/OpenCL/lib/OpenCL.lib)
-	elseif (EMSCRIPTEN)
-		# Embed Sponza into the wasm to load it (in theory there are other methods, but this is the simplest)
-		# See https://emscripten.org/docs/porting/files/packaging_files.html#modifying-file-locations-in-the-virtual-file-system
-		set(tiny_bvh_speedtest_link_flags ${tiny_bvh_speedtest_link_flags} --preload-file "${CMAKE_CURRENT_LIST_DIR}/testdata@/testdata")
+	# if (NOT APPLE AND NOT EMSCRIPTEN)
+	# 	set(tiny_bvh_speedtest_cxx_flags ${tiny_bvh_speedtest_cxx_flags})
+	#  	set(tiny_bvh_speedtest_link_flags ${tiny_bvh_speedtest_link_flags})
+	# 	target_link_libraries(tiny_bvh_speedtest ${CMAKE_CURRENT_LIST_DIR}/external/OpenCL/lib/OpenCL.lib)
+	# elseif (EMSCRIPTEN)
+	# 	# Embed Sponza into the wasm to load it (in theory there are other methods, but this is the simplest)
+	#	# See https://emscripten.org/docs/porting/files/packaging_files.html#modifying-file-locations-in-the-virtual-file-system
+	#	set(tiny_bvh_speedtest_link_flags ${tiny_bvh_speedtest_link_flags} --preload-file "${CMAKE_CURRENT_LIST_DIR}/testdata@/testdata")
 
 		if (emcc_threads)
-			set(tiny_bvh_speedtest_cxx_flags ${tiny_bvh_speedtest_cxx_flags} -pthread)
-			set(tiny_bvh_speedtest_link_flags ${tiny_bvh_speedtest_link_flags} -pthread -sUSE_PTHREADS=1 -sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency)
+			# set(tiny_bvh_speedtest_cxx_flags ${tiny_bvh_speedtest_cxx_flags} -pthread)
+			# set(tiny_bvh_speedtest_link_flags ${tiny_bvh_speedtest_link_flags} -pthread -sUSE_PTHREADS=1 -sPTHREAD_POOL_SIZE=navigator.hardwareConcurrency)
 
 			if (FALSE)
 				# From:
@@ -118,19 +118,19 @@ if (NOT MSVC)
 				# Sadly emcc's clang doesn't include a copy of the lib
 				# So you would need to do compile it yourself https://github.com/abrown/wasm-openmp-examples/blob/main/emscripten.sh
 				# Then link it here
-				set(tiny_bvh_speedtest_cxx_flags ${tiny_bvh_speedtest_cxx_flags} -fopenmp)
-				set(tiny_bvh_speedtest_link_flags ${tiny_bvh_speedtest_link_flags} -fopenmp)
+				# set(tiny_bvh_speedtest_cxx_flags ${tiny_bvh_speedtest_cxx_flags} -fopenmp)
+				# set(tiny_bvh_speedtest_link_flags ${tiny_bvh_speedtest_link_flags} -fopenmp)
 			endif()
 
 			if (emcc_proxy_main)
-				set(tiny_bvh_speedtest_link_flags ${tiny_bvh_speedtest_link_flags} -sPROXY_TO_PTHREAD=1)
+			#	set(tiny_bvh_speedtest_link_flags ${tiny_bvh_speedtest_link_flags} -sPROXY_TO_PTHREAD=1)
 			endif()
 		endif()
 	elseif (APPLE)
-		target_link_libraries(tiny_bvh_speedtest ${COCOA_LIBRARY} ${OPENCL_FRAMEWORK})
+		# target_link_libraries(tiny_bvh_speedtest ${COCOA_LIBRARY} ${OPENCL_FRAMEWORK})
 	endif()
-	target_compile_options(tiny_bvh_speedtest PRIVATE ${tiny_bvh_speedtest_cxx_flags})
-	target_link_options(tiny_bvh_speedtest PRIVATE ${tiny_bvh_speedtest_link_flags})
+	# target_compile_options(tiny_bvh_speedtest PRIVATE ${tiny_bvh_speedtest_cxx_flags})
+	# target_link_options(tiny_bvh_speedtest PRIVATE ${tiny_bvh_speedtest_link_flags})
 	
 	if (TARGET tiny_bvh_fenster)
 		# Not all platforms support all targets. E. g.:
