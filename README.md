@@ -81,7 +81,7 @@ Note: A new, more advanced benchmark tool is now available. See [build.bat](http
 
 Many [additional demos](https://github.com/jbikker/tinybvh/blob/dev/examples) are provided, demonstrating features of the library in small source files.
 
-# Version 1.7.3
+# Version 1.8.0
 
 Basic use:
 
