@@ -112,36 +112,53 @@ THE SOFTWARE.
 namespace tinyscene
 {
 
+// aligned memory allocation -  copy of the same construct in tinybvh, in a different namespace.
 inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alignment - 1)) & ~(alignment - 1); }
+#ifndef _ALIGNED_ALLOC
 #ifdef _MSC_VER // Visual Studio / C11
 #define ALIGNED( x ) __declspec( align( x ) )
-#define _ALIGNED_ALLOC(alignment,size) _aligned_malloc( make_multiple_of( size, alignment ), alignment );
-#define _ALIGNED_FREE(ptr) _aligned_free( ptr );
-#else // EMSCRIPTEN / gcc / clang
+#define _ALIGNED_ALLOC(alignment,size) _aligned_malloc( make_multiple_of( size, alignment ), alignment )
+#define _ALIGNED_FREE(ptr) _aligned_free( ptr )
+#else // EMSCRIPTEN / gcc / clang / Android
 #define ALIGNED( x ) __attribute__( ( aligned( x ) ) )
 #if !defined TINYBVH_NO_SIMD && (defined __x86_64__ || defined _M_X64 || defined __wasm_simd128__ || defined __wasm_relaxed_simd__)
 #include <xmmintrin.h>
-#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment );
-#define _ALIGNED_FREE(ptr) _mm_free( ptr );
-#else
-#if defined __APPLE__ || defined __aarch64__ || (defined __ANDROID_API__ && (__ANDROID_API__ >= 28))
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) );
-#elif defined __GNUC__
+#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment )
+#define _ALIGNED_FREE(ptr) _mm_free( ptr )
+#elif defined(__ANDROID__)
+#include <malloc.h>
+#include <android/api-level.h>
+// Android API 28+ supports aligned_alloc, but older versions (like API 24) 
+// require memalign for aligned memory.
+#if defined(__ANDROID_API__) && (__ANDROID_API__ >= 28) // Modern Android (9.0+)
+#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
+#else // Legacy Android
+#define _ALIGNED_ALLOC(alignment,size) memalign( alignment, make_multiple_of( size, alignment ) )
+#endif
+#define _ALIGNED_FREE(ptr) free( ptr )
+#elif defined(__EMSCRIPTEN__) || defined(__APPLE__) || defined(__aarch64__)
+// Emscripten and Apple strictly follow C11 aligned_alloc
+#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
+#define _ALIGNED_FREE(ptr) free( ptr )
+#elif defined(__GNUC__)
 #ifdef __linux__
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) );
+#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
 #else
-#define _ALIGNED_ALLOC(alignment,size) _aligned_malloc( alignment, make_multiple_of( size, alignment ) );
+#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment );
 #endif
+#define _ALIGNED_FREE(ptr) free( ptr )
+#else
+// Fallback
+#define _ALIGNED_ALLOC(alignment,size) malloc( size )
+#define _ALIGNED_FREE(ptr) free( ptr )
 #endif
-#define _ALIGNED_FREE(ptr) free( ptr );
 #endif
 #endif
 inline void* malloc64( size_t size, void* = nullptr ) { return size == 0 ? 0 : _ALIGNED_ALLOC( 64, size ); }
-inline void* malloc4k( size_t size, void* = nullptr ) { return size == 0 ? 0 : _ALIGNED_ALLOC( 4096, size ); }
-inline void* malloc32k( size_t size, void* = nullptr ) { return size == 0 ? 0 : _ALIGNED_ALLOC( 32768, size ); }
 inline void free64( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
-inline void free4k( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
-inline void free32k( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
+// cleanup defines
+#undef _ALIGNED_ALLOC
+#undef _ALIGNED_FREE
 
 #ifndef TINYSCENE_USE_CUSTOM_VECTOR_TYPES
 

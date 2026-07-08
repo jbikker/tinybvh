@@ -169,10 +169,10 @@ void GLTFDemo::InitScene2()
 	printf( "done.\n" );
 
 	// create OpenCL kernels
-	init = new Kernel( "raytracer.cl", "SetRenderData" );
-	render = new Kernel( "raytracer.cl", "Render" );
-	renderNormals = new Kernel( "raytracer.cl", "RenderNormals" );
-	renderDepth = new Kernel( "raytracer.cl", "RenderDepth" );
+	init = new Kernel( "kernels/raytracer.cl", "SetRenderData" );
+	render = new Kernel( "kernels/raytracer.cl", "Render" );
+	renderNormals = new Kernel( "kernels/raytracer.cl", "RenderNormals" );
+	renderDepth = new Kernel( "kernels/raytracer.cl", "RenderDepth" );
 
 	// create OpenCL buffers
 

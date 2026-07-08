@@ -22,7 +22,7 @@
     <ClInclude Include="..\tiny_bvh.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\tiny_bvh_optimizer.cpp" />
+    <ClCompile Include="..\examples\tiny_bvh_optimizer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\tools.cl" />
@@ -133,7 +133,7 @@
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <FloatingPointModel>Fast</FloatingPointModel>
       <OpenMPSupport>false</OpenMPSupport>
-      <AdditionalIncludeDirectories>../external/OpenCL/inc/;../external/embree/include;../external/madmann91</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..;../external/OpenCL/inc/;../external/embree/include;../external/madmann91</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
@@ -154,7 +154,7 @@
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <FloatingPointModel>Fast</FloatingPointModel>
       <OpenMPSupport>false</OpenMPSupport>
-      <AdditionalIncludeDirectories>../external/OpenCL/inc/;../external/embree/include;../external/madmann91</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..;../external/OpenCL/inc/;../external/embree/include;../external/madmann91</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <Optimization>Full</Optimization>
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
