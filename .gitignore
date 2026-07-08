@@ -18,6 +18,12 @@
 errorlog.txt
 *.bat
 *.tri
+*.xlsx
+*.pptx
+cache/ibl.dat
+external/glm
+external/cv2pdb
+reference
 path.txt
 
 # User-specific files (MonoDevelop/Xamarin Studio)
