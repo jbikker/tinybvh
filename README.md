@@ -19,7 +19,7 @@ TinyBVH GPU ray traversal examples are available for OpenCL and OpenGL with comp
 
 ![Bistro](images/combined.jpg)
 
-To use TinyOCL, just include ````tiny_ocl.h````; this will automatically cause linking with ````OpenCL.lib```` in the 'external' folder, which in turn passes on work to vendor-specific driver code. But all of that is not your problem!
+To use TinyOCL, just include ````tiny_ocl.h````; this will automatically cause linking with ````OpenCL.lib```` in the 'external' folder, which in turn passes on work to vendor-specific driver code.
 
 Note that the ````tiny_bvh.h```` library will work without ````tiny_ocl.h```` and remains dependency-free. The new ````tiny_ocl.h```` is only needed in projects that wish to trace rays on the GPU using BVHs created by ````tiny_bvh.h````.
   
@@ -61,15 +61,15 @@ The library ````tiny_bvh.h```` is designed to be easy to use. Please have a look
 
 The cross-platform fenster-based single-source **bitmap renderer** can be compiled with
 
-````g++ -mwindows -O3 examples/tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on Linux and Windows)
+````g++ -mwindows -O3 [examples/tiny_bvh_fenster.cpp](https://github.com/jbikker/tinybvh/blob/dev/examples/tiny_bvh_fenster.cpp) -o tiny_bvh_fenster```` (on Linux and Windows)
 
-````c++ --std=c++17 -framework Cocoa -O3 examples/tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on macOS)
+````c++ --std=c++17 -framework Cocoa -O3 [examples/tiny_bvh_fenster.cpp](https://github.com/jbikker/tinybvh/blob/dev/examples/tiny_bvh_fenster.cpp) -o tiny_bvh_fenster```` (on macOS)
 
 The multi-threaded **path tracing** demo can be compiled with
 
-````g++ -mwindows -O3 examples/tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on Linux and Windows)
+````g++ -mwindows -O3 [examples/tiny_bvh_pt.cpp](https://github.com/jbikker/tinybvh/blob/dev/examples/tiny_bvh_pt.cpp) -o tiny_bvh_pt```` (on Linux and Windows)
 
-````c++ --std=c++17 -framework Cocoa -O3 examples/tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on macOS)
+````c++ --std=c++17 -framework Cocoa -O3 [examples/tiny_bvh_pt.cpp](https://github.com/jbikker/tinybvh/blob/dev/examples/tiny_bvh_pt.cpp) -o tiny_bvh_pt```` (on macOS)
 
 The **performance measurement tool** can be compiled with:
 
@@ -77,9 +77,9 @@ The **performance measurement tool** can be compiled with:
 
 ````c++ --std=c++17 -framework OpenCL -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on macOS)
 
-Note: A new, more advanced benchmark tool is now available. See built.bat and build_debug.bat for an example of a commandline to compile it using gcc.
+Note: A new, more advanced benchmark tool is now available. See [build.bat](https://github.com/jbikker/tinybvh/blob/dev/build.bat) and [build_debug.bat](https://github.com/jbikker/tinybvh/blob/dev/build_debug.bat) for an example of a commandline to compile it using gcc.
 
-Many additional demos are provided, demonstrating features of the library in small source files.
+Many [additional demos](https://github.com/jbikker/tinybvh/blob/dev/examples) are provided, demonstrating features of the library in small source files.
 
 # Version 1.7.3
 
