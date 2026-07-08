@@ -429,8 +429,8 @@ void FatalError( const char* fmt, ... )
 	va_start( args, fmt );
 	vsnprintf( t, sizeof( t ) - 2, fmt, args );
 	va_end( args );
-#ifdef _WINDOWS_ // i.e., windows.h has been included.
-	MessageBox( NULL, t, "Fatal error", MB_OK );
+#if defined _WINDOWS_ && !defined SKIP_MESSAGEBOXA // i.e., windows.h has been included.
+	MessageBoxA( NULL, t, "Fatal error", MB_OK );
 #else
 	fprintf( stderr, t );
 #endif
