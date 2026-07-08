@@ -26,7 +26,7 @@ Note that the ````tiny_bvh.h```` library will work without ````tiny_ocl.h```` an
 # BVH?
 A Bounding Volume Hierarchy is a data structure used to quickly find intersections in a virtual scene; most commonly between a ray and a group of triangles. You can read more about this in a series of articles on the subject: https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics .
 
-To build a BVH using TinyBVH, simply call ````BVH::Build```` on an instantiated ````BVH````. See [````tiny_bvh_minimal.cpp````](https://github.com/jbikker/tinybvh/blob/dev/tiny_bvh_minimal.cpp) for a (really) small example.
+To build a BVH using TinyBVH, simply call ````BVH::Build```` on an instantiated ````BVH````. See [````tiny_bvh_minimal.cpp````](https://github.com/jbikker/tinybvh/blob/dev/examples/tiny_bvh_minimal.cpp) for a (really) small example.
 Internally, the call is forwarded to a specialized builder. There are fast builders, builders for 'high quality' BVHs and experimental builders for research and development. 
 
 A selection:
@@ -55,27 +55,29 @@ TinyBVH also supports construction of a _Top-Level Acceleration Structure_ (TLAS
 A more complete overview of TinyBVH functionality can be found in the [Basic Use Manual](https://jacco.ompf2.com/2025/01/24/tinybvh-manual-basic-use) and the [Advanced Topics Manual](https://jacco.ompf2.com/2025/01/25/tinybvh-manual-advanced).
 
 # How To Use
-The library ````tiny_bvh.h```` is designed to be easy to use. Please have a look at [````tiny_bvh_minimal.cpp````](https://github.com/jbikker/tinybvh/blob/dev/tiny_bvh_minimal.cpp) for an example. A Visual Studio 'solution' (.sln/.vcxproj) is included, as well as a CMake file. That being said: Most examples consists of only a single source file, which can be compiled with clang or g++, e.g.:
+The library ````tiny_bvh.h```` is designed to be easy to use. Please have a look at [````tiny_bvh_minimal.cpp````](https://github.com/jbikker/tinybvh/blob/dev/examples/tiny_bvh_minimal.cpp) for an example. A Visual Studio 'solution' (.sln/.vcxproj) is included, as well as a CMake file. That being said: Most examples consists of only a single source file, which can be compiled with clang or g++, e.g.:
 
-````g++ tiny_bvh_minimal.cpp````
+````g++ examples/tiny_bvh_minimal.cpp````
 
 The cross-platform fenster-based single-source **bitmap renderer** can be compiled with
 
-````g++ -mwindows -O3 tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on Linux and Windows)
+````g++ -mwindows -O3 examples/tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on Linux and Windows)
 
-````c++ --std=c++17 -framework Cocoa -O3 tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on macOS)
-09:05 07/07/2026
+````c++ --std=c++17 -framework Cocoa -O3 examples/tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on macOS)
+
 The multi-threaded **path tracing** demo can be compiled with
 
-````g++ -mwindows -O3 tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on Linux and Windows)
+````g++ -mwindows -O3 examples/tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on Linux and Windows)
 
-````c++ --std=c++17 -framework Cocoa -O3 tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on macOS)
+````c++ --std=c++17 -framework Cocoa -O3 examples/tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on macOS)
 
 The **performance measurement tool** can be compiled with:
 
 ````g++ -mavx2 -mfma -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on Linux and Windows)
 
 ````c++ --std=c++17 -framework OpenCL -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on macOS)
+
+Note: A new, more advanced benchmark tool is now available. See built.bat and build_debug.bat for an example of a commandline to compile it using gcc.
 
 Many additional demos are provided, demonstrating features of the library in small source files.
 
