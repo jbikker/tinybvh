@@ -1,3 +1,6 @@
+# Dev
+This is the *development branch* for TinyBVH. New features are tested here first. Please direct your PRs to this branch.
+
 # TinyBVH
 Single-header BVH construction and traversal library written in C++14 / "Sane C++" (or "C with classes"). C++17 is used for threading. **This library has no dependencies.** 
 
@@ -78,7 +81,7 @@ Note: A new, more advanced benchmark tool is now available. See [build.bat](http
 
 Many [additional demos](https://github.com/jbikker/tinybvh/blob/dev/examples) are provided, demonstrating features of the library in small source files.
 
-# Version 1.8.0
+# Version 1.8.1
 
 Basic use:
 
