@@ -5004,7 +5004,7 @@ void BVH_GPU::ConvertFrom( const BVH& original, bool compact )
 			{
 				this->bvhNode[idx].lmin = right.aabbMin, this->bvhNode[idx].rmin = left.aabbMin;
 				this->bvhNode[idx].lmax = right.aabbMax, this->bvhNode[idx].rmax = left.aabbMax;
-				this->bvhNode[idx].left = newNodePtr + 1; // right will be filled when popped
+				this->bvhNode[idx].left = newNodePtr; // right will be filled when popped
 				stack[stackPtr++] = idx;
 				stack[stackPtr++] = orig.leftFirst;
 				nodeIdx = orig.leftFirst + 1;
