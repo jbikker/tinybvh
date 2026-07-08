@@ -73,12 +73,12 @@ void InitOpenCL()
 {
 #ifdef ENABLE_OPENCL
 	// load and compile the OpenCL kernel code
-	ailalaine_kernel = new tinyocl::Kernel( "traverse.cl", "batch_ailalaine" );
-	ailalaine_kernel_any = new tinyocl::Kernel( "traverse.cl", "batch_ailalaine_any" );
-	gpu4way_kernel = new tinyocl::Kernel( "traverse.cl", "batch_gpu4way" );
-	gpu4way_kernel_any = new tinyocl::Kernel( "traverse.cl", "batch_gpu4way_any" );
-	cwbvh_kernel = new tinyocl::Kernel( "traverse.cl", "batch_cwbvh" );
-	cwbvh_kernel_any = new tinyocl::Kernel( "traverse.cl", "batch_cwbvh_any" );
+	ailalaine_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_ailalaine" );
+	ailalaine_kernel_any = new tinyocl::Kernel( "kernels/traverse.cl", "batch_ailalaine_any" );
+	gpu4way_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_gpu4way" );
+	gpu4way_kernel_any = new tinyocl::Kernel( "kernels/traverse.cl", "batch_gpu4way_any" );
+	cwbvh_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_cwbvh" );
+	cwbvh_kernel_any = new tinyocl::Kernel( "kernels/traverse.cl", "batch_cwbvh_any" );
 	printf( "----------------------------------------------------------------\n" );
 	if (csv)
 	{

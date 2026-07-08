@@ -15,15 +15,15 @@ using namespace tinyocl;
 void Game::Init()
 {
 	// create OpenCL kernels
-	init = new Kernel( "../wavefront2.cl", "SetRenderData" );
-	clear = new Kernel( "../wavefront2.cl", "Clear" );
-	rayGen = new Kernel( "../wavefront2.cl", "Generate" );
-	extend = new Kernel( "../wavefront2.cl", "Extend" );
-	shade = new Kernel( "../wavefront2.cl", "Shade" );
-	updateCounters1 = new Kernel( "../wavefront2.cl", "UpdateCounters1" );
-	updateCounters2 = new Kernel( "../wavefront2.cl", "UpdateCounters2" );
-	traceShadows = new Kernel( "../wavefront2.cl", "Connect" );
-	finalize = new Kernel( "../wavefront2.cl", "FinalizeGL" );
+	init = new Kernel( "../kernels/wavefront2.cl", "SetRenderData" );
+	clear = new Kernel( "../kernels/wavefront2.cl", "Clear" );
+	rayGen = new Kernel( "../kernels/wavefront2.cl", "Generate" );
+	extend = new Kernel( "../kernels/wavefront2.cl", "Extend" );
+	shade = new Kernel( "../kernels/wavefront2.cl", "Shade" );
+	updateCounters1 = new Kernel( "../kernels/wavefront2.cl", "UpdateCounters1" );
+	updateCounters2 = new Kernel( "../kernels/wavefront2.cl", "UpdateCounters2" );
+	traceShadows = new Kernel( "../kernels/wavefront2.cl", "Connect" );
+	finalize = new Kernel( "../kernels/wavefront2.cl", "FinalizeGL" );
 	screen = 0; // this tells the template to not overwrite the render target.
 
 	// we need the 'compute unit' or 'SM' count for wavefront rendering; ask OpenCL for it.

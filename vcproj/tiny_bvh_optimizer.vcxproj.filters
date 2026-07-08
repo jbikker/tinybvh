@@ -4,7 +4,7 @@
     <ClInclude Include="..\tiny_bvh.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\tiny_bvh_optimizer.cpp" />
+    <ClCompile Include="..\examples\tiny_bvh_optimizer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="opencl">
