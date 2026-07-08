@@ -36,13 +36,17 @@ enable_testing()
 
 add_executable(tiny_bvh_minimal examples/tiny_bvh_minimal.cpp)
 add_executable(tiny_bvh_renderer examples/tiny_bvh_renderer.cpp)
-# add_executable(tiny_bvh_speedtest examples/tiny_bvh_speedtest.cpp)
 add_executable(tiny_bvh_double_test examples/tiny_bvh_double_test.cpp)
 if (NOT EMSCRIPTEN) # EMSCRIPTEN doesn't render anything by default (you would need WebGL/WebGPU)
 	add_executable(tiny_bvh_fenster examples/tiny_bvh_fenster.cpp)
+	target_include_directories(tiny_bvh_fenster PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 endif()
+# add_executable(tiny_bvh_speedtest examples/tiny_bvh_speedtest.cpp)
 
 # target_include_directories(tiny_bvh_speedtest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/external/OpenCL/inc;external/madmann91;external/embree/include)
+target_include_directories(tiny_bvh_minimal PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_include_directories(tiny_bvh_renderer PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_include_directories(tiny_bvh_double_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 
 if (NOT MSVC)
 	# Produce debug symbols and set optimization level
