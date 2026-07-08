@@ -1,6 +1,3 @@
-# Dev
-This is the *development branch* for TinyBVH. New features are tested here first. Please direct your PRs to this branch.
-
 # TinyBVH
 Single-header BVH construction and traversal library written in C++14 / "Sane C++" (or "C with classes"). C++17 is used for threading. **This library has no dependencies.** 
 
@@ -8,7 +5,7 @@ TinyBVH is _fast_. Here is, in a nutshell, how it compares to [Intel's Embree](h
 ![Performance](images/perfgraphs.png)
 TinyBVH currently builds a SAH BVH faster than Embree and Maddmann91. It also traces individual primary rays faster than those libraries. Embree outperforms TinyBVH for _any hit_ rays. Note: These results are based on the new ````tiny_bvh_benchmark.cpp```` application and are cautiously presented as 'preliminary'. Note that single-ray traversal is only a small part of Embree. If you suspect an inperfection in the experiment setup, please [let me know](mailto:bikker.j@protonmail.com).
 ![Performance](images/cpu_vs_gpu.png)
-When tracing rays on the GPU, (multicore) CPU performance is dwarfed. TinyBVH traces up to _4 billion rays_ per second in Crytek's Sponza scene using the basic binary BVH format, regardless of graphics API and without using specialized ray tracing hardware. That is 4 rays per pixel at 4k@120Hz, enough for most purposes.
+When tracing rays on the GPU, (multicore) CPU performance is dwarfed. On an RTX 5080 laptop GPU, TinyBVH traces up to _4 billion rays_ per second in Crytek's Sponza scene using the basic binary BVH format, regardless of graphics API and without using specialized ray tracing hardware. That is 4 rays per pixel at 4k@120Hz, enough for most purposes.
 # TinyOCL
 TinyBVH GPU ray traversal examples are available for OpenCL and OpenGL with compute shaders. For OpenCL support, TinyOCL is provided: a single-header OpenCL library, which helps you select and initialize a compute device. It also loads, compiles and runs kernels, with several convenient features:
 * Include-file expansion for AMD devices
