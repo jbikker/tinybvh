@@ -147,12 +147,13 @@
     <ClInclude Include="template\tmpl8math.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\raytracer.cl" />
-    <None Include="..\tools.cl" />
-    <None Include="..\traverse_bvh2.cl" />
-    <None Include="..\traverse_bvh2_int.inc" />
-    <None Include="..\traverse_cwbvh.cl" />
-    <None Include="..\traverse_tlas.cl" />
+    <None Include="..\kernels\raytracer.cl" />
+    <None Include="..\kernels\tools.cl" />
+    <None Include="..\kernels\traverse.cl" />
+    <None Include="..\kernels\traverse_bvh2.cl" />
+    <None Include="..\kernels\traverse_bvh4.cl" />
+    <None Include="..\kernels\traverse_cwbvh.cl" />
+    <None Include="..\kernels\traverse_tlas.cl" />
     <None Include="README.md" />
     <None Include="template\LICENSE" />
   </ItemGroup>

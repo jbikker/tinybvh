@@ -8,28 +8,22 @@
     <ClInclude Include="..\tiny_ocl.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\tools.cl">
-      <Filter>opencl</Filter>
-    </None>
-    <None Include="..\traverse.cl">
-      <Filter>opencl</Filter>
-    </None>
-    <None Include="..\traverse_bvh2.cl">
-      <Filter>opencl</Filter>
-    </None>
-    <None Include="..\traverse_bvh4.cl">
-      <Filter>opencl</Filter>
-    </None>
-    <None Include="..\traverse_cwbvh.cl">
-      <Filter>opencl</Filter>
-    </None>
-    <None Include="..\wavefront.cl">
-      <Filter>opencl</Filter>
-    </None>
-  </ItemGroup>
-  <ItemGroup>
     <Filter Include="opencl">
       <UniqueIdentifier>{e18e9430-6d1f-4f79-9194-4ee7ce6ce26d}</UniqueIdentifier>
     </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\kernels\tools.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\kernels\traverse.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\kernels\traverse_bvh2.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\kernels\wavefront.cl">
+      <Filter>opencl</Filter>
+    </None>
   </ItemGroup>
 </Project>

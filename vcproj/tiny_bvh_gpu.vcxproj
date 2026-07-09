@@ -26,12 +26,10 @@
     <ClInclude Include="..\tiny_ocl.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\tools.cl" />
-    <None Include="..\traverse.cl" />
-    <None Include="..\traverse_bvh2.cl" />
-    <None Include="..\traverse_bvh4.cl" />
-    <None Include="..\traverse_cwbvh.cl" />
-    <None Include="..\wavefront.cl" />
+    <None Include="..\kernels\tools.cl" />
+    <None Include="..\kernels\traverse.cl" />
+    <None Include="..\kernels\traverse_bvh2.cl" />
+    <None Include="..\kernels\wavefront.cl" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
