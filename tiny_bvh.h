@@ -182,6 +182,15 @@ THE SOFTWARE.
 #define ENABLE_BVH_SOA 
 #endif
 
+// C++ features
+#if __cplusplus >= 202002L
+#define ISLIKELY [[likely]]
+#define ISUNLIKELY [[unlikely]]
+#else
+#define ISLIKELY
+#define ISUNLIKELY
+#endif
+
 // Experimental / WIP features
 
 // CWBVH triangle format - doesn't seem to help on GPU?
@@ -3612,7 +3621,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::Intersect( Ray& ray ) co
 	while (1)
 	{
 		cost += c_trav;
-		if (node->isLeaf())
+		if (node->isLeaf()) ISUNLIKELY
 		{
 			// Performance note: if indexed primitives (ENABLE_INDEXED_GEOMETRY) and custom
 			// geometry (ENABLE_CUSTOM_GEOMETRY) are both disabled, this leaf code reduces
@@ -3671,7 +3680,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 	while (1)
 	{
 		cost += c_trav;
-		if (node->isLeaf())
+		if (node->isLeaf()) ISUNLIKELY
 		{
 			Ray tmpRay;
 			for (uint32_t i = 0; i < node->triCount; i++)
@@ -3771,7 +3780,7 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccluded( const Ray& ray 
 	const float roz = ray.O.z * ray.rD.z;
 	while (1)
 	{
-		if (node->isLeaf())
+		if (node->isLeaf()) ISUNLIKELY
 		{
 			if (indexedEnabled && vertIdx != 0) for (uint32_t i = 0; i < node->triCount; i++)
 			{
@@ -3820,7 +3829,7 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 	const float roz = ray.O.z * ray.rD.z;
 	while (1)
 	{
-		if (node->isLeaf())
+		if (node->isLeaf()) ISUNLIKELY
 		{
 			for (uint32_t i = 0; i < node->triCount; i++)
 			{
@@ -7453,7 +7462,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 	#ifdef _DEBUG
 		steps++;
 	#endif
-		while (!(nodeIdx & LEAF_BIT))
+		while (!(nodeIdx & LEAF_BIT)) ISLIKELY
 		{
 			const BVHNode* n = (BVHNode*)(bvh8Data + nodeIdx);
 			const __m256 tx1 = _mm256_fmsub_ps( posX ? n->xmin8 : n->xmax8, rdx8, rx8 );
@@ -7488,7 +7497,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 			}
 			else
 			{
-				if (!stackPtr) goto the_end;
+				if (!stackPtr) ISUNLIKELY goto the_end;
 				nodeIdx = nodeStack[--stackPtr];
 			}
 		}
@@ -7516,7 +7525,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 		__m128 combined = _mm_and_ps( _mm_and_ps( _mm_and_ps( mask1, mask2 ), _mm_and_ps( mask3, mask4 ) ), mask5 );
 		uint32_t imask = _mm_movemask_ps( combined );
 		// evaluate opacity map, if present (SSE version).
-		if (opmap) if (imask)
+		if (opmap) ISUNLIKELY if (imask)
 		{
 			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
 			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
@@ -7572,7 +7581,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 			}
 			stackPtr = outStackPtr;
 		}
-		if (!stackPtr) break;
+		if (!stackPtr) ISUNLIKELY break;
 		nodeIdx = nodeStack[--stackPtr];
 	}
 the_end:
@@ -7609,7 +7618,7 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 	const __m128 one4 = _mm_set1_ps( 1.0f ), zero4 = _mm_setzero_ps();
 	while (1)
 	{
-		while (!(nodeIdx & LEAF_BIT))
+		while (!(nodeIdx & LEAF_BIT)) ISLIKELY
 		{
 			const BVHNode* n = (BVHNode*)(bvh8Data + nodeIdx);
 			const __m256i c8 = n->child8;
@@ -7639,7 +7648,7 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 			}
 			else
 			{
-				if (!stackPtr) return false;
+				if (!stackPtr) ISUNLIKELY return false;
 				nodeIdx = nodeStack[--stackPtr];
 			}
 		}
@@ -7688,7 +7697,7 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 			}
 		}
 		// continue
-		if (!stackPtr) return false;
+		if (!stackPtr) ISUNLIKELY return false;
 		nodeIdx = nodeStack[--stackPtr];
 	}
 }
@@ -9165,6 +9174,7 @@ void BVH_Verbose::MergeSubtree( const uint32_t nodeIdx, uint32_t* newIdx, uint32
 #if defined ENABLE_THREADED_BUILDS && !defined TINYBVH_NO_BUILTIN_POOL
 
 #if defined _WIN32 && defined _MSC_VER
+#define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include "windows.h"
 #endif // _WIN32 + _MSC_VER
