@@ -191,11 +191,25 @@ void InitMeshes()
 		return res;
 		};
 	AddMesh( "../../testdata/cryteksponza.bin" );
+#if 0
 	// view1 for sponza
 	renderSettings[0] = { -15.2399998f, 21.5000000f, 2.53999996f };
 	renderSettings[1] = { -12.8712616f, 21.3436279f, 2.60801458f };
 	renderSettings[2] = { -13.6628551f, 21.3436279f, 0.771338582f };
 	renderSettings[3] = { -13.5145569f, 19.9051208f, 2.88527060f };
+#elif 1
+	// view2 for sponza
+	renderSettings[0] = { -34.0000000f, 5.00000000f, 11.2600002f };
+	renderSettings[1] = { -31.8041172f, 5.85805798f, 11.5460672f };
+	renderSettings[2] = { -32.4691925f, 5.85805798f, 9.65988636f };
+	renderSettings[3] = { -31.7600574f, 4.25874043f, 11.5305319f };
+#else
+	// view3 for sponza
+	renderSettings[0] = { -1.29999995f, 4.96000004f, 12.2799997f };
+	renderSettings[1] = { -3.09493661f, 5.86036921f, 11.0121126f };
+	renderSettings[2] = { -3.37909675f, 5.86036921f, 12.9918222f };
+	renderSettings[3] = { -3.17523217f, 4.26242685f, 11.0005865f };
+#endif
 	t3 = new bvhvec3[triCount * 3];
 	for (int i = 0; i < triCount * 3; i++) t3[i].x = tris[i].x, t3[i].y = tris[i].y, t3[i].z = tris[i].z;
 	vidx = new unsigned[triCount * 3];
