@@ -20,13 +20,13 @@ using namespace tinybvh;
 
 // Application variables
 
-static BVH8_CWBVH bvh;
+static BVH_GPU bvh;
 static bvhvec4* tris = 0;
 static int triCount = 0, frameIdx = 0, spp = 0;
 static Kernel* init, * clear, * rayGen, * extend, * shade;
 static Kernel* updateCounters1, * updateCounters2, * traceShadows, * finalize;
 static Buffer* pixels, * accumulator, * raysIn, * raysOut, * connections, * triData;
-static Buffer* cwbvhNodes = 0, * cwbvhTris = 0, * noise = 0;
+static Buffer* bvhNodes = 0, * bvhIndices = 0, * noise = 0;
 static size_t computeUnits;
 static uint32_t* blueNoise = new uint32_t[128 * 128 * 8];
 
@@ -96,10 +96,10 @@ void Init()
 	// build bvh (here: 'compressed wide bvh', for efficient GPU rendering)
 	bvh.Build( tris, triCount );
 	// create OpenCL buffers for BVH data
-	cwbvhNodes = new Buffer( bvh.usedBlocks * sizeof( bvhvec4 ), bvh.bvh8Data );
-	cwbvhTris = new Buffer( bvh.idxCount * 3 * sizeof( bvhvec4 ), bvh.bvh8Tris );
-	cwbvhNodes->CopyToDevice();
-	cwbvhTris->CopyToDevice();
+	bvhNodes = new Buffer( bvh.usedNodes * sizeof( BVH_GPU::BVHNode ), bvh.bvhNode );
+	bvhIndices = new Buffer( bvh.idxCount * sizeof( uint32_t ), bvh.bvh.primIdx );
+	bvhNodes->CopyToDevice();
+	bvhIndices->CopyToDevice();
 	triData = new Buffer( triCount * 3 * sizeof( bvhvec4 ), tris );
 	triData->CopyToDevice();
 }
@@ -136,7 +136,7 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 		spp = 1;
 	}
 	// wavefront step 0: render on the GPU
-	init->SetArguments( N, rd.eye, rd.p0, rd.p1, rd.p2, frameIdx, SCRWIDTH, SCRHEIGHT, cwbvhNodes, cwbvhTris, noise );
+	init->SetArguments( N, rd.eye, rd.p0, rd.p1, rd.p2, frameIdx, SCRWIDTH, SCRHEIGHT, bvhNodes, bvhIndices, triData, noise );
 	init->Run( 1 ); // init atomic counters, set buffer ptrs etc.
 	rayGen->SetArguments( raysOut, spp * 19191 );
 	rayGen->Run2D( oclint2( SCRWIDTH, SCRHEIGHT ) );
@@ -160,7 +160,7 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 	float mousex = (float)f.x / SCRWIDTH, mousey = (float)f.y / SCRHEIGHT;
 	bvhvec3 P = rd.p0 + mousex * (rd.p1 - rd.p0) + mousey * (rd.p2 - rd.p0);
 	Ray r( rd.eye, tinybvh_normalize( P - bvhvec3( rd.eye ) ) );
-	bvh.bvh8.bvh.Intersect( r );
+	bvh.Intersect( r );
 	bvhvec3 I = r.O + r.hit.t * r.D;
 	// print frame time / rate in window title
 	char title[512];
