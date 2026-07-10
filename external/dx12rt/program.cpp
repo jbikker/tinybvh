@@ -427,28 +427,31 @@ void Render()
 	D3D12_DISPATCH_RAYS_DESC dispatchDesc = {
 		.RayGenerationShaderRecord = {
 			.StartAddress = shaderIDs->GetGPUVirtualAddress(),
-			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES},
+			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES
+		},
 		.MissShaderTable = {
 			.StartAddress = shaderIDs->GetGPUVirtualAddress() + D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT,
-			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES},
+			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES,
+			.StrideInBytes = 0 },
 		.HitGroupTable = {
 			.StartAddress = shaderIDs->GetGPUVirtualAddress() + 2 * D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT,
-			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES},
+			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES,
+			.StrideInBytes = 32 },
 		.Width = static_cast<UINT>(rtDesc.Width), .Height = rtDesc.Height, .Depth = 1 };
-	static int timeStampRead = 6; // and 7
-	static int timeStampWrite = 0; // and 1
-	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, timeStampWrite );
+	static int readSlot = 0, writeSlot = 2;
+	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, writeSlot );
 	cmdList->DispatchRays( &dispatchDesc );
-	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, timeStampWrite + 1 );
-	cmdList->ResolveQueryData( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, 0, 8, queryResultBuffer, 0 );
+	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, writeSlot + 1 );
+	UINT64 bufferOffset = writeSlot * sizeof( UINT64 );
+	cmdList->ResolveQueryData( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, writeSlot, 2, queryResultBuffer, bufferOffset );
 	swapChain->GetBuffer( swapChain->GetCurrentBackBufferIndex(), IID_PPV_ARGS( &backBuffer ) );
-	auto barrier = []( auto* resource, auto before, auto after ) { 
+	auto barrier = []( auto* resource, auto before, auto after ) {
 		D3D12_RESOURCE_BARRIER rb = {
 			.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-			.Transition = {.pResource = resource, .StateBefore = before, .StateAfter = after} 
+			.Transition = {.pResource = resource, .StateBefore = before, .StateAfter = after}
 		};
 		cmdList->ResourceBarrier( 1, &rb );
-	};
+		};
 	barrier( renderTarget, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE );
 	barrier( backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST );
 	cmdList->CopyResource( backBuffer, renderTarget );
@@ -464,19 +467,19 @@ void Render()
 	UINT64* timestamps = nullptr;
 	D3D12_RANGE readRange = { 0, 8 * sizeof( UINT64 ) };
 	queryResultBuffer->Map( 0, &readRange, reinterpret_cast<void**>(&timestamps) );
-	UINT64 startTimestamp = timestamps[timeStampRead];
-	UINT64 endTimestamp = timestamps[timeStampRead + 1];
+	UINT64 startTimestamp = timestamps[readSlot];
+	UINT64 endTimestamp = timestamps[readSlot + 1];
 	D3D12_RANGE writeRange = { 0, 0 };
 	queryResultBuffer->Unmap( 0, &writeRange );
 	UINT64 frequency = 0;
 	cmdQueue->GetTimestampFrequency( &frequency );
 	double rtTime = static_cast<double>(endTimestamp - startTimestamp) / static_cast<double>(frequency);
-	double raysPerSecond = (1024.0f * 1024.0f) / rtTime;
+	double raysPerSecond = (rtDesc.Width * rtDesc.Height) / rtTime;
 	printf( "frame rendered: %.4fms (%.1fMRays/s)\n", (float)rtTime * 1000.0f, (float)(raysPerSecond / 1000000.0) );
-	timeStampRead = (timeStampRead + 2) & 7;
-	timeStampWrite = (timeStampWrite + 2) & 7;
 #endif
 	swapChain->Present( 1, 0 );
+	readSlot = (readSlot + 2) & 7;
+	writeSlot = (writeSlot + 2) & 7;
 }
 
 int main()
