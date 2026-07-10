@@ -35,7 +35,7 @@ ID3D12CommandQueue* cmdQueue;
 ID3D12Fence* fence;
 IDXGISwapChain3* swapChain;
 ID3D12DescriptorHeap* uavHeap;
-ID3D12Resource* renderTarget, * backBuffer, * cubeVB, * cubeIB, * quadBlas, * cubeBlas, * instances, * shaderIDs;
+ID3D12Resource* renderTarget, * backBuffer, * cubeVB, * cubeIB, * cubeBlas, * instances, * shaderIDs;
 ID3D12Resource* tlas, * tlasUpdateScratch;
 ID3D12CommandAllocator* cmdAlloc;
 ID3D12GraphicsCommandList4* cmdList;
@@ -191,7 +191,7 @@ void InitMeshes()
 		return res;
 		};
 	AddMesh( "../../testdata/cryteksponza.bin" );
-#if 0
+#if 1
 	// view1 for sponza
 	renderSettings[0] = { -15.2399998f, 21.5000000f, 2.53999996f };
 	renderSettings[1] = { -12.8712616f, 21.3436279f, 2.60801458f };
@@ -332,7 +332,7 @@ void InitRootSignature()
 void InitQueryHeap()
 {
 	D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
-	queryHeapDesc.Count = 2; // start and end
+	queryHeapDesc.Count = 8; // start and end, times four
 	queryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
 	queryHeapDesc.NodeMask = 0;
 	device->CreateQueryHeap( &queryHeapDesc, IID_PPV_ARGS( &queryHeap ) );
@@ -340,7 +340,7 @@ void InitQueryHeap()
 	heapProps.Type = D3D12_HEAP_TYPE_READBACK;
 	D3D12_RESOURCE_DESC bufferDesc = {};
 	bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-	bufferDesc.Width = 2 * sizeof( UINT64 );
+	bufferDesc.Width = 8 * sizeof( UINT64 );
 	bufferDesc.Height = 1;
 	bufferDesc.DepthOrArraySize = 1;
 	bufferDesc.MipLevels = 1;
@@ -435,16 +435,20 @@ void Render()
 			.StartAddress = shaderIDs->GetGPUVirtualAddress() + 2 * D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT,
 			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES},
 		.Width = static_cast<UINT>(rtDesc.Width), .Height = rtDesc.Height, .Depth = 1 };
-	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, 0 );
+	static int timeStampRead = 6; // and 7
+	static int timeStampWrite = 0; // and 1
+	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, timeStampWrite );
 	cmdList->DispatchRays( &dispatchDesc );
-	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, 1 );
-	cmdList->ResolveQueryData( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, queryResultBuffer, 0 );
+	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, timeStampWrite + 1 );
+	cmdList->ResolveQueryData( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, 0, 8, queryResultBuffer, 0 );
 	swapChain->GetBuffer( swapChain->GetCurrentBackBufferIndex(), IID_PPV_ARGS( &backBuffer ) );
-	auto barrier = []( auto* resource, auto before, auto after ) { D3D12_RESOURCE_BARRIER rb = {
+	auto barrier = []( auto* resource, auto before, auto after ) { 
+		D3D12_RESOURCE_BARRIER rb = {
 			.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-			.Transition = {.pResource = resource, .StateBefore = before, .StateAfter = after} };
-	cmdList->ResourceBarrier( 1, &rb );
+			.Transition = {.pResource = resource, .StateBefore = before, .StateAfter = after} 
 		};
+		cmdList->ResourceBarrier( 1, &rb );
+	};
 	barrier( renderTarget, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE );
 	barrier( backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST );
 	cmdList->CopyResource( backBuffer, renderTarget );
@@ -456,12 +460,12 @@ void Render()
 	Flush();
 #if 1
 	// get GPU HW RT performance
-	WaitForGpu();
+	// WaitForGpu();
 	UINT64* timestamps = nullptr;
-	D3D12_RANGE readRange = { 0, 2 * sizeof( UINT64 ) };
+	D3D12_RANGE readRange = { 0, 8 * sizeof( UINT64 ) };
 	queryResultBuffer->Map( 0, &readRange, reinterpret_cast<void**>(&timestamps) );
-	UINT64 startTimestamp = timestamps[0];
-	UINT64 endTimestamp = timestamps[1];
+	UINT64 startTimestamp = timestamps[timeStampRead];
+	UINT64 endTimestamp = timestamps[timeStampRead + 1];
 	D3D12_RANGE writeRange = { 0, 0 };
 	queryResultBuffer->Unmap( 0, &writeRange );
 	UINT64 frequency = 0;
@@ -469,6 +473,8 @@ void Render()
 	double rtTime = static_cast<double>(endTimestamp - startTimestamp) / static_cast<double>(frequency);
 	double raysPerSecond = (1024.0f * 1024.0f) / rtTime;
 	printf( "frame rendered: %.4fms (%.1fMRays/s)\n", (float)rtTime * 1000.0f, (float)(raysPerSecond / 1000000.0) );
+	timeStampRead = (timeStampRead + 2) & 7;
+	timeStampWrite = (timeStampWrite + 2) & 7;
 #endif
 	swapChain->Present( 1, 0 );
 }
@@ -481,6 +487,7 @@ int main()
 	RegisterClassW( &wcw );
 	HWND hwnd = CreateWindowExW( 0, L"μDXR", L"_DXR", WS_VISIBLE | WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1024, 1024, 0, 0, 0, 0 );
 	Init( hwnd );
+	// device->SetStablePowerState( true );
 	for (MSG msg;;)
 	{
 		while (PeekMessageW( &msg, nullptr, 0, 0, PM_REMOVE ))
