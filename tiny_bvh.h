@@ -809,6 +809,7 @@ public:
 		LAYOUT_BVH_VERBOSE,
 		LAYOUT_BVH_DOUBLE,
 		LAYOUT_BVH_SOA,
+		LAYOUT_BVH_LBVH,
 		LAYOUT_BVH_GPU,
 		LAYOUT_MBVH,
 		LAYOUT_BVH4_CPU,
@@ -1214,6 +1215,51 @@ public:
 	bool ownBVH = true;				// False when ConvertFrom receives an external bvh.
 };
 
+class BVH_LBVH : public BVHBase
+{
+public:
+    struct BVHNode
+    {
+        bvhvec3 min;
+        bvhvec3 max;
+        uint32_t left_primIdx;
+        uint32_t right;
+
+        float SurfaceArea() const;
+    };
+
+    BVH_LBVH( BVHContext ctx = {} ) { layout = LAYOUT_BVH_LBVH; context = ctx; }
+    BVH_LBVH( BVH_LBVH&& );
+	BVH_LBVH& operator=( const BVH_LBVH& ) = default;
+    void Build( const bvhvec4* vertices, const uint32_t primCount );
+	void Build( const bvhvec4slice& vertices );
+	void Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
+	void Build( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
+    
+    void RadixSort();
+    void StdSort();
+    
+    float SAHCost() const;
+    
+    void PrintTree() const;
+
+    // BVH data
+    BVHNode* bvhNode = 0;
+
+    // The internal build nodes of the bvhNode array
+    // You can also access leaf node array from here
+    BVHNode* internalNodes = 0;
+
+    // The leaf/primitive nodes
+    BVHNode* leafNodes = 0;
+
+    uint32_t* scratchPad = 0;       // internal scratchpad for sorting
+    uint32_t numLeafNodes = 0;
+    uint32_t numInternalNodes = 0;
+    bvhvec4slice verts = {};		// pointer to input primitive array: 3x16 bytes per tri.
+    uint32_t* vertIdx = 0;          // indices array
+};
+
 class BVH_Verbose : public BVHBase
 {
 public:
@@ -1586,7 +1632,6 @@ static constexpr bool customEnabled = false;
 
 namespace tinybvh {
 
-#if defined BVH_USESSE || defined BVH_USENEON
 inline uint32_t __bfind( uint32_t x ) // https://github.com/mackron/refcode/blob/master/lzcnt.c
 {
 #if defined _MSC_VER && !defined __clang__
@@ -1603,7 +1648,6 @@ inline uint32_t __bfind( uint32_t x ) // https://github.com/mackron/refcode/blob
 #endif
 #endif
 }
-#endif
 
 // array element counting; https://stackoverflow.com/questions/12784136
 #define BVH_NUM_ELEMS(a) (sizeof(a)/sizeof 0[a])
@@ -5210,6 +5254,826 @@ void BVH_SoA::ConvertFrom( const BVH& original, bool compact )
 }
 
 // BVH_SoA::Intersect can be found in the BVH_USEAVX section later in this file.
+
+// BVH_LBVH implementation
+// ----------------------------------------------------------------------------
+
+// https://github.com/GPUOpen-Drivers/gpurt/blob/dev/src/shaders/MortonCodes.hlsl
+/*
+ ***********************************************************************************************************************
+ *
+ *  Copyright (c) Advanced Micro Devices, Inc. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy
+ *  of this software and associated documentation files (the "Software"), to deal
+ *  in the Software without restriction, including without limitation the rights
+ *  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *  copies of the Software, and to permit persons to whom the Software is
+ *  furnished to do so, subject to the following conditions:
+ *
+ *  The above copyright notice and this permission notice shall be included in all
+ *  copies or substantial portions of the Software.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ *
+ **********************************************************************************************************************/
+//
+// For morton code functions based on libmorton:
+// MIT License
+//
+// Copyright(c) 2016 Jeroen Baert
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files(the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and / or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions :
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+// For 32 bit morton code functions based on inkblot-sdnbhd
+//https://github.com/inkblot-sdnbhd/Morton-Z-Code-C-library/blob/master/MZC2D32.h
+// The MIT License(MIT)
+//
+// Copyright(c) 2015 Inkblot Sdn.Bhd.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files(the "Software"), to deal in
+// the Software without restriction, including without limitation the rights to
+// use, copy, modify, merge, publish, distribute, sublicense, and / or sell copies of
+// the Software, and to permit persons to whom the Software is furnished to do so,
+// subject to the following conditions :
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+// FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE AUTHORS OR
+// COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+// IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+//=====================================================================================================================
+static uint32_t Expand2D32(uint32_t x)
+{
+    // 32 bit function to expand an axiscode to 2D bits
+    // For an input : xxxxxxxxxxxxxxx...
+    // The output is: _x_x_x_x_x_x_x_...
+
+    // Use 16 bits
+    x = x >> 16U;
+
+    // [8]8[8]8
+    x = (x | (x << 8U)) & 0x00FF00FFU;
+
+    // [4]4[4]4[4]4[4]4
+    x = (x | (x << 4U)) & 0x0F0F0F0FU;
+
+    // [2]2[2]2[2]2[2]2[2]2[2]2[2]2[2]2
+    x = (x | (x << 2U)) & 0x33333333U;
+
+    // [1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1
+    x = (x | (x << 1U)) & 0x55555555U;
+
+    // Note: Initial bit is empty
+    return x;
+}
+
+//=====================================================================================================================
+static uint32_t ExpandFor2DBits32(uint32_t x)
+{
+    // 32 bit function to expand an existing code for insertion of 2D bits
+    // For an input : xxxxxxxxxxxxxxx...
+    // The output is: x_x_x_x_x_x_x_x..
+
+    // input is 16 bits, at the top
+    x &= 0xFFFF0000U;
+
+    // 8[8]8[8]
+    x = (x | (x >> 8U)) & 0xFF00FF00U;
+
+    // 4[4]4[4]4[4]4[4]
+    x = (x | (x >> 4U)) & 0xF0F0F0F0U;
+
+    // 2[2]2[2]2[2]2[2]2[2]2[2]2[2]2[2]
+    x = (x | (x >> 2U)) & 0xCCCCCCCCU;
+
+    // 1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]
+    x = (x | (x >> 1U)) & 0xAAAAAAAAU;
+    return x;
+}
+
+//=====================================================================================================================
+static uint32_t Expand3D32(uint32_t code)
+{
+    // 32 bit function to expand an axiscode to 3D bits
+    // For an input : xxxxxxxxxxxxxxx...
+    // The output is: x__x__x__x__x__....
+
+    // we only look at the first 11 bits
+    uint32_t x = code & 0xFFE00000U;
+
+    // 6[12]5[9]
+    x = (x | x >> 12U) & 0xFC003E00U;
+
+    // 3[6]3[6]3[6]2[3]
+    x = (x | x >> 6U) & 0xE0703818U;
+
+    // 1[2]2[4]1[2]2[4]1[2]2[4]2[3]
+    x = (x | x >> 2U) & 0x984C2618U;
+
+    // 1[2]1[2]1[2]1[2]1[2]1[2]1[2]1[2]1[2]1[2]1[1]
+    x = (x | x >> 2U) & 0x92492492U;
+
+    return x;
+}
+
+//=====================================================================================================================
+static uint32_t ExpandFor3DBits32(uint32_t x)
+{
+    // 32 bit function to expand an existing code for insertion of 3D bits
+    // For an input : xyxyxyxyxyxyxy...
+    // The output is: xy_xy_xy_xy_xy_....
+
+    // input is 22 bits, at the top
+    x &= 0xFFFFFC00U;
+
+    // 12[6]10[4]
+    uint32_t mask = 0x000FFC00U;
+    x = ((x & mask) >> 6U) | (x & ~mask);
+
+    // 6[3]6[3]6[3]4[1]
+    mask = 0x03F000F0U;
+    x = ((x & mask) >> 3U) | (x & ~mask);
+
+    // 4[2]2[1]4[2]2[1]4[2]2[1]4[1]
+    mask = 0x0C060300U;
+    x = ((x & mask) >> 2U) | (x & ~mask);
+
+    // 2[1]2[1]2[1]2[1]2[1]2[1]2[1]2[1]2[1]2[1]2
+    mask = 0x30180C06U;
+    x = ((x & mask) >> 1U) | (x & ~mask);
+
+    return x;
+}
+
+//=====================================================================================================================
+static uint32_t MortonCode3D32(uint32_t x, uint32_t y, uint32_t z)
+{
+    // Generates a 32 bit regular morton code in xyzxyz...
+
+    // x__x__x__x__x__x__x...
+    const uint32_t xx = Expand3D32(x);
+
+    // y__y__y__y__y__y__y...
+    const uint32_t yy = Expand3D32(y);
+
+    // z__z__z__z__z__z__z...
+    const uint32_t zz = Expand3D32(z);
+
+    // Shift and or to obtain xyzxyzxyzxyz....
+    return (xx) | (yy >> 1U) | (zz >> 2U);
+}
+
+//=====================================================================================================================
+static uint32_t CreatePrebitMask32(uint32_t prebits)
+{
+    // Generates a 32 bit mask for the given number of prebits
+    // E.G. Input = 4
+    //     Output = 111100000....
+    return prebits > 0U ? 0xFFFFFFFFU << (32U - prebits) : 0U;
+}
+
+//=====================================================================================================================
+static uint32_t FastVariableBitMorton32(bvhuint3 codes, uint32_t prebitsXZ, uint32_t prebitsXY, uint32_t prebitsYZ)
+{
+    // Generates a 32-bit variable bit morton code
+
+    // NOTE: all comments here will assume the order is xyz of largest to smallest axis
+
+    uint32_t mortonCode;
+
+    if (prebitsXZ == 0U)
+    {
+        // There are no prebits in this code, so early exit preventing 1 expansion
+        mortonCode = MortonCode3D32(codes.x, codes.y, codes.z);
+    }
+    else
+    {
+        // This code has prebits
+
+        // Start with only x bits
+        mortonCode = codes.x;
+
+        // Fetch the prebits from different axes
+        // This calculation computes the number of bits required BEFORE x becomes smaller than z to prevent resorting
+        const uint32_t prebits1D = prebitsXY;
+
+        // < 31, as we'd first insert x again, but that is already present in the current code
+        if (prebits1D < 31U)
+        {
+            const uint32_t prebitMask1D = CreatePrebitMask32(prebits1D);
+            const uint32_t prebits2D = prebitsXZ + prebitsYZ;
+
+            // Check if there are no 2D prebits
+            if (prebits1D == prebits2D)
+            {
+                // Short circuit from 1D to 3D bits, prevents 1 expansion
+
+                // regular tail: xyzxyzxyz
+                uint32_t tail = MortonCode3D32(codes.x << prebits1D, codes.y, codes.z);
+
+                // E.G. 1D prebits = 4:
+                //      1D mask = xxxx________...
+                //      tail    = ____xyzxyzxy... (shifted by prebits1D)
+                //      Or op   = xxxxxyzxyzxy...
+                mortonCode = (mortonCode & prebitMask1D) | (tail >> prebits1D);
+            }
+            else
+            {
+                // Default case with 1D and 2D prebits
+
+                // Mask out 1D prebits and 'weave' in 2D tail
+                // ExpandFor2DBits = x_x_x_x_x_x_...
+                // Expand2D        = _y_y_y_y_y_y...
+                // Or op           = xyxyxyxyxyxy...
+                uint32_t tail2D = ExpandFor2DBits32(mortonCode << (prebits1D)) | (Expand2D32(codes.y));
+
+                // E.G. 1D prebits = 6:
+                //      1D mask = xxxxxx______...
+                //      tail2D  = ______xyxyxy... (shifted by prebits1D)
+                //      Or op   = xxxxxxxyxyxy...
+                mortonCode = (mortonCode & prebitMask1D) | (tail2D >> prebits1D);
+
+                // Check to prevent overshifting, 30 as we'd first insert xy again, but that already is currently in the code
+                if (prebits2D < 30U)
+                {
+                    // Contains all 1D and 2D prebits
+                    const uint32_t prebitMask2D = CreatePrebitMask32(prebits2D);
+
+                    // Mask out 1D and 2D prebits and 'weave' in 3D tail
+                    // ExpandFor3DBits = xy_xy_xy_xy_...
+                    // Expand3D        = __z__z__z__z... (shifted by 2U)
+                    // Or op           = xyzxyzxyzxyz...
+                    uint32_t tail3D = ExpandFor3DBits32(mortonCode << (prebits2D)) | (Expand3D32(codes.z) >> 2U);
+
+                    // E.G. 2D prebits = 6 (Includes 1D prebits)
+                    //      2D mask = xxxyxy______... (2 1D bits + 4 2D bits)
+                    //      tail3D  = ______xyzxyz... (shifted by prebits2D)
+                    //      Or op   = xxxyxyxyzxyz...
+                    // OR (in case of uneven 2D prebits)
+                    //      2D prebits = 5 (Includes 1D prebits)
+                    //      2D mask = xxxyx_______... (2 1D bits + 3 2D bits)
+                    //      tail3D  = _____yxzyxzy... (shifted by prebits2D)
+                    //      Or op   = xxxyxyxzyxzy...
+                    mortonCode = (mortonCode & prebitMask2D) | (tail3D >> prebits2D);
+                }
+            }
+        }
+    }
+
+    return mortonCode;
+}
+
+void BVH_LBVH::Build( const bvhvec4* vertices, const uint32_t primCount )
+{
+    Build(bvhvec4slice{vertices, primCount, sizeof(bvhvec4)});
+}
+
+void BVH_LBVH::Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount )
+{
+    Build(bvhvec4slice{vertices, primCount, sizeof(bvhvec4)}, indices, primCount);
+}
+
+void BVH_LBVH::Build( const bvhvec4slice& vertices )
+{
+    Build(vertices, nullptr, vertices.count);
+}
+
+void BVH_LBVH::Build( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount )
+{
+    BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH_LBVH::Build( .. ), primCount == 0." );
+    // allocate on first build
+    const uint32_t spaceNeeded = primCount * 2; // upper limit
+
+    if (allocatedNodes < spaceNeeded)
+    {
+        AlignedFree( bvhNode );
+        bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
+        allocatedNodes = spaceNeeded;
+
+        // We skip the root node for build nodes, such that the root always lands at 0
+        internalNodes = &bvhNode[1];
+
+        // leaf nodes take half the nodes
+        leafNodes = &bvhNode[primCount];
+    }
+    else BVH_FATAL_ERROR_IF( !rebuildable, "BVH_LBVH::Build( .. ), bvh not rebuildable." );
+
+    verts = vertices; // note: we're not copying this data; don't delete.
+    vertIdx = (uint32_t*)indices;
+    idxCount = triCount = primCount;
+    numLeafNodes = primCount;
+    numInternalNodes = primCount - 1;
+
+    // assign all triangles to the root node to generate scene bounds
+    BVHNode& root = bvhNode[0];
+    root.min = bvhvec3( BVH_FAR ), root.max = bvhvec3( -BVH_FAR );
+
+    // init all nodes to invalid
+    for (uint32_t i = 0; i < numInternalNodes; i++)
+    {
+        internalNodes[i] = root;
+    }
+
+    if (indices)
+    {
+        // initialize primitive nodes
+        for (uint32_t i = 0; i < triCount; i++)
+        {
+            const int i0 = indices[i * 3 + 0];
+            const int i1 = indices[i * 3 + 1];
+            const int i2 = indices[i * 3 + 2];
+            const bvhvec3 v0 = verts[i0];
+            const bvhvec3 v1 = verts[i1];
+            const bvhvec3 v2 = verts[i2];
+            const bvhvec3 min = tinybvh_min( tinybvh_min( v0, v1), v2);
+            const bvhvec3 max = tinybvh_max( tinybvh_max( v0, v1), v2);
+            leafNodes[i].min = min;
+            leafNodes[i].max = max;
+            leafNodes[i].left_primIdx = i;
+
+            root.min = tinybvh_min(root.min, min);
+            root.max = tinybvh_max(root.max, max);
+        }
+    }
+    else
+    {
+        // initialize primitive nodes
+        for (uint32_t i = 0; i < triCount; i++)
+        {
+            const bvhvec3 v0 = verts[i * 3 + 0];
+            const bvhvec3 v1 = verts[i * 3 + 1];
+            const bvhvec3 v2 = verts[i * 3 + 2];
+            const bvhvec3 min = tinybvh_min( tinybvh_min( v0, v1), v2);
+            const bvhvec3 max = tinybvh_max( tinybvh_max( v0, v1), v2);
+            leafNodes[i].min = min;
+            leafNodes[i].max = max;
+            leafNodes[i].left_primIdx = i;
+
+            root.min = tinybvh_min(root.min, min);
+            root.max = tinybvh_max(root.max, max);
+        }
+    }
+
+    aabbMin = root.min;
+    aabbMax = root.max;
+
+    // Setup data for sort and building
+    scratchPad = new uint32_t[triCount * 4];
+
+    // Sort generates MC, allowing one pass to be skipped for RadixSort
+    // We select sort based on num prims, merge sort is slightly faster
+    // for lower prim counts as radixsort has to compute the radix 
+    // multiple times.
+    if (triCount <= 3200)
+    {
+        StdSort();
+    }
+    else
+    {
+        RadixSort();
+    }
+    
+    // Reuse swap space array
+    uint32_t* mortonCode = &scratchPad[0];
+    uint32_t* primIdx = &scratchPad[1 * triCount];
+    uint32_t* parentRange = &scratchPad[2 * triCount];
+    uint32_t* triCountArray = &scratchPad[3 * triCount];
+
+    memset(parentRange, 0xFFFFFFFFU, triCount * sizeof(uint32_t));
+
+    uint32_t rootNodeIndex = 0;
+
+    // After processing all prims, we will have succesfully built the tree
+    for (uint32_t i = 0; i < triCount; i++)
+    {
+        // primIdx hods sorted primArray;
+        uint32_t prim = primIdx[i];
+
+        uint32_t left = prim;
+        uint32_t right = prim;
+
+        // actual node index of the primitive
+        uint32_t currentNode = numInternalNodes + i;
+
+        bvhvec3 bmin = internalNodes[currentNode].min;
+        bvhvec3 bmax = internalNodes[currentNode].max;
+
+        while (1)
+        {
+            // choose parent node
+            uint32_t parentOtherRange = 0;
+            uint32_t parentNodeIndex = 0xFFFFFFFFU;
+
+            const bool useRight = ((left == 0) ||
+                ((right != numInternalNodes) &&
+                    (__bfind(mortonCode[right] ^ mortonCode[right + 1]) > __bfind(mortonCode[left - 1] ^ mortonCode[left]))
+                ));
+
+            parentNodeIndex = useRight ? right : left - 1;
+
+            if (parentNodeIndex == numInternalNodes)
+            {
+                rootNodeIndex = currentNode;
+            }
+            
+            // Set value in parent
+            if (parentNodeIndex != numInternalNodes)
+            {
+                // 8 dwords in raw data array
+                BVHNode& parentNode = internalNodes[parentNodeIndex];
+
+                // Update our current node for moving upwards
+                bmin = tinybvh_min(parentNode.min, bmin);
+                bmax = tinybvh_max(parentNode.max, bmax);
+                parentNode.min = bmin;
+                parentNode.max = bmax;
+
+                if (useRight)
+                {
+                    parentNode.left_primIdx = currentNode;
+                }
+                else
+                {
+                    parentNode.right = currentNode;
+                }
+            }
+
+            const uint32_t previousRange = parentRange[parentNodeIndex];
+            const bool canMoveUp = previousRange != 0xFFFFFFFFU;
+            if (canMoveUp)
+            {
+                if (useRight)
+                {
+                    right = previousRange;
+                }
+                else
+                {
+                    left = previousRange;
+                }
+            }
+            else
+            {
+                const uint32_t range = useRight ? left : right;
+                parentRange[parentNodeIndex] = useRight ? left : right;
+            }
+
+            if (canMoveUp)
+            {
+                currentNode = parentNodeIndex;
+            }
+            else
+            {
+                break;
+            }
+        }
+    }
+
+    root.left_primIdx = internalNodes[rootNodeIndex].left_primIdx;
+    root.right = internalNodes[rootNodeIndex].right;
+
+    // all done.
+    refittable = true; // not using spatial splits: can refit this BVH
+    may_have_holes = false; // the reference builder produces a continuous list of nodes
+    
+    // Not sure, the internal nodes used are primCount, but with leaf nodes primCount * 2
+    usedNodes = 2 * primCount; 
+
+    // cleanup
+    delete[] scratchPad;
+}
+
+void BVH_LBVH::StdSort()
+{
+    bvhvec3 extents = aabbMax - aabbMin;
+
+    // We only need the first 2, we can generate number 3 by taking the ^ of the first 2
+    uint32_t order = (0 << 0) | (1 << 2);
+
+    // Sort extents
+    if (extents.x < extents.y)
+    {
+        if (extents.y < extents.z)
+        {
+            // z y x
+            tinybvh_swap(extents[0], extents[2]);
+            order = (2 << 0) | (1 << 2);
+        }
+        else if (extents.x < extents.z)
+        {
+            // y z x
+            tinybvh_swap(extents[0], extents[1]); // y x z
+            tinybvh_swap(extents[1], extents[2]); // y z x
+            order = (2 << 0) | (0 << 2);
+        }
+        else
+        {
+            // y x z
+            tinybvh_swap(extents[0], extents[1]);
+            order = (1 << 0) | (0 << 2);
+        }
+    }
+    else
+    {
+        if (extents.x < extents.z)
+        {
+            // z x y
+            tinybvh_swap(extents[0], extents[1]); // y x z
+            tinybvh_swap(extents[0], extents[2]); // z x y
+            order = (1 << 0) | (2 << 2);
+        }
+        else if (extents.y < extents.z)
+        {
+            // x z y
+            tinybvh_swap(extents[1], extents[2]);
+            order = (0 << 0) | (2 << 2);
+        }
+        // other case is xyz, but extents is already in that order
+    }
+
+        // Fetch the prebits from different axes
+    // This calculation computes the number of bits required BEFORE x becomes smaller than z to prevent resorting
+    const uint32_t prebitsXY = (uint32_t)tinybvh_max(log2(extents.x / extents.y), 32.0f);
+    const uint32_t prebitsXZ = (uint32_t)tinybvh_max(log2(extents.x / extents.z), 32.0f);
+    const uint32_t prebitsYZ = (uint32_t)tinybvh_max(log2(extents.y / extents.z), 32.0f);
+
+    bvhuint3 axisCodes = 0;
+    bvhuint3 sortedAxisCodes = 0;
+
+    // Sort array on swap space
+    uint32_t* mortonCode = &scratchPad[0];
+    uint32_t* primIds = &scratchPad[1 * triCount];
+    uint64_t* sortArray = (uint64_t*)&scratchPad[2 * triCount];
+
+    for (uint32_t prim = 0; prim < triCount; prim++)
+    {
+        const bvhvec3 middle = (leafNodes[prim].max + leafNodes[prim].min) * 0.5f;
+        const bvhvec3 unitPoint = tinybvh_min(((middle - aabbMin) / extents), 0.9999994f); // cap at just below 1 to get 0xFFFFFFFF for max points
+        axisCodes[(order & 0x3)] = (uint32_t)(unitPoint.x * 0xFFFFFFFFU);
+        axisCodes[((order >> 2U) & 0x3)] = (uint32_t)(unitPoint.y * 0xFFFFFFFFU);
+        axisCodes[((~(order ^ (order >> 2U))) & 0x3)] = (uint32_t)(unitPoint.z * 0xFFFFFFFFU);
+
+        const uint32_t mc = FastVariableBitMorton32(axisCodes, prebitsXY, prebitsXZ, prebitsYZ);
+        sortArray[prim] = (((uint64_t)mc) << 32ULL) | prim;
+    }
+
+    std::stable_sort(sortArray, &sortArray[triCount]);
+
+    for (uint32_t prim = 0; prim < triCount; prim++)
+    {
+        uint64_t value = sortArray[prim];
+
+        uint32_t primId = (uint32_t)value;
+        uint32_t mc = (value >> 32ULL);
+        mortonCode[prim] = mc;
+        primIds[prim] = primId;
+    }
+}
+
+void BVH_LBVH::RadixSort()
+{
+    uint32_t* mortonCode = &scratchPad[0];
+    uint32_t* primIdx = &scratchPad[1 * triCount];
+    uint32_t* mortonCodeSwap = &scratchPad[2 * triCount];
+    uint32_t* primIdxSwap = &scratchPad[3 * triCount];
+
+    constexpr uint32_t mortonBits = 32;
+    constexpr uint32_t radixBitsPerPass = 8;
+    constexpr uint32_t radixPassMask = (1U << radixBitsPerPass) - 1U;
+    constexpr uint32_t radixSortPasses = 1 + ((32 - 1) / radixBitsPerPass);
+    constexpr uint32_t radixBins = 1 << radixBitsPerPass;
+    uint32_t radi[radixBins];
+    uint32_t radiSwap[radixBins];
+
+    // Reset array to 0
+    memset(&radi[0], 0, radixBins * sizeof(uint32_t));
+
+    bvhvec3 extents = aabbMax - aabbMin;
+
+    // We only need the first 2, we can generate number 3 by taking the ^ of the first 2
+    uint32_t order = (0 << 0) | (1 << 2);
+
+    // Sort extents
+    if (extents.x < extents.y)
+    {
+        if (extents.y < extents.z)
+        {
+            // z y x
+            tinybvh_swap(extents[0], extents[2]);
+            order = (2 << 0) | (1 << 2);
+        }
+        else if (extents.x < extents.z)
+        {
+            // y z x
+            tinybvh_swap(extents[0], extents[1]); // y x z
+            tinybvh_swap(extents[1], extents[2]); // y z x
+            order = (2 << 0) | (0 << 2);
+        }
+        else
+        {
+            // y x z
+            tinybvh_swap(extents[0], extents[1]);
+            order = (1 << 0) | (0 << 2);
+        }
+    }
+    else
+    {
+        if (extents.x < extents.z)
+        {
+            // z x y
+            tinybvh_swap(extents[0], extents[1]); // y x z
+            tinybvh_swap(extents[0], extents[2]); // z x y
+            order = (1 << 0) | (2 << 2);
+        }
+        else if (extents.y < extents.z)
+        {
+            // x z y
+            tinybvh_swap(extents[1], extents[2]);
+            order = (0 << 0) | (2 << 2);
+        }
+        // other case is xyz, but extents is already in that order
+    }
+
+    // Fetch the prebits from different axes
+    // This calculation computes the number of bits required BEFORE x becomes smaller than z to prevent resorting
+    const uint32_t prebitsXY = (uint32_t)tinybvh_max(log2(extents.x / extents.y), 32.0f);
+    const uint32_t prebitsXZ = (uint32_t)tinybvh_max(log2(extents.x / extents.z), 32.0f);
+    const uint32_t prebitsYZ = (uint32_t)tinybvh_max(log2(extents.y / extents.z), 32.0f);
+
+    bvhuint3 axisCodes = 0;
+    bvhuint3 sortedAxisCodes = 0;
+
+    for (uint32_t prim = 0; prim < triCount; prim++)
+    {
+        const bvhvec3 middle = (leafNodes[prim].max + leafNodes[prim].min) * 0.5f;
+        const bvhvec3 unitPoint = tinybvh_min(((middle - aabbMin) / extents), 0.9999994f); // cap at just below 1 to get 0xFFFFFFFF for max points
+        axisCodes[(order & 0x3)] = (uint32_t)(unitPoint.x * 0xFFFFFFFFU);
+        axisCodes[((order >> 2U) & 0x3)] = (uint32_t)(unitPoint.y * 0xFFFFFFFFU);
+        axisCodes[((~(order ^ (order >> 2U))) & 0x3)] = (uint32_t)(unitPoint.z * 0xFFFFFFFFU);
+
+        const uint32_t mc = FastVariableBitMorton32(axisCodes, prebitsXY, prebitsXZ, prebitsYZ);
+        primIdx[prim] = prim;
+        mortonCode[prim] = mc;
+        radi[mc & radixPassMask]++;
+    }
+
+    uint32_t radixPrefixSum;
+
+    uint32_t* srcPrimIdx = &primIdx[0];
+    uint32_t* dstPrimIdx = &primIdxSwap[0];
+    uint32_t* srcMortonCode = &mortonCode[0];
+    uint32_t* dstMortonCode = &mortonCodeSwap[0];
+    uint32_t* srcRadi = &radi[0];
+    uint32_t* dstRadi = &radiSwap[0];
+
+    for (uint32_t pass = 0; pass < radixSortPasses; pass++)
+    {
+        // Reset other radi for new iteration
+        memset(&dstRadi[0], 0, radixBins * sizeof(uint32_t));
+        // Prefix sum
+        radixPrefixSum = 0;
+        for (uint32_t i = 0; i < radixBins; i++)
+        {
+            const uint32_t value = srcRadi[i];
+            srcRadi[i] = radixPrefixSum;
+            radixPrefixSum += value;
+        }
+
+        // Scatter
+        for (uint32_t i = 0; i < triCount; i++)
+        {
+            const uint32_t mc = srcMortonCode[i];
+            const uint32_t primID = srcPrimIdx[i];
+            const uint32_t bin = (mc >> (radixBitsPerPass * pass)) & radixPassMask;
+            const uint32_t nextBin = (mc >> (radixBitsPerPass * (pass + 1))) & radixPassMask;
+            const uint32_t index = srcRadi[bin]++; // Moves the int forward for other prims
+            dstRadi[nextBin]++;
+
+            dstMortonCode[index] = mc;
+            dstPrimIdx[index] = primID;
+        }
+
+        tinybvh_swap(srcPrimIdx, dstPrimIdx);
+        tinybvh_swap(srcMortonCode, dstMortonCode);
+        tinybvh_swap(srcRadi, dstRadi);
+    }
+
+    // uneven, need to copy the swap to result
+    if (radixSortPasses & 1U)
+    {
+        memcpy(primIdx, primIdxSwap, triCount * sizeof(uint32_t));
+        memcpy(mortonCode, mortonCodeSwap, triCount * sizeof(uint32_t));
+    }
+}
+
+float BVH_LBVH::SAHCost() const
+{
+    // Determine the SAH cost of the tree. This provides an indication
+    // of the quality of the BVH: Lower is better.
+    std::vector<uint32_t> stack;
+    stack.reserve(numLeafNodes);
+
+    // root
+    const BVHNode& root = bvhNode[0];
+
+    if (numLeafNodes == 1)
+    {
+        return c_int * root.SurfaceArea();
+    }
+
+    float SAHCost = c_trav * root.SurfaceArea();
+
+    stack.push_back(root.right);
+    stack.push_back(root.left_primIdx);
+
+    while(!stack.empty())
+    {
+        const uint32_t nodeIndex = stack.back();
+
+        stack.pop_back();
+
+        const BVHNode& n = internalNodes[nodeIndex];
+
+        if (nodeIndex >= numInternalNodes)
+        {
+            SAHCost += c_int * n.SurfaceArea();
+            continue;
+        }
+        else
+        {
+            SAHCost += c_trav * n.SurfaceArea();
+        }
+
+        stack.push_back(n.right);
+        stack.push_back(n.left_primIdx);
+
+        if (stack.size() > numLeafNodes * 2)
+        {
+            printf("\nStack overflow!!!\n");
+            break;
+        }
+    }
+    return SAHCost / root.SurfaceArea();
+}
+
+void BVH_LBVH::PrintTree() const
+{
+    uint32_t numNodes = numLeafNodes * 2;
+
+    printf("\n ---- LBVH ----\n");
+    printf("internalNodes: \n");
+    for (uint32_t i = 0; i < numLeafNodes; i++)
+    {
+        BVHNode& node = bvhNode[i];
+        printf("min: {%6.2f, %6.2f, %6.2f} max {%6.2f, %6.2f, %6.2f}, left: %u, right: %u\n",
+            node.min.x, node.min.y, node.min.z,
+            node.max.x, node.max.y, node.max.z,
+            node.left_primIdx, node.right);
+    }
+
+    printf("leafNodes: \n");
+    for (uint32_t i = 0; i < numLeafNodes; i++)
+    {
+        BVHNode& node = leafNodes[i];
+        printf("min: {%6.2f, %6.2f, %6.2f} max {%6.2f, %6.2f, %6.2f}, primIdx: %u\n",
+            node.min.x, node.min.y, node.min.z,
+            node.max.x, node.max.y, node.max.z,
+            node.left_primIdx);
+    }
+}
+
+float BVH_LBVH::BVHNode::SurfaceArea() const
+{
+    const bvhvec3 e = max - min;
+    return e.x * e.y + e.y * e.z + e.z * e.x;
+}
 
 // Generic (templated) MBVH implementation
 // ----------------------------------------------------------------------------

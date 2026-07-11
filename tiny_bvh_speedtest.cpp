@@ -19,6 +19,7 @@
 #define BUILD_PRESPLIT
 #define BUILD_FULLSWEEP
 #define BUILD_DOUBLE
+#define BUILD_LBVH
 #define BUILD_AVX
 #define BUILD_NEON
 #define BUILD_SBVH
@@ -120,6 +121,7 @@ BVH* sweepbvh = new BVH();
 BVH* ref_bvh = new BVH();
 BVH_Verbose* bvh_verbose = 0;
 BVH_Double* bvh_double = new BVH_Double();
+BVH_LBVH* bvh_lbvh = new BVH_LBVH();
 BVH_SoA* bvh_soa = 0;
 BVH_GPU* bvh_gpu = 0;
 MBVH<4>* bvh4 = 0;
@@ -660,6 +662,18 @@ int main()
 	TestPrimaryRaysEx( Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
 	printf( "- %6i nodes, SAH=%.2f, rayCost=%.2f\n", (int)bvh_double->usedNodes, bvh_double->SAHCost(), avgCost );
+
+#endif
+
+#if defined BUILD_LBVH
+
+    // measure single-core bvh construction time - LBVH bvh builder
+	printf( "- LBVH builder:      " );
+	t.reset();
+	for (int pass = 0; pass < 3; pass++) bvh_lbvh->Build( triangles, verts / 3 );
+	buildTime = t.elapsed() / 3.0f;
+	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
+	printf( "- %6i nodes, SAH=%.2f\n", bvh_lbvh->usedNodes, bvh_lbvh->SAHCost() );
 
 #endif
 
