@@ -22,7 +22,7 @@
     <ClInclude Include="..\tiny_bvh.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\tiny_bvh_minimal.cpp" />
+    <ClCompile Include="..\examples\tiny_bvh_minimal.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
@@ -120,7 +120,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>../external/</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..;../external/</AdditionalIncludeDirectories>
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
     </ClCompile>
     <Link>
@@ -142,7 +142,7 @@
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <FloatingPointModel>Fast</FloatingPointModel>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>../external/</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..;../external/</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>

@@ -4,6 +4,6 @@
     <ClInclude Include="..\tiny_bvh.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\tiny_bvh_renderer.cpp" />
+    <ClCompile Include="..\examples\tiny_bvh_renderer.cpp" />
   </ItemGroup>
 </Project>

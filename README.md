@@ -1,73 +1,84 @@
 # TinyBVH
-Single-header BVH construction and traversal library written as "Sane C++" (or "C with classes"). Some C++11 is used, e.g. for threading. The library has no dependencies. 
+Single-header BVH construction and traversal library written in C++14 / "Sane C++" (or "C with classes"). C++17 is used for threading. **This library has no dependencies.** 
 
+TinyBVH is _fast_. Here is, in a nutshell, how it compares to [Intel's Embree](https://www.embree.org) and [Madmann91's BVH library](https://github.com/madmann91/bvh).
+![Performance](images/perfgraphs.png)
+TinyBVH currently builds a SAH BVH faster than Embree and Maddmann91. It also traces individual primary rays faster than those libraries. Embree outperforms TinyBVH for _any hit_ rays. Note: These results are based on the new ````tiny_bvh_benchmark.cpp```` application and are cautiously presented as 'preliminary'. Note that single-ray traversal is only a small part of Embree. If you suspect an inperfection in the experiment setup, please [let me know](mailto:bikker.j@protonmail.com).
+![Performance](images/cpu_vs_gpu.png)
+When tracing rays on the GPU, (multicore) CPU performance is dwarfed. On an RTX 5080 laptop GPU, TinyBVH traces up to _4 billion rays_ per second in Crytek's Sponza scene using the basic binary BVH format, regardless of graphics API and without using specialized ray tracing hardware. That is 4 rays per pixel at 4k@120Hz, enough for most purposes.
 # TinyOCL
-Single-header OpenCL library, which helps you select and initialize a device. It also loads, compiles and runs kernels, with several convenient features:
+TinyBVH GPU ray traversal examples are available for OpenCL and OpenGL with compute shaders. For OpenCL support, TinyOCL is provided: a single-header OpenCL library, which helps you select and initialize a compute device. It also loads, compiles and runs kernels, with several convenient features:
 * Include-file expansion for AMD devices
 * Multi-argument passing
 * Host/device buffer management
 * Vendor and architecture detection and propagation to #defines in OpenCL code
-* ..And many other things.
+* ..and many other things.
 
 ![Bistro](images/combined.jpg)
 
-To use tinyocl, just include ````tiny_ocl.h````; this will automatically cause linking with ````OpenCL.lib```` in the 'external' folder, which in turn passes on work to vendor-specific driver code. But all that is not your problem!
+To use TinyOCL, just include ````tiny_ocl.h````; this will automatically cause linking with ````OpenCL.lib```` in the 'external' folder, which in turn passes on work to vendor-specific driver code.
 
-Note that the ````tiny_bvh.h```` library will work without ````tiny_ocl.h```` and remains dependency-free. The new ````tiny_ocl.h```` is only needed in projects that wish to trace rays _on the GPU_ using BVHs created by ````tiny_bvh.h````. 
+Note that the ````tiny_bvh.h```` library will work without ````tiny_ocl.h```` and remains dependency-free. The new ````tiny_ocl.h```` is only needed in projects that wish to trace rays on the GPU using BVHs created by ````tiny_bvh.h````.
   
 # BVH?
 A Bounding Volume Hierarchy is a data structure used to quickly find intersections in a virtual scene; most commonly between a ray and a group of triangles. You can read more about this in a series of articles on the subject: https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics .
 
-Right now TinyBVH comes with the following builders:
+To build a BVH using TinyBVH, simply call ````BVH::Build```` on an instantiated ````BVH````. See [````tiny_bvh_minimal.cpp````](https://github.com/jbikker/tinybvh/blob/dev/examples/tiny_bvh_minimal.cpp) for a (really) small example.
+Internally, the call is forwarded to a specialized builder. There are fast builders, builders for 'high quality' BVHs and experimental builders for research and development. 
+
+A selection:
 * ````BVH::Build```` : Efficient plain-C/C+ binned SAH BVH builder which should run on any platform.
-* ````BVH::BuildAVX```` : A highly optimized version of BVH::Build for Intel CPUs.
-* ````BVH::BuildHQ```` : A 'spatial splits' BVH builder, for highest BVH quality.
+* ````BVH::BuildAVX```` : A highly optimized version of BVH::Build for Intel and AMD CPUs. 
+* ````BVH::BuildHQ```` : A 'spatial splits' BVH builder, for optimal BVH quality.
 
-A constructed BVH can be used to quickly intersect a ray with the geometry, using ````BVH::Intersect```` or ````BVH::IsOccluded````, for shadow rays. The double-precision BVH is traversed using ````BVH::IntersectEx````.
+A constructed BVH can be used to intersect a ray with geometry, using ````BVH::Intersect```` or ````BVH::IsOccluded````, for shadow (aka _any hit_) rays.
 
-Apart from the default BVH layout (simply named ````BVH````), several other layouts are available, which all serve one or more specific purposes. You can create a BVH in the desired layout by instantiating the appropriate class, or by converting from ````BVH```` using the ````::ConvertFrom```` methods. The available layouts are:
+Apart from the default BVH layout (simply named ````BVH````), several other layouts are available, which all serve one or more specific purposes. You can create a BVH in the desired layout by instantiating the appropriate class. The available layouts are:
 * ````BVH```` : A compact format that stores the AABB for a node, along with child pointers and leaf information in a cross-platform-friendly way. The 32-byte size allows for cache-line alignment.
-* ````BVH_SoA```` : This format stores bounding box information in a SIMD-friendly format, making the BVH faster to traverse.
 * ````BVH_Double```` : Double-precision version of ````BVH````.
+* ````MBVH<M>```` : In this (templated) format, each node stores _M_ child pointers, reducing the depth of the tree. This improves performance for divergent rays. Based on the [2008 paper](https://graphics.stanford.edu/~boulos/papers/multi_rt08.pdf) by Ingo Wald et al.
+* ````BVH4_CPU```` : SSE-optimized wide BVH traversal (["WiVe"](https://web.cs.ucdavis.edu/~hamann/FuetterlingLojewskiPfreundtHamannEbertHPG2017PaperFinal06222017.pdf)). The fastest option for CPUs that do not support AVX.
+* ````BVH8_CPU```` : AVX2-optimized wide BVH traversal (["WiVe"](https://web.cs.ucdavis.edu/~hamann/FuetterlingLojewskiPfreundtHamannEbertHPG2017PaperFinal06222017.pdf)). This is the fastest option on CPU.
 * ````BVH_GPU```` : This format uses 64 bytes per node and stores the AABBs of the two child nodes. This is the format presented in the [2009 Aila & Laine paper](https://research.nvidia.com/sites/default/files/pubs/2009-08_Understanding-the-Efficiency/aila2009hpg_paper.pdf). It can be traversed with a simple GPU kernel.
-* ````MBVH<M>```` : In this (templated) format, each node stores M child pointers, reducing the depth of the tree. This improves performance for divergent rays. Based on the [2008 paper](https://graphics.stanford.edu/~boulos/papers/multi_rt08.pdf) by Ingo Wald et al.
-* ````BVH4_GPU```` : A compact version of the ````BVH4```` format, which will be faster for GPU ray tracing.
-* ````BVH4_CPU```` : SSE-optimzied wide BVH traversal. The fastest option for CPUs that do not support AVX.
-* ````BVH8_CPU```` : AVX2-optimized wide BVH traversal. This is the fastest option on CPU.
+* ````BVH4_GPU```` : A compact version of the ````BVH4```` format, which may be faster for GPU ray tracing.
 * ````BVH8_CWBVH```` : An advanced 80-byte representation of the 8-wide BVH, for state-of-the-art GPU rendering, based on the [2017 paper](https://research.nvidia.com/publication/2017-07_efficient-incoherent-ray-traversal-gpus-through-compressed-wide-bvhs) by Ylitie et al. and [code by AlanWBFT](https://github.com/AlanIWBFT/CWBVH).
 
 A BVH in any format can be _rebuilt_ at any time by calling the ````Build```` method on the changed triangle data. A BVH may also be _refitted_, in case the triangles moved, using ````BVH::Refit````. Refitting is substantially faster than rebuilding and works well if the animation is subtle. Refitting does not work if polygon counts change.
 
 Most layouts may be serialized and de-serialized via ````::Save```` and ````::Load````.
 
+TinyBVH also supports construction of a _Top-Level Acceleration Structure_ (TLAS). The TLAS is a BVH over _Bottom-Level Acceleration Structures_ (BLASses), where each BLAS is a BVH, with a 4x4 matrix transform. Different layouts can be combined under a single TLAS. The TLAS can be used for cheap _rigid animation_ (by changing the transforms) as well as instancing.
+
 A more complete overview of TinyBVH functionality can be found in the [Basic Use Manual](https://jacco.ompf2.com/2025/01/24/tinybvh-manual-basic-use) and the [Advanced Topics Manual](https://jacco.ompf2.com/2025/01/25/tinybvh-manual-advanced).
 
 # How To Use
-The library ````tiny_bvh.h```` is designed to be easy to use. Please have a look at tiny_bvh_minimal.cpp for an example. A Visual Studio 'solution' (.sln/.vcxproj) is included, as well as a CMake file. That being said: The examples consists of only a single source file, which can be compiled with clang or g++, e.g.:
+The library ````tiny_bvh.h```` is designed to be easy to use. Please have a look at [````tiny_bvh_minimal.cpp````](https://github.com/jbikker/tinybvh/blob/dev/examples/tiny_bvh_minimal.cpp) for an example. A Visual Studio 'solution' (.sln/.vcxproj) is included, as well as a CMake file. That being said: Most examples consists of only a single source file, which can be compiled with clang or g++, e.g.:
 
-````g++ tiny_bvh_minimal.cpp````
+````g++ examples/tiny_bvh_minimal.cpp````
 
 The cross-platform fenster-based single-source **bitmap renderer** can be compiled with
 
-````g++ -mwindows -O3 tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on windows)
+````g++ -mwindows -O3 examples/tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on Linux and Windows)
 
-````c++ --std=c++11 -framework Cocoa -O3 tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on macOS)
+````c++ --std=c++17 -framework Cocoa -O3 examples/tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on macOS)
 
 The multi-threaded **path tracing** demo can be compiled with
 
-````g++ -mwindows -O3 tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on windows)
+````g++ -mwindows -O3 examples/tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on Linux and Windows)
 
-````c++ --std=c++11 -framework Cocoa -O3 tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on macOS)
+````c++ --std=c++17 -framework Cocoa -O3 examples/tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on macOS)
 
 The **performance measurement tool** can be compiled with:
 
-````g++ -mavx2 -mfma -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on windows)
+````g++ -mavx2 -mfma -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on Linux and Windows)
 
-````c++ --std=c++11 -framework OpenCL -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on macOS)
+````c++ --std=c++17 -framework OpenCL -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on macOS)
 
-Many additional demos are provided, demonstrating features of the library in small source files.
+Note: A new, more advanced benchmark tool is now available. See [build.bat](https://github.com/jbikker/tinybvh/blob/dev/build.bat) and [build_debug.bat](https://github.com/jbikker/tinybvh/blob/dev/build_debug.bat) for an example of a commandline to compile it using gcc.
 
-# Version 1.7.1
+Many [additional demos](https://github.com/jbikker/tinybvh/blob/dev/examples) are provided, demonstrating features of the library in small source files.
+
+# Version 1.8.0
 
 Basic use:
 
@@ -88,7 +99,7 @@ If you wish to use a specific builder (such as the spatial splits builder) or if
 
 ````
 BVH bvh;
-bvh.BuildHQ( verts, indices, triCount );
+bvh.Build( verts, indices, triCount );
 BVH_Verbose tmp;
 tmp.ConvertFrom( bvh );
 tmp.Optimize( 100 );
@@ -97,6 +108,22 @@ printf( "Optimized BVH SAH cost: %f\n", bvh.SAHCost() );
 ````
 
 Note that in this case, data ownership and lifetime must be managed carefully. Specifically, layouts converted from other layouts use data from the original, so both must be kept alive.
+
+**New in 1.7.3:** BVH build settings are now in ````BVHBase::settings````:
+````
+struct BVHBuildSettings
+{
+    bool usePresplitting = false;	// pre-split triangles before building the BVH.
+    bool useSpatialSplits = false;	// consider spatial splits during construction (SBVH).
+    bool presplitPostPass = true;	// attempt to un-split primitives in leafs after a presplit build.
+    float presplitFactor = 0.3f;	// presplit budget relative to input data size.
+    bool useFullSweep = false;		// for experiments only; full-sweep SAH builder.
+    bool postOptimize = false;		// optimize generated BVH using tree rotations.
+    int optimizeIterations = 25;	// default optimization iterations.
+    bool useSIMDifavailable = true;	// set to false to use the scalar reference builder.
+};
+````   
+This supersedes the calls to ````::BuildHQ```` and ````::BuildAVX````, which are now invoked from ````::Build```` based on the hints in ````BVHBuildSettings````. The old interface also remains available for now.
 
 This version of the library includes the following functionality:
 * Reference 'full-sweep' SAH BVH builder
@@ -122,6 +149,8 @@ Besides basic examples demonstrating usage of the library, these more advanced e
 
 Advanced / exotic features of the library include:
 * BVH optimizer: reduces SAH cost and improves ray tracing performance ([Bittner et al., 2013](https://dspace.cvut.cz/bitstream/handle/10467/15603/2013-Fast-Insertion-Based-Optimization-of-Bounding-Volume-Hierarchies.pdf))
+* BVH pre-splitting (implementing ideas from [a paper](https://research.nvidia.com/sites/default/files/pubs/2013-07_Fast-Parallel-Construction/karras2013hpg_paper.pdf) by Karras and Aila and [explanation](https://github.com/BoyBaykiller/IDKEngine) by BoybayKiller)
+* Full-Sweep SAH BVH (with support from [BoyBaykiller](https://github.com/BoyBaykiller))
 * Opacity Micro Map support (as proposed [by Gruen et al.](https://dl.acm.org/doi/10.1145/3406180) in 2020)
 * Sphere/BVH collision detection via BVH::IntersectSphere(..)
 * Fast AVX2 ray tracing: Implements the 2017 paper by [Fuetterling et al.](https://web.cs.ucdavis.edu/~hamann/FuetterlingLojewskiPfreundtHamannEbertHPG2017PaperFinal06222017.pdf)
@@ -134,25 +163,12 @@ Advanced / exotic features of the library include:
 * Optional user-defined memory allocation, by [Thierry Cantenot](https://github.com/tcantenot)
 * Vertex array with a custom stride, by [David Peicho](https://github.com/DavidPeicho)
 * Vertex array with indexing
-* 'Bring Your Own Vector Types (BYOVT), thanks [Tijmen Verhoef](https://github.com/nemjit001)
-* 'SpeedTest' tool that times and validates all (well, most) traversal kernels
+* 'Bring Your Own Vector Types' (BYOVT), thanks [Tijmen Verhoef](https://github.com/nemjit001)
+* 'Bring Your Own Thread Pool', thanks [Wenzel Jakob](https://github.com/wjakob)
+* 'Benchmark' tool that times and validates all builders and traversal kernels
 * A [manual](https://jacco.ompf2.com/2025/01/24/tinybvh-manual-basic-use) is now available.
 
 The current version of the library is stable. Changes may happen but should be limited.
-
-Some plans:
-
-* Better benchmark tool
-* Speed improvements:
-  * Faster builds
-  * Faster optimizer for AVX-capable CPUs
-* Demo of TinyBVH on GPU using other apis:
-  * Ray tracing in pure DirectX
-  * SDL3 sample application
-* Bridge to rt hw / layouts:
-  * Produce a BVH for Intel rt hw (mind the quads)
-  * Produce a BVH for AMD rt hw
-  * Use inline asm on AMD for aabb/tri intersect
 
 # Platforms
 TinyBVH is a cross-platfrom library and should build on any platform that supports C++20 (the '20' bit is for threading). That being said, several platforms are specifically supported:
@@ -171,6 +187,7 @@ A list of projects using TinyBVH:
 * [wave_tracer](https://github.com/ssteinberg/wave_tracer) by Shlomi Steinberg uses TinyBVH to trace path segments.
 * [TrenchBroomBFG](https://github.com/RobertBeckebans/TrenchBroomBFG), by Robert Beckebans. "TinyBVH allows to load bigger glTF 2 maps almost instantly instead of minutes".
 * Jon Baker's [Icarus](https://jbaker.graphics/writings/icarusPLY.html) Point Cloud visualizer uses TinyBVH to represent geometry.
+* The [Wonderland Engine](https://wonderlandengine.com/) for web-based 3D uses TinyBVH for WebGL ray tracing.
 * [unity-tinybvh](https://github.com/andr3wmac/unity-tinybvh): An example implementation for TinyBVH in Unity and a foundation for building compute based raytracing solutions, by Andrew MacIntyre.
 
 # TinyBVH Rust bindings
@@ -179,10 +196,13 @@ The TinyBVH library can now also be used from Rust, with the [Rust bindings](htt
 # TinyBVH Python bindings
 Florent Le Moël created Python bindings for TinyBVH. You can find details in the [pytinybvh repository](https://github.com/FlorentLM/pytinybvh) on GitHub.
 
+# TinyBVH .NET wrapper
+Anders Forsgren provides [TinyBVHNet](https://github.com/andersforsgren/TinyBVHNet), a .NET wrapper for TinyBVH, targetting ```net48``` and ```net10.0```. Get it via [NuGet](https://www.nuget.org/packages/TinyBVHNet).
+
 Created or know about other projects? [Let me know](mailto:bikker.j@protonmail.com)!
 
 # Contribute
-TinyBVH received corrections and features from 28 contributors so far. Thanks! Feel free to submit PRs; **please do so in the [development branch](https://github.com/jbikker/tinybvh/tree/dev)** for a good workflow.
+TinyBVH received features and bug fixes from [32 contributors](https://github.com/jbikker/tinybvh/graphs/contributors?all=1) so far. Thanks! Feel free to submit PRs; **please do so in the [development branch](https://github.com/jbikker/tinybvh/tree/dev)** for a good workflow.
 
 # Contact
 Questions, remarks? Contact me at bikker.j@protonmail.com or BlueSky: @jbikker.bsky.social .

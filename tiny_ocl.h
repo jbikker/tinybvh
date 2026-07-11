@@ -377,12 +377,12 @@ private:
 	inline static cl_context context; // simplifies some things, but limits us to one device
 	inline static cl_command_queue queue, queue2;
 	inline static char* log = 0;
-	inline static bool isNVidia = false, isAMD = false, isIntel = false, isApple = false, isOther = false;
-	inline static bool isAmpere = false, isTuring = false, isPascal = false;
-	inline static bool isAda = false, isBlackwell = false, isRubin = false, isHopper = false;
 	inline static int vendorLines = 0;
 	inline static std::vector<Kernel*> loadedKernels;
 public:
+	inline static bool isNVidia = false, isAMD = false, isIntel = false, isApple = false, isOther = false;
+	inline static bool isAmpere = false, isTuring = false, isPascal = false;
+	inline static bool isAda = false, isBlackwell = false, isRubin = false, isHopper = false;
 	inline static bool candoInterop = false, clStarted = false;
 };
 
@@ -429,8 +429,8 @@ void FatalError( const char* fmt, ... )
 	va_start( args, fmt );
 	vsnprintf( t, sizeof( t ) - 2, fmt, args );
 	va_end( args );
-#ifdef _WINDOWS_ // i.e., windows.h has been included.
-	MessageBox( NULL, t, "Fatal error", MB_OK );
+#if defined _WINDOWS_ && !defined SKIP_MESSAGEBOXA // i.e., windows.h has been included.
+	MessageBoxA( NULL, t, "Fatal error", MB_OK );
 #else
 	fprintf( stderr, t );
 #endif
@@ -914,7 +914,7 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 				if (!errorInInclude) lineNr -= vendorLines;
 				// present error message
 				char t[1024];
-				sprintf( t, "file %s, line %i, pos %i:\n%s", errorFile.c_str(), lineNr + 1, linePos, lns );
+				snprintf( t, 1024, "file %s, line %i, pos %i:\n%s", errorFile.c_str(), lineNr + 1, linePos, lns );
 				FatalError( t, "Build error" );
 			}
 		}
@@ -922,7 +922,7 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 		{
 			// error string has unknown format; just dump it to a window
 			log[2048] = 0; // truncate very long logs
-			if (!log[0]) sprintf( log, "Failed to build entry point %s in %s", entryPoint, file ); 
+			if (!log[0]) snprintf( log, 2048, "Failed to build entry point %s in %s", entryPoint, file ); 
 			FatalError( log, "Build error" );
 		}
 	#endif
