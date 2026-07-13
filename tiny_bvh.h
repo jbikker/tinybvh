@@ -1126,6 +1126,7 @@ private:
 	void RadixSort();
 	void StdSort();
 	void ReorderLBVH();
+	void CountLBVHNodes();
 	BVHNode* internalNodes = 0; // will point inside node array
 	BVHNode* leafNodes = 0; // will point inside node array
 	uint32_t* scratchPad = 0; // for sorting
@@ -2939,10 +2940,33 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 	// all done.
 	refittable = true; // not using spatial splits: can refit this BVH
 	may_have_holes = false; // the reference builder produces a continuous list of nodes
+	// DEBUG: see if we produced a proper BVH.
+	CountLBVHNodes();
 	// LBVH completed; turn it into a valid BVH
 	ReorderLBVH();
 	// At this point we should at least have a proper BVH, ready to trace.
 	// TODO: Optimize, combine leafs using SAH
+}
+
+void BVH::CountLBVHNodes()
+{
+	uint32_t nodeIdx = 0, stack[512], stackPtr = 0, visited = 0;
+	while (1)
+	{
+		BVHNode& node = bvhNode[nodeIdx];
+		visited++;
+		if (node.right == 0 /* must be a leaf */)
+		{
+			if (!stackPtr) break; else nodeIdx = stack[--stackPtr];
+		}
+		else // must be interior node
+		{
+			uint32_t leftIdx = node.leftFirst;
+			uint32_t rightIdx = node.right;
+			nodeIdx = leftIdx, stack[stackPtr++] = rightIdx;
+		}
+	}
+	int w = 0;
 }
 
 void BVH::ReorderLBVH()
