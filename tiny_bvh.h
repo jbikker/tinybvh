@@ -2832,8 +2832,8 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 		// leaf nodes take half the nodes
 		leafNodes = &bvhNode[triCount - 1];
 		// allocate scratchpad
-        AlignedFree( scratchPad )
-		scratchPad = (uint32_t*)AlignedAlloc( spaceNeeded * sizeof( uint32_t ) );
+        AlignedFree( scratchPad );
+		scratchPad = (uint32_t*)AlignedAlloc( triCount * 4 * sizeof( uint32_t ) );
 	}
 	else BVH_FATAL_ERROR_IF( !rebuildable, "BVH_LBVH::Build( .. ), bvh not rebuildable." );
 	verts = vertices; // note: we're not copying this data; don't delete.
@@ -2841,12 +2841,15 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 	idxCount = triCount;
 	numLeafNodes = triCount;
 	numInternalNodes = triCount - 1;
-	// assign all triangles to the root node to generate scene bounds
-	BVHNode& root = bvhNode[0];
-	root.aabbMin = bvhvec3( BVH_FAR ), root.aabbMax = bvhvec3( -BVH_FAR );
-	root.leftFirst = root.right = 0;
+
+	// Scene bounds
+    aabbMin = bvhvec3( BVH_FAR ), aabbMax = bvhvec3( -BVH_FAR );
+
+    BVHNode nullBox;
+    nullBox.aabbMin = bvhvec3( BVH_FAR ), nullBox.aabbMax = bvhvec3( -BVH_FAR );
+	nullBox.leftFirst = nullBox.right = 0;
 	// init all nodes to invalid
-	for (uint32_t i = 0; i < numInternalNodes; i++) bvhNode[i] = root;
+	for (uint32_t i = 0; i < numInternalNodes; i++) bvhNode[i] = nullBox;
 	if (indices)
 	{
 		// initialize primitive nodes
@@ -2857,7 +2860,7 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 			const bvhvec3 min = tinybvh_min( tinybvh_min( v0, v1 ), v2 );
 			const bvhvec3 max = tinybvh_max( tinybvh_max( v0, v1 ), v2 );
 			leafNodes[i].aabbMin = min, leafNodes[i].aabbMax = max, leafNodes[i].leftFirst = i;
-			root.aabbMin = tinybvh_min( root.aabbMin, min ), root.aabbMax = tinybvh_max( root.aabbMax, max );
+			aabbMin = tinybvh_min( aabbMin, min ), aabbMax = tinybvh_max( aabbMax, max );
 		}
 	}
 	else
@@ -2869,10 +2872,9 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 			const bvhvec3 min = tinybvh_min( tinybvh_min( v0, v1 ), v2 );
 			const bvhvec3 max = tinybvh_max( tinybvh_max( v0, v1 ), v2 );
 			leafNodes[i].aabbMin = min, leafNodes[i].aabbMax = max, leafNodes[i].leftFirst = i;
-			root.aabbMin = tinybvh_min( root.aabbMin, min ), root.aabbMax = tinybvh_max( root.aabbMax, max );
+			aabbMin = tinybvh_min( aabbMin, min ), aabbMax = tinybvh_max( aabbMax, max );
 		}
 	}
-	aabbMin = root.aabbMin, aabbMax = root.aabbMax;
 
 	// Sort generates MC, allowing one pass to be skipped for RadixSort
 	// We select sort based on num prims, merge sort is slightly faster
