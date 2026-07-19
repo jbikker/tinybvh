@@ -1125,9 +1125,7 @@ private:
 	// internal methods and data for the LBVH builder
 	void RadixSort();
 	void StdSort();
-	void ReorderLBVH();
-	void CountLBVHNodes();
-	BVHNode* internalNodes = 0; // will point inside node array
+	void ReorderLBVH( uint32_t rootNodeIndex );
 	BVHNode* leafNodes = 0; // will point inside node array
 	uint32_t* scratchPad = 0; // for sorting
 	uint32_t numLeafNodes = 0;
@@ -1904,7 +1902,7 @@ static uint32_t CreatePrebitMask32( uint32_t prebits )
 	return prebits > 0U ? 0xFFFFFFFFU << (32U - prebits) : 0U;
 }
 
-static uint32_t FastVariableBitMorton32( bvhuint3 codes, uint32_t prebitsXZ, uint32_t prebitsXY, uint32_t prebitsYZ )
+static uint32_t FastVariableBitMorton32( bvhuint3 codes, uint32_t prebitsXY, uint32_t prebitsXZ, uint32_t prebitsYZ )
 {
 	// Generates a 32-bit variable bit morton code
 	// NOTE: all comments here will assume the order is xyz of largest to smallest axis
@@ -2821,21 +2819,21 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 	BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH_LBVH::Build( .. ), primCount == 0." );
 	// allocate on first build
 	if (indices) triCount = primCount; else triCount = vertices.count / 3;
-	const uint32_t spaceNeeded = triCount * 2 + 2; // upper limit
+	const uint32_t spaceNeeded = triCount * 2; // upper limit
 	if (allocatedNodes < spaceNeeded)
 	{
 		AlignedFree( bvhNode );
 		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
 		AlignedFree( primIdx );
-		primIdx = (uint32_t*)AlignedAlloc( triCount * sizeof( uint32_t ) );
+		// We do not need a primIdx array right now, created in conversion
+
 		allocatedNodes = spaceNeeded;
-		// we skip the root node for build nodes, such that the root always lands at 0
-		internalNodes = &bvhNode[1];
+
 		// leaf nodes take half the nodes
-		leafNodes = &bvhNode[triCount];
+		leafNodes = &bvhNode[triCount - 1];
 		// allocate scratchpad
-		delete[] scratchPad;
-		scratchPad = new uint32_t[triCount * 4];
+		AlignedFree( scratchPad );
+		scratchPad = (uint32_t*)AlignedAlloc( triCount * 4 * sizeof( uint32_t ) );
 	}
 	else BVH_FATAL_ERROR_IF( !rebuildable, "BVH_LBVH::Build( .. ), bvh not rebuildable." );
 	verts = vertices; // note: we're not copying this data; don't delete.
@@ -2843,12 +2841,15 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 	idxCount = triCount;
 	numLeafNodes = triCount;
 	numInternalNodes = triCount - 1;
-	// assign all triangles to the root node to generate scene bounds
-	BVHNode& root = bvhNode[0];
-	root.aabbMin = bvhvec3( BVH_FAR ), root.aabbMax = bvhvec3( -BVH_FAR );
-	root.leftFirst = root.right = 0;
+
+	// Scene bounds
+	aabbMin = bvhvec3( BVH_FAR ), aabbMax = bvhvec3( -BVH_FAR );
+
+	BVHNode nullBox;
+	nullBox.aabbMin = bvhvec3( BVH_FAR ), nullBox.aabbMax = bvhvec3( -BVH_FAR );
+	nullBox.leftFirst = nullBox.right = 0;
 	// init all nodes to invalid
-	for (uint32_t i = 0; i < numInternalNodes; i++) internalNodes[i] = root;
+	for (uint32_t i = 0; i < numInternalNodes; i++) bvhNode[i] = nullBox;
 	if (indices)
 	{
 		// initialize primitive nodes
@@ -2859,8 +2860,7 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 			const bvhvec3 min = tinybvh_min( tinybvh_min( v0, v1 ), v2 );
 			const bvhvec3 max = tinybvh_max( tinybvh_max( v0, v1 ), v2 );
 			leafNodes[i].aabbMin = min, leafNodes[i].aabbMax = max, leafNodes[i].leftFirst = i;
-			root.aabbMin = tinybvh_min( root.aabbMin, min ), root.aabbMax = tinybvh_max( root.aabbMax, max );
-			primIdx[i] = i;
+			aabbMin = tinybvh_min( aabbMin, min ), aabbMax = tinybvh_max( aabbMax, max );
 		}
 	}
 	else
@@ -2872,18 +2872,18 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 			const bvhvec3 min = tinybvh_min( tinybvh_min( v0, v1 ), v2 );
 			const bvhvec3 max = tinybvh_max( tinybvh_max( v0, v1 ), v2 );
 			leafNodes[i].aabbMin = min, leafNodes[i].aabbMax = max, leafNodes[i].leftFirst = i;
-			root.aabbMin = tinybvh_min( root.aabbMin, min ), root.aabbMax = tinybvh_max( root.aabbMax, max );
-			primIdx[i] = i;
+			aabbMin = tinybvh_min( aabbMin, min ), aabbMax = tinybvh_max( aabbMax, max );
 		}
 	}
-	aabbMin = root.aabbMin, aabbMax = root.aabbMax;
+
 	// Sort generates MC, allowing one pass to be skipped for RadixSort
 	// We select sort based on num prims, merge sort is slightly faster
 	// for lower prim counts as radixsort has to compute the radix  multiple times.
 	if (triCount <= 3200) StdSort(); else RadixSort();
+
 	// reuse swap space array
 	uint32_t* mortonCode = &scratchPad[0];
-	uint32_t* primIdx = &scratchPad[1 * triCount];
+	uint32_t* primIds = &scratchPad[1 * triCount];
 	uint32_t* parentRange = &scratchPad[2 * triCount];
 	uint32_t* triCountArray = &scratchPad[3 * triCount];
 	memset( parentRange, 0xFFFFFFFFU, triCount * sizeof( uint32_t ) );
@@ -2891,28 +2891,39 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 	// After processing all prims, we will have succesfully built the tree
 	for (uint32_t i = 0; i < triCount; i++)
 	{
-		// primIdx hods sorted primArray;
-		uint32_t prim = primIdx[i];
+		// primIds hods sorted primArray;
+		uint32_t prim = primIds[i];
 		uint32_t left = prim;
 		uint32_t right = prim;
 		// actual node index of the primitive
 		uint32_t currentNode = numInternalNodes + i;
-		bvhvec3 bmin = internalNodes[currentNode].aabbMin;
-		bvhvec3 bmax = internalNodes[currentNode].aabbMax;
+		bvhvec3 bmin = bvhNode[currentNode].aabbMin;
+		bvhvec3 bmax = bvhNode[currentNode].aabbMax;
 		while (1)
 		{
 			// choose parent node
 			uint32_t parentOtherRange = 0;
 			uint32_t parentNodeIndex = 0xFFFFFFFFU;
-			const bool useRight = ((left == 0) || ((right != numInternalNodes) &&
-				(__bfind( mortonCode[right] ^ mortonCode[right + 1] ) > __bfind( mortonCode[left - 1] ^ mortonCode[left] ))));
+
+			bool useRight = true;
+			if (left != 0)
+			{
+				if (right == numInternalNodes)
+				{
+					useRight = false;
+				}
+				else
+				{
+					useRight = (__bfind( mortonCode[right] ^ mortonCode[right + 1] ) > __bfind( mortonCode[left - 1] ^ mortonCode[left] ));
+				}
+			}
 			parentNodeIndex = useRight ? right : left - 1;
 			if (parentNodeIndex == numInternalNodes) rootNodeIndex = currentNode;
 			// set value in parent
 			if (parentNodeIndex != numInternalNodes)
 			{
 				// 8 dwords in raw data array
-				BVHNode& parentNode = internalNodes[parentNodeIndex];
+				BVHNode& parentNode = bvhNode[parentNodeIndex];
 				// Update our current node for moving upwards
 				bmin = tinybvh_min( parentNode.aabbMin, bmin );
 				bmax = tinybvh_max( parentNode.aabbMax, bmax );
@@ -2935,54 +2946,36 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 			if (canMoveUp) currentNode = parentNodeIndex; else break;
 		}
 	}
-	root.leftFirst = internalNodes[rootNodeIndex].leftFirst;
-	root.right = internalNodes[rootNodeIndex].right;
+
 	// all done.
 	refittable = true; // not using spatial splits: can refit this BVH
 	may_have_holes = false; // the reference builder produces a continuous list of nodes
-	// DEBUG: see if we produced a proper BVH.
-	CountLBVHNodes();
 	// LBVH completed; turn it into a valid BVH
-	ReorderLBVH();
+	ReorderLBVH( rootNodeIndex );
 	// At this point we should at least have a proper BVH, ready to trace.
 	// TODO: Optimize, combine leafs using SAH
 }
 
-void BVH::CountLBVHNodes()
-{
-	uint32_t nodeIdx = 0, stack[512], stackPtr = 0, visited = 0;
-	while (1)
-	{
-		BVHNode& node = bvhNode[nodeIdx];
-		visited++;
-		if (node.right == 0 /* must be a leaf */)
-		{
-			if (!stackPtr) break; else nodeIdx = stack[--stackPtr];
-		}
-		else // must be interior node
-		{
-			uint32_t leftIdx = node.leftFirst;
-			uint32_t rightIdx = node.right;
-			nodeIdx = leftIdx, stack[stackPtr++] = rightIdx;
-		}
-	}
-	int w = 0;
-}
-
-void BVH::ReorderLBVH()
+void BVH::ReorderLBVH( uint32_t rootNodeIndex )
 {
 	BVHNode* tmpNodes = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * allocatedNodes );
-	uint32_t* idx = (uint32_t*)AlignedAlloc( sizeof( uint32_t ) * idxCount );
-	memcpy( tmpNodes, bvhNode, sizeof( BVHNode ) ); // copy node 0 (root)
+
+	// Now create primIdx
+	uint32_t* primIdx = (uint32_t*)AlignedAlloc( sizeof( uint32_t ) * idxCount );
+	// copy root node
+	tmpNodes[0] = bvhNode[rootNodeIndex];
 	memset( tmpNodes + sizeof( BVHNode ), 0, sizeof( BVHNode ) ); // clear node 1
-	newNodePtr = 2;
+	newNodePtr = 2; // skip index 1 for alignment (I see you Jacco)  ;)
 	uint32_t newIdxPtr = 0, nodeIdx = 0, stack[512], stackPtr = 0;
+	const uint32_t leafMarker = 0x80000000U;
+	const uint32_t nodeIdxMask = ~leafMarker;
 	while (1)
 	{
-		BVHNode& node = tmpNodes[nodeIdx];
-		if (node.right == 0 /* node.isLeaf() */)
+		const bool isLeaf = (nodeIdx & leafMarker) > 0;
+		BVHNode& node = tmpNodes[nodeIdx & nodeIdxMask];
+		if (isLeaf)
 		{
-			idx[newIdxPtr++] = primIdx[node.leftFirst];
+			primIdx[newIdxPtr++] = node.leftFirst;
 			node.triCount = 1; // count is always 1 for LBVH
 			if (!stackPtr) break; else nodeIdx = stack[--stackPtr];
 		}
@@ -2990,28 +2983,31 @@ void BVH::ReorderLBVH()
 		{
 			const BVHNode& left = bvhNode[node.leftFirst];
 			const BVHNode& right = bvhNode[node.right];
+			const uint32_t leftIsLeafMarker = node.leftFirst >= triCount - 1 ? leafMarker : 0U;
+			const uint32_t rightIsLeafMarker = node.right >= triCount - 1 ? leafMarker : 0U;
 			tmpNodes[newNodePtr] = left, tmpNodes[newNodePtr + 1] = right;
-			const uint32_t todo = newNodePtr + 1;
+			const uint32_t todo = (newNodePtr + 1) | rightIsLeafMarker;
 			node.leftFirst = newNodePtr, node.triCount = 0;
-			nodeIdx = newNodePtr, newNodePtr += 2, stack[stackPtr++] = todo;
+			nodeIdx = (newNodePtr | leftIsLeafMarker), newNodePtr += 2, stack[stackPtr++] = todo;
 		}
 	}
 	AlignedFree( bvhNode );
-	AlignedFree( primIdx );
-	usedNodes = newNodePtr, bvhNode = tmpNodes, primIdx = idx;
+	usedNodes = newNodePtr, bvhNode = tmpNodes;
 }
 
 void BVH::StdSort()
 {
 	bvhvec3 extents = aabbMax - aabbMin;
 	uint32_t order = LBVHSortOrder( extents );
+
 	// Fetch the prebits from different axes
 	// This calculation computes the number of bits required BEFORE x becomes smaller than z to prevent resorting
-	const uint32_t prebitsXY = (uint32_t)tinybvh_max( log2( extents.x / extents.y ), 32.0f );
-	const uint32_t prebitsXZ = (uint32_t)tinybvh_max( log2( extents.x / extents.z ), 32.0f );
-	const uint32_t prebitsYZ = (uint32_t)tinybvh_max( log2( extents.y / extents.z ), 32.0f );
+	const uint32_t prebitsXY = (uint32_t)tinybvh_min( log2( extents.x / extents.y ), 32.0f );
+	const uint32_t prebitsXZ = (uint32_t)tinybvh_min( log2( extents.x / extents.z ), 32.0f );
+	const uint32_t prebitsYZ = (uint32_t)tinybvh_min( log2( extents.y / extents.z ), 32.0f );
 	bvhuint3 axisCodes = 0;
 	bvhuint3 sortedAxisCodes = 0;
+
 	// Sort array on swap space
 	uint32_t* mortonCode = &scratchPad[0];
 	uint32_t* primIds = &scratchPad[1 * triCount];
@@ -3054,9 +3050,9 @@ void BVH::RadixSort()
 	uint32_t order = LBVHSortOrder( extents );
 	// Fetch the prebits from different axes
 	// This calculation computes the number of bits required BEFORE x becomes smaller than z to prevent resorting
-	const uint32_t prebitsXY = (uint32_t)tinybvh_max( log2( extents.x / extents.y ), 32.0f );
-	const uint32_t prebitsXZ = (uint32_t)tinybvh_max( log2( extents.x / extents.z ), 32.0f );
-	const uint32_t prebitsYZ = (uint32_t)tinybvh_max( log2( extents.y / extents.z ), 32.0f );
+	const uint32_t prebitsXY = (uint32_t)tinybvh_min( log2( extents.x / extents.y ), 32.0f );
+	const uint32_t prebitsXZ = (uint32_t)tinybvh_min( log2( extents.x / extents.z ), 32.0f );
+	const uint32_t prebitsYZ = (uint32_t)tinybvh_min( log2( extents.y / extents.z ), 32.0f );
 	bvhuint3 axisCodes = 0;
 	bvhuint3 sortedAxisCodes = 0;
 	for (uint32_t prim = 0; prim < triCount; prim++)
