@@ -2959,14 +2959,13 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 void BVH::ReorderLBVH( uint32_t rootNodeIndex )
 {
 	BVHNode* tmpNodes = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * allocatedNodes );
-
 	// Now create primIdx
 	uint32_t* primIdx = (uint32_t*)AlignedAlloc( sizeof( uint32_t ) * idxCount );
 	// copy root node
 	tmpNodes[0] = bvhNode[rootNodeIndex];
 	memset( tmpNodes + sizeof( BVHNode ), 0, sizeof( BVHNode ) ); // clear node 1
 	newNodePtr = 2; // skip index 1 for alignment (I see you Jacco)  ;)
-	uint32_t newIdxPtr = 0, nodeIdx = 0, stack[512], stackPtr = 0;
+	uint32_t newIdxPtr = 0, nodeIdx = 0, stack[16384], stackPtr = 0;
 	const uint32_t leafMarker = 0x80000000U;
 	const uint32_t nodeIdxMask = ~leafMarker;
 	while (1)
@@ -6302,9 +6301,9 @@ void BVH4_CPU::ConvertFrom( MBVH<4>& original )
 			cidx++;
 		}
 		for (; cidx < 4; cidx++)
-			((float*)&newNode->xmin4)[cidx] = 1e30f, ((float*)&newNode->xmax4)[cidx] = 1.00001e30f,
-			((float*)&newNode->ymin4)[cidx] = 1e30f, ((float*)&newNode->ymax4)[cidx] = 1.00001e30f,
-			((float*)&newNode->zmin4)[cidx] = 1e30f, ((float*)&newNode->zmax4)[cidx] = 1.00001e30f,
+			((float*)&newNode->xmin4)[cidx] = BVH_FAR, ((float*)&newNode->xmax4)[cidx] = -BVH_FAR,
+			((float*)&newNode->ymin4)[cidx] = BVH_FAR, ((float*)&newNode->ymax4)[cidx] = -BVH_FAR,
+			((float*)&newNode->zmin4)[cidx] = BVH_FAR, ((float*)&newNode->zmax4)[cidx] = -BVH_FAR,
 			((uint32_t*)&newNode->child4)[cidx] |= EMPTY_BIT;
 		// pop next task
 		if (!stackPtr) break;
@@ -6483,9 +6482,9 @@ void BVH8_CPU::ConvertFrom( MBVH<8>& original )
 		}
 		for (; cidx < 8; cidx++)
 		{
-			((float*)&newNode->xmin8)[cidx] = 1e30f, ((float*)&newNode->xmax8)[cidx] = 1.00001e30f;
-			((float*)&newNode->ymin8)[cidx] = 1e30f, ((float*)&newNode->ymax8)[cidx] = 1.00001e30f;
-			((float*)&newNode->zmin8)[cidx] = 1e30f, ((float*)&newNode->zmax8)[cidx] = 1.00001e30f;
+			((float*)&newNode->xmin8)[cidx] = BVH_FAR, ((float*)&newNode->xmax8)[cidx] = -BVH_FAR;
+			((float*)&newNode->ymin8)[cidx] = BVH_FAR, ((float*)&newNode->ymax8)[cidx] = -BVH_FAR;
+			((float*)&newNode->zmin8)[cidx] = BVH_FAR, ((float*)&newNode->zmax8)[cidx] = -BVH_FAR;
 			((uint32_t*)&newNode->child8)[cidx] |= EMPTY_BIT;
 		}
 		// pop next task
