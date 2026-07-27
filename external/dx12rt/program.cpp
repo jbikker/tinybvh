@@ -1,5 +1,6 @@
 // heavily based on Laura Andelare's great DXR tutorial:
 // https://landelare.github.io/2023/02/18/dxr-tutorial.html
+// Sonnet 5 removed the per-frame fence on Flush.
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -11,9 +12,9 @@
 #include "shader.fxh"
 #include <fstream>
 
-#pragma comment(lib, "user32") // For DefWindowProcW, etc.
-#pragma comment(lib, "d3d12")  // You'll never guess this one
-#pragma comment(lib, "dxgi")   // Another enigma
+#pragma comment(lib, "user32") // for DefWindowProcW, etc.
+#pragma comment(lib, "d3d12")
+#pragma comment(lib, "dxgi")
 
 #define DECLARE_AND_CALL(fn) void fn(); fn()
 
@@ -29,15 +30,20 @@ constexpr D3D12_RESOURCE_DESC BASIC_BUFFER_DESC = {
 };
 constexpr UINT NUM_INSTANCES = 1;
 constexpr UINT64 NUM_SHADER_IDS = 3;
+
+// --- Frame-in-flight configuration ---
+// Must match the swapchain's BufferCount (see InitSurfaces).
+constexpr UINT FRAME_COUNT = 2;
+
 IDXGIFactory4* factory;
 ID3D12Device5* device;
 ID3D12CommandQueue* cmdQueue;
 ID3D12Fence* fence;
 IDXGISwapChain3* swapChain;
 ID3D12DescriptorHeap* uavHeap;
-ID3D12Resource* renderTarget, * backBuffer, * cubeVB, * cubeIB, * cubeBlas, * instances, * shaderIDs;
+ID3D12Resource* renderTarget, * backBuffer, * meshVB, * meshIB, * blas, * instances, * shaderIDs;
 ID3D12Resource* tlas, * tlasUpdateScratch;
-ID3D12CommandAllocator* cmdAlloc;
+ID3D12CommandAllocator* cmdAllocs[FRAME_COUNT]; // one allocator per frame-in-flight slot
 ID3D12GraphicsCommandList4* cmdList;
 D3D12_RAYTRACING_INSTANCE_DESC* instanceData;
 ID3D12RootSignature* rootSignature;
@@ -67,19 +73,14 @@ void AddMesh( const char* file, int N = 0 )
 	tris = data, s.read( (char*)tris + triCount * 48, N * 48 ), triCount += N;
 }
 
-static UINT64 fenceValue = 1;
-
-void Flush()
-{
-	cmdQueue->Signal( fence, fenceValue );
-	fence->SetEventOnCompletion( fenceValue++, nullptr );
-}
+static UINT64 fenceValue = 0;
+static UINT64 frameFenceValues[FRAME_COUNT] = {};
 
 void WaitForGpu()
 {
+	fenceValue++;
 	const UINT64 fenceValueToWait = fenceValue;
 	cmdQueue->Signal( fence, fenceValueToWait );
-	fenceValue++;
 	if (fence->GetCompletedValue() < fenceValueToWait)
 	{
 		fence->SetEventOnCompletion( fenceValueToWait, fenceEvent );
@@ -93,7 +94,7 @@ void Resize( HWND hwnd )
 	GetClientRect( hwnd, &rect );
 	UINT width = std::max<UINT>( rect.right - rect.left, 1 );
 	UINT height = std::max<UINT>( rect.bottom - rect.top, 1 );
-	Flush();
+	WaitForGpu(); // must fully drain before touching swapchain buffers
 	swapChain->ResizeBuffers( 0, width, height, DXGI_FORMAT_UNKNOWN, 0 );
 	if (renderTarget) renderTarget->Release();
 	D3D12_RESOURCE_DESC rtDesc = {
@@ -107,6 +108,9 @@ void Resize( HWND hwnd )
 	D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {
 		.Format = DXGI_FORMAT_R8G8B8A8_UNORM, .ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D };
 	device->CreateUnorderedAccessView( renderTarget, nullptr, &uavDesc, uavHeap->GetCPUDescriptorHandleForHeapStart() );
+
+	// Backbuffer count/layout changed; any pending per-slot fence values are now stale.
+	for (UINT i = 0; i < FRAME_COUNT; i++) frameFenceValues[i] = 0;
 }
 
 LRESULT WINAPI WndProc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
@@ -156,7 +160,7 @@ void InitSurfaces( HWND hwnd )
 {
 	DXGI_SWAP_CHAIN_DESC1 scDesc = {
 		.Format = DXGI_FORMAT_R8G8B8A8_UNORM,
-		.SampleDesc = NO_AA, .BufferCount = 2,
+		.SampleDesc = NO_AA, .BufferCount = FRAME_COUNT,
 		.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
 	};
 	IDXGISwapChain1* swapChain1;
@@ -173,7 +177,10 @@ void InitSurfaces( HWND hwnd )
 
 void InitCommand()
 {
-	device->CreateCommandAllocator( D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS( &cmdAlloc ) );
+	for (UINT i = 0; i < FRAME_COUNT; i++)
+		device->CreateCommandAllocator( D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS( &cmdAllocs[i] ) );
+	// Command list is created against slot 0's allocator; it gets Reset() against
+	// the correct slot's allocator at the top of every Render() call anyway.
 	device->CreateCommandList1( 0, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_FLAG_NONE, IID_PPV_ARGS( &cmdList ) );
 }
 
@@ -214,8 +221,8 @@ void InitMeshes()
 	for (int i = 0; i < triCount * 3; i++) t3[i].x = tris[i].x, t3[i].y = tris[i].y, t3[i].z = tris[i].z;
 	vidx = new unsigned[triCount * 3];
 	for (int i = 0; i < triCount * 3; i++) vidx[i] = i;
-	cubeVB = makeAndCopy( (float*)t3, triCount * 36 );
-	cubeIB = makeAndCopy( (void*)vidx, triCount * 3 * 4 );
+	meshVB = makeAndCopy( (float*)t3, triCount * 36 );
+	meshIB = makeAndCopy( (void*)vidx, triCount * 3 * 4 );
 }
 
 ID3D12Resource* MakeAccelerationStructure( const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, UINT64* updateScratchSize = nullptr )
@@ -231,17 +238,18 @@ ID3D12Resource* MakeAccelerationStructure( const D3D12_BUILD_RAYTRACING_ACCELERA
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuildInfo;
 	device->GetRaytracingAccelerationStructurePrebuildInfo( &inputs, &prebuildInfo );
 	if (updateScratchSize) *updateScratchSize = prebuildInfo.UpdateScratchDataSizeInBytes;
-	auto* scratch = makeBuffer( prebuildInfo.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_COMMON );
-	auto* as = makeBuffer( prebuildInfo.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE );
+	ID3D12Resource* scratch = makeBuffer( prebuildInfo.ScratchDataSizeInBytes, D3D12_RESOURCE_STATE_COMMON );
+	ID3D12Resource* as = makeBuffer( prebuildInfo.ResultDataMaxSizeInBytes, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE );
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc = {
 		.DestAccelerationStructureData = as->GetGPUVirtualAddress(),
 		.Inputs = inputs, .ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress() };
-	cmdAlloc->Reset();
-	cmdList->Reset( cmdAlloc, nullptr );
+	// One-off, pre-render-loop build: use slot 0's allocator and fully drain the GPU.
+	cmdAllocs[0]->Reset();
+	cmdList->Reset( cmdAllocs[0], nullptr );
 	cmdList->BuildRaytracingAccelerationStructure( &buildDesc, 0, nullptr );
 	cmdList->Close();
 	cmdQueue->ExecuteCommandLists( 1, reinterpret_cast<ID3D12CommandList**>(&cmdList) );
-	Flush();
+	WaitForGpu();
 	scratch->Release();
 	return as;
 }
@@ -268,8 +276,7 @@ ID3D12Resource* MakeBLAS( ID3D12Resource* vertexBuffer, UINT vertexFloats, ID3D1
 
 void InitBottomLevel()
 {
-	// cubeBlas = MakeBLAS( cubeVB, std::size( verts ), cubeIB, std::size( indices ) );
-	cubeBlas = MakeBLAS( cubeVB, triCount * 9, cubeIB, triCount * 3 );
+	blas = MakeBLAS( meshVB, triCount * 9, meshIB, triCount * 3 );
 }
 
 ID3D12Resource* MakeTLAS( ID3D12Resource* instances, UINT numInstances, UINT64* updateScratchSize )
@@ -285,18 +292,18 @@ ID3D12Resource* MakeTLAS( ID3D12Resource* instances, UINT numInstances, UINT64* 
 
 void UpdateTransforms()
 {
-	auto cube = DirectX::XMMatrixTranslation( 0, 0, 0 );
-	DirectX::XMStoreFloat3x4( (DirectX::XMFLOAT3X4*)&instanceData[0].Transform, cube );
+	DirectX::XMMATRIX T = DirectX::XMMatrixTranslation( 0, 0, 0 );
+	DirectX::XMStoreFloat3x4( (DirectX::XMFLOAT3X4*)&instanceData[0].Transform, T );
 }
 
 void InitScene()
 {
-	auto instancesDesc = BASIC_BUFFER_DESC;
+	D3D12_RESOURCE_DESC instancesDesc = BASIC_BUFFER_DESC;
 	instancesDesc.Width = sizeof( D3D12_RAYTRACING_INSTANCE_DESC ) * NUM_INSTANCES;
 	device->CreateCommittedResource( &UPLOAD_HEAP, D3D12_HEAP_FLAG_NONE,
 		&instancesDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS( &instances ) );
 	instances->Map( 0, nullptr, reinterpret_cast<void**>(&instanceData) );
-	instanceData[0] = { .InstanceID = 0, .InstanceMask = 1, .AccelerationStructure = cubeBlas->GetGPUVirtualAddress() };
+	instanceData[0] = { .InstanceID = 0, .InstanceMask = 1, .AccelerationStructure = blas->GetGPUVirtualAddress() };
 	UpdateTransforms();
 }
 
@@ -304,7 +311,7 @@ void InitTopLevel()
 {
 	UINT64 updateScratchSize;
 	tlas = MakeTLAS( instances, NUM_INSTANCES, &updateScratchSize );
-	auto desc = BASIC_BUFFER_DESC;
+	D3D12_RESOURCE_DESC desc = BASIC_BUFFER_DESC;
 	// WARP bug workaround: use 8 if the required size was reported as less
 	desc.Width = std::max( updateScratchSize, 8ULL );
 	desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -332,7 +339,7 @@ void InitRootSignature()
 void InitQueryHeap()
 {
 	D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
-	queryHeapDesc.Count = 8; // start and end, times four
+	queryHeapDesc.Count = 8; // start and end, times four (2 per frame slot, double-buffered headroom)
 	queryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
 	queryHeapDesc.NodeMask = 0;
 	device->CreateQueryHeap( &queryHeapDesc, IID_PPV_ARGS( &queryHeap ) );
@@ -372,7 +379,7 @@ void InitPipeline()
 
 void InitShaderTables()
 {
-	auto idDesc = BASIC_BUFFER_DESC;
+	D3D12_RESOURCE_DESC idDesc = BASIC_BUFFER_DESC;
 	idDesc.Width = NUM_SHADER_IDS * D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT;
 	device->CreateCommittedResource( &UPLOAD_HEAP, D3D12_HEAP_FLAG_NONE, &idDesc,
 		D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS( &shaderIDs ) );
@@ -413,17 +420,40 @@ void UpdateScene()
 
 void Render()
 {
-	cmdAlloc->Reset();
-	cmdList->Reset( cmdAlloc, nullptr );
+	UINT frameIndex = swapChain->GetCurrentBackBufferIndex();
+	if (frameFenceValues[frameIndex] != 0 && fence->GetCompletedValue() < frameFenceValues[frameIndex])
+	{
+		fence->SetEventOnCompletion( frameFenceValues[frameIndex], fenceEvent );
+		WaitForSingleObject( fenceEvent, INFINITE );
+	}
+	UINT baseSlot = frameIndex * 2;
+	if (frameFenceValues[frameIndex] != 0)
+	{
+		UINT64* timestamps = nullptr;
+		D3D12_RANGE readRange = { baseSlot * sizeof( UINT64 ), (baseSlot + 2) * sizeof( UINT64 ) };
+		queryResultBuffer->Map( 0, &readRange, reinterpret_cast<void**>(&timestamps) );
+		UINT64 startTimestamp = timestamps[baseSlot];
+		UINT64 endTimestamp = timestamps[baseSlot + 1];
+		D3D12_RANGE writeRange = { 0, 0 };
+		queryResultBuffer->Unmap( 0, &writeRange );
+		UINT64 frequency = 0;
+		cmdQueue->GetTimestampFrequency( &frequency );
+		double rtTime = static_cast<double>(endTimestamp - startTimestamp) / static_cast<double>(frequency);
+		D3D12_RESOURCE_DESC rtDescForTiming = renderTarget->GetDesc();
+		double raysPerSecond = (rtDescForTiming.Width * rtDescForTiming.Height) / rtTime;
+		printf( "frame rendered: %.4fms (%.1fMRays/s)\n", (float)rtTime * 1000.0f, (float)(raysPerSecond / 1000000.0) );
+	}
+	cmdAllocs[frameIndex]->Reset();
+	cmdList->Reset( cmdAllocs[frameIndex], nullptr );
 	UpdateScene();
 	cmdList->SetPipelineState1( pso );
 	cmdList->SetComputeRootSignature( rootSignature );
 	cmdList->SetComputeRoot32BitConstants( 2, 12, renderSettings, 0 );
 	cmdList->SetDescriptorHeaps( 1, &uavHeap );
-	auto uavTable = uavHeap->GetGPUDescriptorHandleForHeapStart();
+	D3D12_GPU_DESCRIPTOR_HANDLE uavTable = uavHeap->GetGPUDescriptorHandleForHeapStart();
 	cmdList->SetComputeRootDescriptorTable( 0, uavTable ); // ←u0 ↓t0
 	cmdList->SetComputeRootShaderResourceView( 1, tlas->GetGPUVirtualAddress() );
-	auto rtDesc = renderTarget->GetDesc();
+	D3D12_RESOURCE_DESC rtDesc = renderTarget->GetDesc();
 	D3D12_DISPATCH_RAYS_DESC dispatchDesc = {
 		.RayGenerationShaderRecord = {
 			.StartAddress = shaderIDs->GetGPUVirtualAddress(),
@@ -438,13 +468,11 @@ void Render()
 			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES,
 			.StrideInBytes = 32 },
 		.Width = static_cast<UINT>(rtDesc.Width), .Height = rtDesc.Height, .Depth = 1 };
-	static int readSlot = 0, writeSlot = 2;
-	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, writeSlot );
+	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot );
 	cmdList->DispatchRays( &dispatchDesc );
-	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, writeSlot + 1 );
-	UINT64 bufferOffset = writeSlot * sizeof( UINT64 );
-	cmdList->ResolveQueryData( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, writeSlot, 2, queryResultBuffer, bufferOffset );
-	swapChain->GetBuffer( swapChain->GetCurrentBackBufferIndex(), IID_PPV_ARGS( &backBuffer ) );
+	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot + 1 );
+	cmdList->ResolveQueryData( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot, 2, queryResultBuffer, baseSlot * sizeof( UINT64 ) );
+	swapChain->GetBuffer( frameIndex, IID_PPV_ARGS( &backBuffer ) );
 	auto barrier = []( auto* resource, auto before, auto after ) {
 		D3D12_RESOURCE_BARRIER rb = {
 			.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
@@ -460,32 +488,15 @@ void Render()
 	backBuffer->Release();
 	cmdList->Close();
 	cmdQueue->ExecuteCommandLists( 1, reinterpret_cast<ID3D12CommandList**>(&cmdList) );
-	Flush();
-#if 1
-	// get GPU HW RT performance
-	// WaitForGpu();
-	UINT64* timestamps = nullptr;
-	D3D12_RANGE readRange = { 0, 8 * sizeof( UINT64 ) };
-	queryResultBuffer->Map( 0, &readRange, reinterpret_cast<void**>(&timestamps) );
-	UINT64 startTimestamp = timestamps[readSlot];
-	UINT64 endTimestamp = timestamps[readSlot + 1];
-	D3D12_RANGE writeRange = { 0, 0 };
-	queryResultBuffer->Unmap( 0, &writeRange );
-	UINT64 frequency = 0;
-	cmdQueue->GetTimestampFrequency( &frequency );
-	double rtTime = static_cast<double>(endTimestamp - startTimestamp) / static_cast<double>(frequency);
-	double raysPerSecond = (rtDesc.Width * rtDesc.Height) / rtTime;
-	printf( "frame rendered: %.4fms (%.1fMRays/s)\n", (float)rtTime * 1000.0f, (float)(raysPerSecond / 1000000.0) );
-#endif
+	fenceValue++;
+	cmdQueue->Signal( fence, fenceValue );
+	frameFenceValues[frameIndex] = fenceValue;
 	swapChain->Present( 1, 0 );
-	readSlot = (readSlot + 2) & 7;
-	writeSlot = (writeSlot + 2) & 7;
 }
 
 int main()
 {
-	// Alternatively, DPI_AWARENESS_CONTEXT_UNAWARE
-	SetProcessDpiAwarenessContext( DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 );
+	SetProcessDpiAwarenessContext( DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 /* or DPI_AWARENESS_CONTEXT_UNAWARE */ );
 	WNDCLASSW wcw = { .lpfnWndProc = &WndProc, .hCursor = LoadCursor( nullptr, IDC_ARROW ), .lpszClassName = L"μDXR" };
 	RegisterClassW( &wcw );
 	HWND hwnd = CreateWindowExW( 0, L"μDXR", L"_DXR", WS_VISIBLE | WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1024, 1024, 0, 0, 0, 0 );
