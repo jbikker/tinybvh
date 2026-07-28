@@ -5,9 +5,12 @@
 #define NOMINMAX
 #include <DirectXMath.h> // for XMMATRIX
 #include <d3d12.h>
-#include <dxgi1_4.h>
+#include <dxgi1_6.h>
 #include "shader.fxh"
 #include <fstream>
+
+extern "C" { __declspec(dllexport) DWORD NvOptimusEnablement = 1; }
+extern "C" { __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1; }
 
 #pragma comment(lib, "user32") // for DefWindowProcW, etc.
 #pragma comment(lib, "d3d12")
@@ -24,7 +27,7 @@ constexpr D3D12_RESOURCE_DESC BASIC_BUFFER_DESC = {
 constexpr UINT NUM_INSTANCES = 1, FRAME_COUNT = 2;
 constexpr UINT64 NUM_SHADER_IDS = 3;
 
-IDXGIFactory4* factory;
+IDXGIFactory6* factory;
 ID3D12Device5* device;
 ID3D12CommandQueue* cmdQueue;
 ID3D12Fence* fence;
@@ -46,6 +49,8 @@ static bvhvec3 renderSettings[4] = {
 	{ 0, 0, -7 }, // eye
 	{ 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } // p1, p2, p3
 };
+
+// struct RayData { float ox, oy, oz, opad; float dx, dy, dz, dpad; }; // 32 bytes
 
 // Scene management - Append a file, with optional position, scale and color override, tinyfied
 int triCount = 0;
@@ -130,12 +135,15 @@ void InitDevice()
 {
 	if (FAILED( CreateDXGIFactory2( DXGI_CREATE_FACTORY_DEBUG, IID_PPV_ARGS( &factory ) ) ))
 		CreateDXGIFactory2( 0, IID_PPV_ARGS( &factory ) );
+#ifdef _DEBUG
 	if (ID3D12Debug* debug; SUCCEEDED( D3D12GetDebugInterface( IID_PPV_ARGS( &debug ) ) ))
 		debug->EnableDebugLayer(), debug->Release();
-	IDXGIAdapter* adapter = nullptr;
-	// Uncomment the following line to use software rendering with WARP:
-	// factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter));
+#endif
+	IDXGIAdapter1* adapter = nullptr;
+	factory->EnumAdapterByGpuPreference( 0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS( &adapter ) );
+	// factory->EnumWarpAdapter( IID_PPV_ARGS( &adapter ) ); // uncomment for software RT
 	D3D12CreateDevice( adapter, D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS( &device ) );
+	adapter->Release();
 	D3D12_COMMAND_QUEUE_DESC cmdQueueDesc = { .Type = D3D12_COMMAND_LIST_TYPE_DIRECT };
 	device->CreateCommandQueue( &cmdQueueDesc, IID_PPV_ARGS( &cmdQueue ) );
 	device->CreateFence( 0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS( &fence ) );
