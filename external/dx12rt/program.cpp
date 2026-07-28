@@ -1,6 +1,6 @@
 // heavily based on Laura Andelare's great DXR tutorial:
 // https://landelare.github.io/2023/02/18/dxr-tutorial.html
-// Sonnet 5 removed the per-frame fence on Flush.
+// Sonnet 5 helped (a lot) with extensions and improvements.
 
 #define NOMINMAX
 #include <DirectXMath.h> // for XMMATRIX
@@ -129,30 +129,10 @@ LRESULT WINAPI WndProc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
 	switch (msg)
 	{
-	case WM_CLOSE:
-	case WM_DESTROY: PostQuitMessage( 0 ); [[fallthrough]];
-	case WM_SIZING:
-	case WM_SIZE: if (swapChain) Resize( hwnd ); [[fallthrough]];
+	case WM_CLOSE: case WM_DESTROY: PostQuitMessage( 0 ); [[fallthrough]];
+	case WM_SIZING: case WM_SIZE: if (swapChain) Resize( hwnd ); [[fallthrough]];
 	default: return DefWindowProcW( hwnd, msg, wparam, lparam );
 	}
-}
-
-#define DECLARE_AND_CALL(fn) void fn(); fn()
-void Init( HWND hwnd )
-{
-	DECLARE_AND_CALL( InitDevice );
-	DECLARE_AND_CALL( InitQueryHeap );
-	DECLARE_AND_CALL( InitCompactionReadback );
-	void InitSurfaces( HWND ); InitSurfaces( hwnd );
-	DECLARE_AND_CALL( InitCommand );
-	DECLARE_AND_CALL( InitMeshes );
-	UpdateRayBuffer( rtWidth, rtHeight );
-	DECLARE_AND_CALL( InitBottomLevel );
-	DECLARE_AND_CALL( InitScene );
-	DECLARE_AND_CALL( InitTopLevel );
-	DECLARE_AND_CALL( InitRootSignature );
-	DECLARE_AND_CALL( InitPipeline );
-	DECLARE_AND_CALL( InitShaderTables );
 }
 
 void InitDevice()
@@ -235,12 +215,9 @@ void InitMeshes()
 	p2 = { -3.37909675f, 5.86036921f, 12.9918222f };
 	p3 = { -3.17523217f, 4.26242685f, 11.0005865f };
 #endif
-	t3 = new bvhvec3[triCount * 3];
-	for (int i = 0; i < triCount * 3; i++) t3[i].x = tris[i].x, t3[i].y = tris[i].y, t3[i].z = tris[i].z;
-	vidx = new unsigned[triCount * 3];
-	for (int i = 0; i < triCount * 3; i++) vidx[i] = i;
-	meshVB = makeAndCopy( (float*)t3, triCount * 36 );
-	meshIB = makeAndCopy( (void*)vidx, triCount * 3 * 4 );
+	t3 = new bvhvec3[triCount * 3], vidx = new unsigned[triCount * 3];
+	for (int i = 0; i < triCount * 3; i++) t3[i].x = tris[i].x, t3[i].y = tris[i].y, t3[i].z = tris[i].z, vidx[i] = i;
+	meshVB = makeAndCopy( (float*)t3, triCount * 36 ), meshIB = makeAndCopy( (void*)vidx, triCount * 3 * 4 );
 }
 
 ID3D12Resource* MakeAccelerationStructure( const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, UINT64* updateScratchSize = nullptr )
@@ -274,20 +251,15 @@ ID3D12Resource* MakeAccelerationStructure( const D3D12_BUILD_RAYTRACING_ACCELERA
 ID3D12Resource* MakeBLAS( ID3D12Resource* vertexBuffer, UINT vertexFloats, ID3D12Resource* indexBuffer = nullptr, UINT indices = 0 )
 {
 	D3D12_RAYTRACING_GEOMETRY_DESC geometryDesc = {
-		.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES,
-		.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE,
-		.Triangles = {
-			.Transform3x4 = 0,
-			.IndexFormat = indexBuffer ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_UNKNOWN,
-			.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT,
-			.IndexCount = indices, .VertexCount = vertexFloats / 3,
+		.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES, .Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE,
+		.Triangles = { .Transform3x4 = 0, .IndexFormat = indexBuffer ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_UNKNOWN,
+			.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT, .IndexCount = indices, .VertexCount = vertexFloats / 3,
 			.IndexBuffer = indexBuffer ? indexBuffer->GetGPUVirtualAddress() : 0,
 			.VertexBuffer = {.StartAddress = vertexBuffer->GetGPUVirtualAddress(), .StrideInBytes = sizeof( float ) * 3}} };
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {
 		.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
 		.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION,
-		.NumDescs = 1, .DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY,
-		.pGeometryDescs = &geometryDesc };
+		.NumDescs = 1, .DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY, .pGeometryDescs = &geometryDesc };
 	return MakeAccelerationStructure( inputs );
 }
 
@@ -298,7 +270,6 @@ ID3D12Resource* CompactBLAS( ID3D12Resource* as )
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postbuildDesc = {
 		.DestBuffer = compactionSizeReadback->GetGPUVirtualAddress(),
 		.InfoType = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE };
-
 	cmdAllocs[0]->Reset();
 	cmdList->Reset( cmdAllocs[0], nullptr );
 	cmdList->ResourceBarrier( 1, &uavBarrier ); // must barrier before reading postbuild info
@@ -306,21 +277,18 @@ ID3D12Resource* CompactBLAS( ID3D12Resource* as )
 	cmdList->Close();
 	cmdQueue->ExecuteCommandLists( 1, reinterpret_cast<ID3D12CommandList**>(&cmdList) );
 	WaitForGpu();
-
 	UINT64 compactedSize;
 	D3D12_RANGE readRange = { 0, sizeof( UINT64 ) }, writeRange = { 0, 0 };
 	void* mapped;
 	compactionSizeReadback->Map( 0, &readRange, &mapped );
 	compactedSize = *reinterpret_cast<UINT64*>(mapped);
 	compactionSizeReadback->Unmap( 0, &writeRange );
-
 	D3D12_RESOURCE_DESC compactDesc = BASIC_BUFFER_DESC;
 	compactDesc.Width = compactedSize;
 	compactDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 	ID3D12Resource* compactedAS;
 	device->CreateCommittedResource( &DEFAULT_HEAP, D3D12_HEAP_FLAG_NONE, &compactDesc,
 		D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS( &compactedAS ) );
-
 	cmdAllocs[0]->Reset();
 	cmdList->Reset( cmdAllocs[0], nullptr );
 	cmdList->CopyRaytracingAccelerationStructure( compactedAS->GetGPUVirtualAddress(),
@@ -328,15 +296,8 @@ ID3D12Resource* CompactBLAS( ID3D12Resource* as )
 	cmdList->Close();
 	cmdQueue->ExecuteCommandLists( 1, reinterpret_cast<ID3D12CommandList**>(&cmdList) );
 	WaitForGpu();
-
 	as->Release();
 	return compactedAS;
-}
-
-void InitBottomLevel()
-{
-	blas = MakeBLAS( meshVB, triCount * 9, meshIB, triCount * 3 );
-	blas = CompactBLAS( blas );
 }
 
 ID3D12Resource* MakeTLAS( ID3D12Resource* instances, UINT numInstances, UINT64* updateScratchSize )
@@ -350,12 +311,6 @@ ID3D12Resource* MakeTLAS( ID3D12Resource* instances, UINT numInstances, UINT64* 
 	return MakeAccelerationStructure( inputs, updateScratchSize );
 }
 
-void UpdateTransforms()
-{
-	DirectX::XMMATRIX T = DirectX::XMMatrixTranslation( 0, 0, 0 );
-	DirectX::XMStoreFloat3x4( (DirectX::XMFLOAT3X4*)&instanceData[0].Transform, T );
-}
-
 void InitScene()
 {
 	D3D12_RESOURCE_DESC instancesDesc = BASIC_BUFFER_DESC;
@@ -364,7 +319,8 @@ void InitScene()
 		&instancesDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS( &instances ) );
 	instances->Map( 0, nullptr, reinterpret_cast<void**>(&instanceData) );
 	instanceData[0] = { .InstanceID = 0, .InstanceMask = 1, .AccelerationStructure = blas->GetGPUVirtualAddress() };
-	UpdateTransforms();
+	DirectX::XMMATRIX T = DirectX::XMMatrixTranslation( 0, 0, 0 );
+	DirectX::XMStoreFloat3x4( (DirectX::XMFLOAT3X4*)&instanceData[0].Transform, T );
 }
 
 void InitTopLevel()
@@ -440,11 +396,9 @@ void InitShaderTables()
 	ID3D12StateObjectProperties* props;
 	pso->QueryInterface( &props );
 	void* data;
-	auto writeId = [&]( const wchar_t* name ) {
-		void* id = props->GetShaderIdentifier( name );
+	auto writeId = [&]( const wchar_t* name ) { void* id = props->GetShaderIdentifier( name );
 		memcpy( data, id, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES );
-		data = static_cast<char*>(data) + D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT;
-		};
+		data = static_cast<char*>(data) + D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT; };
 	shaderIDs->Map( 0, nullptr, &data );
 	writeId( L"RayGeneration" );
 	writeId( L"Miss" );
@@ -455,7 +409,6 @@ void InitShaderTables()
 
 void UpdateScene()
 {
-	UpdateTransforms();
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc = {
 		.DestAccelerationStructureData = tlas->GetGPUVirtualAddress(),
 		.Inputs = {
@@ -485,8 +438,7 @@ void Render()
 		UINT64* timestamps = nullptr;
 		D3D12_RANGE readRange = { baseSlot * sizeof( UINT64 ), (baseSlot + 2) * sizeof( UINT64 ) };
 		queryResultBuffer->Map( 0, &readRange, reinterpret_cast<void**>(&timestamps) );
-		UINT64 startTimestamp = timestamps[baseSlot];
-		UINT64 endTimestamp = timestamps[baseSlot + 1];
+		UINT64 startTimestamp = timestamps[baseSlot], endTimestamp = timestamps[baseSlot + 1];
 		D3D12_RANGE writeRange = { 0, 0 };
 		queryResultBuffer->Unmap( 0, &writeRange );
 		UINT64 frequency = 0;
@@ -496,10 +448,9 @@ void Render()
 		double raysPerSecond = (rtDescForTiming.Width * rtDescForTiming.Height) / rtTime;
 		static double smoothed = 0;
 		static int frames = 0;
-		if (frames == 0) smoothed = raysPerSecond;
+		if (++frames == 1) smoothed = raysPerSecond;
 		else if (frames < 10) smoothed = 0.9f * smoothed + 0.1f * raysPerSecond;
 		else smoothed = 0.99f * smoothed + 0.01f * raysPerSecond;
-		frames++;
 		printf( "frame rendered: %.4fms (%.1fMRays/s)\n", (float)rtTime * 1000.0f, (float)(smoothed / 1000000.0) );
 	}
 	cmdAllocs[frameIndex]->Reset();
@@ -517,8 +468,7 @@ void Render()
 	D3D12_DISPATCH_RAYS_DESC dispatchDesc = {
 		.RayGenerationShaderRecord = {
 			.StartAddress = shaderIDs->GetGPUVirtualAddress(),
-			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES
-		},
+			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES },
 		.MissShaderTable = {
 			.StartAddress = shaderIDs->GetGPUVirtualAddress() + D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT,
 			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, .StrideInBytes = 0 },
@@ -549,6 +499,23 @@ void Render()
 	swapChain->Present( 1, 0 );
 }
 
+void Init( HWND hwnd )
+{
+	InitDevice();
+	InitQueryHeap();
+	InitCompactionReadback();
+	InitSurfaces( hwnd );
+	InitCommand();
+	InitMeshes();
+	UpdateRayBuffer( rtWidth, rtHeight );
+	blas = CompactBLAS( MakeBLAS( meshVB, triCount * 9, meshIB, triCount * 3 ) );
+	InitScene();
+	InitTopLevel();
+	InitRootSignature();
+	InitPipeline();
+	InitShaderTables();
+}
+
 int main()
 {
 	SetProcessDpiAwarenessContext( DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 /* or DPI_AWARENESS_CONTEXT_UNAWARE */ );
@@ -556,7 +523,6 @@ int main()
 	RegisterClassW( &wcw );
 	HWND hwnd = CreateWindowExW( 0, L"μDXR", L"_DXR", WS_VISIBLE | WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1024, 1024, 0, 0, 0, 0 );
 	Init( hwnd );
-	// device->SetStablePowerState( true );
 	for (MSG msg;;)
 	{
 		while (PeekMessageW( &msg, nullptr, 0, 0, PM_REMOVE ))
