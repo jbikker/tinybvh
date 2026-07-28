@@ -20,7 +20,7 @@ RWTexture2D<float4> uav : register(u0);
     uint2 idx = DispatchRaysIndex().xy;
     float2 size = DispatchRaysDimensions().xy;
     float2 uv = idx / size;
-    float3 E = float3( settings.eye_x, settings.eye_y, settings.eye_z );
+    float3 E = float3(settings.eye_x, settings.eye_y, settings.eye_z);
     float3 p1 = float3(settings.p1_x, settings.p1_y, settings.p1_z);
     float3 p2 = float3(settings.p2_x, settings.p2_y, settings.p2_z);
     float3 p3 = float3(settings.p3_x, settings.p3_y, settings.p3_z);
@@ -29,7 +29,7 @@ RWTexture2D<float4> uav : register(u0);
     ray.Origin = E, ray.Direction = normalize(P - E);
     ray.TMin = 0.001, ray.TMax = 1000;
     Payload payload;
-    TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+    TraceRay(scene, RAY_FLAG_FORCE_OPAQUE, 0xFF, 0, 0, 0, ray, payload);
     float t = 1 - min(1, payload.t * 0.01f);
     uav[idx] = float4(t, t, t, 1);
 }
@@ -37,8 +37,7 @@ RWTexture2D<float4> uav : register(u0);
 {
     payload.t = 1e30f;
 }
-[shader("closesthit")]
-void ClosestHit(inout Payload payload, BuiltInTriangleIntersectionAttributes attribs)
+[shader("closesthit")]void ClosestHit(inout Payload payload, BuiltInTriangleIntersectionAttributes attribs)
 {
     payload.t = RayTCurrent();
 }

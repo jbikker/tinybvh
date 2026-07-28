@@ -3,10 +3,7 @@
 // Sonnet 5 removed the per-frame fence on Flush.
 
 #define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <algorithm>     // std::size, typed std::max, etc.
 #include <DirectXMath.h> // for XMMATRIX
-#include <Windows.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include "shader.fxh"
@@ -16,24 +13,16 @@
 #pragma comment(lib, "d3d12")
 #pragma comment(lib, "dxgi")
 
-#define DECLARE_AND_CALL(fn) void fn(); fn()
-
 constexpr DXGI_SAMPLE_DESC NO_AA = { .Count = 1, .Quality = 0 };
 constexpr D3D12_HEAP_PROPERTIES UPLOAD_HEAP = { .Type = D3D12_HEAP_TYPE_UPLOAD };
 constexpr D3D12_HEAP_PROPERTIES DEFAULT_HEAP = { .Type = D3D12_HEAP_TYPE_DEFAULT };
 constexpr D3D12_RESOURCE_DESC BASIC_BUFFER_DESC = {
-	.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
-	.Width = 0, // will be changed in copies
-	.Height = 1, .DepthOrArraySize = 1,
-	.MipLevels = 1, .SampleDesc = NO_AA,
+	.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER, .Width = 0, // will be changed in copies
+	.Height = 1, .DepthOrArraySize = 1, .MipLevels = 1, .SampleDesc = NO_AA,
 	.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR
 };
-constexpr UINT NUM_INSTANCES = 1;
+constexpr UINT NUM_INSTANCES = 1, FRAME_COUNT = 2;
 constexpr UINT64 NUM_SHADER_IDS = 3;
-
-// --- Frame-in-flight configuration ---
-// Must match the swapchain's BufferCount (see InitSurfaces).
-constexpr UINT FRAME_COUNT = 2;
 
 IDXGIFactory4* factory;
 ID3D12Device5* device;
@@ -42,14 +31,13 @@ ID3D12Fence* fence;
 IDXGISwapChain3* swapChain;
 ID3D12DescriptorHeap* uavHeap;
 ID3D12Resource* renderTarget, * backBuffer, * meshVB, * meshIB, * blas, * instances, * shaderIDs;
-ID3D12Resource* tlas, * tlasUpdateScratch;
+ID3D12Resource* tlas, * tlasUpdateScratch, * queryResultBuffer, * compactionSizeReadback;
 ID3D12CommandAllocator* cmdAllocs[FRAME_COUNT]; // one allocator per frame-in-flight slot
 ID3D12GraphicsCommandList4* cmdList;
 D3D12_RAYTRACING_INSTANCE_DESC* instanceData;
 ID3D12RootSignature* rootSignature;
 ID3D12StateObject* pso;
 ID3D12QueryHeap* queryHeap;
-ID3D12Resource* queryResultBuffer;
 HANDLE fenceEvent = nullptr;
 
 struct bvhvec3 { float x, y, z; };
@@ -81,11 +69,9 @@ void WaitForGpu()
 	fenceValue++;
 	const UINT64 fenceValueToWait = fenceValue;
 	cmdQueue->Signal( fence, fenceValueToWait );
-	if (fence->GetCompletedValue() < fenceValueToWait)
-	{
-		fence->SetEventOnCompletion( fenceValueToWait, fenceEvent );
-		WaitForSingleObject( fenceEvent, INFINITE );
-	}
+	if (fence->GetCompletedValue() >= fenceValueToWait) return;
+	fence->SetEventOnCompletion( fenceValueToWait, fenceEvent );
+	WaitForSingleObject( fenceEvent, INFINITE );
 }
 
 void Resize( HWND hwnd )
@@ -108,8 +94,6 @@ void Resize( HWND hwnd )
 	D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {
 		.Format = DXGI_FORMAT_R8G8B8A8_UNORM, .ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D };
 	device->CreateUnorderedAccessView( renderTarget, nullptr, &uavDesc, uavHeap->GetCPUDescriptorHandleForHeapStart() );
-
-	// Backbuffer count/layout changed; any pending per-slot fence values are now stale.
 	for (UINT i = 0; i < FRAME_COUNT; i++) frameFenceValues[i] = 0;
 }
 
@@ -125,10 +109,12 @@ LRESULT WINAPI WndProc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 	}
 }
 
+#define DECLARE_AND_CALL(fn) void fn(); fn()
 void Init( HWND hwnd )
 {
 	DECLARE_AND_CALL( InitDevice );
 	DECLARE_AND_CALL( InitQueryHeap );
+	DECLARE_AND_CALL( InitCompactionReadback );
 	void InitSurfaces( HWND ); InitSurfaces( hwnd );
 	DECLARE_AND_CALL( InitCommand );
 	DECLARE_AND_CALL( InitMeshes );
@@ -227,10 +213,9 @@ void InitMeshes()
 
 ID3D12Resource* MakeAccelerationStructure( const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, UINT64* updateScratchSize = nullptr )
 {
-	auto makeBuffer = []( UINT64 size, auto initialState ) {
-		auto desc = BASIC_BUFFER_DESC;
-		desc.Width = size;
-		desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+	auto makeBuffer = []( UINT64 size, D3D12_RESOURCE_STATES initialState ) {
+		D3D12_RESOURCE_DESC desc = BASIC_BUFFER_DESC;
+		desc.Width = size, desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 		ID3D12Resource* buffer;
 		device->CreateCommittedResource( &DEFAULT_HEAP, D3D12_HEAP_FLAG_NONE, &desc, initialState, nullptr, IID_PPV_ARGS( &buffer ) );
 		return buffer;
@@ -268,22 +253,65 @@ ID3D12Resource* MakeBLAS( ID3D12Resource* vertexBuffer, UINT vertexFloats, ID3D1
 			.VertexBuffer = {.StartAddress = vertexBuffer->GetGPUVirtualAddress(), .StrideInBytes = sizeof( float ) * 3}} };
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {
 		.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
-		.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
+		.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION,
 		.NumDescs = 1, .DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY,
 		.pGeometryDescs = &geometryDesc };
 	return MakeAccelerationStructure( inputs );
 }
 
+ID3D12Resource* CompactBLAS( ID3D12Resource* as )
+{
+	D3D12_GPU_VIRTUAL_ADDRESS asAddr = as->GetGPUVirtualAddress();
+	D3D12_RESOURCE_BARRIER uavBarrier = { .Type = D3D12_RESOURCE_BARRIER_TYPE_UAV, .UAV = {.pResource = as} };
+	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postbuildDesc = {
+		.DestBuffer = compactionSizeReadback->GetGPUVirtualAddress(),
+		.InfoType = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE };
+
+	cmdAllocs[0]->Reset();
+	cmdList->Reset( cmdAllocs[0], nullptr );
+	cmdList->ResourceBarrier( 1, &uavBarrier ); // must barrier before reading postbuild info
+	cmdList->EmitRaytracingAccelerationStructurePostbuildInfo( &postbuildDesc, 1, &asAddr );
+	cmdList->Close();
+	cmdQueue->ExecuteCommandLists( 1, reinterpret_cast<ID3D12CommandList**>(&cmdList) );
+	WaitForGpu();
+
+	UINT64 compactedSize;
+	D3D12_RANGE readRange = { 0, sizeof( UINT64 ) }, writeRange = { 0, 0 };
+	void* mapped;
+	compactionSizeReadback->Map( 0, &readRange, &mapped );
+	compactedSize = *reinterpret_cast<UINT64*>(mapped);
+	compactionSizeReadback->Unmap( 0, &writeRange );
+
+	D3D12_RESOURCE_DESC compactDesc = BASIC_BUFFER_DESC;
+	compactDesc.Width = compactedSize;
+	compactDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+	ID3D12Resource* compactedAS;
+	device->CreateCommittedResource( &DEFAULT_HEAP, D3D12_HEAP_FLAG_NONE, &compactDesc,
+		D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS( &compactedAS ) );
+
+	cmdAllocs[0]->Reset();
+	cmdList->Reset( cmdAllocs[0], nullptr );
+	cmdList->CopyRaytracingAccelerationStructure( compactedAS->GetGPUVirtualAddress(),
+		asAddr, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT );
+	cmdList->Close();
+	cmdQueue->ExecuteCommandLists( 1, reinterpret_cast<ID3D12CommandList**>(&cmdList) );
+	WaitForGpu();
+
+	as->Release();
+	return compactedAS;
+}
+
 void InitBottomLevel()
 {
 	blas = MakeBLAS( meshVB, triCount * 9, meshIB, triCount * 3 );
+	blas = CompactBLAS( blas );
 }
 
 ID3D12Resource* MakeTLAS( ID3D12Resource* instances, UINT numInstances, UINT64* updateScratchSize )
 {
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {
 		.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL,
-		.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE,
+		.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
 		.NumDescs = numInstances,
 		.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY,
 		.InstanceDescs = instances->GetGPUVirtualAddress() };
@@ -312,8 +340,7 @@ void InitTopLevel()
 	UINT64 updateScratchSize;
 	tlas = MakeTLAS( instances, NUM_INSTANCES, &updateScratchSize );
 	D3D12_RESOURCE_DESC desc = BASIC_BUFFER_DESC;
-	// WARP bug workaround: use 8 if the required size was reported as less
-	desc.Width = std::max( updateScratchSize, 8ULL );
+	desc.Width = std::max( updateScratchSize, 8ULL ); // WARP bug workaround: use 8 if the required size was reported as less
 	desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 	device->CreateCommittedResource( &DEFAULT_HEAP, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS( &tlasUpdateScratch ) );
 }
@@ -338,34 +365,31 @@ void InitRootSignature()
 
 void InitQueryHeap()
 {
-	D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
-	queryHeapDesc.Count = 8; // start and end, times four (2 per frame slot, double-buffered headroom)
-	queryHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-	queryHeapDesc.NodeMask = 0;
+	D3D12_QUERY_HEAP_DESC queryHeapDesc = { .Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP, .Count = 8 };
 	device->CreateQueryHeap( &queryHeapDesc, IID_PPV_ARGS( &queryHeap ) );
-	D3D12_HEAP_PROPERTIES heapProps = {};
-	heapProps.Type = D3D12_HEAP_TYPE_READBACK;
-	D3D12_RESOURCE_DESC bufferDesc = {};
-	bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	D3D12_HEAP_PROPERTIES heapProps = { .Type = D3D12_HEAP_TYPE_READBACK };
+	D3D12_RESOURCE_DESC bufferDesc = BASIC_BUFFER_DESC;
 	bufferDesc.Width = 8 * sizeof( UINT64 );
-	bufferDesc.Height = 1;
-	bufferDesc.DepthOrArraySize = 1;
-	bufferDesc.MipLevels = 1;
-	bufferDesc.SampleDesc.Count = 1;
-	bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-	device->CreateCommittedResource(
-		&heapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc,
-		D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS( &queryResultBuffer )
-	);
+	device->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+		D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS( &queryResultBuffer ) );
+}
+
+void InitCompactionReadback()
+{
+	D3D12_HEAP_PROPERTIES heapProps = { .Type = D3D12_HEAP_TYPE_READBACK };
+	D3D12_RESOURCE_DESC bufDesc = BASIC_BUFFER_DESC;
+	bufDesc.Width = sizeof( UINT64 );
+	device->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc,
+		D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS( &compactionSizeReadback ) );
 }
 
 void InitPipeline()
 {
 	D3D12_DXIL_LIBRARY_DESC lib = { .DXILLibrary = {.pShaderBytecode = compiledShader, .BytecodeLength = std::size( compiledShader )} };
 	D3D12_HIT_GROUP_DESC hitGroup = { .HitGroupExport = L"HitGroup", .Type = D3D12_HIT_GROUP_TYPE_TRIANGLES, .ClosestHitShaderImport = L"ClosestHit" };
-	D3D12_RAYTRACING_SHADER_CONFIG shaderCfg = { .MaxPayloadSizeInBytes = 20, .MaxAttributeSizeInBytes = 8 };
+	D3D12_RAYTRACING_SHADER_CONFIG shaderCfg = { .MaxPayloadSizeInBytes = 4, .MaxAttributeSizeInBytes = 8 };
 	D3D12_GLOBAL_ROOT_SIGNATURE globalSig = { rootSignature };
-	D3D12_RAYTRACING_PIPELINE_CONFIG pipelineCfg = { .MaxTraceRecursionDepth = 3 };
+	D3D12_RAYTRACING_PIPELINE_CONFIG pipelineCfg = { .MaxTraceRecursionDepth = 1 };
 	D3D12_STATE_SUBOBJECT subobjects[] = {
 		{.Type = D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY, .pDesc = &lib},
 		{.Type = D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP, .pDesc = &hitGroup},
@@ -407,8 +431,7 @@ void UpdateScene()
 		.Inputs = {
 			.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL,
 			.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE,
-			.NumDescs = NUM_INSTANCES,
-			.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY,
+			.NumDescs = NUM_INSTANCES, .DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY,
 			.InstanceDescs = instances->GetGPUVirtualAddress()},
 		.SourceAccelerationStructureData = tlas->GetGPUVirtualAddress(),
 		.ScratchAccelerationStructureData = tlasUpdateScratch->GetGPUVirtualAddress(),
@@ -441,11 +464,18 @@ void Render()
 		double rtTime = static_cast<double>(endTimestamp - startTimestamp) / static_cast<double>(frequency);
 		D3D12_RESOURCE_DESC rtDescForTiming = renderTarget->GetDesc();
 		double raysPerSecond = (rtDescForTiming.Width * rtDescForTiming.Height) / rtTime;
-		printf( "frame rendered: %.4fms (%.1fMRays/s)\n", (float)rtTime * 1000.0f, (float)(raysPerSecond / 1000000.0) );
+		static double smoothed = 0;
+		static int frames = 0;
+		if (frames == 0) smoothed = raysPerSecond;
+		else if (frames < 10) smoothed = 0.9f * smoothed + 0.1f * raysPerSecond;
+		else smoothed = 0.99f * smoothed + 0.01f * raysPerSecond;
+		frames++;
+		printf( "frame rendered: %.4fms (%.1fMRays/s)\n", (float)rtTime * 1000.0f, (float)(smoothed / 1000000.0) );
 	}
 	cmdAllocs[frameIndex]->Reset();
 	cmdList->Reset( cmdAllocs[frameIndex], nullptr );
-	UpdateScene();
+	static bool sceneDirty = true;
+	if (sceneDirty) { UpdateScene(); sceneDirty = false; }
 	cmdList->SetPipelineState1( pso );
 	cmdList->SetComputeRootSignature( rootSignature );
 	cmdList->SetComputeRoot32BitConstants( 2, 12, renderSettings, 0 );
@@ -461,25 +491,20 @@ void Render()
 		},
 		.MissShaderTable = {
 			.StartAddress = shaderIDs->GetGPUVirtualAddress() + D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT,
-			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES,
-			.StrideInBytes = 0 },
+			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, .StrideInBytes = 0 },
 		.HitGroupTable = {
 			.StartAddress = shaderIDs->GetGPUVirtualAddress() + 2 * D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT,
-			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES,
-			.StrideInBytes = 32 },
+			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, .StrideInBytes = 32 },
 		.Width = static_cast<UINT>(rtDesc.Width), .Height = rtDesc.Height, .Depth = 1 };
 	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot );
 	cmdList->DispatchRays( &dispatchDesc );
 	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot + 1 );
 	cmdList->ResolveQueryData( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot, 2, queryResultBuffer, baseSlot * sizeof( UINT64 ) );
 	swapChain->GetBuffer( frameIndex, IID_PPV_ARGS( &backBuffer ) );
-	auto barrier = []( auto* resource, auto before, auto after ) {
-		D3D12_RESOURCE_BARRIER rb = {
+	auto barrier = []( auto* resource, auto before, auto after ) { D3D12_RESOURCE_BARRIER rb = {
 			.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-			.Transition = {.pResource = resource, .StateBefore = before, .StateAfter = after}
-		};
-		cmdList->ResourceBarrier( 1, &rb );
-		};
+			.Transition = {.pResource = resource, .StateBefore = before, .StateAfter = after} };
+	cmdList->ResourceBarrier( 1, &rb ); };
 	barrier( renderTarget, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE );
 	barrier( backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST );
 	cmdList->CopyResource( backBuffer, renderTarget );
