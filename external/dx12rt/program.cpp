@@ -34,7 +34,7 @@ ID3D12Fence* fence;
 IDXGISwapChain3* swapChain;
 ID3D12DescriptorHeap* uavHeap;
 ID3D12Resource* renderTarget, * backBuffer, * meshVB, * meshIB, * blas, * instances, * shaderIDs;
-ID3D12Resource* tlas, * tlasUpdateScratch, * queryResultBuffer, * compactionSizeReadback;
+ID3D12Resource* tlas, * tlasUpdateScratch, * queryResultBuffer, * compactionSizeReadback, * rayBuffer = nullptr;
 ID3D12CommandAllocator* cmdAllocs[FRAME_COUNT]; // one allocator per frame-in-flight slot
 ID3D12GraphicsCommandList4* cmdList;
 D3D12_RAYTRACING_INSTANCE_DESC* instanceData;
@@ -42,15 +42,12 @@ ID3D12RootSignature* rootSignature;
 ID3D12StateObject* pso;
 ID3D12QueryHeap* queryHeap;
 HANDLE fenceEvent = nullptr;
+UINT rtWidth = 0, rtHeight = 0;
 
 struct bvhvec3 { float x, y, z; };
 struct bvhvec4 { float x, y, z, w; };
-static bvhvec3 renderSettings[4] = {
-	{ 0, 0, -7 }, // eye
-	{ 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } // p1, p2, p3
-};
-
-// struct RayData { float ox, oy, oz, opad; float dx, dy, dz, dpad; }; // 32 bytes
+static bvhvec3 eye, p1, p2, p3;
+struct RayData { float ox, oy, oz, opad; float dx, dy, dz, dpad; }; // 32 bytes
 
 // Scene management - Append a file, with optional position, scale and color override, tinyfied
 int triCount = 0;
@@ -79,6 +76,31 @@ void WaitForGpu()
 	WaitForSingleObject( fenceEvent, INFINITE );
 }
 
+void UpdateRayBuffer( UINT width, UINT height )
+{
+	if (rayBuffer) rayBuffer->Release();
+	D3D12_RESOURCE_DESC desc = BASIC_BUFFER_DESC;
+	desc.Width = sizeof( RayData ) * width * height;
+	device->CreateCommittedResource( &UPLOAD_HEAP, D3D12_HEAP_FLAG_NONE, &desc,
+		D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS( &rayBuffer ) );
+	RayData* data;
+	rayBuffer->Map( 0, nullptr, reinterpret_cast<void**>(&data) );
+	for (UINT y = 0; y < height; y++) for (UINT x = 0; x < width; x++)
+	{
+		float u = (float)x / width, v = (float)y / height;
+		float px = p1.x + u * (p2.x - p1.x) + v * (p3.x - p1.x);
+		float py = p1.y + u * (p2.y - p1.y) + v * (p3.y - p1.y);
+		float pz = p1.z + u * (p2.z - p1.z) + v * (p3.z - p1.z);
+		float dx = px - eye.x, dy = py - eye.y, dz = pz - eye.z;
+		float len = sqrtf( dx * dx + dy * dy + dz * dz );
+		RayData& r = data[y * width + x];
+		r.ox = eye.x, r.oy = eye.y, r.oz = eye.z, r.opad = 0;
+		r.dx = dx / len, r.dy = dy / len, r.dz = dz / len, r.dpad = 0;
+	}
+	rayBuffer->Unmap( 0, nullptr );
+	rtWidth = width, rtHeight = height;
+}
+
 void Resize( HWND hwnd )
 {
 	RECT rect;
@@ -99,6 +121,7 @@ void Resize( HWND hwnd )
 	D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {
 		.Format = DXGI_FORMAT_R8G8B8A8_UNORM, .ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D };
 	device->CreateUnorderedAccessView( renderTarget, nullptr, &uavDesc, uavHeap->GetCPUDescriptorHandleForHeapStart() );
+	UpdateRayBuffer( width, height );
 	for (UINT i = 0; i < FRAME_COUNT; i++) frameFenceValues[i] = 0;
 }
 
@@ -123,6 +146,7 @@ void Init( HWND hwnd )
 	void InitSurfaces( HWND ); InitSurfaces( hwnd );
 	DECLARE_AND_CALL( InitCommand );
 	DECLARE_AND_CALL( InitMeshes );
+	UpdateRayBuffer( rtWidth, rtHeight );
 	DECLARE_AND_CALL( InitBottomLevel );
 	DECLARE_AND_CALL( InitScene );
 	DECLARE_AND_CALL( InitTopLevel );
@@ -194,22 +218,22 @@ void InitMeshes()
 	AddMesh( "../../testdata/cryteksponza.bin" );
 #if 1
 	// view1 for sponza
-	renderSettings[0] = { -15.2399998f, 21.5000000f, 2.53999996f };
-	renderSettings[1] = { -12.8712616f, 21.3436279f, 2.60801458f };
-	renderSettings[2] = { -13.6628551f, 21.3436279f, 0.771338582f };
-	renderSettings[3] = { -13.5145569f, 19.9051208f, 2.88527060f };
+	eye = { -15.2399998f, 21.5000000f, 2.53999996f };
+	p1 = { -12.8712616f, 21.3436279f, 2.60801458f };
+	p2 = { -13.6628551f, 21.3436279f, 0.771338582f };
+	p3 = { -13.5145569f, 19.9051208f, 2.88527060f };
 #elif 1
 	// view2 for sponza
-	renderSettings[0] = { -34.0000000f, 5.00000000f, 11.2600002f };
-	renderSettings[1] = { -31.8041172f, 5.85805798f, 11.5460672f };
-	renderSettings[2] = { -32.4691925f, 5.85805798f, 9.65988636f };
-	renderSettings[3] = { -31.7600574f, 4.25874043f, 11.5305319f };
+	eye = { -34.0000000f, 5.00000000f, 11.2600002f };
+	p1 = { -31.8041172f, 5.85805798f, 11.5460672f };
+	p2 = { -32.4691925f, 5.85805798f, 9.65988636f };
+	p3 = { -31.7600574f, 4.25874043f, 11.5305319f };
 #else
 	// view3 for sponza
-	renderSettings[0] = { -1.29999995f, 4.96000004f, 12.2799997f };
-	renderSettings[1] = { -3.09493661f, 5.86036921f, 11.0121126f };
-	renderSettings[2] = { -3.37909675f, 5.86036921f, 12.9918222f };
-	renderSettings[3] = { -3.17523217f, 4.26242685f, 11.0005865f };
+	eye = { -1.29999995f, 4.96000004f, 12.2799997f };
+	p1 = { -3.09493661f, 5.86036921f, 11.0121126f };
+	p2 = { -3.37909675f, 5.86036921f, 12.9918222f };
+	p3 = { -3.17523217f, 4.26242685f, 11.0005865f };
 #endif
 	t3 = new bvhvec3[triCount * 3];
 	for (int i = 0; i < triCount * 3; i++) t3[i].x = tris[i].x, t3[i].y = tris[i].y, t3[i].z = tris[i].z;
@@ -357,12 +381,10 @@ void InitRootSignature()
 {
 	D3D12_DESCRIPTOR_RANGE uavRange = { .RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV, .NumDescriptors = 1 };
 	D3D12_ROOT_PARAMETER params[] = {
-		{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
-		 .DescriptorTable = {.NumDescriptorRanges = 1, .pDescriptorRanges = &uavRange}},
-		{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 0, .RegisterSpace = 0}},
-		{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
-		 .Constants = {.ShaderRegister = 0, .RegisterSpace = 0, .Num32BitValues = 12 },
-		 .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL }
+	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+	 .DescriptorTable = {.NumDescriptorRanges = 1, .pDescriptorRanges = &uavRange}},
+	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 0, .RegisterSpace = 0}}, // t0: tlas
+	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 1, .RegisterSpace = 0}} // t1: ray buffer
 	};
 	D3D12_ROOT_SIGNATURE_DESC desc = { .NumParameters = std::size( params ), .pParameters = params };
 	ID3DBlob* blob;
@@ -486,11 +508,11 @@ void Render()
 	if (sceneDirty) { UpdateScene(); sceneDirty = false; }
 	cmdList->SetPipelineState1( pso );
 	cmdList->SetComputeRootSignature( rootSignature );
-	cmdList->SetComputeRoot32BitConstants( 2, 12, renderSettings, 0 );
 	cmdList->SetDescriptorHeaps( 1, &uavHeap );
 	D3D12_GPU_DESCRIPTOR_HANDLE uavTable = uavHeap->GetGPUDescriptorHandleForHeapStart();
 	cmdList->SetComputeRootDescriptorTable( 0, uavTable ); // ←u0 ↓t0
 	cmdList->SetComputeRootShaderResourceView( 1, tlas->GetGPUVirtualAddress() );
+	cmdList->SetComputeRootShaderResourceView( 2, rayBuffer->GetGPUVirtualAddress() );
 	D3D12_RESOURCE_DESC rtDesc = renderTarget->GetDesc();
 	D3D12_DISPATCH_RAYS_DESC dispatchDesc = {
 		.RayGenerationShaderRecord = {
