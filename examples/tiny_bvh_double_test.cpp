@@ -20,13 +20,13 @@ static int g_failures = 0;
 // ----------------------------------------------------------------------------
 
 struct Sphere { bvhdbl3 pos; double r; };
-static Sphere* g_spheres = 0;
 
-static bool sphereIntersect( RayEx& ray, const uint64_t primID )
+static bool sphereIntersect( RayEx& ray, const uint64_t primID, void* userdata )
 {
-	const bvhdbl3 oc = ray.O - g_spheres[primID].pos;
+	const Sphere* spheres = (const Sphere*)userdata;
+	const bvhdbl3 oc = ray.O - spheres[primID].pos;
 	const double b = tinybvh_dot( oc, ray.D );
-	const double r = g_spheres[primID].r;
+	const double r = spheres[primID].r;
 	const double c = tinybvh_dot( oc, oc ) - r * r;
 	double d = b * b - c;
 	if (d <= 0) return false;
@@ -37,11 +37,13 @@ static bool sphereIntersect( RayEx& ray, const uint64_t primID )
 	return hit;
 }
 
-static bool sphereIsOccluded( const RayEx& ray, const uint64_t primID )
+static bool sphereIsOccluded( const RayEx& ray, const uint64_t primID,
+	void* userdata )
 {
-	const bvhdbl3 oc = ray.O - g_spheres[primID].pos;
+	const Sphere* spheres = (const Sphere*)userdata;
+	const bvhdbl3 oc = ray.O - spheres[primID].pos;
 	const double b = tinybvh_dot( oc, ray.D );
-	const double r = g_spheres[primID].r;
+	const double r = spheres[primID].r;
 	const double c = tinybvh_dot( oc, oc ) - r * r;
 	double d = b * b - c;
 	if (d <= 0) return false;
@@ -50,22 +52,25 @@ static bool sphereIsOccluded( const RayEx& ray, const uint64_t primID )
 	return t < ray.hit.t && t > 0;
 }
 
-static void sphereAABB( const uint64_t primID, bvhdbl3& bmin, bvhdbl3& bmax )
+static void sphereAABB( const uint64_t primID, bvhdbl3& bmin, bvhdbl3& bmax,
+	void* userdata )
 {
-	bmin = g_spheres[primID].pos - bvhdbl3( g_spheres[primID].r );
-	bmax = g_spheres[primID].pos + bvhdbl3( g_spheres[primID].r );
+	const Sphere* spheres = (const Sphere*)userdata;
+	bmin = spheres[primID].pos - bvhdbl3( spheres[primID].r );
+	bmax = spheres[primID].pos + bvhdbl3( spheres[primID].r );
 }
 
 static void TestCustomShadowRays()
 {
 	printf( "Test: double-precision custom-geometry shadow rays...\n" );
 	const int N = 3;
-	g_spheres = new Sphere[N];
-	g_spheres[0].pos = bvhdbl3( 0, 0, 5 ), g_spheres[0].r = 1.0;
-	g_spheres[1].pos = bvhdbl3( 8, 0, 0 ), g_spheres[1].r = 1.0;
-	g_spheres[2].pos = bvhdbl3( 0, -7, 0 ), g_spheres[2].r = 1.0;
+	Sphere spheres[N];
+	spheres[0].pos = bvhdbl3( 0, 0, 5 ), spheres[0].r = 1.0;
+	spheres[1].pos = bvhdbl3( 8, 0, 0 ), spheres[1].r = 1.0;
+	spheres[2].pos = bvhdbl3( 0, -7, 0 ), spheres[2].r = 1.0;
 
 	BVH_Double bvh;
+	bvh.customUserdata = spheres;
 	bvh.Build( &sphereAABB, N );
 	bvh.customIntersect = &sphereIntersect;
 	bvh.customIsOccluded = &sphereIsOccluded;
@@ -96,7 +101,7 @@ static void TestCustomShadowRays()
 	// Occlusion result must agree with Intersect for a batch of directions.
 	for (int i = 0; i < N; i++)
 	{
-		const bvhdbl3 dir = tinybvh_normalize( g_spheres[i].pos );
+		const bvhdbl3 dir = tinybvh_normalize( spheres[i].pos );
 		RayEx shadow( bvhdbl3( 0, 0, 0 ), dir, 1e30 );
 		RayEx probe( bvhdbl3( 0, 0, 0 ), dir, 1e30 );
 		bvh.Intersect( probe );
@@ -104,7 +109,6 @@ static void TestCustomShadowRays()
 		CHECK( bvh.IsOccluded( shadow ) == hit );
 	}
 
-	delete[] g_spheres, g_spheres = 0;
 }
 
 // ----------------------------------------------------------------------------

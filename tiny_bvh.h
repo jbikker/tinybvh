@@ -1024,7 +1024,7 @@ public:
 	void Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( BLASInstance* instances, const uint32_t instCount, BVHBase** blasses, const uint32_t blasCount );
-	void Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&), const uint32_t primCount );
+	void Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&, void*), const uint32_t primCount );
 	void BuildAABB( const bvhvec4* aabbs, const uint32_t primCount );
 	void BuildHQ( const bvhvec4* vertices, const uint32_t primCount );
 	void BuildHQ( const bvhvec4slice& vertices );
@@ -1113,8 +1113,9 @@ public:
 	uint32_t nextFrag = 0;			// used during SBVH build to keep track of next free fragment.
 	Fragment* fragment = 0;			// input primitive bounding boxes.
 	// Custom geometry intersection callback
-	bool (*customIntersect)(Ray&, const unsigned) = 0;
-	bool (*customIsOccluded)(const Ray&, const unsigned) = 0;
+	bool (*customIntersect)(Ray&, const unsigned, void*) = 0;
+	bool (*customIsOccluded)(const Ray&, const unsigned, void*) = 0;
+	void* customUserdata = 0;
 private:
 #ifdef ENABLE_THREADED_BUILDS
 	// Atomic counters for threaded builds
@@ -1232,7 +1233,7 @@ public:
 	void Build( const bvhdbl3* vertices, const uint64_t primCount );
 	void Build( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount );
 	void Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Double** blasses, const uint64_t blasCount );
-	void Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&), const uint64_t primCount );
+	void Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&, void*), const uint64_t primCount );
 	void PrepareBuild( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount );
 	void Build( uint64_t nodeIdx = 0, uint32_t depth = 0 );
 	double SAHCost( const uint64_t nodeIdx = 0 ) const;
@@ -1258,8 +1259,9 @@ public:
 	bvhdbl3 aabbMin, aabbMax;		// bounds of the root node of the BVH.
 	bool threadedBuild = true;		// will be disabled for small meshes.
 	// Custom geometry intersection callback
-	bool (*customIntersect)(RayEx&, uint64_t) = 0;
-	bool (*customIsOccluded)(const RayEx&, uint64_t) = 0;
+	bool (*customIntersect)(RayEx&, uint64_t, void*) = 0;
+	bool (*customIsOccluded)(const RayEx&, uint64_t, void*) = 0;
+	void* customUserdata = 0;
 #ifdef ENABLE_THREADED_BUILDS
 private:
 	// Atomic counter for threaded builds
@@ -2222,7 +2224,7 @@ void BVH::BuildAABB( const bvhvec4* aabbs, const uint32_t aabbCount )
 	Build();
 }
 
-void BVH::Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&), const uint32_t primCount )
+void BVH::Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&, void*), const uint32_t primCount )
 {
 	// BVH builder for custom geometry; AABBs are obtained via a function pointer in context.
 	BVH_FATAL_ERROR_IF( primCount == 0, "BVH::Build( void (*customGetAABB)( .. ), instCount ), instCount == 0." );
@@ -2244,7 +2246,7 @@ void BVH::Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&), cons
 	root.leftFirst = 0, root.triCount = primCount, root.aabbMin = bvhvec3( BVH_FAR ), root.aabbMax = bvhvec3( -BVH_FAR );
 	for (uint32_t i = 0; i < primCount; i++)
 	{
-		customGetAABB( i, fragment[i].bmin, fragment[i].bmax );
+		customGetAABB( i, fragment[i].bmin, fragment[i].bmax, customUserdata );
 		fragment[i].primIdx = i, fragment[i].clipped = 0, primIdx[i] = i;
 		root.aabbMin = tinybvh_min( root.aabbMin, fragment[i].bmin );
 		root.aabbMax = tinybvh_max( root.aabbMax, fragment[i].bmax );
@@ -4133,7 +4135,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::Intersect( Ray& ray ) co
 			}
 			else if (customEnabled && customIntersect != 0) for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
 			{
-				if ((*customIntersect)(ray, primIdx[node->leftFirst + i]))
+				if ((*customIntersect)(ray, primIdx[node->leftFirst + i], customUserdata))
 				{
 				#if INST_IDX_BITS == 32
 					ray.hit.inst = ray.instIdx;
@@ -4290,7 +4292,7 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccluded( const Ray& ray 
 			else if (customEnabled && customIsOccluded != 0)
 			{
 				for (uint32_t i = 0; i < node->triCount; i++)
-					if ((*customIsOccluded)(ray, primIdx[node->leftFirst + i])) return true;
+					if ((*customIsOccluded)(ray, primIdx[node->leftFirst + i], customUserdata)) return true;
 			}
 			else for (uint32_t i = 0; i < node->triCount; i++)
 			{
@@ -8655,7 +8657,7 @@ BVH_Double::~BVH_Double()
 	AlignedFree( primIdx );
 }
 
-void BVH_Double::Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&), const uint64_t primCount )
+void BVH_Double::Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&, void*), const uint64_t primCount )
 {
 	BVH_FATAL_ERROR_IF( primCount == 0, "BVH_Double::Build( void (*customGetAABB)( .. ), instCount ), instCount == 0." );
 	triCount = idxCount = primCount;
@@ -8675,7 +8677,7 @@ void BVH_Double::Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&
 	root.leftFirst = 0, root.triCount = primCount, root.aabbMin = bvhvec3( BVH_FAR ), root.aabbMax = bvhvec3( -BVH_FAR );
 	for (uint32_t i = 0; i < primCount; i++)
 	{
-		customGetAABB( i, fragment[i].bmin, fragment[i].bmax );
+		customGetAABB( i, fragment[i].bmin, fragment[i].bmax, customUserdata );
 		root.aabbMin = tinybvh_min( root.aabbMin, fragment[i].bmin ), fragment[i].primIdx = i;
 		root.aabbMax = tinybvh_max( root.aabbMax, fragment[i].bmax ), primIdx[i] = i;
 	}
@@ -8960,7 +8962,7 @@ int32_t BVH_Double::Intersect( RayEx& ray ) const
 			if (customEnabled && customIntersect != 0)
 			{
 				for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
-					if ((*customIntersect)(ray, primIdx[node->leftFirst + i]))
+					if ((*customIntersect)(ray, primIdx[node->leftFirst + i], customUserdata))
 						ray.hit.inst = ray.instIdx;
 			}
 			else for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
@@ -9071,7 +9073,7 @@ bool BVH_Double::IsOccluded( const RayEx& ray ) const
 			if (customEnabled && customIsOccluded != 0)
 			{
 				for (uint32_t i = 0; i < node->triCount; i++)
-					if ((*customIsOccluded)(ray, primIdx[node->leftFirst + i])) return true;
+					if ((*customIsOccluded)(ray, primIdx[node->leftFirst + i], customUserdata)) return true;
 			}
 			else for (uint32_t i = 0; i < node->triCount; i++)
 			{

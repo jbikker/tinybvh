@@ -16,31 +16,31 @@ using namespace tinybvh;
 static bool floatStateValid = false, doubleStateValid = false;
 static int floatCalls = 0, doubleCalls = 0;
 
-static void FloatAABB( const unsigned, bvhvec3& bmin, bvhvec3& bmax )
+static void FloatAABB( const unsigned, bvhvec3& bmin, bvhvec3& bmax, void* )
 {
 	bmin = bvhvec3( -1, -1, 4 );
 	bmax = bvhvec3( 1, 1, 6 );
 }
 
-static void DoubleAABB( const uint64_t, bvhdbl3& bmin, bvhdbl3& bmax )
+static void DoubleAABB( const uint64_t, bvhdbl3& bmin, bvhdbl3& bmax, void* )
 {
 	bmin = bvhdbl3( -1, -1, 4 );
 	bmax = bvhdbl3( 1, 1, 6 );
 }
 
-static bool FloatOccludes( const Ray& ray, const unsigned )
+static bool FloatOccludes( const Ray& ray, const unsigned, void* )
 {
 	floatCalls++;
 	return floatStateValid = ray.instIdx == (1u << INST_IDX_SHFT) && ray.mask == 2 && ray.hit.t == 3.0f;
 }
 
-static bool DoubleOccludes( const RayEx& ray, const uint64_t )
+static bool DoubleOccludes( const RayEx& ray, const uint64_t, void* )
 {
 	doubleCalls++;
 	return doubleStateValid = ray.instIdx == 1 && ray.mask == 2 && ray.hit.t == 3.0;
 }
 
-static bool FloatIntersects( Ray& ray, const unsigned )
+static bool FloatIntersects( Ray& ray, const unsigned, void* )
 {
 	floatCalls++;
 	if (!(floatStateValid = ray.instIdx == (1u << INST_IDX_SHFT) && ray.mask == 2 && ray.hit.t == 3.0f)) return false;
@@ -48,7 +48,7 @@ static bool FloatIntersects( Ray& ray, const unsigned )
 	return true;
 }
 
-static bool DoubleIntersects( RayEx& ray, const uint64_t )
+static bool DoubleIntersects( RayEx& ray, const uint64_t, void* )
 {
 	doubleCalls++;
 	if (!(doubleStateValid = ray.instIdx == 1 && ray.mask == 2 && ray.hit.t == 3.0)) return false;
