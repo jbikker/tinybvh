@@ -492,34 +492,25 @@ TINYBVH_FORCEINLINE bool tinybvh_isfinite( float f )
 	std::memcpy( &i, &f, sizeof( i ) );
 	return (i & 0x7F800000) != 0x7F800000; // ieee-754: finite if not all exponent bits are 1.
 }
-TINYBVH_FORCEINLINE bool tinybvh_isfinite( double f )
-{
-	uint64_t i;
-	std::memcpy( &i, &f, sizeof( i ) );
-	return (i & 0x7FF0000000000000ull) != 0x7FF0000000000000ull; // ieee-754
-}
 TINYBVH_FORCEINLINE bool tinybvh_isnan( float f )
 {
 	uint32_t i;
 	std::memcpy( &i, &f, sizeof( i ) );
 	return (i & 0x7F800000) == 0x7F800000 && (i & 0x007FFFFF) != 0; // ieee-754
 }
+// Clamp to BVH_FAR rather than FLT_MAX: precomputed products such as
+// ray.O.x * ray.rD.x must not overflow to inf, since inf slab bounds
+// yield NaN or (under FP contraction) -inf and break traversal.
 TINYBVH_FORCEINLINE float tinybvh_safercp( const float x )
 {
-#if 1
-	// my version
-	float r = 1 / x;
-	if (!tinybvh_isfinite( r )) r = copysignf( 3.402823466e+38F /* FLT_MAX */, x );
+	const float r = 1 / x;
+	if (!(fabsf( r ) <= BVH_FAR)) return copysignf( BVH_FAR, x );
 	return r;
-#else
-	// Madmann91's version
-	return fabs( x ) <= FLT_EPSILON ? copysign( 3.402823466e+38F /* FLT_MAX */, x ) : (1.0f / x);
-#endif
 }
 TINYBVH_FORCEINLINE double tinybvh_safercp( const double x )
 {
-	double r = 1 / x;
-	if (!tinybvh_isfinite( r )) r = copysign( 1.7976931348623158e+308 /* DBL_MAX */, x );
+	const double r = 1 / x;
+	if (!(fabs( r ) <= BVH_DBL_FAR)) return copysign( BVH_DBL_FAR, x );
 	return r;
 }
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_safercp( const bvhvec3 a ) { return bvhvec3( tinybvh_safercp( a.x ), tinybvh_safercp( a.y ), tinybvh_safercp( a.z ) ); }
