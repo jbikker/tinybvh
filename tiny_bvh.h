@@ -492,6 +492,12 @@ TINYBVH_FORCEINLINE bool tinybvh_isfinite( float f )
 	std::memcpy( &i, &f, sizeof( i ) );
 	return (i & 0x7F800000) != 0x7F800000; // ieee-754: finite if not all exponent bits are 1.
 }
+TINYBVH_FORCEINLINE bool tinybvh_isfinite( double f )
+{
+	uint64_t i;
+	std::memcpy( &i, &f, sizeof( i ) );
+	return (i & 0x7FF0000000000000ull) != 0x7FF0000000000000ull; // ieee-754
+}
 TINYBVH_FORCEINLINE bool tinybvh_isnan( float f )
 {
 	uint32_t i;
@@ -509,6 +515,12 @@ TINYBVH_FORCEINLINE float tinybvh_safercp( const float x )
 	// Madmann91's version
 	return fabs( x ) <= FLT_EPSILON ? copysign( 3.402823466e+38F /* FLT_MAX */, x ) : (1.0f / x);
 #endif
+}
+TINYBVH_FORCEINLINE double tinybvh_safercp( const double x )
+{
+	double r = 1 / x;
+	if (!tinybvh_isfinite( r )) r = copysign( 1.7976931348623158e+308 /* DBL_MAX */, x );
+	return r;
 }
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_safercp( const bvhvec3 a ) { return bvhvec3( tinybvh_safercp( a.x ), tinybvh_safercp( a.y ), tinybvh_safercp( a.z ) ); }
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_rcp( const bvhvec3 a ) { return tinybvh_safercp( a ); /* bvhvec3( 1.0f / a.x, 1.0f / a.y, 1.0f / a.z ); */ }
@@ -656,6 +668,8 @@ TINYBVH_FORCEINLINE bvhdbl3 tinybvh_normalize( const bvhdbl3& a )
 	double l = tinybvh_length( a ), rl = l == 0 ? 0 : (1.0 / l);
 	return a * rl;
 }
+TINYBVH_FORCEINLINE bvhdbl3 tinybvh_safercp( const bvhdbl3 a ) { return bvhdbl3( tinybvh_safercp( a.x ), tinybvh_safercp( a.y ), tinybvh_safercp( a.z ) ); }
+TINYBVH_FORCEINLINE bvhdbl3 tinybvh_rcp( const bvhdbl3 a ) { return tinybvh_safercp( a ); }
 inline bvhdbl3 tinybvh_transform_point( const bvhdbl3& v, const double* T )
 {
 	const bvhdbl3 res(
@@ -824,7 +838,7 @@ struct RayEx
 		O = origin, D = direction;
 		double rl = 1.0 / sqrt( D.x * D.x + D.y * D.y + D.z * D.z );
 		D.x *= rl, D.y *= rl, D.z *= rl;
-		rD.x = 1.0 / D.x, rD.y = 1.0 / D.y, rD.z = 1.0 / D.z;
+		rD = tinybvh_rcp( D );
 		hit.u = hit.v = 0, hit.t = tmax;
 		instIdx = 0;
 		mask = rayMask & RAY_MASK_INTERSECT_ALL;
@@ -9025,10 +9039,10 @@ int32_t BVH_Double::IntersectTLAS( RayEx& ray ) const
 				// 1. Transform ray with the inverse of the instance transform
 				tmp.O = tinybvh_transform_point( ray.O, inst.invTransform );
 				tmp.D = tinybvh_transform_vector( ray.D, inst.invTransform );
-				tmp.rD = bvhdbl3( 1.0 / tmp.D.x, 1.0 / tmp.D.y, 1.0 / tmp.D.z );
 				tmp.hit = ray.hit;
 				tmp.instIdx = instIdx;
 				tmp.mask = ray.mask;
+				tmp.rD = tinybvh_rcp( tmp.D );
 				// 2. Traverse BLAS with the transformed ray
 				cost += blas->Intersect( tmp );
 				// 3. Restore ray
@@ -9129,9 +9143,7 @@ bool BVH_Double::IsOccludedTLAS( const RayEx& ray ) const
 				tmp.instIdx = instIdx;
 				tmp.hit = ray.hit;
 				tmp.mask = ray.mask;
-				tmp.rD.x = tmp.D.x > 1e-24 ? (1.0 / tmp.D.x) : (tmp.D.x < -1e-24 ? (1.0 / tmp.D.x) : BVH_DBL_FAR);
-				tmp.rD.y = tmp.D.y > 1e-24 ? (1.0 / tmp.D.y) : (tmp.D.y < -1e-24 ? (1.0 / tmp.D.y) : BVH_DBL_FAR);
-				tmp.rD.z = tmp.D.z > 1e-24 ? (1.0 / tmp.D.z) : (tmp.D.z < -1e-24 ? (1.0 / tmp.D.z) : BVH_DBL_FAR);
+				tmp.rD = tinybvh_rcp( tmp.D );
 				// 2. Traverse BLAS with the transformed ray
 				if (blas->IsOccluded( tmp )) return true;
 			}
