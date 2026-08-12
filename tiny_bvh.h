@@ -4066,18 +4066,18 @@ bool BVH::IntersectSphere( const bvhvec3& pos, const float r ) const
 }
 
 #define SLAB_TEST_TWO_NODES \
-	float tx1a = (posX ? child1->aabbMin.x : child1->aabbMax.x) * ray.rD.x - rox; /* expect fma. */ \
-	float ty1a = (posY ? child1->aabbMin.y : child1->aabbMax.y) * ray.rD.y - roy; \
-	float tz1a = (posZ ? child1->aabbMin.z : child1->aabbMax.z) * ray.rD.z - roz; \
-	float tx1b = (posX ? child2->aabbMin.x : child2->aabbMax.x) * ray.rD.x - rox; \
-	float ty1b = (posY ? child2->aabbMin.y : child2->aabbMax.y) * ray.rD.y - roy; \
-	float tz1b = (posZ ? child2->aabbMin.z : child2->aabbMax.z) * ray.rD.z - roz; \
-	float tx2a = (posX ? child1->aabbMax.x : child1->aabbMin.x) * ray.rD.x - rox; \
-	float ty2a = (posY ? child1->aabbMax.y : child1->aabbMin.y) * ray.rD.y - roy; \
-	float tz2a = (posZ ? child1->aabbMax.z : child1->aabbMin.z) * ray.rD.z - roz; \
-	float tx2b = (posX ? child2->aabbMax.x : child2->aabbMin.x) * ray.rD.x - rox; \
-	float ty2b = (posY ? child2->aabbMax.y : child2->aabbMin.y) * ray.rD.y - roy; \
-	float tz2b = (posZ ? child2->aabbMax.z : child2->aabbMin.z) * ray.rD.z - roz; \
+	float tx1a = tinybvh_fma( posX ? child1->aabbMin.x : child1->aabbMax.x, ray.rD.x, -rox ); \
+	float ty1a = tinybvh_fma( posY ? child1->aabbMin.y : child1->aabbMax.y, ray.rD.y, -roy ); \
+	float tz1a = tinybvh_fma( posZ ? child1->aabbMin.z : child1->aabbMax.z, ray.rD.z, -roz ); \
+	float tx1b = tinybvh_fma( posX ? child2->aabbMin.x : child2->aabbMax.x, ray.rD.x, -rox ); \
+	float ty1b = tinybvh_fma( posY ? child2->aabbMin.y : child2->aabbMax.y, ray.rD.y, -roy ); \
+	float tz1b = tinybvh_fma( posZ ? child2->aabbMin.z : child2->aabbMax.z, ray.rD.z, -roz ); \
+	float tx2a = tinybvh_fma( posX ? child1->aabbMax.x : child1->aabbMin.x, ray.rD.x, -rox ); \
+	float ty2a = tinybvh_fma( posY ? child1->aabbMax.y : child1->aabbMin.y, ray.rD.y, -roy ); \
+	float tz2a = tinybvh_fma( posZ ? child1->aabbMax.z : child1->aabbMin.z, ray.rD.z, -roz ); \
+	float tx2b = tinybvh_fma( posX ? child2->aabbMax.x : child2->aabbMin.x, ray.rD.x, -rox ); \
+	float ty2b = tinybvh_fma( posY ? child2->aabbMax.y : child2->aabbMin.y, ray.rD.y, -roy ); \
+	float tz2b = tinybvh_fma( posZ ? child2->aabbMax.z : child2->aabbMin.z, ray.rD.z, -roz ); \
 	float tmina = tinybvh_max( tinybvh_max( tx1a, ty1a ), tinybvh_max( tz1a, 0.0f ) ); \
 	float tminb = tinybvh_max( tinybvh_max( tx1b, ty1b ), tinybvh_max( tz1b, 0.0f ) ); \
 	float tmaxa = tinybvh_min( tinybvh_min( tx2a, ty2a ), tinybvh_min( tz2a, ray.hit.t ) ); \
