@@ -4188,6 +4188,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				tmpRay.O = tinybvh_transform_point( ray.O, inst.invTransform );
 				tmpRay.D = tinybvh_transform_vector( ray.D, inst.invTransform );
 				tmpRay.instIdx = instIdx << (32 - INST_IDX_BITS);
+				tmpRay.mask = ray.mask;
 				tmpRay.hit = ray.hit;
 				tmpRay.rD = tinybvh_rcp( tmpRay.D );
 				// 2. Traverse BLAS with the transformed ray
@@ -4327,14 +4328,17 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 			for (uint32_t i = 0; i < node->triCount; i++)
 			{
 				// BLAS traversal
-				BLASInstance& inst = instList[primIdx[node->leftFirst + i]];
+				const uint32_t instIdx = primIdx[node->leftFirst + i];
+				BLASInstance& inst = instList[instIdx];
 				const BVHBase* blas = blasList[inst.blasIdx];
 				// Check if the ray should intersect this BLAS Instance, otherwise skip it
 				if (!(inst.mask & ray.mask)) continue;
 				// 1. Transform ray with the inverse of the instance transform
 				tmpRay.O = tinybvh_transform_point( ray.O, inst.invTransform );
 				tmpRay.D = tinybvh_transform_vector( ray.D, inst.invTransform );
-				tmpRay.hit.t = ray.hit.t;
+				tmpRay.instIdx = instIdx << INST_IDX_SHFT;
+				tmpRay.mask = ray.mask;
+				tmpRay.hit = ray.hit;
 				tmpRay.rD = tinybvh_rcp( tmpRay.D );
 				// 2. Traverse BLAS with the transformed ray
 				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH8_AVX2 || blas->layout == LAYOUT_BVH4_CPU );
@@ -9023,8 +9027,9 @@ int32_t BVH_Double::IntersectTLAS( RayEx& ray ) const
 				tmp.D = tinybvh_transform_vector( ray.D, inst.invTransform );
 				tmp.rD = bvhdbl3( 1.0 / tmp.D.x, 1.0 / tmp.D.y, 1.0 / tmp.D.z );
 				tmp.hit = ray.hit;
-				// 2. Traverse BLAS with the transformed ray
 				tmp.instIdx = instIdx;
+				tmp.mask = ray.mask;
+				// 2. Traverse BLAS with the transformed ray
 				cost += blas->Intersect( tmp );
 				// 3. Restore ray
 				ray.hit = tmp.hit;
@@ -9114,12 +9119,16 @@ bool BVH_Double::IsOccludedTLAS( const RayEx& ray ) const
 			for (uint32_t i = 0; i < node->triCount; i++)
 			{
 				// BLAS traversal
-				BLASInstanceEx& inst = instList[primIdx[node->leftFirst + i]];
+				const uint64_t instIdx = primIdx[node->leftFirst + i];
+				BLASInstanceEx& inst = instList[instIdx];
 				if (!(inst.mask & ray.mask)) continue;
 				BVH_Double* blas = blasList[inst.blasIdx];
 				// 1. Transform ray with the inverse of the instance transform
 				tmp.O = tinybvh_transform_point( ray.O, inst.invTransform );
 				tmp.D = tinybvh_transform_vector( ray.D, inst.invTransform );
+				tmp.instIdx = instIdx;
+				tmp.hit = ray.hit;
+				tmp.mask = ray.mask;
 				tmp.rD.x = tmp.D.x > 1e-24 ? (1.0 / tmp.D.x) : (tmp.D.x < -1e-24 ? (1.0 / tmp.D.x) : BVH_DBL_FAR);
 				tmp.rD.y = tmp.D.y > 1e-24 ? (1.0 / tmp.D.y) : (tmp.D.y < -1e-24 ? (1.0 / tmp.D.y) : BVH_DBL_FAR);
 				tmp.rD.z = tmp.D.z > 1e-24 ? (1.0 / tmp.D.z) : (tmp.D.z < -1e-24 ? (1.0 / tmp.D.z) : BVH_DBL_FAR);
