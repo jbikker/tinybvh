@@ -653,6 +653,16 @@ constexpr bvhdbl3 operator*=( bvhdbl3& a, const double b ) { return bvhdbl3( a.x
 
 #endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
+struct bvhdbl3slice
+{
+	bvhdbl3slice() = default;
+	bvhdbl3slice( const bvhdbl3* data, uint64_t count, uint64_t stride = sizeof( bvhdbl3 ) );
+	constexpr operator bool() const { return !!data; }
+	const bvhdbl3& operator [] ( size_t i ) const;
+	const int8_t* data = nullptr;
+	uint64_t count, stride;
+};
+
 TINYBVH_FORCEINLINE double tinybvh_length( const bvhdbl3& a ) { return sqrt( a.x * a.x + a.y * a.y + a.z * a.z ); }
 TINYBVH_FORCEINLINE bvhdbl3 tinybvh_normalize( const bvhdbl3& a )
 {
@@ -1231,10 +1241,12 @@ public:
 	BVH_Double& operator=( const BVH_Double& ) = default;
 	~BVH_Double();
 	void Build( const bvhdbl3* vertices, const uint64_t primCount );
+	void Build( const bvhdbl3slice& vertices );
 	void Build( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount );
+	void Build( const bvhdbl3slice& vertices, const uint32_t* indices, const uint64_t primCount );
 	void Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Double** blasses, const uint64_t blasCount );
 	void Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&, void*), const uint64_t primCount );
-	void PrepareBuild( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount );
+	void PrepareBuild( const bvhdbl3slice& vertices, const uint32_t* indices, const uint64_t primCount );
 	void Build( uint64_t nodeIdx = 0, uint32_t depth = 0 );
 	double SAHCost( const uint64_t nodeIdx = 0 ) const;
 	int32_t Intersect( RayEx& ray ) const;
@@ -1242,7 +1254,7 @@ public:
 	bool IsOccludedTLAS( const RayEx& ray ) const;
 	int32_t IntersectTLAS( RayEx& ray ) const;
 	bool isIndexed() const { return vertIdx != 0; }
-	bvhdbl3* verts = 0;				// pointer to input primitive array, double-precision, 3x24 bytes per tri.
+	bvhdbl3slice verts = {};		// pointer to input primitive array, double-precision, 3x24 bytes per tri.
 	uint32_t* vertIdx = 0;			// vertex indices, only used in case the BVH is built over indexed prims.
 	Fragment* fragment = 0;			// input primitive bounding boxes, double-precision.
 	BVHNode* bvhNode = 0;			// BVH node, double precision format.
@@ -1842,6 +1854,23 @@ const bvhvec4& bvhvec4slice::operator[]( size_t i ) const
 #endif
 	return *reinterpret_cast<const bvhvec4*>(data + stride * i);
 }
+
+#ifdef DOUBLE_PRECISION_SUPPORT
+
+bvhdbl3slice::bvhdbl3slice( const bvhdbl3* data, uint64_t count, uint64_t stride ) :
+	data{ reinterpret_cast<const int8_t*>(data) },
+	count{ count }, stride{ stride } {
+}
+
+const bvhdbl3& bvhdbl3slice::operator[]( size_t i ) const
+{
+#ifdef PARANOID
+	BVH_FATAL_ERROR_IF( i >= count, "bvhdbl3slice::[..], Reading outside slice." );
+#endif
+	return *reinterpret_cast<const bvhdbl3*>(data + stride * i);
+}
+
+#endif // DOUBLE_PRECISION_SUPPORT
 
 // LBVH builder helpers
 // ----------------------------------------------------------------------------
@@ -8724,19 +8753,19 @@ void BVH_Double::Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Doub
 	Build();
 }
 
-void BVH_Double::Build( const bvhdbl3* vertices, const uint64_t primCount )
-{
-	Build( vertices, 0, primCount );
-}
+void BVH_Double::Build( const bvhdbl3slice& v ) { Build( v, 0, 0 ); }
+void BVH_Double::Build( const bvhdbl3* v, const uint64_t p ) { Build( bvhdbl3slice{ v, p * 3, sizeof( bvhdbl3 ) }, 0, p ); }
+void BVH_Double::Build( const bvhdbl3* v, const uint32_t* i, const uint64_t p ) { Build( bvhdbl3slice{ v, p * 3, sizeof( bvhdbl3 ) }, i, p ); }
 
-void BVH_Double::Build( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount )
+void BVH_Double::Build( const bvhdbl3slice& vertices, const uint32_t* indices, const uint64_t primCount )
 {
 	PrepareBuild( vertices, indices, primCount );
 	Build();
 }
 
-void BVH_Double::PrepareBuild( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount )
+void BVH_Double::PrepareBuild( const bvhdbl3slice& vertices, const uint32_t* indices, const uint64_t prims )
 {
+	const uint64_t primCount = prims > 0 ? prims : vertices.count / 3;
 	BVH_FATAL_ERROR_IF( primCount == 0, "BVH_Double::PrepareBuild( .. ), primCount == 0." );
 	const uint64_t spaceNeeded = primCount * 2; // upper limit
 	// allocate memory on first build
@@ -8750,7 +8779,7 @@ void BVH_Double::PrepareBuild( const bvhdbl3* vertices, const uint32_t* indices,
 		primIdx = (uint64_t*)AlignedAlloc( primCount * sizeof( uint64_t ) );
 		fragment = (Fragment*)AlignedAlloc( primCount * sizeof( Fragment ) );
 	}
-	verts = (bvhdbl3*)vertices; // note: we're not copying this data; don't delete.
+	verts = vertices; // note: we're not copying this data; don't delete.
 	vertIdx = (uint32_t*)indices; // also not copied; for indexed triangle meshes.
 	idxCount = triCount = primCount;
 	// prepare fragments
