@@ -498,17 +498,20 @@ TINYBVH_FORCEINLINE bool tinybvh_isnan( float f )
 	std::memcpy( &i, &f, sizeof( i ) );
 	return (i & 0x7F800000) == 0x7F800000 && (i & 0x007FFFFF) != 0; // ieee-754
 }
+// Clamp to BVH_FAR rather than FLT_MAX: precomputed products such as
+// ray.O.x * ray.rD.x must not overflow to inf, since inf slab bounds
+// yield NaN or (under FP contraction) -inf and break traversal.
 TINYBVH_FORCEINLINE float tinybvh_safercp( const float x )
 {
-#if 1
-	// my version
-	float r = 1 / x;
-	if (!tinybvh_isfinite( r )) r = copysignf( 3.402823466e+38F /* FLT_MAX */, x );
+	const float r = 1 / x;
+	if (!(fabsf( r ) <= BVH_FAR)) return copysignf( BVH_FAR, x );
 	return r;
-#else
-	// Madmann91's version
-	return fabs( x ) <= FLT_EPSILON ? copysign( 3.402823466e+38F /* FLT_MAX */, x ) : (1.0f / x);
-#endif
+}
+TINYBVH_FORCEINLINE double tinybvh_safercp( const double x )
+{
+	const double r = 1 / x;
+	if (!(fabs( r ) <= BVH_DBL_FAR)) return copysign( BVH_DBL_FAR, x );
+	return r;
 }
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_safercp( const bvhvec3 a ) { return bvhvec3( tinybvh_safercp( a.x ), tinybvh_safercp( a.y ), tinybvh_safercp( a.z ) ); }
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_rcp( const bvhvec3 a ) { return tinybvh_safercp( a ); /* bvhvec3( 1.0f / a.x, 1.0f / a.y, 1.0f / a.z ); */ }
@@ -650,12 +653,24 @@ constexpr bvhdbl3 operator*=( bvhdbl3& a, const double b ) { return bvhdbl3( a.x
 
 #endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
+struct bvhdbl3slice
+{
+	bvhdbl3slice() = default;
+	bvhdbl3slice( const bvhdbl3* data, uint64_t count, uint64_t stride = sizeof( bvhdbl3 ) );
+	constexpr operator bool() const { return !!data; }
+	const bvhdbl3& operator [] ( size_t i ) const;
+	const int8_t* data = nullptr;
+	uint64_t count, stride;
+};
+
 TINYBVH_FORCEINLINE double tinybvh_length( const bvhdbl3& a ) { return sqrt( a.x * a.x + a.y * a.y + a.z * a.z ); }
 TINYBVH_FORCEINLINE bvhdbl3 tinybvh_normalize( const bvhdbl3& a )
 {
 	double l = tinybvh_length( a ), rl = l == 0 ? 0 : (1.0 / l);
 	return a * rl;
 }
+TINYBVH_FORCEINLINE bvhdbl3 tinybvh_safercp( const bvhdbl3 a ) { return bvhdbl3( tinybvh_safercp( a.x ), tinybvh_safercp( a.y ), tinybvh_safercp( a.z ) ); }
+TINYBVH_FORCEINLINE bvhdbl3 tinybvh_rcp( const bvhdbl3 a ) { return tinybvh_safercp( a ); }
 inline bvhdbl3 tinybvh_transform_point( const bvhdbl3& v, const double* T )
 {
 	const bvhdbl3 res(
@@ -824,7 +839,7 @@ struct RayEx
 		O = origin, D = direction;
 		double rl = 1.0 / sqrt( D.x * D.x + D.y * D.y + D.z * D.z );
 		D.x *= rl, D.y *= rl, D.z *= rl;
-		rD.x = 1.0 / D.x, rD.y = 1.0 / D.y, rD.z = 1.0 / D.z;
+		rD = tinybvh_rcp( D );
 		hit.u = hit.v = 0, hit.t = tmax;
 		instIdx = 0;
 		mask = rayMask & RAY_MASK_INTERSECT_ALL;
@@ -1019,7 +1034,7 @@ public:
 	void Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( BLASInstance* instances, const uint32_t instCount, BVHBase** blasses, const uint32_t blasCount );
-	void Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&), const uint32_t primCount );
+	void Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&, void*), const uint32_t primCount );
 	void BuildAABB( const bvhvec4* aabbs, const uint32_t primCount );
 	void BuildHQ( const bvhvec4* vertices, const uint32_t primCount );
 	void BuildHQ( const bvhvec4slice& vertices );
@@ -1108,8 +1123,9 @@ public:
 	uint32_t nextFrag = 0;			// used during SBVH build to keep track of next free fragment.
 	Fragment* fragment = 0;			// input primitive bounding boxes.
 	// Custom geometry intersection callback
-	bool (*customIntersect)(Ray&, const unsigned) = 0;
-	bool (*customIsOccluded)(const Ray&, const unsigned) = 0;
+	bool (*customIntersect)(Ray&, const unsigned, void*) = 0;
+	bool (*customIsOccluded)(const Ray&, const unsigned, void*) = 0;
+	void* customUserdata = 0;
 private:
 #ifdef ENABLE_THREADED_BUILDS
 	// Atomic counters for threaded builds
@@ -1225,10 +1241,12 @@ public:
 	BVH_Double& operator=( const BVH_Double& ) = default;
 	~BVH_Double();
 	void Build( const bvhdbl3* vertices, const uint64_t primCount );
+	void Build( const bvhdbl3slice& vertices );
 	void Build( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount );
+	void Build( const bvhdbl3slice& vertices, const uint32_t* indices, const uint64_t primCount );
 	void Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Double** blasses, const uint64_t blasCount );
-	void Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&), const uint64_t primCount );
-	void PrepareBuild( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount );
+	void Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&, void*), const uint64_t primCount );
+	void PrepareBuild( const bvhdbl3slice& vertices, const uint32_t* indices, const uint64_t primCount );
 	void Build( uint64_t nodeIdx = 0, uint32_t depth = 0 );
 	double SAHCost( const uint64_t nodeIdx = 0 ) const;
 	int32_t Intersect( RayEx& ray ) const;
@@ -1236,7 +1254,7 @@ public:
 	bool IsOccludedTLAS( const RayEx& ray ) const;
 	int32_t IntersectTLAS( RayEx& ray ) const;
 	bool isIndexed() const { return vertIdx != 0; }
-	bvhdbl3* verts = 0;				// pointer to input primitive array, double-precision, 3x24 bytes per tri.
+	bvhdbl3slice verts = {};		// pointer to input primitive array, double-precision, 3x24 bytes per tri.
 	uint32_t* vertIdx = 0;			// vertex indices, only used in case the BVH is built over indexed prims.
 	Fragment* fragment = 0;			// input primitive bounding boxes, double-precision.
 	BVHNode* bvhNode = 0;			// BVH node, double precision format.
@@ -1253,8 +1271,9 @@ public:
 	bvhdbl3 aabbMin, aabbMax;		// bounds of the root node of the BVH.
 	bool threadedBuild = true;		// will be disabled for small meshes.
 	// Custom geometry intersection callback
-	bool (*customIntersect)(RayEx&, uint64_t) = 0;
-	bool (*customIsOccluded)(const RayEx&, uint64_t) = 0;
+	bool (*customIntersect)(RayEx&, uint64_t, void*) = 0;
+	bool (*customIsOccluded)(const RayEx&, uint64_t, void*) = 0;
+	void* customUserdata = 0;
 #ifdef ENABLE_THREADED_BUILDS
 private:
 	// Atomic counter for threaded builds
@@ -1836,6 +1855,23 @@ const bvhvec4& bvhvec4slice::operator[]( size_t i ) const
 	return *reinterpret_cast<const bvhvec4*>(data + stride * i);
 }
 
+#ifdef DOUBLE_PRECISION_SUPPORT
+
+bvhdbl3slice::bvhdbl3slice( const bvhdbl3* data, uint64_t count, uint64_t stride ) :
+	data{ reinterpret_cast<const int8_t*>(data) },
+	count{ count }, stride{ stride } {
+}
+
+const bvhdbl3& bvhdbl3slice::operator[]( size_t i ) const
+{
+#ifdef PARANOID
+	BVH_FATAL_ERROR_IF( i >= count, "bvhdbl3slice::[..], Reading outside slice." );
+#endif
+	return *reinterpret_cast<const bvhdbl3*>(data + stride * i);
+}
+
+#endif // DOUBLE_PRECISION_SUPPORT
+
 // LBVH builder helpers
 // ----------------------------------------------------------------------------
 
@@ -2217,7 +2253,7 @@ void BVH::BuildAABB( const bvhvec4* aabbs, const uint32_t aabbCount )
 	Build();
 }
 
-void BVH::Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&), const uint32_t primCount )
+void BVH::Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&, void*), const uint32_t primCount )
 {
 	// BVH builder for custom geometry; AABBs are obtained via a function pointer in context.
 	BVH_FATAL_ERROR_IF( primCount == 0, "BVH::Build( void (*customGetAABB)( .. ), instCount ), instCount == 0." );
@@ -2239,7 +2275,7 @@ void BVH::Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&), cons
 	root.leftFirst = 0, root.triCount = primCount, root.aabbMin = bvhvec3( BVH_FAR ), root.aabbMax = bvhvec3( -BVH_FAR );
 	for (uint32_t i = 0; i < primCount; i++)
 	{
-		customGetAABB( i, fragment[i].bmin, fragment[i].bmax );
+		customGetAABB( i, fragment[i].bmin, fragment[i].bmax, customUserdata );
 		fragment[i].primIdx = i, fragment[i].clipped = 0, primIdx[i] = i;
 		root.aabbMin = tinybvh_min( root.aabbMin, fragment[i].bmin );
 		root.aabbMax = tinybvh_max( root.aabbMax, fragment[i].bmax );
@@ -4059,18 +4095,18 @@ bool BVH::IntersectSphere( const bvhvec3& pos, const float r ) const
 }
 
 #define SLAB_TEST_TWO_NODES \
-	float tx1a = (posX ? child1->aabbMin.x : child1->aabbMax.x) * ray.rD.x - rox; /* expect fma. */ \
-	float ty1a = (posY ? child1->aabbMin.y : child1->aabbMax.y) * ray.rD.y - roy; \
-	float tz1a = (posZ ? child1->aabbMin.z : child1->aabbMax.z) * ray.rD.z - roz; \
-	float tx1b = (posX ? child2->aabbMin.x : child2->aabbMax.x) * ray.rD.x - rox; \
-	float ty1b = (posY ? child2->aabbMin.y : child2->aabbMax.y) * ray.rD.y - roy; \
-	float tz1b = (posZ ? child2->aabbMin.z : child2->aabbMax.z) * ray.rD.z - roz; \
-	float tx2a = (posX ? child1->aabbMax.x : child1->aabbMin.x) * ray.rD.x - rox; \
-	float ty2a = (posY ? child1->aabbMax.y : child1->aabbMin.y) * ray.rD.y - roy; \
-	float tz2a = (posZ ? child1->aabbMax.z : child1->aabbMin.z) * ray.rD.z - roz; \
-	float tx2b = (posX ? child2->aabbMax.x : child2->aabbMin.x) * ray.rD.x - rox; \
-	float ty2b = (posY ? child2->aabbMax.y : child2->aabbMin.y) * ray.rD.y - roy; \
-	float tz2b = (posZ ? child2->aabbMax.z : child2->aabbMin.z) * ray.rD.z - roz; \
+	float tx1a = tinybvh_fma( posX ? child1->aabbMin.x : child1->aabbMax.x, ray.rD.x, -rox ); \
+	float ty1a = tinybvh_fma( posY ? child1->aabbMin.y : child1->aabbMax.y, ray.rD.y, -roy ); \
+	float tz1a = tinybvh_fma( posZ ? child1->aabbMin.z : child1->aabbMax.z, ray.rD.z, -roz ); \
+	float tx1b = tinybvh_fma( posX ? child2->aabbMin.x : child2->aabbMax.x, ray.rD.x, -rox ); \
+	float ty1b = tinybvh_fma( posY ? child2->aabbMin.y : child2->aabbMax.y, ray.rD.y, -roy ); \
+	float tz1b = tinybvh_fma( posZ ? child2->aabbMin.z : child2->aabbMax.z, ray.rD.z, -roz ); \
+	float tx2a = tinybvh_fma( posX ? child1->aabbMax.x : child1->aabbMin.x, ray.rD.x, -rox ); \
+	float ty2a = tinybvh_fma( posY ? child1->aabbMax.y : child1->aabbMin.y, ray.rD.y, -roy ); \
+	float tz2a = tinybvh_fma( posZ ? child1->aabbMax.z : child1->aabbMin.z, ray.rD.z, -roz ); \
+	float tx2b = tinybvh_fma( posX ? child2->aabbMax.x : child2->aabbMin.x, ray.rD.x, -rox ); \
+	float ty2b = tinybvh_fma( posY ? child2->aabbMax.y : child2->aabbMin.y, ray.rD.y, -roy ); \
+	float tz2b = tinybvh_fma( posZ ? child2->aabbMax.z : child2->aabbMin.z, ray.rD.z, -roz ); \
 	float tmina = tinybvh_max( tinybvh_max( tx1a, ty1a ), tinybvh_max( tz1a, 0.0f ) ); \
 	float tminb = tinybvh_max( tinybvh_max( tx1b, ty1b ), tinybvh_max( tz1b, 0.0f ) ); \
 	float tmaxa = tinybvh_min( tinybvh_min( tx2a, ty2a ), tinybvh_min( tz2a, ray.hit.t ) ); \
@@ -4128,7 +4164,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::Intersect( Ray& ray ) co
 			}
 			else if (customEnabled && customIntersect != 0) for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
 			{
-				if ((*customIntersect)(ray, primIdx[node->leftFirst + i]))
+				if ((*customIntersect)(ray, primIdx[node->leftFirst + i], customUserdata))
 				{
 				#if INST_IDX_BITS == 32
 					ray.hit.inst = ray.instIdx;
@@ -4188,6 +4224,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				tmpRay.O = tinybvh_transform_point( ray.O, inst.invTransform );
 				tmpRay.D = tinybvh_transform_vector( ray.D, inst.invTransform );
 				tmpRay.instIdx = instIdx << (32 - INST_IDX_BITS);
+				tmpRay.mask = ray.mask;
 				tmpRay.hit = ray.hit;
 				tmpRay.rD = tinybvh_rcp( tmpRay.D );
 				// 2. Traverse BLAS with the transformed ray
@@ -4284,7 +4321,7 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccluded( const Ray& ray 
 			else if (customEnabled && customIsOccluded != 0)
 			{
 				for (uint32_t i = 0; i < node->triCount; i++)
-					if ((*customIsOccluded)(ray, primIdx[node->leftFirst + i])) return true;
+					if ((*customIsOccluded)(ray, primIdx[node->leftFirst + i], customUserdata)) return true;
 			}
 			else for (uint32_t i = 0; i < node->triCount; i++)
 			{
@@ -4327,14 +4364,17 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 			for (uint32_t i = 0; i < node->triCount; i++)
 			{
 				// BLAS traversal
-				BLASInstance& inst = instList[primIdx[node->leftFirst + i]];
+				const uint32_t instIdx = primIdx[node->leftFirst + i];
+				BLASInstance& inst = instList[instIdx];
 				const BVHBase* blas = blasList[inst.blasIdx];
 				// Check if the ray should intersect this BLAS Instance, otherwise skip it
 				if (!(inst.mask & ray.mask)) continue;
 				// 1. Transform ray with the inverse of the instance transform
 				tmpRay.O = tinybvh_transform_point( ray.O, inst.invTransform );
 				tmpRay.D = tinybvh_transform_vector( ray.D, inst.invTransform );
-				tmpRay.hit.t = ray.hit.t;
+				tmpRay.instIdx = instIdx << INST_IDX_SHFT;
+				tmpRay.mask = ray.mask;
+				tmpRay.hit = ray.hit;
 				tmpRay.rD = tinybvh_rcp( tmpRay.D );
 				// 2. Traverse BLAS with the transformed ray
 				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH8_AVX2 || blas->layout == LAYOUT_BVH4_CPU );
@@ -8646,7 +8686,7 @@ BVH_Double::~BVH_Double()
 	AlignedFree( primIdx );
 }
 
-void BVH_Double::Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&), const uint64_t primCount )
+void BVH_Double::Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&, void*), const uint64_t primCount )
 {
 	BVH_FATAL_ERROR_IF( primCount == 0, "BVH_Double::Build( void (*customGetAABB)( .. ), instCount ), instCount == 0." );
 	triCount = idxCount = primCount;
@@ -8666,7 +8706,7 @@ void BVH_Double::Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&
 	root.leftFirst = 0, root.triCount = primCount, root.aabbMin = bvhvec3( BVH_FAR ), root.aabbMax = bvhvec3( -BVH_FAR );
 	for (uint32_t i = 0; i < primCount; i++)
 	{
-		customGetAABB( i, fragment[i].bmin, fragment[i].bmax );
+		customGetAABB( i, fragment[i].bmin, fragment[i].bmax, customUserdata );
 		root.aabbMin = tinybvh_min( root.aabbMin, fragment[i].bmin ), fragment[i].primIdx = i;
 		root.aabbMax = tinybvh_max( root.aabbMax, fragment[i].bmax ), primIdx[i] = i;
 	}
@@ -8713,19 +8753,19 @@ void BVH_Double::Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Doub
 	Build();
 }
 
-void BVH_Double::Build( const bvhdbl3* vertices, const uint64_t primCount )
-{
-	Build( vertices, 0, primCount );
-}
+void BVH_Double::Build( const bvhdbl3slice& v ) { Build( v, 0, 0 ); }
+void BVH_Double::Build( const bvhdbl3* v, const uint64_t p ) { Build( bvhdbl3slice{ v, p * 3, sizeof( bvhdbl3 ) }, 0, p ); }
+void BVH_Double::Build( const bvhdbl3* v, const uint32_t* i, const uint64_t p ) { Build( bvhdbl3slice{ v, p * 3, sizeof( bvhdbl3 ) }, i, p ); }
 
-void BVH_Double::Build( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount )
+void BVH_Double::Build( const bvhdbl3slice& vertices, const uint32_t* indices, const uint64_t primCount )
 {
 	PrepareBuild( vertices, indices, primCount );
 	Build();
 }
 
-void BVH_Double::PrepareBuild( const bvhdbl3* vertices, const uint32_t* indices, const uint64_t primCount )
+void BVH_Double::PrepareBuild( const bvhdbl3slice& vertices, const uint32_t* indices, const uint64_t prims )
 {
+	const uint64_t primCount = prims > 0 ? prims : vertices.count / 3;
 	BVH_FATAL_ERROR_IF( primCount == 0, "BVH_Double::PrepareBuild( .. ), primCount == 0." );
 	const uint64_t spaceNeeded = primCount * 2; // upper limit
 	// allocate memory on first build
@@ -8739,7 +8779,7 @@ void BVH_Double::PrepareBuild( const bvhdbl3* vertices, const uint32_t* indices,
 		primIdx = (uint64_t*)AlignedAlloc( primCount * sizeof( uint64_t ) );
 		fragment = (Fragment*)AlignedAlloc( primCount * sizeof( Fragment ) );
 	}
-	verts = (bvhdbl3*)vertices; // note: we're not copying this data; don't delete.
+	verts = vertices; // note: we're not copying this data; don't delete.
 	vertIdx = (uint32_t*)indices; // also not copied; for indexed triangle meshes.
 	idxCount = triCount = primCount;
 	// prepare fragments
@@ -8951,7 +8991,7 @@ int32_t BVH_Double::Intersect( RayEx& ray ) const
 			if (customEnabled && customIntersect != 0)
 			{
 				for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
-					if ((*customIntersect)(ray, primIdx[node->leftFirst + i]))
+					if ((*customIntersect)(ray, primIdx[node->leftFirst + i], customUserdata))
 						ray.hit.inst = ray.instIdx;
 			}
 			else for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
@@ -9021,10 +9061,11 @@ int32_t BVH_Double::IntersectTLAS( RayEx& ray ) const
 				// 1. Transform ray with the inverse of the instance transform
 				tmp.O = tinybvh_transform_point( ray.O, inst.invTransform );
 				tmp.D = tinybvh_transform_vector( ray.D, inst.invTransform );
-				tmp.rD = bvhdbl3( 1.0 / tmp.D.x, 1.0 / tmp.D.y, 1.0 / tmp.D.z );
 				tmp.hit = ray.hit;
-				// 2. Traverse BLAS with the transformed ray
 				tmp.instIdx = instIdx;
+				tmp.mask = ray.mask;
+				tmp.rD = tinybvh_rcp( tmp.D );
+				// 2. Traverse BLAS with the transformed ray
 				cost += blas->Intersect( tmp );
 				// 3. Restore ray
 				ray.hit = tmp.hit;
@@ -9061,7 +9102,7 @@ bool BVH_Double::IsOccluded( const RayEx& ray ) const
 			if (customEnabled && customIsOccluded != 0)
 			{
 				for (uint32_t i = 0; i < node->triCount; i++)
-					if ((*customIsOccluded)(ray, primIdx[node->leftFirst + i])) return true;
+					if ((*customIsOccluded)(ray, primIdx[node->leftFirst + i], customUserdata)) return true;
 			}
 			else for (uint32_t i = 0; i < node->triCount; i++)
 			{
@@ -9114,15 +9155,17 @@ bool BVH_Double::IsOccludedTLAS( const RayEx& ray ) const
 			for (uint32_t i = 0; i < node->triCount; i++)
 			{
 				// BLAS traversal
-				BLASInstanceEx& inst = instList[primIdx[node->leftFirst + i]];
+				const uint64_t instIdx = primIdx[node->leftFirst + i];
+				BLASInstanceEx& inst = instList[instIdx];
 				if (!(inst.mask & ray.mask)) continue;
 				BVH_Double* blas = blasList[inst.blasIdx];
 				// 1. Transform ray with the inverse of the instance transform
 				tmp.O = tinybvh_transform_point( ray.O, inst.invTransform );
 				tmp.D = tinybvh_transform_vector( ray.D, inst.invTransform );
-				tmp.rD.x = tmp.D.x > 1e-24 ? (1.0 / tmp.D.x) : (tmp.D.x < -1e-24 ? (1.0 / tmp.D.x) : BVH_DBL_FAR);
-				tmp.rD.y = tmp.D.y > 1e-24 ? (1.0 / tmp.D.y) : (tmp.D.y < -1e-24 ? (1.0 / tmp.D.y) : BVH_DBL_FAR);
-				tmp.rD.z = tmp.D.z > 1e-24 ? (1.0 / tmp.D.z) : (tmp.D.z < -1e-24 ? (1.0 / tmp.D.z) : BVH_DBL_FAR);
+				tmp.instIdx = instIdx;
+				tmp.hit = ray.hit;
+				tmp.mask = ray.mask;
+				tmp.rD = tinybvh_rcp( tmp.D );
 				// 2. Traverse BLAS with the transformed ray
 				if (blas->IsOccluded( tmp )) return true;
 			}
