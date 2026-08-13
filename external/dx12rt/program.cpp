@@ -7,6 +7,7 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include "shader.fxh"
+#include "tiny.fxh"
 #include <fstream>
 
 extern "C" { __declspec(dllexport) DWORD NvOptimusEnablement = 1; }
@@ -40,6 +41,7 @@ ID3D12GraphicsCommandList4* cmdList;
 D3D12_RAYTRACING_INSTANCE_DESC* instanceData;
 ID3D12RootSignature* rootSignature;
 ID3D12StateObject* pso;
+ID3D12PipelineState* computePso;
 ID3D12QueryHeap* queryHeap;
 HANDLE fenceEvent = nullptr;
 UINT rtWidth = 0, rtHeight = 0;
@@ -154,6 +156,13 @@ void InitDevice()
 	fenceEvent = CreateEvent( nullptr, FALSE, FALSE, nullptr );
 }
 
+void InitComputePipeline()
+{
+	D3D12_COMPUTE_PIPELINE_STATE_DESC desc = { .pRootSignature = rootSignature,
+		.CS = {.pShaderBytecode = compiledComputeShader, .BytecodeLength = std::size( compiledComputeShader ) } };
+	device->CreateComputePipelineState( &desc, IID_PPV_ARGS( &computePso ) );
+}
+
 void InitSurfaces( HWND hwnd )
 {
 	DXGI_SWAP_CHAIN_DESC1 scDesc = {
@@ -252,7 +261,7 @@ ID3D12Resource* MakeBLAS( ID3D12Resource* vertexBuffer, UINT vertexFloats, ID3D1
 {
 	D3D12_RAYTRACING_GEOMETRY_DESC geometryDesc = {
 		.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES, .Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE,
-		.Triangles = { .Transform3x4 = 0, .IndexFormat = indexBuffer ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_UNKNOWN,
+		.Triangles = {.Transform3x4 = 0, .IndexFormat = indexBuffer ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_UNKNOWN,
 			.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT, .IndexCount = indices, .VertexCount = vertexFloats / 3,
 			.IndexBuffer = indexBuffer ? indexBuffer->GetGPUVirtualAddress() : 0,
 			.VertexBuffer = {.StartAddress = vertexBuffer->GetGPUVirtualAddress(), .StrideInBytes = sizeof( float ) * 3}} };
@@ -397,8 +406,8 @@ void InitShaderTables()
 	pso->QueryInterface( &props );
 	void* data;
 	auto writeId = [&]( const wchar_t* name ) { void* id = props->GetShaderIdentifier( name );
-		memcpy( data, id, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES );
-		data = static_cast<char*>(data) + D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT; };
+	memcpy( data, id, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES );
+	data = static_cast<char*>(data) + D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT; };
 	shaderIDs->Map( 0, nullptr, &data );
 	writeId( L"RayGeneration" );
 	writeId( L"Miss" );
@@ -457,11 +466,21 @@ void Render()
 	cmdList->Reset( cmdAllocs[frameIndex], nullptr );
 	static bool sceneDirty = true;
 	if (sceneDirty) { UpdateScene(); sceneDirty = false; }
+#if 0
+	cmdList->SetPipelineState( computePso );
+	cmdList->SetComputeRootSignature( rootSignature );
+	cmdList->SetDescriptorHeaps( 1, &uavHeap );
+	cmdList->SetComputeRootDescriptorTable( 0, uavHeap->GetGPUDescriptorHandleForHeapStart() );
+	D3D12_RESOURCE_DESC rtDesc = renderTarget->GetDesc();
+	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot );
+	cmdList->Dispatch( (static_cast<UINT>(rtDesc.Width) + 7) / 8, (rtDesc.Height + 7) / 8, 1 );
+	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot + 1 );
+#else
 	cmdList->SetPipelineState1( pso );
 	cmdList->SetComputeRootSignature( rootSignature );
 	cmdList->SetDescriptorHeaps( 1, &uavHeap );
 	D3D12_GPU_DESCRIPTOR_HANDLE uavTable = uavHeap->GetGPUDescriptorHandleForHeapStart();
-	cmdList->SetComputeRootDescriptorTable( 0, uavTable ); // ←u0 ↓t0
+	cmdList->SetComputeRootDescriptorTable( 0, uavTable );
 	cmdList->SetComputeRootShaderResourceView( 1, tlas->GetGPUVirtualAddress() );
 	cmdList->SetComputeRootShaderResourceView( 2, rayBuffer->GetGPUVirtualAddress() );
 	D3D12_RESOURCE_DESC rtDesc = renderTarget->GetDesc();
@@ -479,6 +498,7 @@ void Render()
 	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot );
 	cmdList->DispatchRays( &dispatchDesc );
 	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot + 1 );
+#endif
 	cmdList->ResolveQueryData( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot, 2, queryResultBuffer, baseSlot * sizeof( UINT64 ) );
 	swapChain->GetBuffer( frameIndex, IID_PPV_ARGS( &backBuffer ) );
 	auto barrier = []( auto* resource, auto before, auto after ) { D3D12_RESOURCE_BARRIER rb = {
@@ -513,6 +533,7 @@ void Init( HWND hwnd )
 	InitTopLevel();
 	InitRootSignature();
 	InitPipeline();
+	InitComputePipeline();
 	InitShaderTables();
 }
 
