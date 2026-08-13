@@ -15,6 +15,8 @@ cl_ulong startTime, endTime;
 tinyocl::Buffer* gpuRayData = 0;
 #endif
 
+void InitDXR();
+
 extern FILE* csv;
 
 namespace tinybvh
@@ -365,6 +367,13 @@ void Experiment::WriteImage( char* raySet, const char* tracedRays )
 
 float Experiment::RunGPU_BVH2( char* raySet, const int N, const char* tgaFile )
 {
+	// enable stable power state, if requested
+	/* if (flags & STABLE_POWER)
+	{
+		static bool stablePowerEnabled = false;
+		if (!stablePowerEnabled) InitDXR();
+		stablePowerEnabled = true;
+	} */
 	// trace 'first hit' rays on GPU
 	BVH_GPU* bvh_gpu = (BVH_GPU*)bvh->GetBVH();
 	// create OpenCL buffers for the BVH data calculated by tiny_bvh.h

@@ -32,6 +32,7 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		bvh->settings.useFullSweep = false;
 		bvh->settings.useSIMDifavailable = false;
 		if (flags & BuildFlags::FULLSWEEP) bvh->settings.useFullSweep = true;
+		if (flags & BuildFlags::LBVH) bvh->settings.useLBVH = true;
 		if (flags & BuildFlags::PRESPLIT) bvh->settings.usePresplitting = true;
 		if (flags & BuildFlags::AVXBUILD) bvh->settings.useSIMDifavailable = true;
 		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
@@ -114,6 +115,7 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		if (f & BuildFlags::AVXBUILD) { strncat( desc, "AVX builder", 100 ); strncat( flagShrt, "A", 32 ); f -= BuildFlags::AVXBUILD; }
 		else if (f & BuildFlags::INDEXED) { strncat( desc, "indexed", 100 ); strncat( flagShrt, "I", 32 ); f -= BuildFlags::INDEXED; }
 		else if (f & BuildFlags::FULLSWEEP) { strncat( desc, "full-sweep", 100 ); strncat( flagShrt, "F", 32 ); f -= BuildFlags::FULLSWEEP; }
+		else if (f & BuildFlags::LBVH) { strncat( desc, "LBVH", 100 ); strncat( flagShrt, "L", 32 ); f -= BuildFlags::LBVH; }
 		else if (f & BuildFlags::SPATIALSPLITS) { strncat( desc, "SBVH", 100 ); strncat( flagShrt, "S", 32 ); f -= BuildFlags::SPATIALSPLITS; }
 		else if (f & BuildFlags::PRESPLIT) { strncat( desc, "presplit", 100 ); strncat( flagShrt, "P", 32 ); f -= BuildFlags::PRESPLIT; }
 		else if (f & BuildFlags::OPTIMIZE) { strncat( desc, "optimize", 100 ); strncat( flagShrt, "O", 32 ); f -= BuildFlags::OPTIMIZE; }

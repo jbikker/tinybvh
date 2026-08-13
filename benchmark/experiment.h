@@ -12,6 +12,7 @@ enum ExperimentFlags : int {
 	DEFAULT = 0,
 	MULTICORE = 1,
 	USE_GPU = 2,
+	STABLE_POWER = 4 // windows only; requires 'Developer Mode'; opens a DX12 window.
 };
 
 struct Timer
@@ -50,6 +51,11 @@ private:
 	inline static PrimitiveSet* cachedPrimSet[99] = { 0 };
 	inline static RayDistribution* cachedRaySet[99] = { 0 };
 };
+
+inline ExperimentFlags operator|( ExperimentFlags a, ExperimentFlags b )
+{
+	return static_cast<ExperimentFlags>(static_cast<int>(a) | static_cast<int>(b));
+}
 
 };
 
