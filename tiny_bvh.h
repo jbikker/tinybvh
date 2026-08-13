@@ -164,9 +164,7 @@ THE SOFTWARE.
 #ifndef NO_DOUBLE_PRECISION_SUPPORT
 #define DOUBLE_PRECISION_SUPPORT
 #endif
-// #define TINYBVH_USE_CUSTOM_VECTOR_TYPES
-// #define TINYBVH_NO_SIMD
-#ifndef c
+#ifndef NO_INDEXED_GEOMETRY
 #define ENABLE_INDEXED_GEOMETRY
 #endif
 #ifndef NO_CUSTOM_GEOMETRY
@@ -181,6 +179,9 @@ THE SOFTWARE.
 #ifdef USE_DEPRECATED_LAYOUT
 #define ENABLE_BVH_SOA 
 #endif
+// #define TINYBVH_USE_CUSTOM_VECTOR_TYPES
+// #define TINYBVH_NO_SIMD
+// #define ENABLE_LBVH_CODE
 
 // C++ features
 #if __cplusplus >= 202002L
@@ -1875,6 +1876,8 @@ const bvhdbl3& bvhdbl3slice::operator[]( size_t i ) const
 // LBVH builder helpers
 // ----------------------------------------------------------------------------
 
+#ifdef ENABLE_LBVH_CODE
+
 static uint32_t Expand2D32( uint32_t x )
 {
 	// 32 bit function to expand an axiscode to 2D bits
@@ -2046,6 +2049,8 @@ static uint32_t LBVHSortOrder( bvhvec3 extents )
 	return order;
 }
 
+#endif
+
 // BVHBase implementation
 // ----------------------------------------------------------------------------
 
@@ -2203,10 +2208,12 @@ void BVH::Build( const bvhvec4slice& vertices, const uint32_t* indices, uint32_t
 		PrepareBuild( vertices, indices, prims );
 		BuildFullSweep();
 	}
+#ifdef ENABLE_LBVH_CODE
 	else if (settings.useLBVH) // LBVH builder requested
 	{
 		BuildLBVH( vertices, indices, prims );
 	}
+#endif
 #ifdef BVH_USEAVX
 	else if (settings.useSIMDifavailable) // No preference: use fast AVX builder
 	{
@@ -2841,6 +2848,8 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 	}
 }
 
+#ifdef ENABLE_LBVH_CODE
+
 // LBVH implementation - by Sietze Riemersma (AMD)
 // ----------------------------------------------------------------------------
 // https://github.com/GPUOpen-Drivers/gpurt/blob/dev/src/shaders/MortonCodes.hlsl
@@ -2861,10 +2870,8 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 		AlignedFree( bvhNode );
 		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
 		AlignedFree( primIdx );
-		// We do not need a primIdx array right now, created in conversion
-
+		// we do not need a primIdx array right now, created in conversion
 		allocatedNodes = spaceNeeded;
-
 		// leaf nodes take half the nodes
 		leafNodes = &bvhNode[triCount - 1];
 		// allocate scratchpad
@@ -2877,10 +2884,8 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 	idxCount = triCount;
 	numLeafNodes = triCount;
 	numInternalNodes = triCount - 1;
-
-	// Scene bounds
+	// scene bounds
 	aabbMin = bvhvec3( BVH_FAR ), aabbMax = bvhvec3( -BVH_FAR );
-
 	BVHNode nullBox;
 	nullBox.aabbMin = bvhvec3( BVH_FAR ), nullBox.aabbMax = bvhvec3( -BVH_FAR );
 	nullBox.leftFirst = nullBox.right = 0;
@@ -2911,12 +2916,10 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 			aabbMin = tinybvh_min( aabbMin, min ), aabbMax = tinybvh_max( aabbMax, max );
 		}
 	}
-
 	// Sort generates MC, allowing one pass to be skipped for RadixSort
 	// We select sort based on num prims, merge sort is slightly faster
 	// for lower prim counts as radixsort has to compute the radix  multiple times.
 	if (triCount <= 3200) StdSort(); else RadixSort();
-
 	// reuse swap space array
 	uint32_t* mortonCode = &scratchPad[0];
 	uint32_t* primIds = &scratchPad[1 * triCount];
@@ -2940,15 +2943,10 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 			// choose parent node
 			uint32_t parentOtherRange = 0;
 			uint32_t parentNodeIndex = 0xFFFFFFFFU;
-
 			bool useRight = true;
 			if (left != 0)
 			{
-				if (right == numInternalNodes)
-				{
-					useRight = false;
-				}
-				else
+				if (right == numInternalNodes) useRight = false; else
 				{
 					useRight = (__bfind( mortonCode[right] ^ mortonCode[right + 1] ) > __bfind( mortonCode[left - 1] ^ mortonCode[left] ));
 				}
@@ -2982,7 +2980,6 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 			if (canMoveUp) currentNode = parentNodeIndex; else break;
 		}
 	}
-
 	// all done.
 	refittable = true; // not using spatial splits: can refit this BVH
 	may_have_holes = false; // the reference builder produces a continuous list of nodes
@@ -3034,7 +3031,6 @@ void BVH::StdSort()
 {
 	bvhvec3 extents = aabbMax - aabbMin;
 	uint32_t order = LBVHSortOrder( extents );
-
 	// Fetch the prebits from different axes
 	// This calculation computes the number of bits required BEFORE x becomes smaller than z to prevent resorting
 	const uint32_t prebitsXY = (uint32_t)tinybvh_min( log2( extents.x / extents.y ), 32.0f );
@@ -3042,8 +3038,7 @@ void BVH::StdSort()
 	const uint32_t prebitsYZ = (uint32_t)tinybvh_min( log2( extents.y / extents.z ), 32.0f );
 	bvhuint3 axisCodes = 0;
 	bvhuint3 sortedAxisCodes = 0;
-
-	// Sort array on swap space
+	// sort array on swap space
 	uint32_t* mortonCode = &scratchPad[0];
 	uint32_t* primIds = &scratchPad[1 * triCount];
 	uint64_t* sortArray = (uint64_t*)&scratchPad[2 * triCount];
@@ -3144,6 +3139,8 @@ void BVH::RadixSort()
 		memcpy( mortonCode, mortonCodeSwap, triCount * sizeof( uint32_t ) );
 	}
 }
+
+#endif
 
 // SBVH builder. This builder introduces spatial splits during construction,
 // improving tree quality at the expense of construction time.
