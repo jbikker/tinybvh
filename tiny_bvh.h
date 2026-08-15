@@ -3841,12 +3841,24 @@ void BVH::SplitLeafs( const uint32_t maxPrims )
 
 float BVH::SplitPriority( const Fragment& f ) const
 {
+	auto fastCbrt = [](float x) {
+		// x >= 0.0f is assumed
+		uint32_t i = *(uint32_t*)&x;
+		i = 0x2A51067Fu + i / 3u;
+		float y = *(float*)&i;
+		
+		// Refine with Newton-Raphson iterations
+		y = (2.0f * y + x / (y * y)) * (1.0f / 3.0f);
+
+		return y;
+	};
+
 	const bvhvec3 extent = f.bmax - f.bmin;
 	const float extentPrio = tinybvh_sqrf( extent[tinybvh_maxdim( extent )] );
 	const float boxArea = 2 * tinybvh_halfarea( extent ); // TODO: half of this seems more appropriate?
 	const float triArea = PrimArea( f.primIdx );
 	const float emptyAreaPrio = boxArea - triArea;
-	return cbrtf( extentPrio * emptyAreaPrio );
+	return fastCbrt( extentPrio * emptyAreaPrio );
 }
 
 int BVH::SplitCount( const float prio, const float sumPrio, const int tris, const float factor ) const
