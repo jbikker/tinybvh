@@ -146,11 +146,6 @@ void UpdateRayBuffer( UINT width, UINT height )
 // them from the tinybvh BVH_GPU build via one-shot UPLOAD staging copies.
 void InitBVHBuffers()
 {
-	const UINT N = triCount > 0 ? (UINT)triCount : 1;
-	const UINT64 guard = 4096;
-	const UINT64 nodeBytes = (UINT64)sizeof( GPUBVHNode ) * N * 2 + guard; // <= 2N nodes for a binary BVH
-	const UINT64 idxBytes = (UINT64)sizeof( unsigned ) * N + guard;     // idxCount entries (== N for a standard build)
-	const UINT64 triBytes = (UINT64)sizeof( bvhvec4 ) * N * 3 + guard; // 3 verts x 16 bytes per triangle
 	// UPLOAD-heap staging: CPU-fillable, released once the copy has completed.
 	auto makeStaging = []( UINT64 size, const void* src, UINT64 srcBytes ) {
 		D3D12_RESOURCE_DESC desc = BASIC_BUFFER_DESC;
@@ -174,9 +169,12 @@ void InitBVHBuffers()
 			D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS( &res ) );
 		return res;
 		};
-	ID3D12Resource* nodeStaging = makeStaging( nodeBytes, bvh.bvhNode, (UINT64)bvh.usedNodes * sizeof( GPUBVHNode ) );
-	ID3D12Resource* idxStaging = makeStaging( idxBytes, bvh.bvh.primIdx, (UINT64)bvh.idxCount * sizeof( unsigned ) );
-	ID3D12Resource* triStaging = makeStaging( triBytes, t4, (UINT64)triCount * 3 * sizeof( bvhvec4 ) );
+	const UINT64 nodeBytes = (UINT64)bvh.allocatedNodes * sizeof( GPUBVHNode );
+	const UINT64 idxBytes = (UINT64)bvh.bvh.idxCount * sizeof( unsigned );
+	const UINT64 triBytes = (UINT64)triCount * 3 * sizeof( bvhvec4 );
+	ID3D12Resource* nodeStaging = makeStaging( nodeBytes, bvh.bvhNode, nodeBytes );
+	ID3D12Resource* idxStaging = makeStaging( idxBytes, bvh.bvh.primIdx, idxBytes );
+	ID3D12Resource* triStaging = makeStaging( triBytes, t4, triBytes );
 	bvhNodeBuffer = makeDefault( nodeBytes );
 	bvhIdxBuffer = makeDefault( idxBytes );
 	bvhTriBuffer = makeDefault( triBytes );
@@ -345,7 +343,7 @@ void InitMeshes()
 		t3[i].x = tris[i].x, t3[i].y = tris[i].y, t3[i].z = tris[i].z, vidx[i] = i,
 		t4[i].x = tris[i].x, t4[i].y = tris[i].y, t4[i].z = tris[i].z, t4[i].w = 0;
 	meshVB = makeAndCopy( (float*)t3, triCount * 36 ), meshIB = makeAndCopy( (void*)vidx, triCount * 3 * 4 );
-	bvh.Build( t4, triCount );
+	bvh.BuildHQ( t4, triCount );
 }
 
 ID3D12Resource* MakeAccelerationStructure( const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, UINT64* updateScratchSize = nullptr )
