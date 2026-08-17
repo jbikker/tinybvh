@@ -44,7 +44,7 @@ float4 traverse_ailalaine(const float3 O, const float3 D, const float3 rD, const
     float4 hit;
     hit.x = tmax;
     uint node = 0, stack[32], stackPtr = 0;
-    for (uint guard = 0; guard < 512; guard++) // cap at 512 traversal steps
+    while (true) // for (uint guard = 0; guard < 256; guard++) // cap at 512 traversal steps
     {
         const BVHNode n = bvhNodes[node];
         const float4 lmin = n.lmin, lmax = n.lmax;
@@ -115,6 +115,11 @@ float4 traverse_ailalaine(const float3 O, const float3 D, const float3 rD, const
     return hit;
 }
 
+float safe_rcp(float x)
+{
+    return 1.0f / (sign(x) * max(abs(x), 1e-5f));
+}
+
 [numthreads(8, 8, 1)]void TraceRays(uint3 tid : SV_DispatchThreadID)
 {
     uint w, h;
@@ -126,7 +131,7 @@ float4 traverse_ailalaine(const float3 O, const float3 D, const float3 rD, const
     const RayData r = rayBuffer[id];
     const float3 O = r.origin;
     const float3 D = r.direction;
-    const float3 rD = float3(1.0f / D.x, 1.0f / D.y, 1.0f / D.z);
+    const float3 rD = float3(safe_rcp(D.x), safe_rcp(D.y), safe_rcp(D.z));
     // trace
     const float4 hit = traverse_ailalaine(O, D, rD, 1e30f);
     // simple depth visualization (miss -> black), same style as shader.hlsl
