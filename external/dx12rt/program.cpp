@@ -46,15 +46,34 @@ ID3D12QueryHeap* queryHeap;
 HANDLE fenceEvent = nullptr;
 UINT rtWidth = 0, rtHeight = 0;
 
-struct bvhvec3 { float x, y, z; };
-struct bvhvec4 { float x, y, z, w; };
+#define TINYBVH_IMPLEMENTATION
+#include "../../tiny_bvh.h"
+using namespace tinybvh;
+BVH_GPU bvh;
+
 static bvhvec3 eye, p1, p2, p3;
 struct RayData { float ox, oy, oz, opad; float dx, dy, dz, dpad; }; // 32 bytes
+
+// tinybvh BVH_GPU node.
+struct GPUBVHNode
+{
+	bvhvec3 lmin; unsigned left;
+	bvhvec3 lmax; unsigned right;
+	bvhvec3 rmin; unsigned triCount;
+	bvhvec3 rmax; unsigned firstTri; // total: 64 bytes
+};
+
+// Software-RT compute inputs. The compute shader (tiny.hlsl) reads these on
+// every step of BVH traversal, so they live in DEVICE-LOCAL (VRAM) memory, not
+// on the UPLOAD heap. InitBVHBuffers() fills UPLOAD staging buffers from the
+// tinybvh BVH_GPU build, copies them here once, then releases the staging.
+ID3D12Resource* bvhNodeBuffer = nullptr, * bvhIdxBuffer = nullptr, * bvhTriBuffer = nullptr;
 
 // Scene management - Append a file, with optional position, scale and color override, tinyfied
 int triCount = 0;
 bvhvec4* tris = 0;
 bvhvec3* t3 = 0;
+bvhvec4* t4 = 0;
 unsigned* vidx = 0;
 void AddMesh( const char* file, int N = 0 )
 {
@@ -103,6 +122,74 @@ void UpdateRayBuffer( UINT width, UINT height )
 	rtWidth = width, rtHeight = height;
 }
 
+// Create the software-RT compute inputs in device-local (VRAM) memory and fill
+// them from the tinybvh BVH_GPU build via one-shot UPLOAD staging copies. These
+// buffers are touched on every node/triangle fetch during traversal, so keeping
+// them out of system memory (the UPLOAD heap, read over PCIe on a discrete GPU)
+// is the single biggest win for the software path. They are never written again
+// after this, so they stay in NON_PIXEL_SHADER_RESOURCE for the app's lifetime.
+void InitBVHBuffers()
+{
+	const UINT N = triCount > 0 ? (UINT)triCount : 1;
+	const UINT64 guard = 4096;
+	const UINT64 nodeBytes = (UINT64)sizeof( GPUBVHNode ) * N * 2 + guard; // <= 2N nodes for a binary BVH
+	const UINT64 idxBytes = (UINT64)sizeof( unsigned ) * N + guard;     // idxCount entries (== N for a standard build)
+	const UINT64 triBytes = (UINT64)sizeof( bvhvec4 ) * N * 3 + guard; // 3 verts x 16 bytes per triangle
+	// UPLOAD-heap staging: CPU-fillable, released once the copy has completed.
+	auto makeStaging = []( UINT64 size, const void* src, UINT64 srcBytes ) {
+		D3D12_RESOURCE_DESC desc = BASIC_BUFFER_DESC;
+		desc.Width = size ? size : 1; // 0-width buffers are invalid
+		ID3D12Resource* res;
+		device->CreateCommittedResource( &UPLOAD_HEAP, D3D12_HEAP_FLAG_NONE, &desc,
+			D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS( &res ) );
+		void* mapped;
+		res->Map( 0, nullptr, &mapped );
+		memset( mapped, 0, desc.Width );          // zero the unused tail (e.g. spare nodes)
+		if (src) memcpy( mapped, src, srcBytes ); // then the real data
+		res->Unmap( 0, nullptr );
+		return res;
+		};
+	// DEFAULT-heap (VRAM) buffers the compute shader actually reads from.
+	auto makeDefault = []( UINT64 size ) {
+		D3D12_RESOURCE_DESC desc = BASIC_BUFFER_DESC;
+		desc.Width = size ? size : 1;
+		ID3D12Resource* res;
+		device->CreateCommittedResource( &DEFAULT_HEAP, D3D12_HEAP_FLAG_NONE, &desc,
+			D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS( &res ) );
+		return res;
+		};
+	ID3D12Resource* nodeStaging = makeStaging( nodeBytes, bvh.bvhNode, (UINT64)bvh.usedNodes * sizeof( GPUBVHNode ) );
+	ID3D12Resource* idxStaging = makeStaging( idxBytes, bvh.bvh.primIdx, (UINT64)bvh.idxCount * sizeof( unsigned ) );
+	ID3D12Resource* triStaging = makeStaging( triBytes, t4, (UINT64)triCount * 3 * sizeof( bvhvec4 ) );
+	bvhNodeBuffer = makeDefault( nodeBytes );
+	bvhIdxBuffer = makeDefault( idxBytes );
+	bvhTriBuffer = makeDefault( triBytes );
+	bvhNodeBuffer->SetName( L"bvhNodeBuffer" );
+	bvhIdxBuffer->SetName( L"bvhIdxBuffer" );
+	bvhTriBuffer->SetName( L"bvhTriBuffer" );
+	// copy staging -> VRAM, then flip the VRAM buffers to a compute-shader-readable state. 
+	// Uses slot 0's allocator and fully drains the GPU, matching the other pre-render-loop setup helpers.
+	cmdAllocs[0]->Reset();
+	cmdList->Reset( cmdAllocs[0], nullptr );
+	cmdList->CopyResource( bvhNodeBuffer, nodeStaging );
+	cmdList->CopyResource( bvhIdxBuffer, idxStaging );
+	cmdList->CopyResource( bvhTriBuffer, triStaging );
+	auto toSRV = []( ID3D12Resource* res ) {
+		D3D12_RESOURCE_BARRIER rb = { .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+			.Transition = {.pResource = res,
+				.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
+				.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE } };
+		return rb; };
+	D3D12_RESOURCE_BARRIER barriers[] = { toSRV( bvhNodeBuffer ), toSRV( bvhIdxBuffer ), toSRV( bvhTriBuffer ) };
+	cmdList->ResourceBarrier( 3, barriers );
+	cmdList->Close();
+	cmdQueue->ExecuteCommandLists( 1, reinterpret_cast<ID3D12CommandList**>(&cmdList) );
+	WaitForGpu();
+	nodeStaging->Release();
+	idxStaging->Release();
+	triStaging->Release();
+}
+
 void Resize( HWND hwnd )
 {
 	RECT rect;
@@ -141,13 +228,25 @@ void InitDevice()
 {
 	if (FAILED( CreateDXGIFactory2( DXGI_CREATE_FACTORY_DEBUG, IID_PPV_ARGS( &factory ) ) ))
 		CreateDXGIFactory2( 0, IID_PPV_ARGS( &factory ) );
-#ifdef _DEBUG
-	if (ID3D12Debug* debug; SUCCEEDED( D3D12GetDebugInterface( IID_PPV_ARGS( &debug ) ) ))
-		debug->EnableDebugLayer(), debug->Release();
-#endif
 	IDXGIAdapter1* adapter = nullptr;
 	factory->EnumAdapterByGpuPreference( 0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS( &adapter ) );
 	// factory->EnumWarpAdapter( IID_PPV_ARGS( &adapter ) ); // uncomment for software RT
+#if 1
+	// DRED is independent of the debug layer and nearly free, so arm it in ALL builds.
+	ID3D12DeviceRemovedExtendedDataSettings* dred;
+	D3D12GetDebugInterface( IID_PPV_ARGS( &dred ) );
+	dred->SetAutoBreadcrumbsEnablement( D3D12_DRED_ENABLEMENT_FORCED_ON );
+	// dred->SetPageFaultEnablement( D3D12_DRED_ENABLEMENT_FORCED_ON );
+	dred->Release();
+#endif
+#if 0 // #ifdef _DEBUG
+	// Enable the debug layer.
+	ID3D12Debug1* dbg;
+	D3D12GetDebugInterface( IID_PPV_ARGS( &dbg ) );
+	dbg->EnableDebugLayer();
+	// dbg->SetEnableGPUBasedValidation( TRUE ); // on-demand only; TDRs the SW traversal
+#endif
+	// create device
 	D3D12CreateDevice( adapter, D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS( &device ) );
 	adapter->Release();
 	D3D12_COMMAND_QUEUE_DESC cmdQueueDesc = { .Type = D3D12_COMMAND_LIST_TYPE_DIRECT };
@@ -225,8 +324,12 @@ void InitMeshes()
 	p3 = { -3.17523217f, 4.26242685f, 11.0005865f };
 #endif
 	t3 = new bvhvec3[triCount * 3], vidx = new unsigned[triCount * 3];
-	for (int i = 0; i < triCount * 3; i++) t3[i].x = tris[i].x, t3[i].y = tris[i].y, t3[i].z = tris[i].z, vidx[i] = i;
+	t4 = new bvhvec4[triCount * 3];
+	for (int i = 0; i < triCount * 3; i++)
+		t3[i].x = tris[i].x, t3[i].y = tris[i].y, t3[i].z = tris[i].z, vidx[i] = i,
+		t4[i].x = tris[i].x, t4[i].y = tris[i].y, t4[i].z = tris[i].z, t4[i].w = 0;
 	meshVB = makeAndCopy( (float*)t3, triCount * 36 ), meshIB = makeAndCopy( (void*)vidx, triCount * 3 * 4 );
+	bvh.Build( t4, triCount );
 }
 
 ID3D12Resource* MakeAccelerationStructure( const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, UINT64* updateScratchSize = nullptr )
@@ -348,8 +451,11 @@ void InitRootSignature()
 	D3D12_ROOT_PARAMETER params[] = {
 	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
 	 .DescriptorTable = {.NumDescriptorRanges = 1, .pDescriptorRanges = &uavRange}},
-	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 0, .RegisterSpace = 0}}, // t0: tlas
-	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 1, .RegisterSpace = 0}} // t1: ray buffer
+	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 0, .RegisterSpace = 0}}, // t0: tlas (DXR)
+	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 1, .RegisterSpace = 0}}, // t1: ray buffer (DXR + compute)
+	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 0, .RegisterSpace = 1}}, // t0 space1: BVH nodes
+	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 1, .RegisterSpace = 1}}, // t1 space1: primIdx
+	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 2, .RegisterSpace = 1}} // t2 space1: triangles
 	};
 	D3D12_ROOT_SIGNATURE_DESC desc = { .NumParameters = std::size( params ), .pParameters = params };
 	ID3DBlob* blob;
@@ -433,6 +539,32 @@ void UpdateScene()
 	cmdList->ResourceBarrier( 1, &barrier );
 }
 
+// On device removal, dump DRED breadcrumbs + the faulting GPU virtual address so
+// the crash is diagnosable instead of a bare __debugbreak. DRED is armed for debug
+// builds in InitDevice(); in release these queries just return empty data.
+void ReportDeviceRemoval()
+{
+	printf( "device removed: 0x%08X\n", device->GetDeviceRemovedReason() );
+	ID3D12DeviceRemovedExtendedData* dred = nullptr;
+	if (FAILED( device->QueryInterface( IID_PPV_ARGS( &dred ) ) ) || !dred) return;
+	D3D12_DRED_PAGE_FAULT_OUTPUT pf = {};
+	if (SUCCEEDED( dred->GetPageFaultAllocationOutput( &pf ) ))
+	{
+		printf( "  page fault VA: 0x%llX\n", (unsigned long long)pf.PageFaultVA );
+		for (auto* n = pf.pHeadExistingAllocationNode; n; n = n->pNext)
+			printf( "    inside live allocation: %ls\n", n->ObjectNameW ? n->ObjectNameW : L"<unnamed>" );
+		for (auto* n = pf.pHeadRecentFreedAllocationNode; n; n = n->pNext)
+			printf( "    inside recently-freed allocation: %ls\n", n->ObjectNameW ? n->ObjectNameW : L"<unnamed>" );
+	}
+	D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT bc = {};
+	if (SUCCEEDED( dred->GetAutoBreadcrumbsOutput( &bc ) ))
+		for (auto* n = bc.pHeadAutoBreadcrumbNode; n; n = n->pNext)
+			printf( "  breadcrumbs on %ls: %u/%u ops completed\n",
+				n->pCommandListDebugNameW ? n->pCommandListDebugNameW : L"<cmdlist>",
+				n->pLastBreadcrumbValue ? *n->pLastBreadcrumbValue : 0u, n->BreadcrumbCount );
+	dred->Release();
+}
+
 void Render()
 {
 	UINT frameIndex = swapChain->GetCurrentBackBufferIndex();
@@ -442,11 +574,22 @@ void Render()
 		WaitForSingleObject( fenceEvent, INFINITE );
 	}
 	UINT baseSlot = frameIndex * 2;
+	// Alternate ray-tracing backends per frame so the two can be compared directly:
+	// even frames run the software (compute) path, odd frames run the hardware (DXR) path.
+	static UINT64 frameCounter = 0;
+	static bool slotIsSoftware[FRAME_COUNT] = {}; // which backend last ran in each frame slot
+	bool useSoftware = (frameCounter & 1) == 0;
 	if (frameFenceValues[frameIndex] != 0)
 	{
 		UINT64* timestamps = nullptr;
 		D3D12_RANGE readRange = { baseSlot * sizeof( UINT64 ), (baseSlot + 2) * sizeof( UINT64 ) };
-		queryResultBuffer->Map( 0, &readRange, reinterpret_cast<void**>(&timestamps) );
+		HRESULT hr = queryResultBuffer->Map( 0, &readRange, reinterpret_cast<void**>(&timestamps) );
+		if (FAILED( hr ) || !timestamps)
+		{
+			if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG) ReportDeviceRemoval();
+			else printf( "Map failed: 0x%08X\n", hr );
+			__debugbreak();
+		}
 		UINT64 startTimestamp = timestamps[baseSlot], endTimestamp = timestamps[baseSlot + 1];
 		D3D12_RANGE writeRange = { 0, 0 };
 		queryResultBuffer->Unmap( 0, &writeRange );
@@ -455,50 +598,71 @@ void Render()
 		double rtTime = static_cast<double>(endTimestamp - startTimestamp) / static_cast<double>(frequency);
 		D3D12_RESOURCE_DESC rtDescForTiming = renderTarget->GetDesc();
 		double raysPerSecond = (rtDescForTiming.Width * rtDescForTiming.Height) / rtTime;
-		static double smoothed = 0;
-		static int frames = 0;
-		if (++frames == 1) smoothed = raysPerSecond;
-		else if (frames < 10) smoothed = 0.9f * smoothed + 0.1f * raysPerSecond;
-		else smoothed = 0.99f * smoothed + 0.01f * raysPerSecond;
-		printf( "frame rendered: %.4fms (%.1fMRays/s)\n", (float)rtTime * 1000.0f, (float)(smoothed / 1000000.0) );
+		bool wasSoftware = slotIsSoftware[frameIndex]; // which backend produced this timestamp
+		static double smoothed[2] = { 0, 0 }; // [0] = hardware, [1] = software
+		static int frames[2] = { 0, 0 };
+		int k = wasSoftware ? 1 : 0;
+		if (++frames[k] == 1) smoothed[k] = raysPerSecond;
+		else if (frames[k] < 10) smoothed[k] = 0.9 * smoothed[k] + 0.1 * raysPerSecond;
+		else smoothed[k] = 0.99 * smoothed[k] + 0.01 * raysPerSecond;
+		static float lastHw = 0, lastSw = 0;
+		if (wasSoftware)
+		{
+			lastSw = (float)(smoothed[k] / 1000000.0);
+			printf( "SW: %.4fms (%.1fMRays/s avg, %.1f%%)\n", (float)rtTime * 1000.0f, lastSw, lastSw * 100 / lastHw );
+		}
+		else
+		{
+			lastHw = (float)(smoothed[k] / 1000000.0);
+			printf( "HW: %.4fms (%.1fMRays/s avg) - ", (float)rtTime * 1000.0f, lastHw );
+		}
 	}
 	cmdAllocs[frameIndex]->Reset();
 	cmdList->Reset( cmdAllocs[frameIndex], nullptr );
 	static bool sceneDirty = true;
 	if (sceneDirty) { UpdateScene(); sceneDirty = false; }
-#if 0
-	cmdList->SetPipelineState( computePso );
-	cmdList->SetComputeRootSignature( rootSignature );
-	cmdList->SetDescriptorHeaps( 1, &uavHeap );
-	cmdList->SetComputeRootDescriptorTable( 0, uavHeap->GetGPUDescriptorHandleForHeapStart() );
-	D3D12_RESOURCE_DESC rtDesc = renderTarget->GetDesc();
-	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot );
-	cmdList->Dispatch( (static_cast<UINT>(rtDesc.Width) + 7) / 8, (rtDesc.Height + 7) / 8, 1 );
-	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot + 1 );
-#else
-	cmdList->SetPipelineState1( pso );
-	cmdList->SetComputeRootSignature( rootSignature );
-	cmdList->SetDescriptorHeaps( 1, &uavHeap );
-	D3D12_GPU_DESCRIPTOR_HANDLE uavTable = uavHeap->GetGPUDescriptorHandleForHeapStart();
-	cmdList->SetComputeRootDescriptorTable( 0, uavTable );
-	cmdList->SetComputeRootShaderResourceView( 1, tlas->GetGPUVirtualAddress() );
-	cmdList->SetComputeRootShaderResourceView( 2, rayBuffer->GetGPUVirtualAddress() );
-	D3D12_RESOURCE_DESC rtDesc = renderTarget->GetDesc();
-	D3D12_DISPATCH_RAYS_DESC dispatchDesc = {
-		.RayGenerationShaderRecord = {
-			.StartAddress = shaderIDs->GetGPUVirtualAddress(),
-			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES },
-		.MissShaderTable = {
-			.StartAddress = shaderIDs->GetGPUVirtualAddress() + D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT,
-			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, .StrideInBytes = 0 },
-		.HitGroupTable = {
-			.StartAddress = shaderIDs->GetGPUVirtualAddress() + 2 * D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT,
-			.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, .StrideInBytes = 32 },
-		.Width = static_cast<UINT>(rtDesc.Width), .Height = rtDesc.Height, .Depth = 1 };
-	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot );
-	cmdList->DispatchRays( &dispatchDesc );
-	cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot + 1 );
-#endif
+	if (useSoftware)
+	{
+		cmdList->SetPipelineState( computePso );
+		cmdList->SetComputeRootSignature( rootSignature );
+		cmdList->SetDescriptorHeaps( 1, &uavHeap );
+		cmdList->SetComputeRootDescriptorTable( 0, uavHeap->GetGPUDescriptorHandleForHeapStart() );
+		cmdList->SetComputeRootShaderResourceView( 2, rayBuffer->GetGPUVirtualAddress() );     // t1: rays
+		cmdList->SetComputeRootShaderResourceView( 3, bvhNodeBuffer->GetGPUVirtualAddress() ); // t0 space1: BVH nodes
+		cmdList->SetComputeRootShaderResourceView( 4, bvhIdxBuffer->GetGPUVirtualAddress() );  // t1 space1: primIdx
+		cmdList->SetComputeRootShaderResourceView( 5, bvhTriBuffer->GetGPUVirtualAddress() );  // t2 space1: triangles
+		D3D12_RESOURCE_DESC rtDesc = renderTarget->GetDesc();
+		cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot );
+		cmdList->Dispatch( (static_cast<UINT>(rtDesc.Width) + 7) / 8, (rtDesc.Height + 7) / 8, 1 );
+		cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot + 1 );
+	}
+	else
+	{
+		cmdList->SetPipelineState1( pso );
+		cmdList->SetComputeRootSignature( rootSignature );
+		cmdList->SetDescriptorHeaps( 1, &uavHeap );
+		D3D12_GPU_DESCRIPTOR_HANDLE uavTable = uavHeap->GetGPUDescriptorHandleForHeapStart();
+		cmdList->SetComputeRootDescriptorTable( 0, uavTable );
+		cmdList->SetComputeRootShaderResourceView( 1, tlas->GetGPUVirtualAddress() );
+		cmdList->SetComputeRootShaderResourceView( 2, rayBuffer->GetGPUVirtualAddress() );
+		D3D12_RESOURCE_DESC rtDesc = renderTarget->GetDesc();
+		D3D12_DISPATCH_RAYS_DESC dispatchDesc = {
+			.RayGenerationShaderRecord = {
+				.StartAddress = shaderIDs->GetGPUVirtualAddress(),
+				.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES },
+			.MissShaderTable = {
+				.StartAddress = shaderIDs->GetGPUVirtualAddress() + D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT,
+				.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, .StrideInBytes = 0 },
+			.HitGroupTable = {
+				.StartAddress = shaderIDs->GetGPUVirtualAddress() + 2 * D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT,
+				.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, .StrideInBytes = 32 },
+			.Width = static_cast<UINT>(rtDesc.Width), .Height = rtDesc.Height, .Depth = 1 };
+		cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot );
+		cmdList->DispatchRays( &dispatchDesc );
+		cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot + 1 );
+	}
+	slotIsSoftware[frameIndex] = useSoftware; // for the timing readback next time this slot runs
+	frameCounter++;
 	cmdList->ResolveQueryData( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot, 2, queryResultBuffer, baseSlot * sizeof( UINT64 ) );
 	swapChain->GetBuffer( frameIndex, IID_PPV_ARGS( &backBuffer ) );
 	auto barrier = []( auto* resource, auto before, auto after ) { D3D12_RESOURCE_BARRIER rb = {
@@ -527,6 +691,7 @@ void Init( HWND hwnd )
 	InitSurfaces( hwnd );
 	InitCommand();
 	InitMeshes();
+	InitBVHBuffers(); // dummy software-RT input buffers (fill from tinybvh)
 	UpdateRayBuffer( rtWidth, rtHeight );
 	blas = CompactBLAS( MakeBLAS( meshVB, triCount * 9, meshIB, triCount * 3 ) );
 	InitScene();
