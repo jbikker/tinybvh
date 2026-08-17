@@ -1319,7 +1319,7 @@ public:
 	bool IsOccluded( const Ray& ray ) const { FALLBACK_SHADOW_QUERY( ray ); }
 	// BVH data
 	BVHNode* bvhNode = 0;			// BVH node in Aila & Laine format.
-	BVH bvh;						// BVH4 is created from BVH and uses its data.
+	BVH bvh;						// BVH_GPU is created from BVH and uses its data.
 	bool ownBVH = true;				// False when ConvertFrom receives an external bvh.
 };
 
