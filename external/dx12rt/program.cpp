@@ -8,6 +8,7 @@
 #include <dxgi1_6.h>
 #include "shader.fxh"
 #include "tiny.fxh"
+#include <cassert>
 #include <fstream>
 
 extern "C" { __declspec(dllexport) DWORD NvOptimusEnablement = 1; }
@@ -99,35 +100,50 @@ void WaitForGpu()
 
 void UpdateRayBuffer( UINT width, UINT height )
 {
-	if (rayBuffer) rayBuffer->Release();
-	D3D12_RESOURCE_DESC desc = BASIC_BUFFER_DESC;
-	desc.Width = sizeof( RayData ) * width * height;
-	device->CreateCommittedResource( &UPLOAD_HEAP, D3D12_HEAP_FLAG_NONE, &desc,
-		D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS( &rayBuffer ) );
-	RayData* data;
-	rayBuffer->Map( 0, nullptr, reinterpret_cast<void**>(&data) );
-	for (UINT y = 0; y < height; y++) for (UINT x = 0; x < width; x++)
-	{
-		float u = (float)x / width, v = (float)y / height;
-		float px = p1.x + u * (p2.x - p1.x) + v * (p3.x - p1.x);
-		float py = p1.y + u * (p2.y - p1.y) + v * (p3.y - p1.y);
-		float pz = p1.z + u * (p2.z - p1.z) + v * (p3.z - p1.z);
-		float dx = px - eye.x, dy = py - eye.y, dz = pz - eye.z;
-		float len = sqrtf( dx * dx + dy * dy + dz * dz );
-		RayData& r = data[y * width + x];
-		r.ox = eye.x, r.oy = eye.y, r.oz = eye.z, r.opad = 0;
-		r.dx = dx / len, r.dy = dy / len, r.dz = dz / len, r.dpad = 0;
-	}
-	rayBuffer->Unmap( 0, nullptr );
-	rtWidth = width, rtHeight = height;
+    if (rayBuffer) rayBuffer->Release();
+    D3D12_RESOURCE_DESC desc = BASIC_BUFFER_DESC;
+    desc.Width = sizeof( RayData ) * width * height;
+    // CPU-fillable UPLOAD staging buffer.
+    ID3D12Resource* staging = nullptr;
+    device->CreateCommittedResource( &UPLOAD_HEAP, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS( &staging ) );
+    RayData* data;
+    staging->Map( 0, nullptr, reinterpret_cast<void**>(&data) );
+    for (UINT y = 0; y < height; y++) for (UINT x = 0; x < width; x++)
+    {
+        float u = (float)x / width, v = (float)y / height;
+        float px = p1.x + u * (p2.x - p1.x) + v * (p3.x - p1.x);
+        float py = p1.y + u * (p2.y - p1.y) + v * (p3.y - p1.y);
+        float pz = p1.z + u * (p2.z - p1.z) + v * (p3.z - p1.z);
+        float dx = px - eye.x, dy = py - eye.y, dz = pz - eye.z;
+        float len = sqrtf( dx * dx + dy * dy + dz * dz );
+        RayData& r = data[y * width + x];
+        r.ox = eye.x, r.oy = eye.y, r.oz = eye.z, r.opad = 0;
+        r.dx = dx / len, r.dy = dy / len, r.dz = dz / len, r.dpad = 0;
+    }
+    staging->Unmap( 0, nullptr );
+    // DEVICE-LOCAL (VRAM) buffer the shaders actually read from on every ray.
+    device->CreateCommittedResource( &DEFAULT_HEAP, D3D12_HEAP_FLAG_NONE, &desc,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS( &rayBuffer ) );
+    rayBuffer->SetName( L"rayBuffer" );
+    // One-shot copy staging -> VRAM, then flip to a shader-readable state.
+    cmdAllocs[0]->Reset();
+    cmdList->Reset( cmdAllocs[0], nullptr );
+    cmdList->CopyResource( rayBuffer, staging );
+    D3D12_RESOURCE_BARRIER rb = { .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        .Transition = { .pResource = rayBuffer,
+            .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
+            .StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE } };
+    cmdList->ResourceBarrier( 1, &rb );
+    cmdList->Close();
+    cmdQueue->ExecuteCommandLists( 1, reinterpret_cast<ID3D12CommandList**>(&cmdList) );
+    WaitForGpu();
+    staging->Release();
+    rtWidth = width, rtHeight = height;
 }
 
 // Create the software-RT compute inputs in device-local (VRAM) memory and fill
-// them from the tinybvh BVH_GPU build via one-shot UPLOAD staging copies. These
-// buffers are touched on every node/triangle fetch during traversal, so keeping
-// them out of system memory (the UPLOAD heap, read over PCIe on a discrete GPU)
-// is the single biggest win for the software path. They are never written again
-// after this, so they stay in NON_PIXEL_SHADER_RESOURCE for the app's lifetime.
+// them from the tinybvh BVH_GPU build via one-shot UPLOAD staging copies.
 void InitBVHBuffers()
 {
 	const UINT N = triCount > 0 ? (UINT)triCount : 1;
@@ -231,7 +247,7 @@ void InitDevice()
 	IDXGIAdapter1* adapter = nullptr;
 	factory->EnumAdapterByGpuPreference( 0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS( &adapter ) );
 	// factory->EnumWarpAdapter( IID_PPV_ARGS( &adapter ) ); // uncomment for software RT
-#if 1
+#if 0
 	// DRED is independent of the debug layer and nearly free, so arm it in ALL builds.
 	ID3D12DeviceRemovedExtendedDataSettings* dred;
 	D3D12GetDebugInterface( IID_PPV_ARGS( &dred ) );
@@ -379,22 +395,44 @@ ID3D12Resource* CompactBLAS( ID3D12Resource* as )
 {
 	D3D12_GPU_VIRTUAL_ADDRESS asAddr = as->GetGPUVirtualAddress();
 	D3D12_RESOURCE_BARRIER uavBarrier = { .Type = D3D12_RESOURCE_BARRIER_TYPE_UAV, .UAV = {.pResource = as} };
+	// The postbuild-info destination must be in UNORDERED_ACCESS, which a READBACK-heap
+	// resource can never be. So emit into a small DEFAULT-heap UAV buffer, then copy that
+	// into the readback buffer the CPU maps. Writing straight into readback memory happens
+	// to work on some drivers, but when it doesn't you compact a multi-MB BLAS into a
+	// buffer sized from garbage - and the corrupt AS hangs the GPU at DispatchRays time.
+	D3D12_RESOURCE_DESC postbuildDescBuf = BASIC_BUFFER_DESC;
+	postbuildDescBuf.Width = sizeof( UINT64 );
+	postbuildDescBuf.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+	ID3D12Resource* postbuildBuffer = nullptr;
+	device->CreateCommittedResource( &DEFAULT_HEAP, D3D12_HEAP_FLAG_NONE, &postbuildDescBuf,
+		D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS( &postbuildBuffer ) );
+	postbuildBuffer->SetName( L"postbuildBuffer" );
 	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postbuildDesc = {
-		.DestBuffer = compactionSizeReadback->GetGPUVirtualAddress(),
+		.DestBuffer = postbuildBuffer->GetGPUVirtualAddress(),
 		.InfoType = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE };
 	cmdAllocs[0]->Reset();
 	cmdList->Reset( cmdAllocs[0], nullptr );
 	cmdList->ResourceBarrier( 1, &uavBarrier ); // must barrier before reading postbuild info
 	cmdList->EmitRaytracingAccelerationStructurePostbuildInfo( &postbuildDesc, 1, &asAddr );
+	D3D12_RESOURCE_BARRIER toCopySrc = { .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+		.Transition = {.pResource = postbuildBuffer,
+			.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+			.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE } };
+	cmdList->ResourceBarrier( 1, &toCopySrc );
+	cmdList->CopyBufferRegion( compactionSizeReadback, 0, postbuildBuffer, 0, sizeof( UINT64 ) );
 	cmdList->Close();
 	cmdQueue->ExecuteCommandLists( 1, reinterpret_cast<ID3D12CommandList**>(&cmdList) );
 	WaitForGpu();
+	postbuildBuffer->Release();
 	UINT64 compactedSize;
 	D3D12_RANGE readRange = { 0, sizeof( UINT64 ) }, writeRange = { 0, 0 };
 	void* mapped;
 	compactionSizeReadback->Map( 0, &readRange, &mapped );
 	compactedSize = *reinterpret_cast<UINT64*>(mapped);
 	compactionSizeReadback->Unmap( 0, &writeRange );
+	// A zero or absurd size here means the emit never landed; compacting against it
+	// would produce an acceleration structure that hangs the device on first use.
+	assert( compactedSize > 0 );
 	D3D12_RESOURCE_DESC compactDesc = BASIC_BUFFER_DESC;
 	compactDesc.Width = compactedSize;
 	compactDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -416,7 +454,12 @@ ID3D12Resource* MakeTLAS( ID3D12Resource* instances, UINT numInstances, UINT64* 
 {
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {
 		.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL,
-		.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE,
+		// ALLOW_UPDATE is mandatory: UpdateScene() refits this TLAS in-place with
+		// PERFORM_UPDATE. Without it the refit is undefined behaviour AND the runtime
+		// reports UpdateScratchDataSizeInBytes as 0, so the scratch buffer below ends
+		// up far too small and the driver scribbles past it - a nondeterministic hang.
+		.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE
+			| D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE,
 		.NumDescs = numInstances,
 		.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY,
 		.InstanceDescs = instances->GetGPUVirtualAddress() };
@@ -437,10 +480,14 @@ void InitScene()
 
 void InitTopLevel()
 {
-	UINT64 updateScratchSize;
+	UINT64 updateScratchSize = 0;
 	tlas = MakeTLAS( instances, NUM_INSTANCES, &updateScratchSize );
+	// A zero here means the TLAS was not built with ALLOW_UPDATE; clamping it to a
+	// token size (the old "WARP workaround") just hides the bug until the refit
+	// overruns the scratch buffer and takes the device with it.
+	assert( updateScratchSize > 0 );
 	D3D12_RESOURCE_DESC desc = BASIC_BUFFER_DESC;
-	desc.Width = std::max( updateScratchSize, 8ULL ); // WARP bug workaround: use 8 if the required size was reported as less
+	desc.Width = updateScratchSize;
 	desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 	device->CreateCommittedResource( &DEFAULT_HEAP, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS( &tlasUpdateScratch ) );
 }
@@ -528,7 +575,10 @@ void UpdateScene()
 		.DestAccelerationStructureData = tlas->GetGPUVirtualAddress(),
 		.Inputs = {
 			.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL,
-			.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE,
+			// Must match the flags the TLAS was originally built with, plus PERFORM_UPDATE.
+			.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE
+				| D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE
+				| D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE,
 			.NumDescs = NUM_INSTANCES, .DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY,
 			.InstanceDescs = instances->GetGPUVirtualAddress()},
 		.SourceAccelerationStructureData = tlas->GetGPUVirtualAddress(),
@@ -686,10 +736,10 @@ void Render()
 void Init( HWND hwnd )
 {
 	InitDevice();
+	InitCommand();
 	InitQueryHeap();
 	InitCompactionReadback();
 	InitSurfaces( hwnd );
-	InitCommand();
 	InitMeshes();
 	InitBVHBuffers(); // dummy software-RT input buffers (fill from tinybvh)
 	UpdateRayBuffer( rtWidth, rtHeight );
