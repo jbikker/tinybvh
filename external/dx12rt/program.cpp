@@ -1,6 +1,6 @@
 // heavily based on Laura Andelare's great DXR tutorial:
 // https://landelare.github.io/2023/02/18/dxr-tutorial.html
-// Sonnet 5 helped (a lot) with extensions and improvements.
+// Sonnet 5 and Claude helped (a lot) with extensions and improvements.
 
 #define NOMINMAX
 #include <DirectXMath.h> // for XMMATRIX
@@ -8,6 +8,7 @@
 #include <dxgi1_6.h>
 #include "shader.fxh"
 #include "tiny.fxh"
+#include "tiny4.fxh"
 #include <cassert>
 #include <fstream>
 
@@ -18,6 +19,7 @@ extern "C" { __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #pragma comment(lib, "d3d12")
 #pragma comment(lib, "dxgi")
 
+constexpr UINT rtWidth = 1024, rtHeight = 1024;
 constexpr DXGI_SAMPLE_DESC NO_AA = { .Count = 1, .Quality = 0 };
 constexpr D3D12_HEAP_PROPERTIES UPLOAD_HEAP = { .Type = D3D12_HEAP_TYPE_UPLOAD };
 constexpr D3D12_HEAP_PROPERTIES DEFAULT_HEAP = { .Type = D3D12_HEAP_TYPE_DEFAULT };
@@ -42,18 +44,23 @@ ID3D12GraphicsCommandList4* cmdList;
 D3D12_RAYTRACING_INSTANCE_DESC* instanceData;
 ID3D12RootSignature* rootSignature;
 ID3D12StateObject* pso;
-ID3D12PipelineState* computePso;
+ID3D12PipelineState* computePso, * computePso4;
 ID3D12QueryHeap* queryHeap;
 HANDLE fenceEvent = nullptr;
-UINT rtWidth = 0, rtHeight = 0;
+
+// The three ray tracing backends that are cycled through, one per frame.
+enum Backend { BACKEND_DXR = 0, BACKEND_BVH_GPU, BACKEND_BVH4_GPU, BACKEND_COUNT };
+static const char* backendName[BACKEND_COUNT] = { "DXR", "BVH_GPU", "BVH4_GPU" };
 
 #define TINYBVH_IMPLEMENTATION
 #include "../../tiny_bvh.h"
 using namespace tinybvh;
-BVH_GPU bvh;
 
-static bvhvec3 eye, p1, p2, p3;
-struct RayData { float ox, oy, oz, opad; float dx, dy, dz, dpad; }; // 32 bytes
+// One high-quality (SBVH) BVH2 is built and both software layouts are derived from it.
+BVH bvh2;
+BVH_GPU bvh;
+MBVH<4> mbvh4;
+BVH4_GPU bvh4;
 
 // tinybvh BVH_GPU node.
 struct GPUBVHNode
@@ -64,17 +71,14 @@ struct GPUBVHNode
 	bvhvec3 rmax; unsigned firstTri; // total: 64 bytes
 };
 
-// Software-RT compute inputs. The compute shader (tiny.hlsl) reads these on
-// every step of BVH traversal, so they live in DEVICE-LOCAL (VRAM) memory, not
-// on the UPLOAD heap. InitBVHBuffers() fills UPLOAD staging buffers from the
-// tinybvh BVH_GPU build, copies them here once, then releases the staging.
+// Software-RT compute inputs.
 ID3D12Resource* bvhNodeBuffer = nullptr, * bvhIdxBuffer = nullptr, * bvhTriBuffer = nullptr;
+ID3D12Resource* bvh4DataBuffer = nullptr;
 
 // Scene management - Append a file, with optional position, scale and color override, tinyfied
 int triCount = 0;
 bvhvec4* tris = 0;
 bvhvec3* t3 = 0;
-bvhvec4* t4 = 0;
 unsigned* vidx = 0;
 void AddMesh( const char* file, int N = 0 )
 {
@@ -98,30 +102,22 @@ void WaitForGpu()
 	WaitForSingleObject( fenceEvent, INFINITE );
 }
 
-void UpdateRayBuffer( UINT width, UINT height )
+void UpdateRayBuffer()
 {
     if (rayBuffer) rayBuffer->Release();
     D3D12_RESOURCE_DESC desc = BASIC_BUFFER_DESC;
-    desc.Width = sizeof( RayData ) * width * height;
+    desc.Width = 32 * rtWidth * rtHeight;
     // CPU-fillable UPLOAD staging buffer.
     ID3D12Resource* staging = nullptr;
     device->CreateCommittedResource( &UPLOAD_HEAP, D3D12_HEAP_FLAG_NONE, &desc,
         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS( &staging ) );
-    RayData* data;
+    float* data;
     staging->Map( 0, nullptr, reinterpret_cast<void**>(&data) );
-    for (UINT y = 0; y < height; y++) for (UINT x = 0; x < width; x++)
-    {
-        float u = (float)x / width, v = (float)y / height;
-        float px = p1.x + u * (p2.x - p1.x) + v * (p3.x - p1.x);
-        float py = p1.y + u * (p2.y - p1.y) + v * (p3.y - p1.y);
-        float pz = p1.z + u * (p2.z - p1.z) + v * (p3.z - p1.z);
-        float dx = px - eye.x, dy = py - eye.y, dz = pz - eye.z;
-        float len = sqrtf( dx * dx + dy * dy + dz * dz );
-        RayData& r = data[y * width + x];
-        r.ox = eye.x, r.oy = eye.y, r.oz = eye.z, r.opad = 0;
-        r.dx = dx / len, r.dy = dy / len, r.dz = dz / len, r.dpad = 0;
-    }
-    staging->Unmap( 0, nullptr );
+	FILE* f = fopen( "raysets/view3rays.bin", "rb" );
+	memset( data, 0, 32 * 1024 * 1024 );
+	for( int i = 0; i < rtWidth * rtHeight; i++ ) fread( data + i * 8, 4, 3, f );
+	for( int i = 0; i < rtWidth * rtHeight; i++ ) fread( data + i * 8 + 4, 4, 3, f );
+	staging->Unmap( 0, nullptr );
     // DEVICE-LOCAL (VRAM) buffer the shaders actually read from on every ray.
     device->CreateCommittedResource( &DEFAULT_HEAP, D3D12_HEAP_FLAG_NONE, &desc,
         D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS( &rayBuffer ) );
@@ -139,11 +135,8 @@ void UpdateRayBuffer( UINT width, UINT height )
     cmdQueue->ExecuteCommandLists( 1, reinterpret_cast<ID3D12CommandList**>(&cmdList) );
     WaitForGpu();
     staging->Release();
-    rtWidth = width, rtHeight = height;
 }
 
-// Create the software-RT compute inputs in device-local (VRAM) memory and fill
-// them from the tinybvh BVH_GPU build via one-shot UPLOAD staging copies.
 void InitBVHBuffers()
 {
 	// UPLOAD-heap staging: CPU-fillable, released once the copy has completed.
@@ -172,15 +165,20 @@ void InitBVHBuffers()
 	const UINT64 nodeBytes = (UINT64)bvh.allocatedNodes * sizeof( GPUBVHNode );
 	const UINT64 idxBytes = (UINT64)bvh.bvh.idxCount * sizeof( unsigned );
 	const UINT64 triBytes = (UINT64)triCount * 3 * sizeof( bvhvec4 );
+	// BVH4_GPU counts storage in 16-byte 'blocks'; usedBlocks is what traversal touches.
+	const UINT64 bvh4Bytes = (UINT64)bvh4.usedBlocks * sizeof( bvhvec4 );
 	ID3D12Resource* nodeStaging = makeStaging( nodeBytes, bvh.bvhNode, nodeBytes );
 	ID3D12Resource* idxStaging = makeStaging( idxBytes, bvh.bvh.primIdx, idxBytes );
-	ID3D12Resource* triStaging = makeStaging( triBytes, t4, triBytes );
+	ID3D12Resource* triStaging = makeStaging( triBytes, tris, triBytes );
+	ID3D12Resource* bvh4Staging = makeStaging( bvh4Bytes, bvh4.bvh4Data, bvh4Bytes );
 	bvhNodeBuffer = makeDefault( nodeBytes );
 	bvhIdxBuffer = makeDefault( idxBytes );
 	bvhTriBuffer = makeDefault( triBytes );
+	bvh4DataBuffer = makeDefault( bvh4Bytes );
 	bvhNodeBuffer->SetName( L"bvhNodeBuffer" );
 	bvhIdxBuffer->SetName( L"bvhIdxBuffer" );
 	bvhTriBuffer->SetName( L"bvhTriBuffer" );
+	bvh4DataBuffer->SetName( L"bvh4DataBuffer" );
 	// copy staging -> VRAM, then flip the VRAM buffers to a compute-shader-readable state. 
 	// Uses slot 0's allocator and fully drains the GPU, matching the other pre-render-loop setup helpers.
 	cmdAllocs[0]->Reset();
@@ -188,35 +186,33 @@ void InitBVHBuffers()
 	cmdList->CopyResource( bvhNodeBuffer, nodeStaging );
 	cmdList->CopyResource( bvhIdxBuffer, idxStaging );
 	cmdList->CopyResource( bvhTriBuffer, triStaging );
+	cmdList->CopyResource( bvh4DataBuffer, bvh4Staging );
 	auto toSRV = []( ID3D12Resource* res ) {
 		D3D12_RESOURCE_BARRIER rb = { .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
 			.Transition = {.pResource = res,
 				.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
 				.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE } };
 		return rb; };
-	D3D12_RESOURCE_BARRIER barriers[] = { toSRV( bvhNodeBuffer ), toSRV( bvhIdxBuffer ), toSRV( bvhTriBuffer ) };
-	cmdList->ResourceBarrier( 3, barriers );
+	D3D12_RESOURCE_BARRIER barriers[] = {
+		toSRV( bvhNodeBuffer ), toSRV( bvhIdxBuffer ), toSRV( bvhTriBuffer ), toSRV( bvh4DataBuffer ) };
+	cmdList->ResourceBarrier( (UINT)std::size( barriers ), barriers );
 	cmdList->Close();
 	cmdQueue->ExecuteCommandLists( 1, reinterpret_cast<ID3D12CommandList**>(&cmdList) );
 	WaitForGpu();
 	nodeStaging->Release();
 	idxStaging->Release();
 	triStaging->Release();
+	bvh4Staging->Release();
 }
 
 void Resize( HWND hwnd )
-{
-	RECT rect;
-	GetClientRect( hwnd, &rect );
-	UINT width = std::max<UINT>( rect.right - rect.left, 1 );
-	UINT height = std::max<UINT>( rect.bottom - rect.top, 1 );
+{	
 	WaitForGpu(); // must fully drain before touching swapchain buffers
-	swapChain->ResizeBuffers( 0, width, height, DXGI_FORMAT_UNKNOWN, 0 );
+	swapChain->ResizeBuffers( 0, rtWidth, rtHeight, DXGI_FORMAT_UNKNOWN, 0 );
 	if (renderTarget) renderTarget->Release();
 	D3D12_RESOURCE_DESC rtDesc = {
 		.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-		.Width = width, .Height = height,
-		.DepthOrArraySize = 1,
+		.Width = rtWidth, .Height = rtHeight, .DepthOrArraySize = 1,
 		.MipLevels = 1, .Format = DXGI_FORMAT_R8G8B8A8_UNORM, .SampleDesc = NO_AA,
 		.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS };
 	device->CreateCommittedResource( &DEFAULT_HEAP, D3D12_HEAP_FLAG_NONE, &rtDesc,
@@ -224,7 +220,7 @@ void Resize( HWND hwnd )
 	D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {
 		.Format = DXGI_FORMAT_R8G8B8A8_UNORM, .ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D };
 	device->CreateUnorderedAccessView( renderTarget, nullptr, &uavDesc, uavHeap->GetCPUDescriptorHandleForHeapStart() );
-	UpdateRayBuffer( width, height );
+	UpdateRayBuffer();
 	for (UINT i = 0; i < FRAME_COUNT; i++) frameFenceValues[i] = 0;
 }
 
@@ -245,21 +241,6 @@ void InitDevice()
 	IDXGIAdapter1* adapter = nullptr;
 	factory->EnumAdapterByGpuPreference( 0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS( &adapter ) );
 	// factory->EnumWarpAdapter( IID_PPV_ARGS( &adapter ) ); // uncomment for software RT
-#if 0
-	// DRED is independent of the debug layer and nearly free, so arm it in ALL builds.
-	ID3D12DeviceRemovedExtendedDataSettings* dred;
-	D3D12GetDebugInterface( IID_PPV_ARGS( &dred ) );
-	dred->SetAutoBreadcrumbsEnablement( D3D12_DRED_ENABLEMENT_FORCED_ON );
-	// dred->SetPageFaultEnablement( D3D12_DRED_ENABLEMENT_FORCED_ON );
-	dred->Release();
-#endif
-#if 0 // #ifdef _DEBUG
-	// Enable the debug layer.
-	ID3D12Debug1* dbg;
-	D3D12GetDebugInterface( IID_PPV_ARGS( &dbg ) );
-	dbg->EnableDebugLayer();
-	// dbg->SetEnableGPUBasedValidation( TRUE ); // on-demand only; TDRs the SW traversal
-#endif
 	// create device
 	D3D12CreateDevice( adapter, D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS( &device ) );
 	adapter->Release();
@@ -271,17 +252,22 @@ void InitDevice()
 
 void InitComputePipeline()
 {
+	// tiny.hlsl, entry point 'TraceRays' - BVH_GPU (Aila & Laine) traversal.
 	D3D12_COMPUTE_PIPELINE_STATE_DESC desc = { .pRootSignature = rootSignature,
-		.CS = {.pShaderBytecode = compiledComputeShader, .BytecodeLength = std::size( compiledComputeShader ) } };
+		.CS = {.pShaderBytecode = compiledComputeShader1, .BytecodeLength = std::size( compiledComputeShader1 ) } };
 	device->CreateComputePipelineState( &desc, IID_PPV_ARGS( &computePso ) );
+	// tiny4.hlsl, entry point 'TraceRays_4_wide' - BVH4_GPU traversal. tiny4.fxh is
+	// expected to expose its blob as 'compiledComputeShader2', mirroring tiny.fxh.
+	D3D12_COMPUTE_PIPELINE_STATE_DESC desc4 = { .pRootSignature = rootSignature,
+		.CS = {.pShaderBytecode = compiledComputeShader2, .BytecodeLength = std::size( compiledComputeShader2 ) } };
+	device->CreateComputePipelineState( &desc4, IID_PPV_ARGS( &computePso4 ) );
 }
 
 void InitSurfaces( HWND hwnd )
 {
 	DXGI_SWAP_CHAIN_DESC1 scDesc = {
-		.Format = DXGI_FORMAT_R8G8B8A8_UNORM,
-		.SampleDesc = NO_AA, .BufferCount = FRAME_COUNT,
-		.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
+		.Format = DXGI_FORMAT_R8G8B8A8_UNORM, .SampleDesc = NO_AA, 
+		.BufferCount = FRAME_COUNT, .SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
 	};
 	IDXGISwapChain1* swapChain1;
 	factory->CreateSwapChainForHwnd( cmdQueue, hwnd, &scDesc, nullptr, nullptr, &swapChain1 );
@@ -299,7 +285,7 @@ void InitCommand()
 {
 	for (UINT i = 0; i < FRAME_COUNT; i++)
 		device->CreateCommandAllocator( D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS( &cmdAllocs[i] ) );
-	// Command list is created against slot 0's allocator; it gets Reset() against
+	// command list is created against slot 0's allocator; it gets Reset() against
 	// the correct slot's allocator at the top of every Render() call anyway.
 	device->CreateCommandList1( 0, D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_LIST_FLAG_NONE, IID_PPV_ARGS( &cmdList ) );
 }
@@ -318,32 +304,16 @@ void InitMeshes()
 		return res;
 		};
 	AddMesh( "../../testdata/cryteksponza.bin" );
-#if 1
-	// view1 for sponza
-	eye = { -15.2399998f, 21.5000000f, 2.53999996f };
-	p1 = { -12.8712616f, 21.3436279f, 2.60801458f };
-	p2 = { -13.6628551f, 21.3436279f, 0.771338582f };
-	p3 = { -13.5145569f, 19.9051208f, 2.88527060f };
-#elif 1
-	// view2 for sponza
-	eye = { -34.0000000f, 5.00000000f, 11.2600002f };
-	p1 = { -31.8041172f, 5.85805798f, 11.5460672f };
-	p2 = { -32.4691925f, 5.85805798f, 9.65988636f };
-	p3 = { -31.7600574f, 4.25874043f, 11.5305319f };
-#else
-	// view3 for sponza
-	eye = { -1.29999995f, 4.96000004f, 12.2799997f };
-	p1 = { -3.09493661f, 5.86036921f, 11.0121126f };
-	p2 = { -3.37909675f, 5.86036921f, 12.9918222f };
-	p3 = { -3.17523217f, 4.26242685f, 11.0005865f };
-#endif
 	t3 = new bvhvec3[triCount * 3], vidx = new unsigned[triCount * 3];
-	t4 = new bvhvec4[triCount * 3];
-	for (int i = 0; i < triCount * 3; i++)
-		t3[i].x = tris[i].x, t3[i].y = tris[i].y, t3[i].z = tris[i].z, vidx[i] = i,
-		t4[i].x = tris[i].x, t4[i].y = tris[i].y, t4[i].z = tris[i].z, t4[i].w = 0;
+	for (int i = 0; i < triCount * 3; i++) t3[i].x = tris[i].x, t3[i].y = tris[i].y, t3[i].z = tris[i].z, vidx[i] = i;
 	meshVB = makeAndCopy( (float*)t3, triCount * 36 ), meshIB = makeAndCopy( (void*)vidx, triCount * 3 * 4 );
-	bvh.BuildHQ( t4, triCount );
+	// One spatial-split build, converted to both GPU layouts.
+	bvh2.BuildHQ( tris, triCount );
+	bvh.ConvertFrom( bvh2, true );    // Aila & Laine 64-byte nodes + primIdx + separate tris
+	mbvh4.ConvertFrom( bvh2, true );  // collapse the BVH2 into a 4-wide BVH
+	bvh4.ConvertFrom( mbvh4, true );  // quantize into the single-blob BVH4_GPU layout
+	printf( "BVH2: %u nodes, %u prim refs (%u tris)\n", bvh.usedNodes, bvh.bvh.idxCount, triCount );
+	printf( "BVH4_GPU: %u blocks (%.1fMB)\n", bvh4.usedBlocks, bvh4.usedBlocks * 16 / (1024.0f * 1024.0f) );
 }
 
 ID3D12Resource* MakeAccelerationStructure( const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, UINT64* updateScratchSize = nullptr )
@@ -393,11 +363,6 @@ ID3D12Resource* CompactBLAS( ID3D12Resource* as )
 {
 	D3D12_GPU_VIRTUAL_ADDRESS asAddr = as->GetGPUVirtualAddress();
 	D3D12_RESOURCE_BARRIER uavBarrier = { .Type = D3D12_RESOURCE_BARRIER_TYPE_UAV, .UAV = {.pResource = as} };
-	// The postbuild-info destination must be in UNORDERED_ACCESS, which a READBACK-heap
-	// resource can never be. So emit into a small DEFAULT-heap UAV buffer, then copy that
-	// into the readback buffer the CPU maps. Writing straight into readback memory happens
-	// to work on some drivers, but when it doesn't you compact a multi-MB BLAS into a
-	// buffer sized from garbage - and the corrupt AS hangs the GPU at DispatchRays time.
 	D3D12_RESOURCE_DESC postbuildDescBuf = BASIC_BUFFER_DESC;
 	postbuildDescBuf.Width = sizeof( UINT64 );
 	postbuildDescBuf.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -428,9 +393,6 @@ ID3D12Resource* CompactBLAS( ID3D12Resource* as )
 	compactionSizeReadback->Map( 0, &readRange, &mapped );
 	compactedSize = *reinterpret_cast<UINT64*>(mapped);
 	compactionSizeReadback->Unmap( 0, &writeRange );
-	// A zero or absurd size here means the emit never landed; compacting against it
-	// would produce an acceleration structure that hangs the device on first use.
-	assert( compactedSize > 0 );
 	D3D12_RESOURCE_DESC compactDesc = BASIC_BUFFER_DESC;
 	compactDesc.Width = compactedSize;
 	compactDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -452,14 +414,9 @@ ID3D12Resource* MakeTLAS( ID3D12Resource* instances, UINT numInstances, UINT64* 
 {
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {
 		.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL,
-		// ALLOW_UPDATE is mandatory: UpdateScene() refits this TLAS in-place with
-		// PERFORM_UPDATE. Without it the refit is undefined behaviour AND the runtime
-		// reports UpdateScratchDataSizeInBytes as 0, so the scratch buffer below ends
-		// up far too small and the driver scribbles past it - a nondeterministic hang.
 		.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE
 			| D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE,
-		.NumDescs = numInstances,
-		.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY,
+		.NumDescs = numInstances, .DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY,
 		.InstanceDescs = instances->GetGPUVirtualAddress() };
 	return MakeAccelerationStructure( inputs, updateScratchSize );
 }
@@ -480,10 +437,6 @@ void InitTopLevel()
 {
 	UINT64 updateScratchSize = 0;
 	tlas = MakeTLAS( instances, NUM_INSTANCES, &updateScratchSize );
-	// A zero here means the TLAS was not built with ALLOW_UPDATE; clamping it to a
-	// token size (the old "WARP workaround") just hides the bug until the refit
-	// overruns the scratch buffer and takes the device with it.
-	assert( updateScratchSize > 0 );
 	D3D12_RESOURCE_DESC desc = BASIC_BUFFER_DESC;
 	desc.Width = updateScratchSize;
 	desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -500,7 +453,8 @@ void InitRootSignature()
 	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 1, .RegisterSpace = 0}}, // t1: ray buffer (DXR + compute)
 	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 0, .RegisterSpace = 1}}, // t0 space1: BVH nodes
 	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 1, .RegisterSpace = 1}}, // t1 space1: primIdx
-	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 2, .RegisterSpace = 1}} // t2 space1: triangles
+	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 2, .RegisterSpace = 1}}, // t2 space1: triangles
+	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 3, .RegisterSpace = 1}} // t3 space1: BVH4_GPU blob
 	};
 	D3D12_ROOT_SIGNATURE_DESC desc = { .NumParameters = std::size( params ), .pParameters = params };
 	ID3DBlob* blob;
@@ -587,32 +541,6 @@ void UpdateScene()
 	cmdList->ResourceBarrier( 1, &barrier );
 }
 
-// On device removal, dump DRED breadcrumbs + the faulting GPU virtual address so
-// the crash is diagnosable instead of a bare __debugbreak. DRED is armed for debug
-// builds in InitDevice(); in release these queries just return empty data.
-void ReportDeviceRemoval()
-{
-	printf( "device removed: 0x%08X\n", device->GetDeviceRemovedReason() );
-	ID3D12DeviceRemovedExtendedData* dred = nullptr;
-	if (FAILED( device->QueryInterface( IID_PPV_ARGS( &dred ) ) ) || !dred) return;
-	D3D12_DRED_PAGE_FAULT_OUTPUT pf = {};
-	if (SUCCEEDED( dred->GetPageFaultAllocationOutput( &pf ) ))
-	{
-		printf( "  page fault VA: 0x%llX\n", (unsigned long long)pf.PageFaultVA );
-		for (auto* n = pf.pHeadExistingAllocationNode; n; n = n->pNext)
-			printf( "    inside live allocation: %ls\n", n->ObjectNameW ? n->ObjectNameW : L"<unnamed>" );
-		for (auto* n = pf.pHeadRecentFreedAllocationNode; n; n = n->pNext)
-			printf( "    inside recently-freed allocation: %ls\n", n->ObjectNameW ? n->ObjectNameW : L"<unnamed>" );
-	}
-	D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT bc = {};
-	if (SUCCEEDED( dred->GetAutoBreadcrumbsOutput( &bc ) ))
-		for (auto* n = bc.pHeadAutoBreadcrumbNode; n; n = n->pNext)
-			printf( "  breadcrumbs on %ls: %u/%u ops completed\n",
-				n->pCommandListDebugNameW ? n->pCommandListDebugNameW : L"<cmdlist>",
-				n->pLastBreadcrumbValue ? *n->pLastBreadcrumbValue : 0u, n->BreadcrumbCount );
-	dred->Release();
-}
-
 void Render()
 {
 	UINT frameIndex = swapChain->GetCurrentBackBufferIndex();
@@ -622,11 +550,10 @@ void Render()
 		WaitForSingleObject( fenceEvent, INFINITE );
 	}
 	UINT baseSlot = frameIndex * 2;
-	// Alternate ray-tracing backends per frame so the two can be compared directly:
-	// even frames run the software (compute) path, odd frames run the hardware (DXR) path.
+	// Round-robin the ray tracing backends.
 	static UINT64 frameCounter = 0;
-	static bool slotIsSoftware[FRAME_COUNT] = {}; // which backend last ran in each frame slot
-	bool useSoftware = (frameCounter & 1) == 0;
+	static int slotBackend[FRAME_COUNT] = {}; // which backend last ran in each frame slot
+	const int backend = (int)(frameCounter % BACKEND_COUNT);
 	if (frameFenceValues[frameIndex] != 0)
 	{
 		UINT64* timestamps = nullptr;
@@ -634,7 +561,8 @@ void Render()
 		HRESULT hr = queryResultBuffer->Map( 0, &readRange, reinterpret_cast<void**>(&timestamps) );
 		if (FAILED( hr ) || !timestamps)
 		{
-			if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG) ReportDeviceRemoval();
+			if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG) 
+				printf( "device removed: 0x%08X\n", device->GetDeviceRemovedReason() );
 			else printf( "Map failed: 0x%08X\n", hr );
 			__debugbreak();
 		}
@@ -646,39 +574,44 @@ void Render()
 		double rtTime = static_cast<double>(endTimestamp - startTimestamp) / static_cast<double>(frequency);
 		D3D12_RESOURCE_DESC rtDescForTiming = renderTarget->GetDesc();
 		double raysPerSecond = (rtDescForTiming.Width * rtDescForTiming.Height) / rtTime;
-		bool wasSoftware = slotIsSoftware[frameIndex]; // which backend produced this timestamp
-		static double smoothed[2] = { 0, 0 }; // [0] = hardware, [1] = software
-		static int frames[2] = { 0, 0 };
-		int k = wasSoftware ? 1 : 0;
+		const int k = slotBackend[frameIndex]; // which backend produced this timestamp
+		static double smoothed[BACKEND_COUNT] = {};
+		static int frames[BACKEND_COUNT] = {};
 		if (++frames[k] == 1) smoothed[k] = raysPerSecond;
 		else if (frames[k] < 10) smoothed[k] = 0.9 * smoothed[k] + 0.1 * raysPerSecond;
 		else smoothed[k] = 0.99 * smoothed[k] + 0.01 * raysPerSecond;
-		static float lastHw = 0, lastSw = 0;
-		if (wasSoftware)
-		{
-			lastSw = (float)(smoothed[k] / 1000000.0);
-			printf( "SW: %.4fms (%.1fMRays/s avg, %.1f%%)\n", (float)rtTime * 1000.0f, lastSw, lastSw * 100 / lastHw );
-		}
+		// DXR is the reference; report the software kernels as a fraction of it.
+		const double ref = smoothed[BACKEND_DXR];
+		if (k == BACKEND_DXR || ref <= 0.0)
+			printf( "%s: %6.1f MRays/s",
+				backendName[k], smoothed[k] / 1e6 );
 		else
-		{
-			lastHw = (float)(smoothed[k] / 1000000.0);
-			printf( "HW: %.4fms (%.1fMRays/s avg) - ", (float)rtTime * 1000.0f, lastHw );
-		}
+			printf( "%s: %6.1f MRays/s, %4.1f%% of DXR",
+				backendName[k], smoothed[k] / 1e6, 100.0 * smoothed[k] / ref );
+		if (k == 2) printf( "\n" ); else printf( "; " );
 	}
 	cmdAllocs[frameIndex]->Reset();
 	cmdList->Reset( cmdAllocs[frameIndex], nullptr );
 	static bool sceneDirty = true;
 	if (sceneDirty) { UpdateScene(); sceneDirty = false; }
-	if (useSoftware)
+	if (backend != BACKEND_DXR)
 	{
-		cmdList->SetPipelineState( computePso );
+		// Both software kernels share the root signature, the ray buffer and the
+		// render target UAV; they differ only in the PSO and the BVH bindings.
+		const bool fourWide = (backend == BACKEND_BVH4_GPU);
+		cmdList->SetPipelineState( fourWide ? computePso4 : computePso );
 		cmdList->SetComputeRootSignature( rootSignature );
 		cmdList->SetDescriptorHeaps( 1, &uavHeap );
 		cmdList->SetComputeRootDescriptorTable( 0, uavHeap->GetGPUDescriptorHandleForHeapStart() );
-		cmdList->SetComputeRootShaderResourceView( 2, rayBuffer->GetGPUVirtualAddress() );     // t1: rays
-		cmdList->SetComputeRootShaderResourceView( 3, bvhNodeBuffer->GetGPUVirtualAddress() ); // t0 space1: BVH nodes
-		cmdList->SetComputeRootShaderResourceView( 4, bvhIdxBuffer->GetGPUVirtualAddress() );  // t1 space1: primIdx
-		cmdList->SetComputeRootShaderResourceView( 5, bvhTriBuffer->GetGPUVirtualAddress() );  // t2 space1: triangles
+		cmdList->SetComputeRootShaderResourceView( 2, rayBuffer->GetGPUVirtualAddress() );         // t1: rays
+		if (fourWide)
+			cmdList->SetComputeRootShaderResourceView( 6, bvh4DataBuffer->GetGPUVirtualAddress() ); // t3 space1: BVH4_GPU blob
+		else
+		{
+			cmdList->SetComputeRootShaderResourceView( 3, bvhNodeBuffer->GetGPUVirtualAddress() ); // t0 space1: BVH nodes
+			cmdList->SetComputeRootShaderResourceView( 4, bvhIdxBuffer->GetGPUVirtualAddress() );  // t1 space1: primIdx
+			cmdList->SetComputeRootShaderResourceView( 5, bvhTriBuffer->GetGPUVirtualAddress() );  // t2 space1: triangles
+		}
 		D3D12_RESOURCE_DESC rtDesc = renderTarget->GetDesc();
 		cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot );
 		cmdList->Dispatch( (static_cast<UINT>(rtDesc.Width) + 7) / 8, (rtDesc.Height + 7) / 8, 1 );
@@ -709,7 +642,7 @@ void Render()
 		cmdList->DispatchRays( &dispatchDesc );
 		cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot + 1 );
 	}
-	slotIsSoftware[frameIndex] = useSoftware; // for the timing readback next time this slot runs
+	slotBackend[frameIndex] = backend; // for the timing readback next time this slot runs
 	frameCounter++;
 	cmdList->ResolveQueryData( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot, 2, queryResultBuffer, baseSlot * sizeof( UINT64 ) );
 	swapChain->GetBuffer( frameIndex, IID_PPV_ARGS( &backBuffer ) );
@@ -739,8 +672,8 @@ void Init( HWND hwnd )
 	InitCompactionReadback();
 	InitSurfaces( hwnd );
 	InitMeshes();
-	InitBVHBuffers(); // dummy software-RT input buffers (fill from tinybvh)
-	UpdateRayBuffer( rtWidth, rtHeight );
+	InitBVHBuffers();
+	UpdateRayBuffer();
 	blas = CompactBLAS( MakeBLAS( meshVB, triCount * 9, meshIB, triCount * 3 ) );
 	InitScene();
 	InitTopLevel();
@@ -755,7 +688,7 @@ int main()
 	SetProcessDpiAwarenessContext( DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 /* or DPI_AWARENESS_CONTEXT_UNAWARE */ );
 	WNDCLASSW wcw = { .lpfnWndProc = &WndProc, .hCursor = LoadCursor( nullptr, IDC_ARROW ), .lpszClassName = L"μDXR" };
 	RegisterClassW( &wcw );
-	HWND hwnd = CreateWindowExW( 0, L"μDXR", L"_DXR", WS_VISIBLE | WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1024, 1024, 0, 0, 0, 0 );
+	HWND hwnd = CreateWindowExW( 0, L"μDXR", L"_DXR", WS_VISIBLE | WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, rtWidth, rtHeight, 0, 0, 0, 0 );
 	Init( hwnd );
 	for (MSG msg;;)
 	{

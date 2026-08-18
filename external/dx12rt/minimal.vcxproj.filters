@@ -6,5 +6,6 @@
   <ItemGroup>
     <FxCompile Include="shader.hlsl" />
     <FxCompile Include="tiny.hlsl" />
+    <FxCompile Include="tiny4.hlsl" />
   </ItemGroup>
 </Project>
