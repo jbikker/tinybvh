@@ -24,7 +24,7 @@ namespace tinybvh
 
 extern RTCScene embreeScene;
 
-Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays, ExperimentFlags expFlags, const char* view )
+Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays, ExperimentFlags expFlags, const char* view, const char* rayFile )
 {
 	if (rays == RaySet::UNSPECIFIED)
 	{
@@ -64,6 +64,11 @@ Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, Ra
 		{
 			tgaFile = new char[512];
 			strncpy( tgaFile, view, 512 );
+		}
+		// Save the set of rays if requested.
+		if (rayFile)
+		{
+			cachedRaySet[raySet]->WriteToFile( rayFile );
 		}
 	}
 }

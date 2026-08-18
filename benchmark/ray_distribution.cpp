@@ -177,6 +177,24 @@ RayDistribution::~RayDistribution()
 	O = 0, D = 0, tmin = 0, tmax = 0;
 }
 
+unsigned int DeTile( unsigned int i )
+{
+	int x = i & 1023, y = i >> 10;
+	int tx = x / 4, ty = y / 4, tile = tx + ty * 256;
+	int posInTile = (x & 3) + (y & 3) * 4;
+	return tile * 16 + posInTile;
+}
+
+void RayDistribution::WriteToFile( const char* fileName )
+{
+	FILE* f = fopen( fileName, "wb" );
+	for( int i = 0; i < rayCount; i++ ) fwrite( O + DeTile( i ), sizeof( bvhvec3 ), 1, f );
+	for( int i = 0; i < rayCount; i++ ) fwrite( D + DeTile( i ), sizeof( bvhvec3 ), 1, f );
+	for( int i = 0; i < rayCount; i++ ) fwrite( tmin + DeTile( i ), sizeof( float ), 1, f );
+	for( int i = 0; i < rayCount; i++ ) fwrite( tmax + DeTile( i ), sizeof( float ), 1, f );
+	fclose( f );
+}
+
 void RayDistribution::UpdateViewPyramid( const bvhvec3 camPos, const bvhvec3 camDir )
 {
 	eye = camPos;

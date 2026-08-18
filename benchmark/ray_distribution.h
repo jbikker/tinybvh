@@ -22,6 +22,7 @@ public:
 	RayDistribution( RaySet r, PrimitiveSet* p );
 	~RayDistribution();
 	char* GetDescription() { return desc; }
+	void WriteToFile( const char* fileName );
 	RaySet raySet = RaySet::UNSPECIFIED;
 	uint32_t rayCount = 0;
 	bvhvec3* O = 0;			// ray origins

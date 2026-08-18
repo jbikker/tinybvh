@@ -30,7 +30,7 @@ struct Timer
 class Experiment
 {
 public:
-	Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays = RaySet::UNSPECIFIED, ExperimentFlags = DEFAULT, const char* view = 0 );
+	Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays = RaySet::UNSPECIFIED, ExperimentFlags = DEFAULT, const char* view = 0, const char* rayFile = 0 );
 	void Run();
 private:
 	void RunBuildExperiment();
