@@ -31,6 +31,13 @@ int main()
 
 #if 1 // run one block at a time to reduce throttling effects.
 
+	// save ray distributions
+	experiment.push_back( new Experiment( BVH8_WIVE, NO_FLAGS, scene, PRIMARY_VIEW1, DEFAULT, "view1.tga", "view1rays.bin" ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, NO_FLAGS, scene, PRIMARY_VIEW2, DEFAULT, "view2.tga", "view2rays.bin" ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, NO_FLAGS, scene, PRIMARY_VIEW3, DEFAULT, "view3.tga", "view3rays.bin" ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, NO_FLAGS, scene, AO_RAYS, DEFAULT, "ao.tga", "aorays.bin" ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, NO_FLAGS, scene, FIRST_BOUNCE, DEFAULT, "diff.tga", "diffrays.bin" ) );
+
 	// 1. BVH construction
 	// PART 1 - TinyBVH, from ultra-fast to ultra-quality
 	experiment.push_back( new Experiment( BVH2, AVXBUILD, scene ) );
