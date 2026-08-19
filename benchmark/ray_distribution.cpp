@@ -188,10 +188,10 @@ unsigned int DeTile( unsigned int i )
 void RayDistribution::WriteToFile( const char* fileName )
 {
 	FILE* f = fopen( fileName, "wb" );
-	for( int i = 0; i < rayCount; i++ ) fwrite( O + DeTile( i ), sizeof( bvhvec3 ), 1, f );
-	for( int i = 0; i < rayCount; i++ ) fwrite( D + DeTile( i ), sizeof( bvhvec3 ), 1, f );
-	for( int i = 0; i < rayCount; i++ ) fwrite( tmin + DeTile( i ), sizeof( float ), 1, f );
-	for( int i = 0; i < rayCount; i++ ) fwrite( tmax + DeTile( i ), sizeof( float ), 1, f );
+	for( uint32_t i = 0; i < rayCount; i++ ) fwrite( O + DeTile( i ), sizeof( bvhvec3 ), 1, f );
+	for( uint32_t i = 0; i < rayCount; i++ ) fwrite( D + DeTile( i ), sizeof( bvhvec3 ), 1, f );
+	for( uint32_t i = 0; i < rayCount; i++ ) fwrite( tmin + DeTile( i ), sizeof( float ), 1, f );
+	for( uint32_t i = 0; i < rayCount; i++ ) fwrite( tmax + DeTile( i ), sizeof( float ), 1, f );
 	fclose( f );
 }
 
