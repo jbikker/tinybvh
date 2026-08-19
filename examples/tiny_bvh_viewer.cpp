@@ -18,7 +18,7 @@ using namespace tinybvh;
 
 // Application variables
 
-static BVH bvh;
+static BVH_GPU bvh;
 static bvhvec4* tris = 0;
 static int triCount = 0;
 static std::atomic<int> tileIdx( 0 );
@@ -53,8 +53,12 @@ void AddMesh( const char* file, float scale = 1, bvhvec3 pos = {}, int c = 0, in
 void Init()
 {
 	// prepare scene
+#if 0
 	AddMesh( "./testdata/bistro_ext_part1.bin" );
 	AddMesh( "./testdata/bistro_ext_part2.bin" );
+#else
+	AddMesh( "./testdata/cryteksponza.bin" );
+#endif
 	bvh.BuildHQ( tris, triCount );
 	// load camera position / direction from file
 	std::fstream t = std::fstream{ "camera.bin", t.binary | t.in };
