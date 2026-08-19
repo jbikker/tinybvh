@@ -33,13 +33,11 @@ float4 traverse_ailalaine(const float3 O, const float3 D, const float3 rD,
     uint node = 0, stack[STACK_SIZE], stackPtr = 0;
     while (true)
     {
-        const BVHNode n = bvhNodes[node];
-        const float4 lmin = n.lmin, lmax = n.lmax;
-        const float4 rmin = n.rmin, rmax = n.rmax;
-        const uint triCount = asuint(rmin.w);
-        if (triCount > 0)
+        if (node & 0x80000000)
         {
-            const uint firstTri = asuint(rmax.w);
+            // leaf node
+            const uint triCount = (node >> 24) & 127;
+            const uint firstTri = node & 0xffffff;
             for (uint i = 0; i < triCount; i++)
             {
                 const uint triIdx = primIdx[firstTri + i];
@@ -56,7 +54,7 @@ float4 traverse_ailalaine(const float3 O, const float3 D, const float3 rD,
                 const float v = f * dot(D, q);
                 const float d = f * dot(edge2, q);
                 const bool valid = (u >= 0.0f) && (v >= 0.0f) && (u + v <= 1.0f) &&
-                                   (d > 0.0f) && (d < hit.x);
+                                (d > 0.0f) && (d < hit.x);
                 hit = valid ? float4(d, u, v, asfloat(triIdx)) : hit;
             }
             if (stackPtr == 0)
@@ -64,6 +62,9 @@ float4 traverse_ailalaine(const float3 O, const float3 D, const float3 rD,
             node = stack[--stackPtr];
             continue;
         }
+        const BVHNode n = bvhNodes[node];
+        const float4 lmin = n.lmin, lmax = n.lmax;
+        const float4 rmin = n.rmin, rmax = n.rmax;
         const uint left = asuint(lmin.w), right = asuint(lmax.w);
         const float3 t1a = lmin.xyz * rD - Ord, t2a = lmax.xyz * rD - Ord;
         const float3 t1b = rmin.xyz * rD - Ord, t2b = rmax.xyz * rD - Ord;

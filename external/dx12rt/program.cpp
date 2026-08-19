@@ -30,6 +30,7 @@ constexpr D3D12_RESOURCE_DESC BASIC_BUFFER_DESC = {
 };
 constexpr UINT NUM_INSTANCES = 1, FRAME_COUNT = 2;
 constexpr UINT64 NUM_SHADER_IDS = 3;
+constexpr UINT NUM_DISPATCHES = 20;
 
 IDXGIFactory6* factory;
 ID3D12Device5* device;
@@ -572,6 +573,7 @@ void Render()
 		UINT64 frequency = 0;
 		cmdQueue->GetTimestampFrequency( &frequency );
 		double rtTime = static_cast<double>(endTimestamp - startTimestamp) / static_cast<double>(frequency);
+		rtTime /= (double)NUM_DISPATCHES;
 		D3D12_RESOURCE_DESC rtDescForTiming = renderTarget->GetDesc();
 		double raysPerSecond = (rtDescForTiming.Width * rtDescForTiming.Height) / rtTime;
 		const int k = slotBackend[frameIndex]; // which backend produced this timestamp
@@ -614,7 +616,7 @@ void Render()
 		}
 		D3D12_RESOURCE_DESC rtDesc = renderTarget->GetDesc();
 		cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot );
-		cmdList->Dispatch( (static_cast<UINT>(rtDesc.Width) + 7) / 8, (rtDesc.Height + 7) / 8, 1 );
+		for( int i = 0; i < NUM_DISPATCHES; i++ ) cmdList->Dispatch( (static_cast<UINT>(rtDesc.Width) + 7) / 8, (rtDesc.Height + 7) / 8, 1 );
 		cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot + 1 );
 	}
 	else
@@ -639,7 +641,7 @@ void Render()
 				.SizeInBytes = D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, .StrideInBytes = 32 },
 			.Width = static_cast<UINT>(rtDesc.Width), .Height = rtDesc.Height, .Depth = 1 };
 		cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot );
-		cmdList->DispatchRays( &dispatchDesc );
+		for( int i = 0; i < NUM_DISPATCHES; i++ ) cmdList->DispatchRays( &dispatchDesc );
 		cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot + 1 );
 	}
 	slotBackend[frameIndex] = backend; // for the timing readback next time this slot runs
@@ -661,7 +663,7 @@ void Render()
 	fenceValue++;
 	cmdQueue->Signal( fence, fenceValue );
 	frameFenceValues[frameIndex] = fenceValue;
-	swapChain->Present( 1, 0 );
+	swapChain->Present( 0, 0 );
 }
 
 void Init( HWND hwnd )
