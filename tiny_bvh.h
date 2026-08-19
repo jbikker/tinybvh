@@ -198,7 +198,6 @@ THE SOFTWARE.
 // #define CWBVH_COMPRESSED_TRIS
 // BVH4 triangle format
 // #define BVH4_GPU_COMPRESSED_TRIS
-#define COMPACT_BVH_GPU_LEAFS
 
 // ============================================================================
 //
@@ -1316,7 +1315,6 @@ public:
 	void Optimize( const uint32_t iterations = 25, bool extreme = false );
 	float SAHCost( const uint32_t nodeIdx = 0 ) { return bvh.SAHCost( nodeIdx ); }
 	void ConvertFrom( const BVH& original, bool compact = true );
-	void CompressLeafs();
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const { FALLBACK_SHADOW_QUERY( ray ); }
 	// BVH data
@@ -5507,13 +5505,21 @@ void BVH_GPU::Optimize( const uint32_t iterations, bool extreme )
 	ConvertFrom( bvh, false );
 }
 
+// Encode a BVH2 leaf as a compact child reference for the BVH_GPU layout:
+// msb marks leaf, 24..30 hold triangle count and 0..23 the offset into primIdx.
+static uint32_t CompactLeafRef( const BVH::BVHNode& leaf )
+{
+	assert( leaf.triCount <= 127 && leaf.leftFirst <= 0xffffff );
+	return 0x80000000u | (tinybvh_min( 127u, leaf.triCount ) << 24) | (leaf.leftFirst & 0xffffff);
+}
+
 void BVH_GPU::ConvertFrom( const BVH& original, bool compact )
 {
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
 	bvh = original;
-	// allocate space
-	const uint32_t spaceNeeded = compact ? original.usedNodes : original.allocatedNodes;
+	const uint32_t sourceNodes = compact ? original.usedNodes : original.allocatedNodes;
+	const uint32_t spaceNeeded = (sourceNodes >> 1) + 1; // the +1 covers a leaf-only bvh
 	if (allocatedNodes < spaceNeeded)
 	{
 		AlignedFree( bvhNode );
@@ -5522,89 +5528,48 @@ void BVH_GPU::ConvertFrom( const BVH& original, bool compact )
 	}
 	memset( bvhNode, 0, sizeof( BVHNode ) * spaceNeeded );
 	CopyBasePropertiesFrom( original );
-	// recursively convert nodes
-	uint32_t newNodePtr = 0, nodeIdx = 0, stack[128], stackPtr = 0;
+	this->may_have_holes = false;
+	// a bvh consisting of a single leaf: traversal always starts at an interior
+	// node, so wrap the leaf in one. The second child is an empty leaf, which is
+	// harmless to 'hit' - it intersects nothing and pops immediately.
+	if (original.bvhNode[0].isLeaf())
+	{
+		BVHNode& root = this->bvhNode[0];
+		root.lmin = original.bvhNode[0].aabbMin, root.lmax = original.bvhNode[0].aabbMax;
+		root.rmin = root.rmax = original.bvhNode[0].aabbMin;
+		root.left = CompactLeafRef( original.bvhNode[0] );
+		root.right = 0x80000000u; // triCount 0, firstTri 0
+		usedNodes = 1;
+		return;
+	}
+	// depth-first conversion
+	uint32_t stack[256], stackPtr = 0, newNodePtr = 1, nodeIdx = 0, slot = 0;
 	while (1)
 	{
 		const BVH::BVHNode& orig = original.bvhNode[nodeIdx];
-		if (orig.isLeaf())
-		{
-			const uint32_t idx = newNodePtr++;
-			this->bvhNode[idx].triCount = orig.triCount;
-			this->bvhNode[idx].firstTri = orig.leftFirst;
-			if (!stackPtr) break; // only happens if the root is a leaf.
-			nodeIdx = stack[--stackPtr];
-			uint32_t leafParent = stack[--stackPtr];
-			this->bvhNode[leafParent].right = newNodePtr;
-		}
-		else
-		{
-			const uint32_t idx = newNodePtr++;
-			const BVH::BVHNode& left = original.bvhNode[orig.leftFirst];
-			const BVH::BVHNode& right = original.bvhNode[orig.leftFirst + 1];
-			const float leftArea = tinybvh_halfarea( left.aabbMax - left.aabbMin );
-			const float rightArea = tinybvh_halfarea( right.aabbMax - right.aabbMin );
-			// put the larger node to the left to improve cache coherence during traversal
-			if (leftArea > rightArea)
-			{
-				this->bvhNode[idx].lmin = left.aabbMin, this->bvhNode[idx].rmin = right.aabbMin;
-				this->bvhNode[idx].lmax = left.aabbMax, this->bvhNode[idx].rmax = right.aabbMax;
-				this->bvhNode[idx].left = newNodePtr; // right will be filled when popped
-				stack[stackPtr++] = idx;
-				stack[stackPtr++] = orig.leftFirst + 1;
-				nodeIdx = orig.leftFirst;
-			}
-			else
-			{
-				this->bvhNode[idx].lmin = right.aabbMin, this->bvhNode[idx].rmin = left.aabbMin;
-				this->bvhNode[idx].lmax = right.aabbMax, this->bvhNode[idx].rmax = left.aabbMax;
-				this->bvhNode[idx].left = newNodePtr; // right will be filled when popped
-				stack[stackPtr++] = idx;
-				stack[stackPtr++] = orig.leftFirst;
-				nodeIdx = orig.leftFirst + 1;
-			}
-		}
+		uint32_t leftIdx = orig.leftFirst, rightIdx = orig.leftFirst + 1;
+		const BVH::BVHNode& c0 = original.bvhNode[leftIdx];
+		const BVH::BVHNode& c1 = original.bvhNode[rightIdx];
+		// put the larger node to the left to improve cache coherence during traversal
+		if (tinybvh_halfarea( c0.aabbMax - c0.aabbMin ) <= tinybvh_halfarea( c1.aabbMax - c1.aabbMin ))
+			tinybvh_swap( leftIdx, rightIdx );
+		const BVH::BVHNode& left = original.bvhNode[leftIdx];
+		const BVH::BVHNode& right = original.bvhNode[rightIdx];
+		BVHNode& node = this->bvhNode[slot];
+		node.lmin = left.aabbMin, node.lmax = left.aabbMax;
+		node.rmin = right.aabbMin, node.rmax = right.aabbMax;
+		node.triCount = 0, node.firstTri = 0; // unused: leafs live in left / right
+		const bool leftLeaf = left.isLeaf(), rightLeaf = right.isLeaf();
+		uint32_t leftSlot = 0, rightSlot = 0;
+		if (leftLeaf) node.left = CompactLeafRef( left ); else node.left = leftSlot = newNodePtr++;
+		if (rightLeaf) node.right = CompactLeafRef( right ); else node.right = rightSlot = newNodePtr++;
+		// defer the right subtree, then descend into the left one
+		if (!rightLeaf) stack[stackPtr++] = rightIdx, stack[stackPtr++] = rightSlot;
+		if (!leftLeaf) { nodeIdx = leftIdx, slot = leftSlot; continue; }
+		if (!stackPtr) break;
+		slot = stack[--stackPtr], nodeIdx = stack[--stackPtr];
 	}
 	usedNodes = newNodePtr;
-#ifdef COMPACT_BVH_GPU_LEAFS
-	// TODO: this will leave gaps where the leafs used to be.
-	CompressLeafs();
-#endif
-}
-
-void BVH_GPU::CompressLeafs()
-{
-	uint32_t nodeIdx = 0, stackPtr = 0, stack[64];
-	while (true)
-	{
-		BVHNode& node = bvhNode[nodeIdx];
-		if (node.isLeaf())
-		{
-			if (!stackPtr) break;
-			nodeIdx = stack[--stackPtr];
-			continue;
-		}
-		BVHNode& left = bvhNode[node.left];
-		BVHNode& right = bvhNode[node.right];
-		bool leftLeaf = left.isLeaf(), rightLeaf = right.isLeaf();
-		if (!(leftLeaf || rightLeaf)) stack[stackPtr++] = node.left, nodeIdx = node.right; else
-		{
-			if (left.isLeaf())
-			{
-				node.left = (left.firstTri & 0xffffff) + (tinybvh_min( 127u, left.triCount ) << 24) + 0x80000000u;
-				if (!right.isLeaf()) nodeIdx = node.right;
-			}
-			if (right.isLeaf())
-			{
-				node.right = (right.firstTri & 0xffffff) + (tinybvh_min( 127u, right.triCount ) << 24) + 0x80000000u;
-				if (!left.isLeaf()) nodeIdx = node.left; else
-				{
-					if (!stackPtr) break;
-					nodeIdx = stack[--stackPtr];
-				}
-			}
-		}
-	}
 }
 
 int32_t BVH_GPU::Intersect( Ray& ray ) const
@@ -5617,7 +5582,6 @@ int32_t BVH_GPU::Intersect( Ray& ray ) const
 	while (1)
 	{
 		cost += c_trav;
-	#ifdef COMPACT_BVH_GPU_LEAFS
 		if (nodeIdx & 0x80000000u)
 		{
 			uint32_t triCount = (nodeIdx >> 24) & 127;
@@ -5638,25 +5602,6 @@ int32_t BVH_GPU::Intersect( Ray& ray ) const
 		}
 		// not a leaf; nodeIdx contains the index of an interior node.
 		BVHNode& node = bvhNode[nodeIdx];
-	#else
-		BVHNode& node = bvhNode[nodeIdx];
-		if (node.isLeaf())
-		{
-			if (indexedEnabled && bvh.vertIdx != 0) for (uint32_t i = 0; i < node.triCount; i++, cost += c_int)
-			{
-				const uint32_t pi = primIdx[node.firstTri + i];
-				const uint32_t i0 = bvh.vertIdx[pi * 3], i1 = bvh.vertIdx[pi * 3 + 1], i2 = bvh.vertIdx[pi * 3 + 2];
-				IntersectTri( ray, pi, verts, i0, i1, i2 );
-			}
-			else for (uint32_t i = 0; i < node.triCount; i++, cost += c_int)
-			{
-				const uint32_t pi = primIdx[node.firstTri + i];
-				IntersectTri( ray, pi, verts, pi * 3, pi * 3 + 1, pi * 3 + 2 );
-			}
-			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
-			continue;
-		}
-	#endif
 		float dist1 = BVH_FAR, dist2 = BVH_FAR;
 		const bvhvec3 t1a = (node.lmin - ray.O) * ray.rD, t2a = (node.lmax - ray.O) * ray.rD;
 		const bvhvec3 t1b = (node.rmin - ray.O) * ray.rD, t2b = (node.rmax - ray.O) * ray.rD;
