@@ -4,34 +4,33 @@
 // 
 // ============================================================================
 
+#define COMPACT_BVH_GPU_LEAFS // keep in sync with setting in tin_bvh.h
+
 uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// traverse BVH
 	float4 hit;
 	hit.x = tmax;
-	uint node = 0, stack[STACK_SIZE], stackPtr = 0;
+	uint nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0;
 	float cost = 0;
 	while (1)
 	{
-		// fetch the node
+		// process node
 		cost += 1.2f; // TODO: obtain somehow via tiny_bvh.h?
-		const float4 lmin = bvhNode[node].lmin, lmax = bvhNode[node].lmax;
-		const float4 rmin = bvhNode[node].rmin, rmax = bvhNode[node].rmax;
-		const uint triCount = as_uint( rmin.w );
-		if (triCount > 0)
+	#ifdef COMPACT_BVH_GPU_LEAFS
+		if (nodeIdx & 0x80000000)
 		{
-			// process leaf node
-			const uint firstTri = as_uint( rmax.w );
+			const uint triCount = (nodeIdx >> 24) & 127;
+			const uint firstTri = nodeIdx & 0xffffff;
 			for (uint i = 0; i < triCount; i++)
 			{
 				cost += 1.0f; // TODO: obtain somehow via tiny_bvh.h?
 				const uint triIdx = idx[firstTri + i];
 				const global float4* tri = verts + 3 * triIdx;
-				// triangle intersection - M�ller-Trumbore
+				// triangle intersection - Moeller-Trumbore
 				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
 				const float3 h = cross( D, edge2.xyz );
 				const float a = dot( edge1.xyz, h );
-				if (fabs( a ) < 0.0000001f) continue;
 				const float f = 1 / a;
 				const float3 s = O - tri[0].xyz;
 				const float u = f * dot( s, h );
@@ -42,9 +41,42 @@ uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global uint*
 				if (d > 0.0f && d < hit.x) hit = (float4)(d, u, v, as_float( triIdx ));
 			}
 			if (stackPtr == 0) break;
-			node = stack[--stackPtr];
+			nodeIdx = stack[--stackPtr];
 			continue;
 		}
+		const float4 lmin = bvhNode[nodeIdx].lmin, lmax = bvhNode[nodeIdx].lmax;
+		const float4 rmin = bvhNode[nodeIdx].rmin, rmax = bvhNode[nodeIdx].rmax;
+	#else
+		const float4 lmin = bvhNode[nodeIdx].lmin, lmax = bvhNode[nodeIdx].lmax;
+		const float4 rmin = bvhNode[nodeIdx].rmin, rmax = bvhNode[nodeIdx].rmax;
+		const uint triCount = as_uint( rmin.w );
+		if (triCount > 0)
+		{
+			// process leaf node
+			const uint firstTri = as_uint( rmax.w );
+			for (uint i = 0; i < triCount; i++)
+			{
+				cost += 1.0f; // TODO: obtain somehow via tiny_bvh.h?
+				const uint triIdx = idx[firstTri + i];
+				const global float4* tri = verts + 3 * triIdx;
+				// triangle intersection - Moeller-Trumbore
+				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
+				const float3 h = cross( D, edge2.xyz );
+				const float a = dot( edge1.xyz, h );
+				const float f = 1 / a;
+				const float3 s = O - tri[0].xyz;
+				const float u = f * dot( s, h );
+				const float3 q = cross( s, edge1.xyz );
+				const float v = f * dot( D, q );
+				if (u < 0 || v < 0 || u + v > 1) continue;
+				const float d = f * dot( edge2.xyz, q );
+				if (d > 0.0f && d < hit.x) hit = (float4)(d, u, v, as_float( triIdx ));
+			}
+			if (stackPtr == 0) break;
+			nodeIdx = stack[--stackPtr];
+			continue;
+		}
+	#endif
 		uint left = as_uint( lmin.w ), right = as_uint( lmax.w );
 		// child AABB intersection tests
 		const float3 t1a = (lmin.xyz - O) * rD, t2a = (lmax.xyz - O) * rD;
@@ -59,13 +91,13 @@ uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global uint*
 		const float dist2 = tminb > tmaxb ? 1e30f : tminb;
 		if (dist1 > dist2)
 		{
-			if (dist2 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
-			else { node = right; if (dist1 < 1e30f) stack[stackPtr++] = left; }
+			if (dist2 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
+			else { nodeIdx = right; if (dist1 < 1e30f) stack[stackPtr++] = left; }
 		}
 		else
 		{
-			if (dist1 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
-			else { node = left; if (dist2 < 1e30f) stack[stackPtr++] = right; }
+			if (dist1 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
+			else { nodeIdx = left; if (dist2 < 1e30f) stack[stackPtr++] = right; }
 		}
 
 	}
@@ -81,15 +113,15 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 	const float3 rO = O * -rD;
 	// traverse BVH
 	float4 hit = (float4)( tmax, 0, 0, 0 );
-	uint node = 0, stack[STACK_SIZE], stackPtr = 0, steps = 0;
+	uint nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0, steps = 0;
 	while (1)
 	{
 		steps++;
-		const float4 rmin = bvhNode[node].rmin, rmax = bvhNode[node].rmax;
-		const uint triCount = as_uint( rmin.w );
-		if (triCount > 0 /* leaf */)
+	#ifdef COMPACT_BVH_GPU_LEAFS
+		if (nodeIdx & 0x80000000)
 		{
-			const uint firstTri = as_uint( rmax.w );
+			const uint triCount = (nodeIdx >> 24) & 127;
+			const uint firstTri = nodeIdx & 0xffffff;
 			for (uint i = 0; i < triCount; i++)
 			{
 				const uint triIdx = idx[firstTri + i];
@@ -97,7 +129,6 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
 				const float3 h = cross( D, edge2.xyz );
 				const float a = dot( edge1.xyz, h );
-				if (fabs( a ) < 0.0000001f) continue;
 				const float f = native_recip( a );
 				const float3 s = O - tri[0].xyz;
 				const float u = f * dot( s, h );
@@ -115,10 +146,46 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 				hit = (float4)(d, u, v, as_float( triIdx ));
 			}
 			if (stackPtr == 0) break;
-			node = stack[--stackPtr];
+			nodeIdx = stack[--stackPtr];
 			continue;
 		}
-		const float4 lmin = bvhNode[node].lmin, lmax = bvhNode[node].lmax;
+		const float4 lmin = bvhNode[nodeIdx].lmin, lmax = bvhNode[nodeIdx].lmax;
+		const float4 rmin = bvhNode[nodeIdx].rmin, rmax = bvhNode[nodeIdx].rmax;
+	#else
+		const float4 rmin = bvhNode[nodeIdx].rmin, rmax = bvhNode[nodeIdx].rmax;
+		const uint triCount = as_uint( rmin.w );
+		if (triCount > 0 /* leaf */)
+		{
+			const uint firstTri = as_uint( rmax.w );
+			for (uint i = 0; i < triCount; i++)
+			{
+				const uint triIdx = idx[firstTri + i];
+				const global float4* tri = verts + 3 * triIdx;
+				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
+				const float3 h = cross( D, edge2.xyz );
+				const float a = dot( edge1.xyz, h );
+				const float f = native_recip( a );
+				const float3 s = O - tri[0].xyz;
+				const float u = f * dot( s, h );
+				const float3 q = cross( s, edge1.xyz );
+				const float v = f * dot( D, q );
+				if (u < 0 || v < 0 || u + v > 1) continue;
+				const float d = f * dot( edge2.xyz, q );
+				if (d <= 0.0f || d >= hit.x) continue;
+				if (opmap)
+				{
+					const int row = (int)( (u + v) * 32.0f ), diag = (int)( (1 - u) * 32.0f );
+					const int idx = (row * row) + (int)( v * 32.0f ) + (diag - (31 - row));
+					if (!(opmap[triIdx * 32 + (idx >> 5)] & (1 << (idx & 31)))) continue;
+				}
+				hit = (float4)(d, u, v, as_float( triIdx ));
+			}
+			if (stackPtr == 0) break;
+			nodeIdx = stack[--stackPtr];
+			continue;
+		}
+		const float4 lmin = bvhNode[nodeIdx].lmin, lmax = bvhNode[nodeIdx].lmax;
+	#endif
 		uint left = as_uint( lmin.w ), right = as_uint( lmax.w );
 		const float3 t1a = fma( lmin.xyz, rD, rO ), t2a = fma( lmax.xyz, rD, rO );
 		const float3 t1b = fma( rmin.xyz, rD, rO ), t2b = fma( rmax.xyz, rD, rO );
@@ -132,13 +199,13 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 		const float dist2 = tminb > tmaxb ? 1e30f : tminb;
 		if (dist1 > dist2)
 		{
-			if (dist2 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
-			else { node = right; if (dist1 < 1e30f) stack[stackPtr++] = left; }
+			if (dist2 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
+			else { nodeIdx = right; if (dist1 < 1e30f) stack[stackPtr++] = left; }
 		}
 		else
 		{
-			if (dist1 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
-			else { node = left; if (dist2 < 1e30f) stack[stackPtr++] = right; }
+			if (dist1 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
+			else { nodeIdx = left; if (dist2 < 1e30f) stack[stackPtr++] = right; }
 		}
 	}
 	if (stepCount) *stepCount += steps;
@@ -153,11 +220,45 @@ bool isoccluded_ailalaine(
 	// prepare slab test
 	const float3 rO = O * -rD;
 	// traverse BVH
-	uint node = 0, stack[STACK_SIZE], stackPtr = 0;
+	uint nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0;
 	while (1)
 	{
-		const float4 lmin = bvhNode[node].lmin, lmax = bvhNode[node].lmax;
-		const float4 rmin = bvhNode[node].rmin, rmax = bvhNode[node].rmax;
+	#ifdef COMPACT_BVH_GPU_LEAFS
+		if (nodeIdx & 0x80000000)
+		{
+			const uint triCount = (nodeIdx >> 24) & 127;
+			const uint firstTri = nodeIdx & 0xffffff;
+			for (uint i = 0; i < triCount; i++)
+			{
+				const uint triIdx = idx[firstTri + i];
+				const global float4* tri = verts + 3 * triIdx;
+				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
+				const float3 h = cross( D, edge2.xyz );
+				const float f = 1 / dot( edge1.xyz, h );
+				const float3 s = O - tri[0].xyz;
+				const float u = f * dot( s, h );
+				const float3 q = cross( s, edge1.xyz );
+				const float v = f * dot( D, q );
+				if (u < 0 || v < 0 || u + v > 1) continue;
+				const float d = f * dot( edge2.xyz, q );
+				if (d <= 0.0f || d >= tmax) continue;
+				if (opmap)
+				{
+					const int row = (int)( (u + v) * 32.0f ), diag = (int)( (1 - u) * 32.0f );
+					const int idx = (row * row) + (int)( v * 32.0f ) + (diag - (31 - row));
+					if (!(opmap[triIdx * 32 + (idx >> 5)] & (1 << (idx & 31)))) continue;
+				}
+				return true;
+			}
+			if (stackPtr == 0) break;
+			nodeIdx = stack[--stackPtr];
+			continue;
+		}
+		const float4 lmin = bvhNode[nodeIdx].lmin, lmax = bvhNode[nodeIdx].lmax;
+		const float4 rmin = bvhNode[nodeIdx].rmin, rmax = bvhNode[nodeIdx].rmax;
+	#else
+		const float4 lmin = bvhNode[nodeIdx].lmin, lmax = bvhNode[nodeIdx].lmax;
+		const float4 rmin = bvhNode[nodeIdx].rmin, rmax = bvhNode[nodeIdx].rmax;
 		const uint triCount = as_uint( rmin.w );
 		if (triCount > 0 /* leaf */)
 		{
@@ -185,9 +286,10 @@ bool isoccluded_ailalaine(
 				return true;
 			}
 			if (stackPtr == 0) break;
-			node = stack[--stackPtr];
+			nodeIdx = stack[--stackPtr];
 			continue;
 		}
+	#endif
 		uint left = as_uint( lmin.w ), right = as_uint( lmax.w );
 		const float3 t1a = fma( lmin.xyz, rD, rO ), t2a = fma( lmax.xyz, rD, rO );
 		const float3 t1b = fma( rmin.xyz, rD, rO ), t2b = fma( rmax.xyz, rD, rO );
@@ -201,13 +303,13 @@ bool isoccluded_ailalaine(
 		const float dist2 = tminb > tmaxb ? 1e30f : tminb;
 		if (dist1 > dist2)
 		{
-			if (dist2 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
-			else { node = right; if (dist1 < 1e30f) stack[stackPtr++] = left; }
+			if (dist2 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
+			else { nodeIdx = right; if (dist1 < 1e30f) stack[stackPtr++] = left; }
 		}
 		else
 		{
-			if (dist1 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
-			else { node = left; if (dist2 < 1e30f) stack[stackPtr++] = right; }
+			if (dist1 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
+			else { nodeIdx = left; if (dist2 < 1e30f) stack[stackPtr++] = right; }
 		}
 	}
 	return false;

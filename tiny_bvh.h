@@ -198,6 +198,7 @@ THE SOFTWARE.
 // #define CWBVH_COMPRESSED_TRIS
 // BVH4 triangle format
 // #define BVH4_GPU_COMPRESSED_TRIS
+#define COMPACT_BVH_GPU_LEAFS
 
 // ============================================================================
 //
@@ -1315,6 +1316,7 @@ public:
 	void Optimize( const uint32_t iterations = 25, bool extreme = false );
 	float SAHCost( const uint32_t nodeIdx = 0 ) { return bvh.SAHCost( nodeIdx ); }
 	void ConvertFrom( const BVH& original, bool compact = true );
+	void CompressLeafs();
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const { FALLBACK_SHADOW_QUERY( ray ); }
 	// BVH data
@@ -3841,17 +3843,17 @@ void BVH::SplitLeafs( const uint32_t maxPrims )
 
 float BVH::SplitPriority( const Fragment& f ) const
 {
-	auto fastCbrt = [](float x) {
+	auto fastCbrt = []( float x ) {
 		// x >= 0.0f is assumed
 		uint32_t i = *(uint32_t*)&x;
 		i = 0x2A51067Fu + i / 3u;
 		float y = *(float*)&i;
-		
+
 		// Refine with Newton-Raphson iterations
 		y = (2.0f * y + x / (y * y)) * (1.0f / 3.0f);
 
 		return y;
-	};
+		};
 
 	const bvhvec3 extent = f.bmax - f.bmin;
 	const float extentPrio = tinybvh_sqrf( extent[tinybvh_maxdim( extent )] );
@@ -5525,18 +5527,19 @@ void BVH_GPU::ConvertFrom( const BVH& original, bool compact )
 	while (1)
 	{
 		const BVH::BVHNode& orig = original.bvhNode[nodeIdx];
-		const uint32_t idx = newNodePtr++;
 		if (orig.isLeaf())
 		{
+			const uint32_t idx = newNodePtr++;
 			this->bvhNode[idx].triCount = orig.triCount;
 			this->bvhNode[idx].firstTri = orig.leftFirst;
-			if (!stackPtr) break;
+			if (!stackPtr) break; // only happens if the root is a leaf.
 			nodeIdx = stack[--stackPtr];
-			uint32_t newNodeParent = stack[--stackPtr];
-			this->bvhNode[newNodeParent].right = newNodePtr;
+			uint32_t leafParent = stack[--stackPtr];
+			this->bvhNode[leafParent].right = newNodePtr;
 		}
 		else
 		{
+			const uint32_t idx = newNodePtr++;
 			const BVH::BVHNode& left = original.bvhNode[orig.leftFirst];
 			const BVH::BVHNode& right = original.bvhNode[orig.leftFirst + 1];
 			const float leftArea = tinybvh_halfarea( left.aabbMax - left.aabbMin );
@@ -5563,45 +5566,107 @@ void BVH_GPU::ConvertFrom( const BVH& original, bool compact )
 		}
 	}
 	usedNodes = newNodePtr;
+#ifdef COMPACT_BVH_GPU_LEAFS
+	// TODO: this will leave gaps where the leafs used to be.
+	CompressLeafs();
+#endif
+}
+
+void BVH_GPU::CompressLeafs()
+{
+	uint32_t nodeIdx = 0, stackPtr = 0, stack[64];
+	while (true)
+	{
+		BVHNode& node = bvhNode[nodeIdx];
+		if (node.isLeaf())
+		{
+			if (!stackPtr) break;
+			nodeIdx = stack[--stackPtr];
+			continue;
+		}
+		BVHNode& left = bvhNode[node.left];
+		BVHNode& right = bvhNode[node.right];
+		bool leftLeaf = left.isLeaf(), rightLeaf = right.isLeaf();
+		if (!(leftLeaf || rightLeaf)) stack[stackPtr++] = node.left, nodeIdx = node.right; else
+		{
+			if (left.isLeaf())
+			{
+				node.left = (left.firstTri & 0xffffff) + (tinybvh_min( 127u, left.triCount ) << 24) + 0x80000000u;
+				if (!right.isLeaf()) nodeIdx = node.right;
+			}
+			if (right.isLeaf())
+			{
+				node.right = (right.firstTri & 0xffffff) + (tinybvh_min( 127u, right.triCount ) << 24) + 0x80000000u;
+				if (!left.isLeaf()) nodeIdx = node.left; else
+				{
+					if (!stackPtr) break;
+					nodeIdx = stack[--stackPtr];
+				}
+			}
+		}
+	}
 }
 
 int32_t BVH_GPU::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
-	BVHNode* node = &bvhNode[0], * stack[64];
+	uint32_t nodeIdx = 0, stack[64], stackPtr = 0;
 	const bvhvec4slice& verts = bvh.verts;
 	const uint32_t* primIdx = bvh.primIdx;
-	uint32_t stackPtr = 0;
 	float cost = 0;
 	while (1)
 	{
 		cost += c_trav;
-		if (node->isLeaf())
+	#ifdef COMPACT_BVH_GPU_LEAFS
+		if (nodeIdx & 0x80000000u)
 		{
-			if (indexedEnabled && bvh.vertIdx != 0) for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
+			uint32_t triCount = (nodeIdx >> 24) & 127;
+			uint32_t firstTri = nodeIdx & 0xffffff;
+			if (indexedEnabled && bvh.vertIdx != 0) for (uint32_t i = 0; i < triCount; i++, cost += c_int)
 			{
-				const uint32_t pi = primIdx[node->firstTri + i];
+				const uint32_t pi = primIdx[firstTri + i];
 				const uint32_t i0 = bvh.vertIdx[pi * 3], i1 = bvh.vertIdx[pi * 3 + 1], i2 = bvh.vertIdx[pi * 3 + 2];
 				IntersectTri( ray, pi, verts, i0, i1, i2 );
 			}
-			else for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
+			else for (uint32_t i = 0; i < triCount; i++, cost += c_int)
 			{
-				const uint32_t pi = primIdx[node->firstTri + i];
+				const uint32_t pi = primIdx[firstTri + i];
 				IntersectTri( ray, pi, verts, pi * 3, pi * 3 + 1, pi * 3 + 2 );
 			}
-			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
 			continue;
 		}
+		// not a leaf; nodeIdx contains the index of an interior node.
+		BVHNode& node = bvhNode[nodeIdx];
+	#else
+		BVHNode& node = bvhNode[nodeIdx];
+		if (node.isLeaf())
+		{
+			if (indexedEnabled && bvh.vertIdx != 0) for (uint32_t i = 0; i < node.triCount; i++, cost += c_int)
+			{
+				const uint32_t pi = primIdx[node.firstTri + i];
+				const uint32_t i0 = bvh.vertIdx[pi * 3], i1 = bvh.vertIdx[pi * 3 + 1], i2 = bvh.vertIdx[pi * 3 + 2];
+				IntersectTri( ray, pi, verts, i0, i1, i2 );
+			}
+			else for (uint32_t i = 0; i < node.triCount; i++, cost += c_int)
+			{
+				const uint32_t pi = primIdx[node.firstTri + i];
+				IntersectTri( ray, pi, verts, pi * 3, pi * 3 + 1, pi * 3 + 2 );
+			}
+			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
+			continue;
+		}
+	#endif
 		float dist1 = BVH_FAR, dist2 = BVH_FAR;
-		const bvhvec3 t1a = (node->lmin - ray.O) * ray.rD, t2a = (node->lmax - ray.O) * ray.rD;
-		const bvhvec3 t1b = (node->rmin - ray.O) * ray.rD, t2b = (node->rmax - ray.O) * ray.rD;
+		const bvhvec3 t1a = (node.lmin - ray.O) * ray.rD, t2a = (node.lmax - ray.O) * ray.rD;
+		const bvhvec3 t1b = (node.rmin - ray.O) * ray.rD, t2b = (node.rmax - ray.O) * ray.rD;
 		const float tmina = tinybvh_max( tinybvh_max( tinybvh_min( t1a.x, t2a.x ), tinybvh_min( t1a.y, t2a.y ) ), tinybvh_min( t1a.z, t2a.z ) );
 		const float tmaxa = tinybvh_min( tinybvh_min( tinybvh_max( t1a.x, t2a.x ), tinybvh_max( t1a.y, t2a.y ) ), tinybvh_max( t1a.z, t2a.z ) );
 		const float tminb = tinybvh_max( tinybvh_max( tinybvh_min( t1b.x, t2b.x ), tinybvh_min( t1b.y, t2b.y ) ), tinybvh_min( t1b.z, t2b.z ) );
 		const float tmaxb = tinybvh_min( tinybvh_min( tinybvh_max( t1b.x, t2b.x ), tinybvh_max( t1b.y, t2b.y ) ), tinybvh_max( t1b.z, t2b.z ) );
 		if (tmaxa >= tmina && tmina < ray.hit.t && tmaxa >= 0) dist1 = tmina;
 		if (tmaxb >= tminb && tminb < ray.hit.t && tmaxb >= 0) dist2 = tminb;
-		uint32_t lidx = node->left, ridx = node->right;
+		uint32_t lidx = node.left, ridx = node.right;
 		if (dist1 > dist2)
 		{
 			float t = dist1; dist1 = dist2; dist2 = t;
@@ -5609,12 +5674,12 @@ int32_t BVH_GPU::Intersect( Ray& ray ) const
 		}
 		if (dist1 == BVH_FAR)
 		{
-			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
 		}
 		else
 		{
-			node = bvhNode + lidx;
-			if (dist2 != BVH_FAR) stack[stackPtr++] = bvhNode + ridx;
+			nodeIdx = lidx;
+			if (dist2 != BVH_FAR) stack[stackPtr++] = ridx;
 		}
 	}
 	return (int32_t)cost; // cast to not break interface.
