@@ -104,7 +104,7 @@ THE SOFTWARE.
 #define CACHEIMAGES
 
 #define	BVH_DYNAMIC			0	// BVH will be built as tinybvh::BVH / Build, for fast rebuilds
-#define BVH_RIGID			1	// BVH will be built as tinybvh::BVH8_CPU / BuildHQ, for fast traversal
+#define BVH_RIGID			1	// BVH will be built as tinybvh::BVH8_GPU / BuildHQ, for fast traversal
 #define GPU_DYNAMIC			2	// BVH will be built with tinybvh::BVH_GPU::Build(..) - for refits/rebuilds
 #define GPU_RIGID			3	// BVH will be built as tinybvh::BVH8_GPU::BuildHQ(..) - for opacity maps
 #define GPU_STATIC			4	// BVH will be built as tinybvh::BVH8_CWBVH::BuildHQ(..) - for fast traversal
