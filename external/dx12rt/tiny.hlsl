@@ -24,13 +24,21 @@ StructuredBuffer<uint> primIdx : register(t1, space1); // tinybvh primitive inde
 StructuredBuffer<float4> triData : register(t2, space1); // 3x float4 per triangle
 RWTexture2D<float4> uav : register(u0); // render target
 
+#define GROUP_X    8
+#define GROUP_Y    8
+#define GROUP_SIZE (GROUP_X * GROUP_Y)
 #define STACK_SIZE 32
 
+// depth-major indexing so that all lanes at the same stack depth land on
+// consecutive LDS banks: GROUP_SIZE * STACK_SIZE * 4 = 8KB per group.
+groupshared uint g_stack[STACK_SIZE * GROUP_SIZE];
+#define STACK_AT(i) g_stack[(i) * GROUP_SIZE + lane]
+
 float4 traverse_ailalaine(const float3 O, const float3 D, const float3 rD,
-                          const float3 Ord, const float tmax)
+                          const float3 Ord, const float tmax, const uint lane)
 {
     float4 hit = float4(tmax, 0, 0, 0);
-    uint node = 0, stack[STACK_SIZE], stackPtr = 0;
+    uint node = 0, stackPtr = 0;
     while (true)
     {
         if (node & 0x80000000)
@@ -59,7 +67,7 @@ float4 traverse_ailalaine(const float3 O, const float3 D, const float3 rD,
             }
             if (stackPtr == 0)
                 break;
-            node = stack[--stackPtr];
+            node = STACK_AT(--stackPtr);
             continue;
         }
         const BVHNode n = bvhNodes[node];
@@ -81,7 +89,7 @@ float4 traverse_ailalaine(const float3 O, const float3 D, const float3 rD,
             node = leftFirst ? left : right;
             const uint far = leftFirst ? right : left;
             if (stackPtr < STACK_SIZE)
-                stack[stackPtr++] = far;
+                STACK_AT(stackPtr++) = far;
         }
         else if (hitL)
             node = left;
@@ -91,7 +99,7 @@ float4 traverse_ailalaine(const float3 O, const float3 D, const float3 rD,
         {
             if (stackPtr == 0)
                 break;
-            node = stack[--stackPtr];
+            node = STACK_AT(--stackPtr);
         }
     }
     return hit;
@@ -102,8 +110,8 @@ float safe_rcp(float x)
     return 1.0f / (sign(x) * max(abs(x), 1e-5f));
 }
 
-[numthreads(8, 8, 1)]
-void TraceRays(uint3 tid : SV_DispatchThreadID)
+[numthreads(GROUP_X, GROUP_Y, 1)]
+void TraceRays(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 {
     uint w, h;
     uav.GetDimensions(w, h);
@@ -115,7 +123,7 @@ void TraceRays(uint3 tid : SV_DispatchThreadID)
     const float3 rD = float3(safe_rcp(D.x), safe_rcp(D.y), safe_rcp(D.z));
     const float3 Ord = O * rD; // hoisted out of the traversal loop
     // trace
-    const float4 hit = traverse_ailalaine(O, D, rD, Ord, 1e30f);
+    const float4 hit = traverse_ailalaine(O, D, rD, Ord, 1e30f, gi);
     // visualize depth
     const float t = (hit.x >= 1e30f) ? 0.0f : (1.0f - min(1.0f, hit.x * 0.01f));
     uav[tid.xy] = float4(t, t, t, 1);

@@ -4,8 +4,6 @@
 // 
 // ============================================================================
 
-#define COMPACT_BVH_GPU_LEAFS // keep in sync with setting in tin_bvh.h
-
 uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// traverse BVH
@@ -17,7 +15,6 @@ uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global uint*
 	{
 		// process node
 		cost += 1.2f; // TODO: obtain somehow via tiny_bvh.h?
-	#ifdef COMPACT_BVH_GPU_LEAFS
 		if (nodeIdx & 0x80000000)
 		{
 			const uint triCount = (nodeIdx >> 24) & 127;
@@ -46,37 +43,6 @@ uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global uint*
 		}
 		const float4 lmin = bvhNode[nodeIdx].lmin, lmax = bvhNode[nodeIdx].lmax;
 		const float4 rmin = bvhNode[nodeIdx].rmin, rmax = bvhNode[nodeIdx].rmax;
-	#else
-		const float4 lmin = bvhNode[nodeIdx].lmin, lmax = bvhNode[nodeIdx].lmax;
-		const float4 rmin = bvhNode[nodeIdx].rmin, rmax = bvhNode[nodeIdx].rmax;
-		const uint triCount = as_uint( rmin.w );
-		if (triCount > 0)
-		{
-			// process leaf node
-			const uint firstTri = as_uint( rmax.w );
-			for (uint i = 0; i < triCount; i++)
-			{
-				cost += 1.0f; // TODO: obtain somehow via tiny_bvh.h?
-				const uint triIdx = idx[firstTri + i];
-				const global float4* tri = verts + 3 * triIdx;
-				// triangle intersection - Moeller-Trumbore
-				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
-				const float3 h = cross( D, edge2.xyz );
-				const float a = dot( edge1.xyz, h );
-				const float f = 1 / a;
-				const float3 s = O - tri[0].xyz;
-				const float u = f * dot( s, h );
-				const float3 q = cross( s, edge1.xyz );
-				const float v = f * dot( D, q );
-				if (u < 0 || v < 0 || u + v > 1) continue;
-				const float d = f * dot( edge2.xyz, q );
-				if (d > 0.0f && d < hit.x) hit = (float4)(d, u, v, as_float( triIdx ));
-			}
-			if (stackPtr == 0) break;
-			nodeIdx = stack[--stackPtr];
-			continue;
-		}
-	#endif
 		uint left = as_uint( lmin.w ), right = as_uint( lmax.w );
 		// child AABB intersection tests
 		const float3 t1a = (lmin.xyz - O) * rD, t2a = (lmax.xyz - O) * rD;
@@ -117,7 +83,6 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 	while (1)
 	{
 		steps++;
-	#ifdef COMPACT_BVH_GPU_LEAFS
 		if (nodeIdx & 0x80000000)
 		{
 			const uint triCount = (nodeIdx >> 24) & 127;
@@ -151,41 +116,6 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 		}
 		const float4 lmin = bvhNode[nodeIdx].lmin, lmax = bvhNode[nodeIdx].lmax;
 		const float4 rmin = bvhNode[nodeIdx].rmin, rmax = bvhNode[nodeIdx].rmax;
-	#else
-		const float4 rmin = bvhNode[nodeIdx].rmin, rmax = bvhNode[nodeIdx].rmax;
-		const uint triCount = as_uint( rmin.w );
-		if (triCount > 0 /* leaf */)
-		{
-			const uint firstTri = as_uint( rmax.w );
-			for (uint i = 0; i < triCount; i++)
-			{
-				const uint triIdx = idx[firstTri + i];
-				const global float4* tri = verts + 3 * triIdx;
-				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
-				const float3 h = cross( D, edge2.xyz );
-				const float a = dot( edge1.xyz, h );
-				const float f = native_recip( a );
-				const float3 s = O - tri[0].xyz;
-				const float u = f * dot( s, h );
-				const float3 q = cross( s, edge1.xyz );
-				const float v = f * dot( D, q );
-				if (u < 0 || v < 0 || u + v > 1) continue;
-				const float d = f * dot( edge2.xyz, q );
-				if (d <= 0.0f || d >= hit.x) continue;
-				if (opmap)
-				{
-					const int row = (int)( (u + v) * 32.0f ), diag = (int)( (1 - u) * 32.0f );
-					const int idx = (row * row) + (int)( v * 32.0f ) + (diag - (31 - row));
-					if (!(opmap[triIdx * 32 + (idx >> 5)] & (1 << (idx & 31)))) continue;
-				}
-				hit = (float4)(d, u, v, as_float( triIdx ));
-			}
-			if (stackPtr == 0) break;
-			nodeIdx = stack[--stackPtr];
-			continue;
-		}
-		const float4 lmin = bvhNode[nodeIdx].lmin, lmax = bvhNode[nodeIdx].lmax;
-	#endif
 		uint left = as_uint( lmin.w ), right = as_uint( lmax.w );
 		const float3 t1a = fma( lmin.xyz, rD, rO ), t2a = fma( lmax.xyz, rD, rO );
 		const float3 t1b = fma( rmin.xyz, rD, rO ), t2b = fma( rmax.xyz, rD, rO );
@@ -223,7 +153,6 @@ bool isoccluded_ailalaine(
 	uint nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0;
 	while (1)
 	{
-	#ifdef COMPACT_BVH_GPU_LEAFS
 		if (nodeIdx & 0x80000000)
 		{
 			const uint triCount = (nodeIdx >> 24) & 127;
@@ -256,40 +185,6 @@ bool isoccluded_ailalaine(
 		}
 		const float4 lmin = bvhNode[nodeIdx].lmin, lmax = bvhNode[nodeIdx].lmax;
 		const float4 rmin = bvhNode[nodeIdx].rmin, rmax = bvhNode[nodeIdx].rmax;
-	#else
-		const float4 lmin = bvhNode[nodeIdx].lmin, lmax = bvhNode[nodeIdx].lmax;
-		const float4 rmin = bvhNode[nodeIdx].rmin, rmax = bvhNode[nodeIdx].rmax;
-		const uint triCount = as_uint( rmin.w );
-		if (triCount > 0 /* leaf */)
-		{
-			const uint firstTri = as_uint( rmax.w );
-			for (uint i = 0; i < triCount; i++)
-			{
-				const uint triIdx = idx[firstTri + i];
-				const global float4* tri = verts + 3 * triIdx;
-				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
-				const float3 h = cross( D, edge2.xyz );
-				const float f = 1 / dot( edge1.xyz, h );
-				const float3 s = O - tri[0].xyz;
-				const float u = f * dot( s, h );
-				const float3 q = cross( s, edge1.xyz );
-				const float v = f * dot( D, q );
-				if (u < 0 || v < 0 || u + v > 1) continue;
-				const float d = f * dot( edge2.xyz, q );
-				if (d <= 0.0f || d >= tmax) continue;
-				if (opmap)
-				{
-					const int row = (int)( (u + v) * 32.0f ), diag = (int)( (1 - u) * 32.0f );
-					const int idx = (row * row) + (int)( v * 32.0f ) + (diag - (31 - row));
-					if (!(opmap[triIdx * 32 + (idx >> 5)] & (1 << (idx & 31)))) continue;
-				}
-				return true;
-			}
-			if (stackPtr == 0) break;
-			nodeIdx = stack[--stackPtr];
-			continue;
-		}
-	#endif
 		uint left = as_uint( lmin.w ), right = as_uint( lmax.w );
 		const float3 t1a = fma( lmin.xyz, rD, rO ), t2a = fma( lmax.xyz, rD, rO );
 		const float3 t1b = fma( rmin.xyz, rD, rO ), t2b = fma( rmax.xyz, rD, rO );
