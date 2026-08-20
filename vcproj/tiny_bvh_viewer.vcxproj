@@ -121,7 +121,9 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalIncludeDirectories>..;..\external</AdditionalIncludeDirectories>
-      <EnableEnhancedInstructionSet>AdvancedVectorExtensions</EnableEnhancedInstructionSet>
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
+      <EnableVectorLength>VectorLength256</EnableVectorLength>
+      <FloatingPointModel>Fast</FloatingPointModel>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -143,8 +145,9 @@
       <AdditionalIncludeDirectories>..;..\external</AdditionalIncludeDirectories>
       <Optimization>Full</Optimization>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
-      <EnableEnhancedInstructionSet>AdvancedVectorExtensions</EnableEnhancedInstructionSet>
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <FloatingPointModel>Fast</FloatingPointModel>
+      <EnableVectorLength>VectorLength256</EnableVectorLength>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
