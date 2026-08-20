@@ -333,6 +333,7 @@ void InitMeshes()
 	mbvh4.ConvertFrom( bvh2, true );  // collapse the BVH2 into a 4-wide BVH
 	bvh4.ConvertFrom( mbvh4, true );  // quantize into the single-blob BVH4_GPU layout
 	cwbvh.BuildHQ( verts, triCount ); // separate SBVH build
+	cwbvh.Optimize( 25 );
 }
 
 ID3D12Resource* MakeAccelerationStructure( const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, UINT64* updateScratchSize = nullptr )

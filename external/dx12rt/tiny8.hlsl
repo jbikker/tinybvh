@@ -22,37 +22,37 @@ RWTexture2D<float4> uav : register(u0); // render target
 #define TRI_STRIDE 3
 #endif
 
-// Entries are node *groups*, not nodes, and one group is pushed per level at
-// most, so this only has to cover tree depth. Measured peak on test scenes: 4.
-#define CWBVH_STACK_SIZE 32
+#define GROUP_X    8
+#define GROUP_Y    8
+#define GROUP_SIZE (GROUP_X * GROUP_Y)
 
-// robust reciprocal calculation
+// Stack entries are node groups, not nodes. At most one group is pushed per level, 
+// so this only has to cover tree depth. Measured peak: 6 at 450k primitives.
+#define CWBVH_STACK_SIZE 8
+
+// Depth-major, and split into two uint arrays rather than one uint2 array: a
+// uint2 would give an 8-byte stride, landing all lanes at a given depth on
+// every other LDS bank. This way consecutive lanes hit consecutive banks.
+// 16 * 64 * 8 = 8KB per group, the same budget tiny.hlsl already uses.
+groupshared uint g_stackX[CWBVH_STACK_SIZE * GROUP_SIZE];
+groupshared uint g_stackY[CWBVH_STACK_SIZE * GROUP_SIZE];
+#define STACK_PUSH(g) { const uint s_ = stackPtr++ * GROUP_SIZE + lane; \
+                        g_stackX[s_] = (g).x, g_stackY[s_] = (g).y; }
+#define STACK_POP(g)  { const uint s_ = --stackPtr * GROUP_SIZE + lane; \
+                        (g) = uint2(g_stackX[s_], g_stackY[s_]); }
+
 float safe_rcp(float x)
 {
     return 1.0f / (sign(x) * max(abs(x), 1e-5f));
 }
 
-// OpenCL as_uchar4( float ): the four bytes of the bit pattern, low byte first.
 float4 as_uchar4(const float v)
 {
     const uint u = asuint(v);
     return float4(uint4(u, u >> 8, u >> 16, u >> 24) & 255);
 }
 
-// CUDA's __bfind: index (from the LSB) of the most significant set bit. HLSL's
-// firstbithigh returns exactly that for uint operands. It yields 0xffffffff for
-// a zero input, which never happens here: every call site has already tested
-// that the mask is non-zero.
 #define bfind(x) firstbithigh(x)
-
-// Replicate the sign bit of every byte across that byte, i.e. what CUDA's
-// prmt.b32 with selector 0x0000BA98 does. Branchless: per byte 0x80 -> 0x01,
-// and multiplying the resulting 0x01010101-style mask by 255 widens each set
-// byte to 0xff (the 32-bit wrap-around makes this exact).
-uint sign_extend_s8x4(const uint i)
-{
-    return ((i & 0x80808080u) >> 7) * 255u;
-}
 
 // Slab test for one group of four children. Returns the bits this quad
 // contributes to the node's hitmask; the caller ORs the two quads together.
@@ -64,7 +64,7 @@ uint intersect_quad(const uint meta4, const uint octinv4,
                     const float3 idir, const float3 orig, const float tmax)
 {
     const uint is_inner4 = (meta4 & (meta4 << 1)) & 0x10101010;
-    const uint inner_mask4 = sign_extend_s8x4(is_inner4 << 3);
+    const uint inner_mask4 = (is_inner4 >> 4) * 255;
     const uint bit_index4 = (meta4 ^ (octinv4 & inner_mask4)) & 0x1F1F1F1F;
     const uint child_bits4 = (meta4 >> 5) & 0x07070707;
     // dequantize and intersect all four children at once
@@ -86,11 +86,11 @@ uint intersect_quad(const uint meta4, const uint octinv4,
     return hitmask;
 }
 
-float4 traverse_cwbvh(const float3 O, const float3 D, const float3 rD, const float t)
+float4 traverse_cwbvh(const float3 O, const float3 D, const float3 rD, const float t,
+                      const uint lane)
 {
     // prepare traversal
     float4 hit = float4(t, 0, 0, 0); // returned unchanged if we miss everything
-    uint2 stack[CWBVH_STACK_SIZE];
     uint hitAddr = 0, stackPtr = 0;
     float2 uv = float2(0, 0);
     float tmax = t;
@@ -107,7 +107,7 @@ float4 traverse_cwbvh(const float3 O, const float3 D, const float3 rD, const flo
             const uint child_node_base_index = ngroup.x;
             ngroup.y &= ~(1u << child_bit_index);
             if (ngroup.y > 0x00FFFFFF && stackPtr < CWBVH_STACK_SIZE)
-                stack[stackPtr++] = ngroup; // there are siblings left; save them
+                STACK_PUSH(ngroup); // there are siblings left; save them
             const uint slot_index = (child_bit_index - 24) ^ (octinv4 & 255);
             const uint relative_index = countbits(imask & ~(0xFFFFFFFFu << slot_index));
             const uint child_node_index = (child_node_base_index + relative_index) * 5;
@@ -117,7 +117,7 @@ float4 traverse_cwbvh(const float3 O, const float3 D, const float3 rD, const flo
             const float4 n3 = cwbvhNodes[child_node_index + 3];
             const float4 n4 = cwbvhNodes[child_node_index + 4];
             ngroup.x = asuint(n1.x), tgroup = uint2(asuint(n1.y), 0);
-            // n0.w packs three *signed* per-axis exponents plus imask; sign-extend
+            // n0.w packs three signed per-axis exponents plus imask; sign-extend
             // each byte, then (e + 127) << 23 is simply 2^e as a float.
             const uint packed_e = asuint(n0.w);
             const int3 e = int3(asint(packed_e << 24), asint(packed_e << 16),
@@ -151,7 +151,7 @@ float4 traverse_cwbvh(const float3 O, const float3 D, const float3 rD, const flo
             const uint triangleIndex = bfind(tgroup.y);
             const uint triAddr = tgroup.x + triangleIndex * TRI_STRIDE;
             tgroup.y -= 1u << triangleIndex;
-        #ifdef CWBVH_COMPRESSED_TRIS
+#ifdef CWBVH_COMPRESSED_TRIS
             // "Fast Ray-Triangle Intersections by Coordinate Transformation",
             // Baldwin & Weber, 2016.
             const float4 T2 = cwbvhTris[triAddr + 2];
@@ -168,10 +168,9 @@ float4 traverse_cwbvh(const float3 O, const float3 D, const float3 rD, const flo
                 continue;
             uv = float2(u, v), tmax = d;
             hitAddr = asuint(cwbvhTris[triAddr + 3].w);
-        #else
-            // Moeller-Trumbore, iquilezles.org version. Triangles are stored as
-            // 3x16 bytes: two edges plus vertex 0, whose (otherwise unused) w
-            // component holds the original primitive index.
+#else
+            // Moeller-Trumbore, iquilezles.org version. Tris are stored as 3x16 bytes: 
+            // two edges plus vertex 0, whose w holds the original primitive index.
             const float3 e1 = cwbvhTris[triAddr].xyz;
             const float3 e2 = cwbvhTris[triAddr + 1].xyz;
             const float4 v0 = cwbvhTris[triAddr + 2];
@@ -189,7 +188,7 @@ float4 traverse_cwbvh(const float3 O, const float3 D, const float3 rD, const flo
                 continue;
             uv = float2(u, v), tmax = d;
             hitAddr = asuint(v0.w);
-        #endif
+#endif
         }
         // out of child nodes: continue with the group on top of the stack
         if (ngroup.y <= 0x00FFFFFF)
@@ -199,14 +198,14 @@ float4 traverse_cwbvh(const float3 O, const float3 D, const float3 rD, const flo
                 hit = float4(tmax, uv.x, uv.y, asfloat(hitAddr));
                 break;
             }
-            ngroup = stack[--stackPtr];
+            STACK_POP(ngroup);
         }
     }
     return hit;
 }
 
-[numthreads(8, 8, 1)]
-void TraceRays_8_wide(uint3 tid : SV_DispatchThreadID)
+[numthreads(GROUP_X, GROUP_Y, 1)]
+void TraceRays_8_wide(uint3 tid : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 {
     uint w, h;
     uav.GetDimensions(w, h);
@@ -219,7 +218,7 @@ void TraceRays_8_wide(uint3 tid : SV_DispatchThreadID)
     const float3 D = r.direction;
     const float3 rD = float3(safe_rcp(D.x), safe_rcp(D.y), safe_rcp(D.z));
     // trace
-    const float4 hit = traverse_cwbvh(O, D, rD, 1e30f);
+    const float4 hit = traverse_cwbvh(O, D, rD, 1e30f, gi);
     // visualize depth
     const float t = (hit.x >= 1e30f) ? 0.0f : (1.0f - min(1.0f, hit.x * 0.01f));
     uav[tid.xy] = float4(t, t, t, 1);
