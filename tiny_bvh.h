@@ -99,10 +99,10 @@ THE SOFTWARE.
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
 #define TINY_BVH_VERSION_MINOR	8
-#define TINY_BVH_VERSION_SUB	1
+#define TINY_BVH_VERSION_SUB	2
 
 // Cached BVH file version - increases only when file layout changes.
-#define TINY_BVH_CACHE_VERSION	181
+#define TINY_BVH_CACHE_VERSION	182
 
 // Run-time checks / debugging.
 // #define PARANOID // checks out-of-bound access of slices
@@ -1320,6 +1320,7 @@ public:
 	// BVH data
 	BVHNode* bvhNode = 0;			// BVH node in Aila & Laine format.
 	BVH bvh;						// BVH_GPU is created from BVH and uses its data.
+	bvhvec4slice orderedVerts = {};	// Vertex data ordered according to triIdx.
 	bool ownBVH = true;				// False when ConvertFrom receives an external bvh.
 };
 
@@ -5509,7 +5510,6 @@ void BVH_GPU::Optimize( const uint32_t iterations, bool extreme )
 // msb marks leaf, 24..30 hold triangle count and 0..23 the offset into primIdx.
 static uint32_t CompactLeafRef( const BVH::BVHNode& leaf )
 {
-	assert( leaf.triCount <= 127 && leaf.leftFirst <= 0xffffff );
 	return 0x80000000u | (tinybvh_min( 127u, leaf.triCount ) << 24) | (leaf.leftFirst & 0xffffff);
 }
 
@@ -5570,32 +5570,48 @@ void BVH_GPU::ConvertFrom( const BVH& original, bool compact )
 		slot = stack[--stackPtr], nodeIdx = stack[--stackPtr];
 	}
 	usedNodes = newNodePtr;
+	// reorder triangle data to avoid the idx array indirection
+	if (bvh_over_aabbs) return; // skip for TLAS builds.
+	bvhvec4* vertexData = (bvhvec4*)AlignedAlloc( sizeof( bvhvec4 ) * 3 * idxCount );
+	orderedVerts = bvhvec4slice( vertexData, 3 * idxCount );
+	for (uint32_t i = 0; i < idxCount; i++)
+	{
+		uint32_t pidx = bvh.primIdx[i];
+		if (pidx < triCount)
+		{
+			vertexData[i * 3 + 0] = bvh.verts[pidx * 3 + 0];
+			vertexData[i * 3 + 1] = bvh.verts[pidx * 3 + 1] - vertexData[i * 3 + 0];
+			vertexData[i * 3 + 2] = bvh.verts[pidx * 3 + 2] - vertexData[i * 3 + 0];
+			vertexData[i * 3 + 0].w = *(float*)&pidx; // store original primitive index.
+			vertexData[i * 3 + 1].w = bvh.verts[pidx * 3 + 1].w; // keep; may contain triangle color.
+		}
+	}
 }
 
 int32_t BVH_GPU::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
 	uint32_t nodeIdx = 0, stack[64], stackPtr = 0;
-	const bvhvec4slice& verts = bvh.verts;
-	const uint32_t* primIdx = bvh.primIdx;
 	float cost = 0;
 	while (1)
 	{
 		cost += c_trav;
 		if (nodeIdx & 0x80000000u)
 		{
-			uint32_t triCount = (nodeIdx >> 24) & 127;
-			uint32_t firstTri = nodeIdx & 0xffffff;
-			if (indexedEnabled && bvh.vertIdx != 0) for (uint32_t i = 0; i < triCount; i++, cost += c_int)
+			uint32_t primCount = (nodeIdx >> 24) & 127, firstTri = nodeIdx & 0xffffff;
+			for (uint32_t i = 0; i < primCount; i++, cost += c_int)
 			{
-				const uint32_t pi = primIdx[firstTri + i];
-				const uint32_t i0 = bvh.vertIdx[pi * 3], i1 = bvh.vertIdx[pi * 3 + 1], i2 = bvh.vertIdx[pi * 3 + 2];
-				IntersectTri( ray, pi, verts, i0, i1, i2 );
-			}
-			else for (uint32_t i = 0; i < triCount; i++, cost += c_int)
-			{
-				const uint32_t pi = primIdx[firstTri + i];
-				IntersectTri( ray, pi, verts, pi * 3, pi * 3 + 1, pi * 3 + 2 );
+				const uint32_t pi = (firstTri + i) * 3;
+				const bvhvec4 v0_ = orderedVerts[pi];
+				const bvhvec3 v0 = v0_, e1 = orderedVerts[pi + 1], e2 = orderedVerts[pi + 2];
+				MOLLER_TRUMBORE_TEST( ray.hit.t, continue );
+				// register a hit: ray is shortened to t.
+				ray.hit.t = t, ray.hit.u = u, ray.hit.v = v;
+			#if INST_IDX_BITS == 32
+				ray.hit.prim = *(uint32_t*)&v0_.w, ray.hit.inst = ray.instIdx;
+			#else
+				ray.hit.prim = *(uint32_t*)&v0_.w + ray.instIdx;
+			#endif
 			}
 			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
 			continue;
