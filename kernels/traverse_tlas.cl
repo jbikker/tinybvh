@@ -17,22 +17,19 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 	// safety net
 	if (isnan( O4.x + O4.y + O4.z + D4.x + D4.y + D4.z )) return hit;
 	// traverse BVH
-	unsigned node = 0, stack[STACK_SIZE], stackPtr = 0, steps = 0;
+	unsigned nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0, steps = 0;
 	if (stepCount) *stepCount = 0;
 	while (1)
 	{
 		steps++;
-		// fetch the node
-		const float4 lmin = tlasNodes[node].lmin, lmax = tlasNodes[node].lmax;
-		const float4 rmin = tlasNodes[node].rmin, rmax = tlasNodes[node].rmax;
-		const unsigned triCount = as_uint( rmin.w );
-		if (triCount > 0)
+		if (nodeIdx & 0x80000000)
 		{
 			// process leaf node
-			const unsigned firstTri = as_uint( rmax.w );
-			for (unsigned i = 0; i < triCount; i++)
+			const uint instCount = (nodeIdx >> 24) & 127;
+			uint firstInst = nodeIdx & 0xffffff;
+			for (unsigned i = 0; i < instCount; i++)
 			{
-				const uint instIdx = tlasIdx[firstTri + i];
+				const uint instIdx = tlasIdx[firstInst + i];
 				const struct Instance* inst = instances + instIdx;
 				const float3 Oblas = TransformPoint( O4.xyz, inst->invTransform );
 				const float3 Dblas = TransformVector( D4.xyz, inst->invTransform );
@@ -77,9 +74,11 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 					hit.w = as_float( as_uint( hit.w ) + (instIdx << 24) );
 				}
 			}
-			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
 			continue;
 		}
+		const float4 lmin = tlasNodes[nodeIdx].lmin, lmax = tlasNodes[nodeIdx].lmax;
+		const float4 rmin = tlasNodes[nodeIdx].rmin, rmax = tlasNodes[nodeIdx].rmax;
 		unsigned left = as_uint( lmin.w ), right = as_uint( lmax.w );
 		// child AABB intersection tests
 		const float3 t1a = (lmin.xyz - O4.xyz) * rD4.xyz, t2a = (lmax.xyz - O4.xyz) * rD4.xyz;
@@ -98,8 +97,8 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 			float h = dist1; dist1 = dist2; dist2 = h;
 			unsigned t = left; left = right; right = t;
 		}
-		if (dist1 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
-		else { node = left; if (dist2 != 1e30f) stack[stackPtr++] = right; }
+		if (dist1 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
+		else { nodeIdx = left; if (dist2 != 1e30f) stack[stackPtr++] = right; }
 	}
 	// write back intersection result
 	if (stepCount) *stepCount += steps;
@@ -109,23 +108,20 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 bool isoccluded_tlas( const float4 O4, const float4 D4, const float4 rD4, const float tmax )
 {
 	// traverse BVH
-	unsigned node = 0, stack[STACK_SIZE], stackPtr = 0;
+	unsigned nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0;
 	// safety net
 	if (isnan( O4.x + O4.y + O4.z + D4.x + D4.y + D4.z )) return true;
 	// traverse
 	while (1)
 	{
-		// fetch the node
-		const float4 lmin = tlasNodes[node].lmin, lmax = tlasNodes[node].lmax;
-		const float4 rmin = tlasNodes[node].rmin, rmax = tlasNodes[node].rmax;
-		const unsigned triCount = as_uint( rmin.w );
-		if (triCount > 0)
+		if (nodeIdx & 0x80000000)
 		{
 			// process leaf node
-			const unsigned firstTri = as_uint( rmax.w );
-			for (unsigned i = 0; i < triCount; i++)
+			const uint instCount = (nodeIdx >> 24) & 127;
+			uint firstInst = nodeIdx & 0xffffff;
+			for (unsigned i = 0; i < instCount; i++)
 			{
-				const uint instIdx = tlasIdx[firstTri + i];
+				const uint instIdx = tlasIdx[firstInst + i];
 				const struct Instance* inst = instances + instIdx;
 				const float3 Oblas = TransformPoint( O4.xyz, inst->invTransform );
 				const float3 Dblas = TransformVector( D4.xyz, inst->invTransform );
@@ -164,9 +160,11 @@ bool isoccluded_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 				}
 			#endif
 			}
-			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
 			continue;
 		}
+		const float4 lmin = tlasNodes[nodeIdx].lmin, lmax = tlasNodes[nodeIdx].lmax;
+		const float4 rmin = tlasNodes[nodeIdx].rmin, rmax = tlasNodes[nodeIdx].rmax;
 		unsigned left = as_uint( lmin.w ), right = as_uint( lmax.w );
 		// child AABB intersection tests
 		const float3 t1a = (lmin.xyz - O4.xyz) * rD4.xyz, t2a = (lmax.xyz - O4.xyz) * rD4.xyz;
@@ -185,8 +183,8 @@ bool isoccluded_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 			float h = dist1; dist1 = dist2; dist2 = h;
 			unsigned t = left; left = right; right = t;
 		}
-		if (dist1 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
-		else { node = left; if (dist2 != 1e30f) stack[stackPtr++] = right; }
+		if (dist1 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
+		else { nodeIdx = left; if (dist2 != 1e30f) stack[stackPtr++] = right; }
 	}
 	// no hit found
 	return false;

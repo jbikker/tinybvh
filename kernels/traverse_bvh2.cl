@@ -4,7 +4,7 @@
 // 
 // ============================================================================
 
-uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* verts, const float3 O, const float3 D, const float3 rD, const float tmax )
+uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* orderedVerts, const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// traverse BVH
 	float4 hit;
@@ -18,24 +18,23 @@ uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global uint*
 		if (nodeIdx & 0x80000000)
 		{
 			const uint triCount = (nodeIdx >> 24) & 127;
-			const uint firstTri = nodeIdx & 0xffffff;
-			for (uint i = 0; i < triCount; i++)
+			uint firstVert = (nodeIdx & 0xffffff) * 3;
+			for (uint i = 0; i < triCount; i++, firstVert += 3)
 			{
 				cost += 1.0f; // TODO: obtain somehow via tiny_bvh.h?
-				const uint triIdx = idx[firstTri + i];
-				const global float4* tri = verts + 3 * triIdx;
-				// triangle intersection - Moeller-Trumbore
-				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
+				const float4 vert0 = orderedVerts[firstVert];
+				const float4 edge1 = orderedVerts[firstVert + 1];
+				const float4 edge2 = orderedVerts[firstVert + 2];
 				const float3 h = cross( D, edge2.xyz );
 				const float a = dot( edge1.xyz, h );
 				const float f = 1 / a;
-				const float3 s = O - tri[0].xyz;
+				const float3 s = O - vert0.xyz;
 				const float u = f * dot( s, h );
 				const float3 q = cross( s, edge1.xyz );
 				const float v = f * dot( D, q );
 				if (u < 0 || v < 0 || u + v > 1) continue;
 				const float d = f * dot( edge2.xyz, q );
-				if (d > 0.0f && d < hit.x) hit = (float4)(d, u, v, as_float( triIdx ));
+				if (d > 0.0f && d < hit.x) hit = (float4)(d, u, v, vert0.w);
 			}
 			if (stackPtr == 0) break;
 			nodeIdx = stack[--stackPtr];
@@ -72,7 +71,7 @@ uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global uint*
 }
 
 float4 traverse_ailalaine( const global struct BVHNode* bvhNode, 
-	const global uint* idx, const global float4* verts, const global uint* opmap,
+	const global uint* idx, const global float4* orderedVerts, const global uint* opmap,
 	const float3 O, const float3 D, const float3 rD, const float tmax, uint* stepCount )
 {
 	// prepare slab test
@@ -86,16 +85,16 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 		if (nodeIdx & 0x80000000)
 		{
 			const uint triCount = (nodeIdx >> 24) & 127;
-			const uint firstTri = nodeIdx & 0xffffff;
-			for (uint i = 0; i < triCount; i++)
+			uint firstVert = (nodeIdx & 0xffffff) * 3;
+			for (uint i = 0; i < triCount; i++, firstVert += 3)
 			{
-				const uint triIdx = idx[firstTri + i];
-				const global float4* tri = verts + 3 * triIdx;
-				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
+				const float4 vert0 = orderedVerts[firstVert];
+				const float4 edge1 = orderedVerts[firstVert + 1];
+				const float4 edge2 = orderedVerts[firstVert + 2];
 				const float3 h = cross( D, edge2.xyz );
 				const float a = dot( edge1.xyz, h );
 				const float f = native_recip( a );
-				const float3 s = O - tri[0].xyz;
+				const float3 s = O - vert0.xyz;
 				const float u = f * dot( s, h );
 				const float3 q = cross( s, edge1.xyz );
 				const float v = f * dot( D, q );
@@ -104,11 +103,12 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 				if (d <= 0.0f || d >= hit.x) continue;
 				if (opmap)
 				{
+					const uint triIdx = as_uint( vert0.w );
 					const int row = (int)( (u + v) * 32.0f ), diag = (int)( (1 - u) * 32.0f );
 					const int idx = (row * row) + (int)( v * 32.0f ) + (diag - (31 - row));
 					if (!(opmap[triIdx * 32 + (idx >> 5)] & (1 << (idx & 31)))) continue;
 				}
-				hit = (float4)(d, u, v, as_float( triIdx ));
+				hit = (float4)(d, u, v, vert0.w);
 			}
 			if (stackPtr == 0) break;
 			nodeIdx = stack[--stackPtr];
@@ -144,7 +144,7 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 
 bool isoccluded_ailalaine( 
 	const global struct BVHNode* bvhNode, 
-	const global uint* idx, const global float4* verts, const global uint* opmap, 
+	const global uint* idx, const global float4* orderedVerts, const global uint* opmap, 
 	const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// prepare slab test
@@ -156,15 +156,15 @@ bool isoccluded_ailalaine(
 		if (nodeIdx & 0x80000000)
 		{
 			const uint triCount = (nodeIdx >> 24) & 127;
-			const uint firstTri = nodeIdx & 0xffffff;
-			for (uint i = 0; i < triCount; i++)
+			uint firstVert = (nodeIdx & 0xffffff) * 3;
+			for (uint i = 0; i < triCount; i++, firstVert += 3)
 			{
-				const uint triIdx = idx[firstTri + i];
-				const global float4* tri = verts + 3 * triIdx;
-				const float4 edge1 = tri[1] - tri[0], edge2 = tri[2] - tri[0];
+				const float4 vert0 = orderedVerts[firstVert];
+				const float4 edge1 = orderedVerts[firstVert + 1];
+				const float4 edge2 = orderedVerts[firstVert + 2];
 				const float3 h = cross( D, edge2.xyz );
 				const float f = 1 / dot( edge1.xyz, h );
-				const float3 s = O - tri[0].xyz;
+				const float3 s = O - vert0.xyz;
 				const float u = f * dot( s, h );
 				const float3 q = cross( s, edge1.xyz );
 				const float v = f * dot( D, q );
@@ -173,6 +173,7 @@ bool isoccluded_ailalaine(
 				if (d <= 0.0f || d >= tmax) continue;
 				if (opmap)
 				{
+					const uint triIdx = as_uint( vert0.w );
 					const int row = (int)( (u + v) * 32.0f ), diag = (int)( (1 - u) * 32.0f );
 					const int idx = (row * row) + (int)( v * 32.0f ) + (diag - (31 - row));
 					if (!(opmap[triIdx * 32 + (idx >> 5)] & (1 << (idx & 31)))) continue;
@@ -210,7 +211,7 @@ bool isoccluded_ailalaine(
 	return false;
 }
 
-void kernel batch_ailalaine( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* verts, global struct Ray* rayData )
+void kernel batch_ailalaine( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* orderedVerts, global struct Ray* rayData )
 {
 	// fetch ray
 	const uint threadId = get_global_id( 0 );
@@ -218,11 +219,11 @@ void kernel batch_ailalaine( const global struct BVHNode* bvhNode, const global 
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	float4 hit = traverse_ailalaine( bvhNode, idx, verts, 0, O, D, rD, 1e30f, 0 );
+	float4 hit = traverse_ailalaine( bvhNode, idx, orderedVerts, 0, O, D, rD, 1e30f, 0 );
 	rayData[threadId].hit = hit;
 }
 
-void kernel batch_ailalaine_any( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* verts, global struct Ray* rayData )
+void kernel batch_ailalaine_any( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* orderedVerts, global struct Ray* rayData )
 {
 	// fetch ray
 	const uint threadId = get_global_id( 0 );
@@ -232,11 +233,11 @@ void kernel batch_ailalaine_any( const global struct BVHNode* bvhNode, const glo
 	const float3 rD = rayData[threadId].rD.xyz;
 	const float tmax = 1e30f; // TODO: get this from the ray.
 	float4 hit = 0;
-	if (isoccluded_ailalaine( bvhNode, idx, verts, 0, O, D, rD, tmax )) hit.w = as_float( 1 );
+	if (isoccluded_ailalaine( bvhNode, idx, orderedVerts, 0, O, D, rD, tmax )) hit.w = as_float( 1 );
 	rayData[threadId].hit = hit;
 }
 
-void kernel batch_ailalaine_rrs( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* verts, global struct Ray* rayData, global uint* rrsResult )
+void kernel batch_ailalaine_rrs( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* orderedVerts, global struct Ray* rayData, global uint* rrsResult )
 {
 	// fetch ray
 	const uint threadId = get_global_id( 0 );
@@ -244,5 +245,5 @@ void kernel batch_ailalaine_rrs( const global struct BVHNode* bvhNode, const glo
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	rrsResult[threadId] = RRScost_ailalaine( bvhNode, idx, verts, O, D, rD, 1e30f );
+	rrsResult[threadId] = RRScost_ailalaine( bvhNode, idx, orderedVerts, O, D, rD, 1e30f );
 }

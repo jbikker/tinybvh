@@ -62,7 +62,7 @@ struct BLASDesc
 	uint opmapOffset;				// position of opacity micromap data in global arrays
 	uint node8Offset;				// position of CWBVH nodes in global array
 	uint tri8Offset;				// position of CWBVH triangle data in global array
-	uint blasType;					// blas type: 0 = BVH_GPU, 1 = BVH8_CWBVH
+	uint blasType;					// blas type: 2, 3 = BVH_GPU, 4 = BVH8_CWBVH
 };
 
 // buffers - most data will be accessed as 128-bit values for efficiency.
