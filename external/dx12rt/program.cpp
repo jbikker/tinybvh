@@ -9,6 +9,7 @@
 #include "shader.fxh"
 #include "tiny.fxh"
 #include "tiny4.fxh"
+#include "tiny8.fxh"
 #include <cassert>
 #include <fstream>
 
@@ -38,30 +39,31 @@ ID3D12CommandQueue* cmdQueue;
 ID3D12Fence* fence;
 IDXGISwapChain3* swapChain;
 ID3D12DescriptorHeap* uavHeap;
-ID3D12Resource* renderTarget, * backBuffer, * meshVB, * meshIB, * blas, * instances, * shaderIDs;
+ID3D12Resource* renderTarget, * backBuffer, * meshVB, * blas, * instances, * shaderIDs;
 ID3D12Resource* tlas, * tlasUpdateScratch, * queryResultBuffer, * compactionSizeReadback, * rayBuffer = nullptr;
 ID3D12CommandAllocator* cmdAllocs[FRAME_COUNT]; // one allocator per frame-in-flight slot
 ID3D12GraphicsCommandList4* cmdList;
 D3D12_RAYTRACING_INSTANCE_DESC* instanceData;
 ID3D12RootSignature* rootSignature;
 ID3D12StateObject* pso;
-ID3D12PipelineState* computePso, * computePso4;
+ID3D12PipelineState* computePso, * computePso4, * computePso8;
 ID3D12QueryHeap* queryHeap;
 HANDLE fenceEvent = nullptr;
 
-// The three ray tracing backends that are cycled through, one per frame.
-enum Backend { BACKEND_DXR = 0, BACKEND_BVH_GPU, BACKEND_BVH4_GPU, BACKEND_COUNT };
-static const char* backendName[BACKEND_COUNT] = { "DXR", "BVH_GPU", "BVH4_GPU" };
+// The ray tracing backends that are cycled through, one per frame.
+enum Backend { BACKEND_DXR = 0, BACKEND_BVH_GPU, BACKEND_BVH4_GPU, BACKEND_BVH8_CWBVH, BACKEND_COUNT };
+static const char* backendName[BACKEND_COUNT] = { "DXR", "BVH_GPU", "BVH4_GPU", "CWBVH" };
 
 #define TINYBVH_IMPLEMENTATION
 #include "../../tiny_bvh.h"
 using namespace tinybvh;
 
-// One high-quality (SBVH) BVH2 is built and both software layouts are derived from it.
+// One high-quality (SBVH) BVH2 is built; BVH_GPU and BVH4_GPU are derived from it.
 BVH bvh2;
 BVH_GPU bvh;
 MBVH<4> mbvh4;
 BVH4_GPU bvh4;
+BVH8_CWBVH cwbvh;
 
 // tinybvh BVH_GPU node.
 struct GPUBVHNode
@@ -73,21 +75,20 @@ struct GPUBVHNode
 };
 
 // Software-RT compute inputs.
-ID3D12Resource* bvhNodeBuffer = nullptr, * bvhIdxBuffer = nullptr, * bvhTriBuffer = nullptr;
+ID3D12Resource* bvhNodeBuffer = nullptr, * bvhIdxBuffer = nullptr, * bvhVertBuffer = nullptr;
 ID3D12Resource* bvh4DataBuffer = nullptr;
+ID3D12Resource* cwbvhNodeBuffer = nullptr, * cwbvhTriBuffer = nullptr;
 
 // Scene management - Append a file, with optional position, scale and color override, tinyfied
 int triCount = 0;
-bvhvec4* tris = 0;
-bvhvec3* t3 = 0;
-unsigned* vidx = 0;
+bvhvec4* verts = 0;
 void AddMesh( const char* file, int N = 0 )
 {
 	std::fstream s{ file, s.binary | s.in };
 	s.read( (char*)&N, 4 );
 	bvhvec4* data = (bvhvec4*)_aligned_malloc( (N + triCount) * 48, 64 );
-	if (tris) memcpy( data, tris, triCount * 48 ), _aligned_free( tris );
-	tris = data, s.read( (char*)tris + triCount * 48, N * 48 ), triCount += N;
+	if (verts) memcpy( data, verts, triCount * 48 ), _aligned_free( verts );
+	verts = data, s.read( (char*)verts + triCount * 48, N * 48 ), triCount += N;
 }
 
 static UINT64 fenceValue = 0;
@@ -114,7 +115,7 @@ void UpdateRayBuffer()
         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS( &staging ) );
     float* data;
     staging->Map( 0, nullptr, reinterpret_cast<void**>(&data) );
-	FILE* f = fopen( "raysets/view3rays.bin", "rb" );
+	FILE* f = fopen( "raysets/diffrays.bin", "rb" );
 	memset( data, 0, 32 * 1024 * 1024 );
 	for( int i = 0; i < rtWidth * rtHeight; i++ ) fread( data + i * 8, 4, 3, f );
 	for( int i = 0; i < rtWidth * rtHeight; i++ ) fread( data + i * 8 + 4, 4, 3, f );
@@ -165,29 +166,46 @@ void InitBVHBuffers()
 		};
 	const UINT64 nodeBytes = (UINT64)bvh.allocatedNodes * sizeof( GPUBVHNode );
 	const UINT64 idxBytes = (UINT64)bvh.bvh.idxCount * sizeof( unsigned );
-	const UINT64 triBytes = (UINT64)triCount * 3 * sizeof( bvhvec4 );
+	const UINT64 vertBytes = (UINT64)bvh.bvh.idxCount * 3 * sizeof( bvhvec4 );
 	// BVH4_GPU counts storage in 16-byte 'blocks'; usedBlocks is what traversal touches.
 	const UINT64 bvh4Bytes = (UINT64)bvh4.usedBlocks * sizeof( bvhvec4 );
+	// CWBVH keeps nodes (5 blocks each, again counted in usedBlocks) and triangles
+	// in two separate blobs; the triangle stride must match the tiny8.hlsl define.
+	const UINT64 cwbvhNodeBytes = (UINT64)cwbvh.usedBlocks * sizeof( bvhvec4 );
+#ifdef CWBVH_COMPRESSED_TRIS
+	const UINT64 cwbvhTriBytes = (UINT64)cwbvh.idxCount * 4 * sizeof( bvhvec4 );
+#else
+	const UINT64 cwbvhTriBytes = (UINT64)cwbvh.idxCount * 3 * sizeof( bvhvec4 );
+#endif
 	ID3D12Resource* nodeStaging = makeStaging( nodeBytes, bvh.bvhNode, nodeBytes );
 	ID3D12Resource* idxStaging = makeStaging( idxBytes, bvh.bvh.primIdx, idxBytes );
-	ID3D12Resource* triStaging = makeStaging( triBytes, tris, triBytes );
+	bvhvec4* vertexData = (bvhvec4*)bvh.orderedVerts.data;
+	ID3D12Resource* vertStaging = makeStaging( vertBytes, vertexData, vertBytes );
 	ID3D12Resource* bvh4Staging = makeStaging( bvh4Bytes, bvh4.bvh4Data, bvh4Bytes );
+	ID3D12Resource* cwbvhNodeStaging = makeStaging( cwbvhNodeBytes, cwbvh.bvh8Data, cwbvhNodeBytes );
+	ID3D12Resource* cwbvhTriStaging = makeStaging( cwbvhTriBytes, cwbvh.bvh8Tris, cwbvhTriBytes );
 	bvhNodeBuffer = makeDefault( nodeBytes );
 	bvhIdxBuffer = makeDefault( idxBytes );
-	bvhTriBuffer = makeDefault( triBytes );
+	bvhVertBuffer = makeDefault( vertBytes );
 	bvh4DataBuffer = makeDefault( bvh4Bytes );
+	cwbvhNodeBuffer = makeDefault( cwbvhNodeBytes );
+	cwbvhTriBuffer = makeDefault( cwbvhTriBytes );
 	bvhNodeBuffer->SetName( L"bvhNodeBuffer" );
 	bvhIdxBuffer->SetName( L"bvhIdxBuffer" );
-	bvhTriBuffer->SetName( L"bvhTriBuffer" );
+	bvhVertBuffer->SetName( L"bvhVertBuffer" );
 	bvh4DataBuffer->SetName( L"bvh4DataBuffer" );
+	cwbvhNodeBuffer->SetName( L"cwbvhNodeBuffer" );
+	cwbvhTriBuffer->SetName( L"cwbvhTriBuffer" );
 	// copy staging -> VRAM, then flip the VRAM buffers to a compute-shader-readable state. 
 	// Uses slot 0's allocator and fully drains the GPU, matching the other pre-render-loop setup helpers.
 	cmdAllocs[0]->Reset();
 	cmdList->Reset( cmdAllocs[0], nullptr );
 	cmdList->CopyResource( bvhNodeBuffer, nodeStaging );
 	cmdList->CopyResource( bvhIdxBuffer, idxStaging );
-	cmdList->CopyResource( bvhTriBuffer, triStaging );
+	cmdList->CopyResource( bvhVertBuffer, vertStaging );
 	cmdList->CopyResource( bvh4DataBuffer, bvh4Staging );
+	cmdList->CopyResource( cwbvhNodeBuffer, cwbvhNodeStaging );
+	cmdList->CopyResource( cwbvhTriBuffer, cwbvhTriStaging );
 	auto toSRV = []( ID3D12Resource* res ) {
 		D3D12_RESOURCE_BARRIER rb = { .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
 			.Transition = {.pResource = res,
@@ -195,15 +213,18 @@ void InitBVHBuffers()
 				.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE } };
 		return rb; };
 	D3D12_RESOURCE_BARRIER barriers[] = {
-		toSRV( bvhNodeBuffer ), toSRV( bvhIdxBuffer ), toSRV( bvhTriBuffer ), toSRV( bvh4DataBuffer ) };
+		toSRV( bvhNodeBuffer ), toSRV( bvhIdxBuffer ), toSRV( bvhVertBuffer ), toSRV( bvh4DataBuffer ),
+		toSRV( cwbvhNodeBuffer ), toSRV( cwbvhTriBuffer ) };
 	cmdList->ResourceBarrier( (UINT)std::size( barriers ), barriers );
 	cmdList->Close();
 	cmdQueue->ExecuteCommandLists( 1, reinterpret_cast<ID3D12CommandList**>(&cmdList) );
 	WaitForGpu();
 	nodeStaging->Release();
 	idxStaging->Release();
-	triStaging->Release();
+	vertStaging->Release();
 	bvh4Staging->Release();
+	cwbvhNodeStaging->Release();
+	cwbvhTriStaging->Release();
 }
 
 void Resize( HWND hwnd )
@@ -253,15 +274,15 @@ void InitDevice()
 
 void InitComputePipeline()
 {
-	// tiny.hlsl, entry point 'TraceRays' - BVH_GPU (Aila & Laine) traversal.
 	D3D12_COMPUTE_PIPELINE_STATE_DESC desc = { .pRootSignature = rootSignature,
 		.CS = {.pShaderBytecode = compiledComputeShader1, .BytecodeLength = std::size( compiledComputeShader1 ) } };
 	device->CreateComputePipelineState( &desc, IID_PPV_ARGS( &computePso ) );
-	// tiny4.hlsl, entry point 'TraceRays_4_wide' - BVH4_GPU traversal. tiny4.fxh is
-	// expected to expose its blob as 'compiledComputeShader2', mirroring tiny.fxh.
 	D3D12_COMPUTE_PIPELINE_STATE_DESC desc4 = { .pRootSignature = rootSignature,
 		.CS = {.pShaderBytecode = compiledComputeShader2, .BytecodeLength = std::size( compiledComputeShader2 ) } };
 	device->CreateComputePipelineState( &desc4, IID_PPV_ARGS( &computePso4 ) );
+	D3D12_COMPUTE_PIPELINE_STATE_DESC desc8 = { .pRootSignature = rootSignature,
+		.CS = {.pShaderBytecode = compiledComputeShader3, .BytecodeLength = std::size( compiledComputeShader3 ) } };
+	device->CreateComputePipelineState( &desc8, IID_PPV_ARGS( &computePso8 ) );
 }
 
 void InitSurfaces( HWND hwnd )
@@ -305,16 +326,13 @@ void InitMeshes()
 		return res;
 		};
 	AddMesh( "../../testdata/cryteksponza.bin" );
-	t3 = new bvhvec3[triCount * 3], vidx = new unsigned[triCount * 3];
-	for (int i = 0; i < triCount * 3; i++) t3[i].x = tris[i].x, t3[i].y = tris[i].y, t3[i].z = tris[i].z, vidx[i] = i;
-	meshVB = makeAndCopy( (float*)t3, triCount * 36 ), meshIB = makeAndCopy( (void*)vidx, triCount * 3 * 4 );
+	meshVB = makeAndCopy( verts, (uint64_t)triCount * 3 * sizeof( bvhvec4 ) );
 	// One spatial-split build, converted to both GPU layouts.
-	bvh2.BuildHQ( tris, triCount );
+	bvh2.BuildHQ( verts, triCount );
 	bvh.ConvertFrom( bvh2, true );    // Aila & Laine 64-byte nodes + primIdx + separate tris
 	mbvh4.ConvertFrom( bvh2, true );  // collapse the BVH2 into a 4-wide BVH
 	bvh4.ConvertFrom( mbvh4, true );  // quantize into the single-blob BVH4_GPU layout
-	printf( "BVH2: %u nodes, %u prim refs (%u tris)\n", bvh.usedNodes, bvh.bvh.idxCount, triCount );
-	printf( "BVH4_GPU: %u blocks (%.1fMB)\n", bvh4.usedBlocks, bvh4.usedBlocks * 16 / (1024.0f * 1024.0f) );
+	cwbvh.BuildHQ( verts, triCount ); // separate SBVH build
 }
 
 ID3D12Resource* MakeAccelerationStructure( const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, UINT64* updateScratchSize = nullptr )
@@ -345,14 +363,15 @@ ID3D12Resource* MakeAccelerationStructure( const D3D12_BUILD_RAYTRACING_ACCELERA
 	return as;
 }
 
-ID3D12Resource* MakeBLAS( ID3D12Resource* vertexBuffer, UINT vertexFloats, ID3D12Resource* indexBuffer = nullptr, UINT indices = 0 )
+ID3D12Resource* MakeBLAS( ID3D12Resource* vertexBuffer, UINT vertexCount, UINT vertexStride,
+	ID3D12Resource* indexBuffer = nullptr, UINT indices = 0 )
 {
 	D3D12_RAYTRACING_GEOMETRY_DESC geometryDesc = {
 		.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES, .Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE,
 		.Triangles = {.Transform3x4 = 0, .IndexFormat = indexBuffer ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_UNKNOWN,
-			.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT, .IndexCount = indices, .VertexCount = vertexFloats / 3,
+			.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT, .IndexCount = indexBuffer ? indices : 0, .VertexCount = vertexCount,
 			.IndexBuffer = indexBuffer ? indexBuffer->GetGPUVirtualAddress() : 0,
-			.VertexBuffer = {.StartAddress = vertexBuffer->GetGPUVirtualAddress(), .StrideInBytes = sizeof( float ) * 3}} };
+			.VertexBuffer = {.StartAddress = vertexBuffer->GetGPUVirtualAddress(), .StrideInBytes = vertexStride}} };
 	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {
 		.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL,
 		.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION,
@@ -455,7 +474,9 @@ void InitRootSignature()
 	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 0, .RegisterSpace = 1}}, // t0 space1: BVH nodes
 	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 1, .RegisterSpace = 1}}, // t1 space1: primIdx
 	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 2, .RegisterSpace = 1}}, // t2 space1: triangles
-	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 3, .RegisterSpace = 1}} // t3 space1: BVH4_GPU blob
+	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 3, .RegisterSpace = 1}}, // t3 space1: BVH4_GPU blob
+	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 4, .RegisterSpace = 1}}, // t4 space1: CWBVH nodes
+	{.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV, .Descriptor = {.ShaderRegister = 5, .RegisterSpace = 1}} // t5 space1: CWBVH triangles
 	};
 	D3D12_ROOT_SIGNATURE_DESC desc = { .NumParameters = std::size( params ), .pParameters = params };
 	ID3DBlob* blob;
@@ -590,7 +611,7 @@ void Render()
 		else
 			printf( "%s: %6.1f MRays/s, %4.1f%% of DXR",
 				backendName[k], smoothed[k] / 1e6, 100.0 * smoothed[k] / ref );
-		if (k == 2) printf( "\n" ); else printf( "; " );
+		if (k == BACKEND_COUNT - 1) printf( "\n" ); else printf( "; " );
 	}
 	cmdAllocs[frameIndex]->Reset();
 	cmdList->Reset( cmdAllocs[frameIndex], nullptr );
@@ -598,21 +619,26 @@ void Render()
 	if (sceneDirty) { UpdateScene(); sceneDirty = false; }
 	if (backend != BACKEND_DXR)
 	{
-		// Both software kernels share the root signature, the ray buffer and the
+		// The software kernels share the root signature, the ray buffer and the
 		// render target UAV; they differ only in the PSO and the BVH bindings.
-		const bool fourWide = (backend == BACKEND_BVH4_GPU);
-		cmdList->SetPipelineState( fourWide ? computePso4 : computePso );
+		cmdList->SetPipelineState( backend == BACKEND_BVH4_GPU ? computePso4 :
+			backend == BACKEND_BVH8_CWBVH ? computePso8 : computePso );
 		cmdList->SetComputeRootSignature( rootSignature );
 		cmdList->SetDescriptorHeaps( 1, &uavHeap );
 		cmdList->SetComputeRootDescriptorTable( 0, uavHeap->GetGPUDescriptorHandleForHeapStart() );
 		cmdList->SetComputeRootShaderResourceView( 2, rayBuffer->GetGPUVirtualAddress() );         // t1: rays
-		if (fourWide)
+		if (backend == BACKEND_BVH4_GPU)
 			cmdList->SetComputeRootShaderResourceView( 6, bvh4DataBuffer->GetGPUVirtualAddress() ); // t3 space1: BVH4_GPU blob
+		else if (backend == BACKEND_BVH8_CWBVH)
+		{
+			cmdList->SetComputeRootShaderResourceView( 7, cwbvhNodeBuffer->GetGPUVirtualAddress() ); // t4 space1: CWBVH nodes
+			cmdList->SetComputeRootShaderResourceView( 8, cwbvhTriBuffer->GetGPUVirtualAddress() );  // t5 space1: CWBVH triangles
+		}
 		else
 		{
 			cmdList->SetComputeRootShaderResourceView( 3, bvhNodeBuffer->GetGPUVirtualAddress() ); // t0 space1: BVH nodes
 			cmdList->SetComputeRootShaderResourceView( 4, bvhIdxBuffer->GetGPUVirtualAddress() );  // t1 space1: primIdx
-			cmdList->SetComputeRootShaderResourceView( 5, bvhTriBuffer->GetGPUVirtualAddress() );  // t2 space1: triangles
+			cmdList->SetComputeRootShaderResourceView( 5, bvhVertBuffer->GetGPUVirtualAddress() );  // t2 space1: triangles
 		}
 		D3D12_RESOURCE_DESC rtDesc = renderTarget->GetDesc();
 		cmdList->EndQuery( queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, baseSlot );
@@ -676,7 +702,7 @@ void Init( HWND hwnd )
 	InitMeshes();
 	InitBVHBuffers();
 	UpdateRayBuffer();
-	blas = CompactBLAS( MakeBLAS( meshVB, triCount * 9, meshIB, triCount * 3 ) );
+	blas = CompactBLAS( MakeBLAS( meshVB, triCount * 3, sizeof( bvhvec4 ) ) );
 	InitScene();
 	InitTopLevel();
 	InitRootSignature();

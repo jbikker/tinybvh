@@ -7,5 +7,6 @@
     <FxCompile Include="shader.hlsl" />
     <FxCompile Include="tiny.hlsl" />
     <FxCompile Include="tiny4.hlsl" />
+    <FxCompile Include="tiny8.hlsl" />
   </ItemGroup>
 </Project>
