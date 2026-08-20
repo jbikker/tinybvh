@@ -55,8 +55,9 @@ int main()
 	tinyocl::Kernel ailalaine_kernel( "kernels/traverse.cl", "batch_ailalaine" );
 
 	// Create and populate the OpenCL buffers.
-	// 1. Triangle data: For each triangle, 3 times a vec4 vertex.
-	tinyocl::Buffer* triData = new tinyocl::Buffer( TRIANGLE_COUNT * 3 * sizeof( bvhvec4 ), triangles );
+	// 1. Triangle data: For each index, 3 times a vec4 vertex.
+	//    Beware: BVH_GPU stores reordered vertex data to avoid the usual indirection.
+	tinyocl::Buffer* triData = new tinyocl::Buffer( gpubvh.idxCount * 3 * sizeof( bvhvec4 ), (bvhvec4*)gpubvh.orderedVerts.data );
 	// 2. BVH node data: Taken from gpubvh.bvhNode; count is gpubvh.usedNodes.
 	//    If the tree is rebuilt per frame, use gpubvh.allocatedNodes instead.
 	tinyocl::Buffer* gpuNodes = new tinyocl::Buffer( gpubvh.usedNodes * sizeof( BVH_GPU::BVHNode ), gpubvh.bvhNode );

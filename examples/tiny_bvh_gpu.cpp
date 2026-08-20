@@ -25,7 +25,7 @@ static bvhvec4* tris = 0;
 static int triCount = 0, frameIdx = 0, spp = 0;
 static Kernel* init, * clear, * rayGen, * extend, * shade;
 static Kernel* updateCounters1, * updateCounters2, * traceShadows, * finalize;
-static Buffer* pixels, * accumulator, * raysIn, * raysOut, * connections, * triData;
+static Buffer* pixels, * accumulator, * raysIn, * raysOut, * connections, * triData, *vertData;
 static Buffer* bvhNodes = 0, * bvhIndices = 0, * noise = 0;
 static size_t computeUnits;
 static uint32_t* blueNoise = new uint32_t[128 * 128 * 8];
@@ -100,6 +100,8 @@ void Init()
 	bvhIndices = new Buffer( bvh.idxCount * sizeof( uint32_t ), bvh.bvh.primIdx );
 	bvhNodes->CopyToDevice();
 	bvhIndices->CopyToDevice();
+	vertData = new Buffer( bvh.idxCount * 3 * sizeof( bvhvec4 ), (bvhvec4*)bvh.orderedVerts.data );
+	vertData->CopyToDevice();
 	triData = new Buffer( triCount * 3 * sizeof( bvhvec4 ), tris );
 	triData->CopyToDevice();
 }
@@ -136,7 +138,7 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 		spp = 1;
 	}
 	// wavefront step 0: render on the GPU
-	init->SetArguments( N, rd.eye, rd.p0, rd.p1, rd.p2, frameIdx, SCRWIDTH, SCRHEIGHT, bvhNodes, bvhIndices, triData, noise );
+	init->SetArguments( N, rd.eye, rd.p0, rd.p1, rd.p2, frameIdx, SCRWIDTH, SCRHEIGHT, bvhNodes, bvhIndices, vertData, noise );
 	init->Run( 1 ); // init atomic counters, set buffer ptrs etc.
 	rayGen->SetArguments( raysOut, spp * 19191 );
 	rayGen->Run2D( oclint2( SCRWIDTH, SCRHEIGHT ) );
