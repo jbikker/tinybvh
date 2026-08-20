@@ -205,7 +205,7 @@ void GLTFDemo::InitScene2()
 			desc.opmapOffset = gpubvh2->opmap ? opmapOffset : 0x99999999;
 			node2Count += gpubvh2->usedNodes;
 			indexCount += gpubvh2->idxCount;
-			triCount += gpubvh2->triCount;
+			triCount += gpubvh2->idxCount;
 			if (gpubvh2->opmap) opmapOffset += gpubvh2->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 		else
@@ -238,10 +238,10 @@ void GLTFDemo::InitScene2()
 			BVH_GPU* gpubvh2 = mesh->blas.dynamicGPU;
 			memcpy( (BVH_GPU::BVHNode*)blasNode2->GetHostPtr() + node2Count, gpubvh2->bvhNode, gpubvh2->usedNodes * sizeof( BVH_GPU::BVHNode ) );
 			memcpy( (uint*)blasIdx->GetHostPtr() + indexCount, gpubvh2->bvh.primIdx, gpubvh2->idxCount * sizeof( uint ) );
-			memcpy( (float4*)blasTri->GetHostPtr() + triCount * 3, gpubvh2->bvh.verts.data, gpubvh2->triCount * sizeof( float4 ) * 3 );
+			memcpy( (float4*)blasTri->GetHostPtr() + triCount * 3, gpubvh2->orderedVerts.data, gpubvh2->idxCount * sizeof( float4 ) * 3 );
 			memcpy( (FatTri*)blasFatTri->GetHostPtr() + fatTriCount, mesh->triangles.data(), mesh->triangles.size() * sizeof( FatTri ) );
 			if (gpubvh2->opmap) memcpy( (uint32_t*)blasOpMap->GetHostPtr() + opmapOffset, gpubvh2->opmap, gpubvh2->triCount * 128 );
-			node2Count += gpubvh2->usedNodes, indexCount += gpubvh2->idxCount, triCount += gpubvh2->triCount;
+			node2Count += gpubvh2->usedNodes, indexCount += gpubvh2->idxCount, triCount += gpubvh2->idxCount;
 			if (gpubvh2->opmap) opmapOffset += gpubvh2->triCount * 32; // for N=32: 128 bytes = 32uints
 		}
 		else
