@@ -154,6 +154,8 @@ void kernel Shade( global float4* accumulator,
 		// fetch geometry at intersection point
 		uint vertIdx = as_uint( hit.w ) * 3;
 		float4 v0 = verts[vertIdx];
+		float4 v1 = verts[vertIdx + 1];
+		float4 v2 = verts[vertIdx + 2];
 		uint materialType = as_uint( v0.w ) >> 24;
 		float brdfPDF = T4.w;
 		float3 D = D4.xyz;
@@ -192,7 +194,7 @@ void kernel Shade( global float4* accumulator,
 			r2 = RandomFloat( &seed ), r3 = RandomFloat( &seed );
 		}
 		// prepare data for bounce
-		float3 vert0 = v0.xyz, vert1 = verts[vertIdx + 1].xyz, vert2 = verts[vertIdx + 2].xyz;
+		float3 vert0 = v0.xyz, vert1 = v1.xyz, vert2 = v2.xyz;
 		float3 I = O4.xyz + t * D;
 		float3 N = fast_normalize( cross( vert1 - vert0, vert2 - vert0 ) );
 		if (dot( N, D ) > 0) N *= -1;
