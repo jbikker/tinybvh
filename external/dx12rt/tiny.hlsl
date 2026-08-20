@@ -45,25 +45,23 @@ float4 traverse_ailalaine(const float3 O, const float3 D, const float3 rD,
         {
             // leaf node
             const uint triCount = (node >> 24) & 127;
-            const uint firstTri = node & 0xffffff;
-            for (uint i = 0; i < triCount; i++)
+            uint v0 = (node & 0xffffff) * 3;
+            for (uint i = 0; i < triCount; i++, v0 += 3)
             {
-                const uint triIdx = primIdx[firstTri + i];
-                const uint v0 = triIdx * 3;
-                const float3 vert0 = triData[v0].xyz;
-                const float3 edge1 = triData[v0 + 1].xyz - vert0;
-                const float3 edge2 = triData[v0 + 2].xyz - vert0;
+                const float4 v04 = triData[v0];
+                const float3 edge1 = triData[v0 + 1].xyz;
+                const float3 edge2 = triData[v0 + 2].xyz;
                 const float3 h = cross(D, edge2);
                 const float a = dot(edge1, h);
                 const float f = 1.0f / a;
-                const float3 s = O - vert0;
+                const float3 s = O - v04.xyz;
                 const float u = f * dot(s, h);
                 const float3 q = cross(s, edge1);
                 const float v = f * dot(D, q);
                 const float d = f * dot(edge2, q);
                 const bool valid = (u >= 0.0f) && (v >= 0.0f) && (u + v <= 1.0f) &&
                                 (d > 0.0f) && (d < hit.x);
-                hit = valid ? float4(d, u, v, asfloat(triIdx)) : hit;
+                hit = valid ? float4(d, u, v, v04.w) : hit;
             }
             if (stackPtr == 0)
                 break;
