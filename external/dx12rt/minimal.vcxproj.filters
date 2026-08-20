@@ -8,5 +8,6 @@
     <FxCompile Include="tiny.hlsl" />
     <FxCompile Include="tiny4.hlsl" />
     <FxCompile Include="tiny8.hlsl" />
+    <FxCompile Include="tinyrq.hlsl" />
   </ItemGroup>
 </Project>

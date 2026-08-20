@@ -10,6 +10,7 @@
 #include "tiny.fxh"
 #include "tiny4.fxh"
 #include "tiny8.fxh"
+#include "tinyrq.fxh"
 #include <cassert>
 #include <fstream>
 
@@ -46,13 +47,20 @@ ID3D12GraphicsCommandList4* cmdList;
 D3D12_RAYTRACING_INSTANCE_DESC* instanceData;
 ID3D12RootSignature* rootSignature;
 ID3D12StateObject* pso;
-ID3D12PipelineState* computePso, * computePso4, * computePso8;
+ID3D12PipelineState* computePso, * computePso4, * computePso8, * computePsoRQ = nullptr;
 ID3D12QueryHeap* queryHeap;
 HANDLE fenceEvent = nullptr;
 
 // The ray tracing backends that are cycled through, one per frame.
-enum Backend { BACKEND_DXR = 0, BACKEND_BVH_GPU, BACKEND_BVH4_GPU, BACKEND_BVH8_CWBVH, BACKEND_COUNT };
-static const char* backendName[BACKEND_COUNT] = { "DXR", "BVH_GPU", "BVH4_GPU", "CWBVH" };
+enum Backend {
+	BACKEND_DXR = 0, BACKEND_BVH_GPU, BACKEND_BVH4_GPU, BACKEND_BVH8_CWBVH, BACKEND_INLINE_RT, BACKEND_COUNT
+};
+static const char* backendName[BACKEND_COUNT] = { "DXR", "BVH_GPU", "BVH4_GPU", "CWBVH", "InlineRT" };
+// Inline ray tracing needs D3D12_RAYTRACING_TIER_1_1, which is a step above the
+// tier 1.0 the DXR path requires. If it is missing we simply cycle one backend
+// fewer rather than failing to start.
+bool inlineRTSupported = false;
+int activeBackends = BACKEND_COUNT;
 
 #define TINYBVH_IMPLEMENTATION
 #include "../../tiny_bvh.h"
@@ -63,6 +71,9 @@ BVH bvh2;
 BVH_GPU bvh;
 MBVH<4> mbvh4;
 BVH4_GPU bvh4;
+// CWBVH gets its own build: the layout encodes a leaf's triangle count in three
+// bits, so it needs a tree that has been through SplitLeafs( 3 ), and doing that
+// to the shared bvh2 would change the node counts the other two backends see.
 BVH8_CWBVH cwbvh;
 
 // tinybvh BVH_GPU node.
@@ -115,7 +126,7 @@ void UpdateRayBuffer()
         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS( &staging ) );
     float* data;
     staging->Map( 0, nullptr, reinterpret_cast<void**>(&data) );
-	FILE* f = fopen( "raysets/diffrays.bin", "rb" );
+	FILE* f = fopen( "raysets/view1rays.bin", "rb" );
 	memset( data, 0, 32 * 1024 * 1024 );
 	for( int i = 0; i < rtWidth * rtHeight; i++ ) fread( data + i * 8, 4, 3, f );
 	for( int i = 0; i < rtWidth * rtHeight; i++ ) fread( data + i * 8 + 4, 4, 3, f );
@@ -266,6 +277,15 @@ void InitDevice()
 	// create device
 	D3D12CreateDevice( adapter, D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS( &device ) );
 	adapter->Release();
+	// Inline ray tracing (RayQuery) requires raytracing tier 1.1.
+	D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {};
+	if (SUCCEEDED( device->CheckFeatureSupport( D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof( options5 ) ) ))
+		inlineRTSupported = options5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1;
+	if (!inlineRTSupported)
+	{
+		activeBackends = BACKEND_COUNT - 1;
+		printf( "raytracing tier 1.1 not available; the %s backend is disabled.\n", backendName[BACKEND_INLINE_RT] );
+	}
 	D3D12_COMMAND_QUEUE_DESC cmdQueueDesc = { .Type = D3D12_COMMAND_LIST_TYPE_DIRECT };
 	device->CreateCommandQueue( &cmdQueueDesc, IID_PPV_ARGS( &cmdQueue ) );
 	device->CreateFence( 0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS( &fence ) );
@@ -283,6 +303,12 @@ void InitComputePipeline()
 	D3D12_COMPUTE_PIPELINE_STATE_DESC desc8 = { .pRootSignature = rootSignature,
 		.CS = {.pShaderBytecode = compiledComputeShader3, .BytecodeLength = std::size( compiledComputeShader3 ) } };
 	device->CreateComputePipelineState( &desc8, IID_PPV_ARGS( &computePso8 ) );
+	if (inlineRTSupported)
+	{
+		D3D12_COMPUTE_PIPELINE_STATE_DESC descRQ = { .pRootSignature = rootSignature,
+			.CS = {.pShaderBytecode = compiledComputeShader4, .BytecodeLength = std::size( compiledComputeShader4 ) } };
+		device->CreateComputePipelineState( &descRQ, IID_PPV_ARGS( &computePsoRQ ) );
+	}
 }
 
 void InitSurfaces( HWND hwnd )
@@ -332,8 +358,7 @@ void InitMeshes()
 	bvh.ConvertFrom( bvh2, true );    // Aila & Laine 64-byte nodes + primIdx + separate tris
 	mbvh4.ConvertFrom( bvh2, true );  // collapse the BVH2 into a 4-wide BVH
 	bvh4.ConvertFrom( mbvh4, true );  // quantize into the single-blob BVH4_GPU layout
-	cwbvh.BuildHQ( verts, triCount ); // separate SBVH build
-	cwbvh.Optimize( 25 );
+	cwbvh.BuildHQ( verts, triCount ); // separate SBVH build: see the note at 'cwbvh'.
 }
 
 ID3D12Resource* MakeAccelerationStructure( const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, UINT64* updateScratchSize = nullptr )
@@ -576,7 +601,7 @@ void Render()
 	// Round-robin the ray tracing backends.
 	static UINT64 frameCounter = 0;
 	static int slotBackend[FRAME_COUNT] = {}; // which backend last ran in each frame slot
-	const int backend = (int)(frameCounter % BACKEND_COUNT);
+	const int backend = (int)(frameCounter % activeBackends);
 	if (frameFenceValues[frameIndex] != 0)
 	{
 		UINT64* timestamps = nullptr;
@@ -600,10 +625,11 @@ void Render()
 		double raysPerSecond = (rtDescForTiming.Width * rtDescForTiming.Height) / rtTime;
 		const int k = slotBackend[frameIndex]; // which backend produced this timestamp
 		static double smoothed[BACKEND_COUNT] = {};
+		static double alpha = 0.8;
 		static int frames[BACKEND_COUNT] = {};
 		if (++frames[k] == 1) smoothed[k] = raysPerSecond;
-		else if (frames[k] < 10) smoothed[k] = 0.9 * smoothed[k] + 0.1 * raysPerSecond;
-		else smoothed[k] = 0.99 * smoothed[k] + 0.01 * raysPerSecond;
+		else smoothed[k] = alpha * smoothed[k] + (1 - alpha) * raysPerSecond;
+		if (alpha < 0.99f) alpha += 0.005f;
 		// DXR is the reference; report the software kernels as a fraction of it.
 		const double ref = smoothed[BACKEND_DXR];
 		if (k == BACKEND_DXR || ref <= 0.0)
@@ -612,7 +638,7 @@ void Render()
 		else
 			printf( "%s: %6.1f MRays/s, %4.1f%% of DXR",
 				backendName[k], smoothed[k] / 1e6, 100.0 * smoothed[k] / ref );
-		if (k == BACKEND_COUNT - 1) printf( "\n" ); else printf( "; " );
+		if (k == activeBackends - 1) printf( "\n" ); else printf( "; " );
 	}
 	cmdAllocs[frameIndex]->Reset();
 	cmdList->Reset( cmdAllocs[frameIndex], nullptr );
@@ -620,15 +646,20 @@ void Render()
 	if (sceneDirty) { UpdateScene(); sceneDirty = false; }
 	if (backend != BACKEND_DXR)
 	{
-		// The software kernels share the root signature, the ray buffer and the
+		// The compute backends share the root signature, the ray buffer and the
 		// render target UAV; they differ only in the PSO and the BVH bindings.
 		cmdList->SetPipelineState( backend == BACKEND_BVH4_GPU ? computePso4 :
-			backend == BACKEND_BVH8_CWBVH ? computePso8 : computePso );
+			backend == BACKEND_BVH8_CWBVH ? computePso8 :
+			backend == BACKEND_INLINE_RT ? computePsoRQ : computePso );
 		cmdList->SetComputeRootSignature( rootSignature );
 		cmdList->SetDescriptorHeaps( 1, &uavHeap );
 		cmdList->SetComputeRootDescriptorTable( 0, uavHeap->GetGPUDescriptorHandleForHeapStart() );
 		cmdList->SetComputeRootShaderResourceView( 2, rayBuffer->GetGPUVirtualAddress() );         // t1: rays
-		if (backend == BACKEND_BVH4_GPU)
+		if (backend == BACKEND_INLINE_RT)
+			// RayQuery reads the same TLAS the DXR path traces against, already in
+			// RAYTRACING_ACCELERATION_STRUCTURE state, so no extra root entry.
+			cmdList->SetComputeRootShaderResourceView( 1, tlas->GetGPUVirtualAddress() );          // t0: TLAS
+		else if (backend == BACKEND_BVH4_GPU)
 			cmdList->SetComputeRootShaderResourceView( 6, bvh4DataBuffer->GetGPUVirtualAddress() ); // t3 space1: BVH4_GPU blob
 		else if (backend == BACKEND_BVH8_CWBVH)
 		{
