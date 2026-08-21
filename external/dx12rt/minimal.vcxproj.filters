@@ -10,4 +10,7 @@
     <FxCompile Include="tiny8.hlsl" />
     <FxCompile Include="tinyrq.hlsl" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\tiny_bvh.h" />
+  </ItemGroup>
 </Project>

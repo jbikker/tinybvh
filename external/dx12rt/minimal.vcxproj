@@ -85,6 +85,9 @@
       <HeaderFileOutput Condition="'$(Configuration)|$(Platform)'=='Release|x64'">tinyrq.fxh</HeaderFileOutput>
     </FxCompile>
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\tiny_bvh.h" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>

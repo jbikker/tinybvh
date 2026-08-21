@@ -126,7 +126,7 @@ void UpdateRayBuffer()
         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS( &staging ) );
     float* data;
     staging->Map( 0, nullptr, reinterpret_cast<void**>(&data) );
-	FILE* f = fopen( "raysets/view1rays.bin", "rb" );
+	FILE* f = fopen( "raysets/view3rays.bin", "rb" );
 	memset( data, 0, 32 * 1024 * 1024 );
 	for( int i = 0; i < rtWidth * rtHeight; i++ ) fread( data + i * 8, 4, 3, f );
 	for( int i = 0; i < rtWidth * rtHeight; i++ ) fread( data + i * 8 + 4, 4, 3, f );
