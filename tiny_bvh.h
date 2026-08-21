@@ -156,6 +156,10 @@ THE SOFTWARE.
 #ifndef MT_SPAWN_DEPTH
 #define MT_SPAWN_DEPTH 9
 #endif
+// Threaded builds: only spawn a task if the larger child has at least this many primitives.
+#ifndef MT_SPAWN_MIN_PRIMS
+#define MT_SPAWN_MIN_PRIMS 5000
+#endif
 #ifndef MT_BUILD_THRESHOLD
 #define MT_BUILD_THRESHOLD 50000 // single-threaded builds below this triangle count
 #endif
@@ -1141,8 +1145,10 @@ private:
 	static void SAHCostSubtree( void* payload );
 #endif
 	// internal methods and data for the LBVH builder
-	void RadixSort();
-	void StdSort();
+#ifdef ENABLE_LBVH_CODE
+	void LBVHRadixSort();
+	void LBVHStdSort();
+#endif
 	void ReorderLBVH( uint32_t rootNodeIndex );
 	BVHNode* leafNodes = 0; // will point inside node array
 	uint32_t* scratchPad = 0; // for sorting
@@ -1161,7 +1167,7 @@ private:
 	static __m256 max8, mask6, signFlip8;
 public:
 	// helper for AVX binning
-	void BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* binbox, __m256* orig,
+	void BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* binbox,
 		uint32_t* count, const __m128& nmin4, const __m128& rpd4 );
 #endif
 };
@@ -2518,19 +2524,21 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 				extent.y > minDim.y ? (BVHBINS / extent.y) : 0,
 				extent.z > minDim.z ? (BVHBINS / extent.z) : 0
 			);
+			const uint32_t* nodeFragIdx = primIdx + node.leftFirst;
 			for (uint32_t i = 0; i < node.triCount; i++) // process all tris for x,y and z at once
 			{
-				const uint32_t fi = primIdx[node.leftFirst + i];
-				bvhint3 bi = bvhint3( ((fragment[fi].bmin + fragment[fi].bmax) * 0.5f - nmin3) * rpd3 );
+				const Fragment& frag = fragment[nodeFragIdx[i]];
+				const bvhvec3 fbmin = frag.bmin, fbmax = frag.bmax;
+				bvhint3 bi = bvhint3( ((fbmin + fbmax) * 0.5f - nmin3) * rpd3 );
 				bi.x = tinybvh_clamp( bi.x, 0, BVHBINS - 1 );
 				bi.y = tinybvh_clamp( bi.y, 0, BVHBINS - 1 );
 				bi.z = tinybvh_clamp( bi.z, 0, BVHBINS - 1 );
-				binMin[0][bi.x] = tinybvh_min( binMin[0][bi.x], fragment[fi].bmin );
-				binMax[0][bi.x] = tinybvh_max( binMax[0][bi.x], fragment[fi].bmax ), count[0][bi.x]++;
-				binMin[1][bi.y] = tinybvh_min( binMin[1][bi.y], fragment[fi].bmin );
-				binMax[1][bi.y] = tinybvh_max( binMax[1][bi.y], fragment[fi].bmax ), count[1][bi.y]++;
-				binMin[2][bi.z] = tinybvh_min( binMin[2][bi.z], fragment[fi].bmin );
-				binMax[2][bi.z] = tinybvh_max( binMax[2][bi.z], fragment[fi].bmax ), count[2][bi.z]++;
+				binMin[0][bi.x] = tinybvh_min( binMin[0][bi.x], fbmin );
+				binMax[0][bi.x] = tinybvh_max( binMax[0][bi.x], fbmax ), count[0][bi.x]++;
+				binMin[1][bi.y] = tinybvh_min( binMin[1][bi.y], fbmin );
+				binMax[1][bi.y] = tinybvh_max( binMax[1][bi.y], fbmax ), count[1][bi.y]++;
+				binMin[2][bi.z] = tinybvh_min( binMin[2][bi.z], fbmin );
+				binMax[2][bi.z] = tinybvh_max( binMax[2][bi.z], fbmax ), count[2][bi.z]++;
 			}
 			// calculate per-split totals
 			float splitCost = BVH_FAR;
@@ -2593,12 +2601,15 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
 			node.leftFirst = n, node.triCount = 0;
 		#ifdef ENABLE_THREADED_BUILDS
-			if (depth < MT_SPAWN_DEPTH && threadedBuild)
+			// only hand work to the pool if the subtrees are large enough to pay for the task overhead.
+			if (threadedBuild && depth < MT_SPAWN_DEPTH &&
+				tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS)
 			{
-				BVHBuildSubtreeArgs a0 = { this, (uint32_t)n, depth + 1 }, a1 = { this, (uint32_t)n + 1, depth + 1 };
-				tinybvh_spawn( context, &BVHBuildSubtree, &a0, sizeof( a0 ) );
-				tinybvh_spawn( context, &BVHBuildSubtree, &a1, sizeof( a1 ) );
-				break;
+				// spawn the larger subtree, continue with the small one; root barrier joins.
+				BVHBuildSubtreeArgs a = { this, leftCount > rightCount ? (uint32_t)n : (uint32_t)n + 1, depth + 1 };
+				tinybvh_spawn( context, &BVHBuildSubtree, &a, sizeof( a ) );
+				nodeIdx = leftCount > rightCount ? ((uint32_t)n + 1) : (uint32_t)n;
+				continue;
 			}
 		#endif
 			task[taskCount++] = n + 1, nodeIdx = n;
@@ -2922,10 +2933,10 @@ void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, cons
 			aabbMin = tinybvh_min( aabbMin, min ), aabbMax = tinybvh_max( aabbMax, max );
 		}
 	}
-	// Sort generates MC, allowing one pass to be skipped for RadixSort
+	// Sort generates MC, allowing one pass to be skipped for LBVHRadixSort
 	// We select sort based on num prims, merge sort is slightly faster
 	// for lower prim counts as radixsort has to compute the radix  multiple times.
-	if (triCount <= 3200) StdSort(); else RadixSort();
+	if (triCount <= 3200) LBVHStdSort(); else LBVHRadixSort();
 	// reuse swap space array
 	uint32_t* mortonCode = &scratchPad[0];
 	uint32_t* primIds = &scratchPad[1 * triCount];
@@ -3963,6 +3974,7 @@ void BVH::Optimize( const uint32_t iterations, bool extreme, bool stochastic )
 	verbose->ConvertFrom( *this );
 	verbose->Optimize( iterations, extreme, stochastic );
 	ConvertFrom( *verbose );
+	delete verbose; // safe: ~BVH_Verbose only releases its own node pool.
 }
 
 // Refitting: For animated meshes, where the topology remains intact. This
@@ -5273,8 +5285,8 @@ void BVH_Verbose::Optimize( const uint32_t iterations, const bool extreme, bool 
 			if (node.parent == 0) continue;
 			if (bvhNode[node.parent].parent == 0) continue;
 			const float A = node.SA(), AL = bvhNode[node.left].SA(), AR = bvhNode[node.right].SA();
-			float Mmin = A / tinybvh_min( 1e-10f, tinybvh_min( AL, AR ) );
-			float Msum = A / tinybvh_min( 1e-10f, 0.5f * (AL + AR) );
+			float Mmin = A / tinybvh_max( 1e-10f, tinybvh_min( AL, AR ) );
+			float Msum = A / tinybvh_max( 1e-10f, 0.5f * (AL + AR) );
 			float Mcomb = A * Msum * Mmin;
 			sortList[interiorNodes].idx = j, sortList[interiorNodes++].cost = Mcomb;
 		}
@@ -5873,6 +5885,7 @@ template<int M> float MBVH<M>::SAHCost( const uint32_t nodeIdx ) const
 
 // Collapse a BVH2 into an M-wide BVH. Based on "Efficient Incoherent Ray Traversal on GPUs 
 // Through Compressed Wide BVHs", Ylitie et al. 2017, section 4.2.
+static constexpr float c_leaf = C_INT * 0.8f;
 template<int M> void MBVH<M>::ConvertFrom( const BVH& original, bool compact )
 {
 	// get a copy of the original bvh
@@ -5931,7 +5944,7 @@ template<int M> void MBVH<M>::ConvertFrom( const BVH& original, bool compact )
 			// a leaf takes a single slot, no matter how many it is offered.
 			subFirst[n] = node.leftFirst, subCount[n] = node.triCount;
 			flag[n] |= CONTIG | ASLEAF;
-			const float c = sa * c_int * (float)(l_quads ? (((node.triCount + 3) >> 2) * 4) : node.triCount);
+			const float c = sa * (c_leaf + c_int * (float)(l_quads ? (((node.triCount + 3) >> 2) * 4) : node.triCount));
 			for (int32_t i = 0; i < M; i++) cost[base + i] = c;
 			continue;
 		}
@@ -5958,7 +5971,7 @@ template<int M> void MBVH<M>::ConvertFrom( const BVH& original, bool compact )
 		const float cNode = sa * c_trav + cost[base + M - 1];
 		float cLeaf = BVH_FAR;
 		if ((flag[n] & CONTIG) && subCount[n] <= leafPrimLimit)
-			cLeaf = sa * c_int * (float)(l_quads ? (((subCount[n] + 3) >> 2) * 4) : subCount[n]);
+			cLeaf = sa * (c_leaf + c_int * (float)(l_quads ? (((subCount[n] + 3) >> 2) * 4) : subCount[n]));
 		if (cLeaf < cNode) cost[base] = cLeaf, flag[n] |= ASLEAF; else cost[base] = cNode;
 		// a subtree may always use fewer slots than it is offered; dist == 0 then
 		// means 'this subtree occupies a single slot'.
@@ -6760,8 +6773,10 @@ void BVH8_CWBVH::Build( const bvhvec4slice& vertices, const uint32_t* indices, u
 	// build underlying layout
 	bvh8.bvh.Build( vertices, indices, prims );
 	bvh8.bvh.Compact();
+	uint32_t firstIdx = 0;
+	bvh8.bvh.CombineLeafs( 3, firstIdx, 0 ); // merge subtrees that fit in one leaf slot
 	bvh8.bvh.SplitLeafs( 3 );
-	// convert to BVH4_CPU layout
+	// convert to BVH8_CPU layout
 	bvh8.leafPrimLimit = 3; // a cwbvh leaf slot holds at most 3 prims
 	bvh8.ConvertFrom( bvh8.bvh, true );
 	ConvertFrom( bvh8, true );
@@ -7359,7 +7374,7 @@ TINYBVH_FORCEINLINE float halfArea( const __m256& a /* a contains aabb itself, w
 #endif
 }
 
-#define PROCESS_PLANE( a, pos, ANLR, lN, rN, lb, rb ) if (lN * rN != 0) { \
+#define PROCESS_PLANE( a, pos, ANLR, lN, rN, lb, rb ) if (lN != 0 && rN != 0) { \
 	ANLR = halfArea( lb ) * (float)lN + halfArea( rb ) * (float)rN; if (ANLR < splitCost) \
 	splitCost = ANLR, bestAxis = a, bestPos = pos, bestLBox = lb, bestRBox = rb; }
 #if defined _MSC_VER
@@ -7378,19 +7393,21 @@ void BVH::BuildAVX( const bvhvec4slice& v, const uint32_t* i, const uint32_t p )
 
 // bin one slice of a node's fragment range; scheduled via the parallel_for hook.
 struct FragSSE { __m128 bmin4, bmax4; };
+static constexpr uint32_t AVXCOUNTSTRIDE = 32; // 32 * 4 bytes = 128 bytes.
+struct ALIGNED( 64 ) SliceBounds { __m128 bmin4, bmax4; char pad[32]; };
 struct BuildAVXFragSliceArgs
 {
 	BVH* bvh;
 	const uint32_t triCount, sliceSize, slices, * indices, stride4;
 	const __m128* verts4;
-	__m128* sliceMin, * sliceMax;
+	SliceBounds* slice;
 	void* f4;
 };
 static void BuildAVXFragSlice( uint32_t i, void* payload )
 {
 	BuildAVXFragSliceArgs* a = (BuildAVXFragSliceArgs*)payload;
 	const uint32_t first = a->sliceSize * i, last = i == (a->slices - 1) ? a->triCount : (first + a->sliceSize);
-	a->bvh->PrepareAVXBuildFragSlice( first, last, a->indices, a->verts4, a->stride4, a->f4, a->sliceMin + i, a->sliceMax + i );
+	a->bvh->PrepareAVXBuildFragSlice( first, last, a->indices, a->verts4, a->stride4, a->f4, &a->slice[i].bmin4, &a->slice[i].bmax4 );
 }
 void BVH::PrepareAVXBuildFragSlice( const uint32_t first, const uint32_t last,
 	const uint32_t* indices, const __m128* verts4, const uint32_t stride4, void* f4, __m128* rootMin, __m128* rootMax )
@@ -7412,7 +7429,7 @@ void BVH::PrepareAVXBuildFragSlice( const uint32_t first, const uint32_t last,
 		frag4[i].bmin4 = t1, frag4[i].bmax4 = t2, rmin = _mm_min_ps( rmin, t1 ), rmax = _mm_max_ps( rmax, t2 );
 		primIdx[i] = i;
 	}
-	*rootMin = rmin, * rootMax = rmax; // warning: some false sharing.
+	*rootMin = rmin, * rootMax = rmax; // slices are cache line separated; no false sharing.
 }
 
 void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
@@ -7451,17 +7468,17 @@ void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices
 	// initialize fragments
 	__m128 rootMin = min4, rootMax = max4;
 	uint32_t stride4 = verts.stride / 16;
-	BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH::PrepareAVXBuild( .. ), empty vertex slice." );
 	BVH_FATAL_ERROR_IF( primCount == 0, "BVH::PrepareAVXBuild( .. ), primCount == 0." );
 	// build the BVH over indexed triangles
 	if (threadedBuild)
 	{
 		constexpr int slices = 4;
-		__m128 sliceMin[slices], sliceMax[slices];
-		BuildAVXFragSliceArgs args = { this, triCount, triCount / slices, slices, indices, stride4, verts4, sliceMin, sliceMax, frag4 };
+		ALIGNED( 64 ) SliceBounds slice[slices]; // one cache line per slice; no false sharing.
+		BuildAVXFragSliceArgs args = { this, triCount, triCount / slices, slices, indices, stride4, verts4, slice, frag4 };
 		tinybvh_parallel_for( context, slices, &BuildAVXFragSlice, &args );
-		rootMin = sliceMin[0], rootMax = sliceMax[0];
-		for (int i = 1; i < slices; i++) rootMin = _mm_min_ps( rootMin, sliceMin[i] ), rootMax = _mm_max_ps( rootMax, sliceMax[i] );
+		rootMin = slice[0].bmin4, rootMax = slice[0].bmax4;
+		for (int i = 1; i < slices; i++)
+			rootMin = _mm_min_ps( rootMin, slice[i].bmin4 ), rootMax = _mm_max_ps( rootMax, slice[i].bmax4 );
 	}
 	else PrepareAVXBuildFragSlice( 0, triCount, indices, verts4, stride4, (void*)frag4, &rootMin, &rootMax );
 	BVHNode& root = bvhNode[0];
@@ -7480,33 +7497,31 @@ void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices
 	// all set; actual build happens in BVH::BuildAVXSubtree.
 }
 
-void BVH::BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* binbox, __m256* orig,
+void BVH::BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* binbox,
 	uint32_t* count, const __m128& nmin4, const __m128& rpd4 )
 {
 	struct FragSSE { __m128 bmin4, bmax4; };
 	FragSSE* frag4 = (FragSSE*)fragment;
 	__m256* frag8 = (__m256*)fragment;
-	uint32_t fi = primIdx[first];
 	memset( count, 0, 3 * AVXBINS * 4 ); // exactly 96 bytes
-	// memcpy( binbox, orig, 3 * AVXBINS * 32 ); // exactly 768 bytes. Performance bottleneck.
-	FAST_COPY_256B( binbox, orig, 0 );
-	FAST_COPY_256B( binbox, orig, 8 );
-	FAST_COPY_256B( binbox, orig, 16 );
+	for (uint32_t i = 0; i < 3 * AVXBINS; i++) binbox[i] = max8;
+	if (first >= last) return; // empty slice; 'last - 1' below would wrap.
+	uint32_t fi = primIdx[first];
 	__m256 r0, r1, r2, f = _mm256_xor_ps( frag8[fi], signFlip8 );
 	const __m128i zero4i = _mm_setzero_si128();
 	union { __m128i bc4; uint32_t bc[4]; };
-	bc4 = _mm_max_epi32( _mm_cvtps_epi32( _mm_sub_ps( _mm_mul_ps( _mm_sub_ps( _mm_add_ps( frag4[fi].bmax4, frag4[fi].bmin4 ), nmin4 ), rpd4 ), half4 ) ), zero4i );
+	bc4 = _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_add_ps( frag4[fi].bmax4, frag4[fi].bmin4 ), nmin4 ), rpd4 ) ), zero4i );
 	uint32_t i0 = bc[0], i1 = bc[1], i2 = bc[2], * ti = primIdx + first + 1;
 	for (uint32_t i = first; i < last - 1; i++)
 	{
 		uint32_t fid = *ti++;
 	#if defined __GNUC__ || _MSC_VER < 1920
-		if (fid > triCount) fid = triCount - 1; // never happens but g++ *and* vs2017 need this to not crash...
+		if (fid >= triCount) fid = triCount - 1; // never happens but g++ *and* vs2017 need this to not crash...
 	#endif
 		const __m256 b0 = binbox[i0], b1 = binbox[AVXBINS + i1], b2 = binbox[2 * AVXBINS + i2];
 		const __m128 frmin = frag4[fid].bmin4, frmax = frag4[fid].bmax4;
 		r0 = _mm256_max_ps( b0, f ), r1 = _mm256_max_ps( b1, f ), r2 = _mm256_max_ps( b2, f );
-		bc4 = _mm_max_epi32( _mm_cvtps_epi32( _mm_sub_ps( _mm_mul_ps( _mm_sub_ps( _mm_add_ps( frmax, frmin ), nmin4 ), rpd4 ), half4 ) ), zero4i );
+		bc4 = _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_add_ps( frmax, frmin ), nmin4 ), rpd4 ) ), zero4i );
 		f = _mm256_xor_ps( frag8[fid], signFlip8 );
 		count[i0]++, count[AVXBINS + i1]++, count[AVXBINS * 2 + i2]++;
 		binbox[i0] = r0, i0 = bc[0];
@@ -7532,8 +7547,7 @@ struct BVHBuildAVXBinSliceArgs
 	BVH* bvh;
 	uint32_t leftFirst, triCount, sliceSize, slices;
 	__m256* slicebinbox;				// base of slices x (3*AVXBINS) bin boxes
-	__m256* binboxOrig;
-	uint32_t* slicecount;				// base of slices x (3*AVXBINS) counts
+	uint32_t* slicecount;				// base of slices x AVXCOUNTSTRIDE counts
 	__m128 nmin4, rpd4;
 };
 static void BVHBuildAVXBinSlice( uint32_t i, void* payload )
@@ -7541,8 +7555,8 @@ static void BVHBuildAVXBinSlice( uint32_t i, void* payload )
 	BVHBuildAVXBinSliceArgs* a = (BVHBuildAVXBinSliceArgs*)payload;
 	const uint32_t first = a->leftFirst + a->sliceSize * i;
 	const uint32_t last = i == (a->slices - 1) ? (a->leftFirst + a->triCount) : (first + a->sliceSize);
-	a->bvh->BuildAVXBinTask( first, last, a->slicebinbox + i * 3 * AVXBINS, a->binboxOrig,
-		a->slicecount + i * 3 * AVXBINS, a->nmin4, a->rpd4 );
+	a->bvh->BuildAVXBinTask( first, last, a->slicebinbox + i * 3 * AVXBINS,
+		a->slicecount + i * AVXCOUNTSTRIDE, a->nmin4, a->rpd4 );
 }
 void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 {
@@ -7550,12 +7564,10 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 	constexpr uint32_t maxSlices = 24;
 	const uint32_t slices = maxSlices - 2 * depth;
 	ALIGNED( 64 ) __m256 slicebinbox[maxSlices][3 * AVXBINS];
-	ALIGNED( 64 ) uint32_t slicecount[maxSlices][3 * AVXBINS];
-	ALIGNED( 64 ) __m256 binboxOrig[3 * AVXBINS];		// 768 bytes
+	ALIGNED( 64 ) uint32_t slicecount[maxSlices][AVXCOUNTSTRIDE]; // padded: see AVXCOUNTSTRIDE
 	ALIGNED( 64 ) __m256 bestLBox, bestRBox;			// 64 bytes
 	__m256* binbox = slicebinbox[0];					// slot 0 doubles as the reduce target
 	uint32_t* count = slicecount[0];
-	for (uint32_t i = 0; i < 3 * AVXBINS; i++) binboxOrig[i] = max8; // binbox initialization template
 	// subdivide recursively
 	ALIGNED( 64 ) uint32_t task[512], taskCount = 0;
 	BVHNode& root = bvhNode[0];
@@ -7565,6 +7577,8 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 		while (1)
 		{
 			BVHNode& node = bvhNode[nodeIdx];
+			const float SAV = node.SurfaceArea();
+			if (SAV == 0) break; // can't split an infinitely small node.
 			__m128* node4 = (__m128*) & bvhNode[nodeIdx];
 			// find optimal object split
 			const __m128 d4 = _mm_blendv_ps( min1, _mm_sub_ps( node4[1], node4[0] ), mask3 );
@@ -7574,23 +7588,25 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
 			if (threadedBuild && node.triCount > MT_BUILD_THRESHOLD)
 			{
-				// bin in parallel slices, then reduce into slot 0 (binbox / count).
-				// tinybvh_parallel_for runs the slices serially if no hook is set.
 				const uint32_t sliceSize = node.triCount / slices;
 				BVHBuildAVXBinSliceArgs args = { this, node.leftFirst, node.triCount, sliceSize, slices,
-					slicebinbox[0], binboxOrig, slicecount[0], nmin4, rpd4 };
+					slicebinbox[0], slicecount[0], nmin4, rpd4 };
 				tinybvh_parallel_for( context, slices, &BVHBuildAVXBinSlice, &args );
-				// combine results from slices
-				for (int a = 0; a < 3; a++) for (int i = 0; i < AVXBINS; i++)
-					for (int ai = a * AVXBINS + i, slice = 1; slice < (int)slices; slice++) count[ai] += slicecount[slice][ai],
-						binbox[ai] = _mm256_max_ps( binbox[ai], slicebinbox[slice][ai] );
+				// combine results from slices; slice-major, so each slice is a linear sweep.
+				for (uint32_t slice = 1; slice < slices; slice++)
+				{
+					const __m256* sbb = slicebinbox[slice];
+					const uint32_t* sc = slicecount[slice];
+					for (uint32_t ai = 0; ai < 3 * AVXBINS; ai++)
+						count[ai] += sc[ai], binbox[ai] = _mm256_max_ps( binbox[ai], sbb[ai] );
+				}
 			}
 			else
 				// binning runs serially; threading comes from the subtree spawns below.
-				BuildAVXBinTask( node.leftFirst, node.leftFirst + node.triCount, binbox, binboxOrig, count, nmin4, rpd4 );
+				BuildAVXBinTask( node.leftFirst, node.leftFirst + node.triCount, binbox, count, nmin4, rpd4 );
 			// calculate per-split totals
 			float splitCost = BVH_FAR;
-			const float rSAV = 1.0f / node.SurfaceArea();
+			const float rSAV = 1.0f / SAV;
 			uint32_t bestAxis = 0, bestPos = 0;
 			const __m256* bb = binbox;
 			for (int32_t a = 0; a < 3; a++, bb += AVXBINS) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
@@ -7621,29 +7637,33 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 			splitCost = c_trav + c_int * rSAV * splitCost;
 			const float noSplitCost = (float)node.triCount * c_int;
 			if (splitCost >= noSplitCost) break; // not splitting is better.
-			// in-place partition
 			const float rpd = (*(bvhvec3*)&rpd4)[bestAxis], nmin = (*(bvhvec3*)&nmin4)[bestAxis];
-			uint32_t i = node.leftFirst, j = node.leftFirst + node.triCount, t, fr = primIdx[i];
+			uint32_t i = node.leftFirst, j = node.leftFirst + node.triCount;
 			for (uint32_t k = 0; k < node.triCount; k++)
 			{
-				const uint32_t bi = (uint32_t)((fragment[fr].bmax[bestAxis] + fragment[fr].bmin[bestAxis] - nmin) * rpd);
-				if (bi <= bestPos) fr = primIdx[++i]; else t = fr, fr = primIdx[i] = primIdx[--j], primIdx[j] = t;
+				const uint32_t fr = primIdx[i];
+				const int32_t bi = tinybvh_max( 0, (int32_t)((fragment[fr].bmax[bestAxis] + fragment[fr].bmin[bestAxis] - nmin) * rpd) );
+				if ((uint32_t)bi <= bestPos) i++; else
+				{
+					const uint32_t t = primIdx[--j];
+					primIdx[j] = fr, primIdx[i] = t;
+				}
 			}
 			// create child nodes and recurse
+			const uint32_t leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
+			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
 			uint32_t n;
 		#ifdef ENABLE_THREADED_BUILDS
 			if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
 		#else
 			n = newNodePtr, newNodePtr += 2;
 		#endif
-			const uint32_t leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
-			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
 			*(__m256*)& bvhNode[n] = _mm256_xor_ps( bestLBox, signFlip8 );
 			bvhNode[n].leftFirst = node.leftFirst, bvhNode[n].triCount = leftCount;
 			node.leftFirst = n, node.triCount = 0;
 			*(__m256*)& bvhNode[n + 1] = _mm256_xor_ps( bestRBox, signFlip8 );
 			bvhNode[n + 1].leftFirst = i, bvhNode[n + 1].triCount = rightCount;
-			const bool spawnThreads = leftCount + rightCount > 5000 && depth < MT_SPAWN_DEPTH && threadedBuild;
+			const bool spawnThreads = tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS && depth < MT_SPAWN_DEPTH && threadedBuild;
 			if (!spawnThreads) task[taskCount++] = n + 1, nodeIdx = n; else
 			{
 				// spawn the larger subtree, continue with the small one; root barrier joins.
