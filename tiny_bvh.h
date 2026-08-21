@@ -1155,9 +1155,14 @@ private:
 	uint32_t numLeafNodes = 0;
 	uint32_t numInternalNodes = 0;
 	// data for full sweep builder
+	struct SweepBounds { bvhvec3 bmin, bmax; };	// 24 bytes: fragment bounds, in sorted order.
 	uint8_t* flag = 0;
 	uint32_t* sortedIdx[3] = { 0 };
+	SweepBounds* sortedBnds[3] = { 0 };	// per-axis fragment bounds; keeps the sweeps linear.
+	SweepBounds* tmpBnds = 0;			// scratch for the stable partition of sortedBnds.
 	float* SARs = 0;
+	void GatherSweepBounds( uint32_t axis );
+	static void SweepGatherTask( uint32_t axis, void* payload );
 #ifdef BVH_USESSE
 	static __m128 half4, two4, min1, mask3, binmul3;
 	static __m128i maxbin4;
@@ -2694,12 +2699,42 @@ static void BVHRadixSortAxis( uint32_t a, void* payload )
 	RadixSort( args->input[a], args->output[a], args->keys[a], args->len );
 }
 #endif
+// Gather the fragment bounds for one axis into sorted order. Scheduled via parallel_for.
+void BVH::SweepGatherTask( uint32_t axis, void* payload ) { ((BVH*)payload)->GatherSweepBounds( axis ); }
+void BVH::GatherSweepBounds( uint32_t axis )
+{
+	const uint32_t* idx = sortedIdx[axis];
+	SweepBounds* bnd = sortedBnds[axis];
+	for (uint32_t i = 0; i < triCount; i++)
+	{
+		const Fragment& f = fragment[idx[i]];
+		bnd[i].bmin = f.bmin, bnd[i].bmax = f.bmax;
+	}
+}
 void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 {
 	// Full-sweep SAH builder. Instead of using binning, this builder evaluates all possible split
 	// plane candidates for each axis. Works well with triangle presplitting.
 	if (depth == 0)
 	{
+		if (triCount < 2)
+		{
+			// Trivial input: the root node is a leaf. Handled here separately.
+			BVHNode& root = bvhNode[0];
+			root.aabbMin = bvhvec3( BVH_FAR ), root.aabbMax = bvhvec3( -BVH_FAR );
+			for (uint32_t i = 0; i < triCount; i++)
+				root.aabbMin = tinybvh_min( root.aabbMin, fragment[primIdx[i]].bmin ),
+				root.aabbMax = tinybvh_max( root.aabbMax, fragment[primIdx[i]].bmax );
+			root.leftFirst = 0, root.triCount = triCount;
+			aabbMin = root.aabbMin, aabbMax = root.aabbMax, usedNodes = newNodePtr;
+			refittable = true, may_have_holes = false, bvh_over_aabbs = (verts == 0);
+			if (settings.usePresplitting)
+			{
+				for (uint32_t i = 0; i < triCount; i++) primIdx[i] = fragment[primIdx[i]].primIdx;
+				if (settings.presplitPostPass) PresplitPostPass();
+			}
+			return;
+		}
 		// prepare threading
 		threadedBuild = false;
 	#ifdef ENABLE_THREADED_BUILDS
@@ -2727,10 +2762,16 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 	#endif
 		// allocate space for right sweep
 		SARs = (float*)AlignedAlloc( triCount * sizeof( float ) );
+		// per-axis copies of the fragment bounds, in sorted order.
+		// cost: 3x24 bytes per fragment, plus 24 for the partition scratch.
+		for (int a = 0; a < 3; a++) sortedBnds[a] = (SweepBounds*)AlignedAlloc( triCount * sizeof( SweepBounds ) );
+		tmpBnds = (SweepBounds*)AlignedAlloc( triCount * sizeof( SweepBounds ) );
+		tinybvh_parallel_for( context, 3, &BVH::SweepGatherTask, this );
 	}
 	// subdivide root node recursively
 	uint32_t task[512], taskCount = 0;
 	bvhvec3 minDim = (bvhNode->aabbMax - bvhNode->aabbMin) * 1e-20f;
+	const float cratio = c_int > 0 ? (c_trav / c_int) : 0;
 	while (1)
 	{
 		while (1)
@@ -2738,34 +2779,34 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 			BVHNode& node = bvhNode[nodeIdx];
 			// update node bounds
 			node.aabbMin = bvhvec3( BVH_FAR ), node.aabbMax = bvhvec3( -BVH_FAR );
+			const SweepBounds* nodeBnd = sortedBnds[0] + node.leftFirst;
 			for (uint32_t i = 0; i < node.triCount; i++)
 			{
-				const uint32_t fi = sortedIdx[0][node.leftFirst + i];
-				node.aabbMin = tinybvh_min( node.aabbMin, fragment[fi].bmin );
-				node.aabbMax = tinybvh_max( node.aabbMax, fragment[fi].bmax );
+				node.aabbMin = tinybvh_min( node.aabbMin, nodeBnd[i].bmin );
+				node.aabbMax = tinybvh_max( node.aabbMax, nodeBnd[i].bmax );
 			}
 			if (node.triCount == 1) break; // can't split one triangle.
 			const bvhvec3 extent = node.aabbMax - node.aabbMin;
-			// iterate over x,y,z
-			float splitCost = (float)node.triCount * node.SurfaceArea();
+			float splitCost = ((float)node.triCount - cratio) * node.SurfaceArea();
 			uint32_t splitAxis = 0, splitPos = 0;
 			for (uint32_t a = 0; a < 3; a++) if (extent[a] > minDim[a])
 			{
+				const SweepBounds* bnd = sortedBnds[a] + node.leftFirst;
+				float* sar = SARs + node.leftFirst;
 				uint32_t firstRightTri = 1;
 				bvhvec3 Rmin( BVH_FAR ), Rmax( -BVH_FAR );
 				// sweep from right to left
-				float if32 = 0;
-				for (uint32_t i = 0; i < node.triCount; i++, if32 += 1.0f)
+				for (uint32_t i = 0; i < node.triCount; i++)
 				{
-					const uint32_t fi = sortedIdx[a][node.leftFirst + node.triCount - i - 1];
-					const float SAR = if32 * tinybvh_halfarea( Rmax - Rmin );
-					SARs[node.leftFirst + node.triCount - i - 1] = SAR;
-					Rmin = tinybvh_min( Rmin, fragment[fi].bmin );
-					Rmax = tinybvh_max( Rmax, fragment[fi].bmax );
+					const uint32_t j = node.triCount - i - 1;
+					const float SAR = (float)i * tinybvh_halfarea( Rmax - Rmin );
+					sar[j] = SAR;
+					Rmin = tinybvh_min( Rmin, bnd[j].bmin );
+					Rmax = tinybvh_max( Rmax, bnd[j].bmax );
 					if (SAR >= splitCost)
 					{
 						// right side's cost is already greater than lowest cost and will only increase. Stop early
-						firstRightTri = node.triCount - i;
+						firstRightTri = j + 1;
 						break;
 					}
 				}
@@ -2773,25 +2814,20 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 				bvhvec3 Lmin( BVH_FAR ), Lmax( -BVH_FAR );
 				for (uint32_t i = 0; i < firstRightTri - 1; i++)
 				{
-					const uint32_t fi = sortedIdx[a][node.leftFirst + i];
-					Lmin = tinybvh_min( Lmin, fragment[fi].bmin );
-					Lmax = tinybvh_max( Lmax, fragment[fi].bmax );
+					Lmin = tinybvh_min( Lmin, bnd[i].bmin );
+					Lmax = tinybvh_max( Lmax, bnd[i].bmax );
 				}
-				if32 = (float)firstRightTri;
-				for (uint32_t i = firstRightTri - 1; i < node.triCount - 1; i++, if32 += 1.0f)
+				for (uint32_t i = firstRightTri - 1; i < node.triCount - 1; i++)
 				{
-					const uint32_t fi = sortedIdx[a][node.leftFirst + i];
-					Lmin = tinybvh_min( Lmin, fragment[fi].bmin );
-					Lmax = tinybvh_max( Lmax, fragment[fi].bmax );
-					const float SAL = if32 * tinybvh_halfarea( Lmax - Lmin );
-					const float C = SAL + SARs[node.leftFirst + i];
+					Lmin = tinybvh_min( Lmin, bnd[i].bmin );
+					Lmax = tinybvh_max( Lmax, bnd[i].bmax );
+					const float SAL = (float)(i + 1) * tinybvh_halfarea( Lmax - Lmin );
+					const float C = SAL + sar[i];
 					if (C < splitCost) splitCost = C, splitPos = i + 1, splitAxis = a;
 					else if (SAL >= splitCost) break;
 				}
 			}
-			float noSplitCost = c_int * (float)node.triCount;
-			splitCost = c_trav + c_int * splitCost / node.SurfaceArea();
-			if (splitCost >= noSplitCost) break; // not splitting turns out to be better.
+			if (splitPos == 0) break; // no split beats not splitting; make this node a leaf.
 			// partition
 			for (uint32_t i = 0; i < splitPos; i++) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 0; // "left"
 			for (uint32_t i = splitPos; i < node.triCount; i++) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 1; // "right"
@@ -2799,13 +2835,20 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 			uint32_t* tmp = (uint32_t*)SARs;
 			for (uint32_t a = 0; a < 3; a++) if (a != splitAxis)
 			{
-				int p0 = 0, p1 = 0;
+				// the bounds travel with the indices, so the sweeps stay linear at every level.
+				uint32_t* idx = sortedIdx[a] + node.leftFirst;
+				SweepBounds* bnd = sortedBnds[a] + node.leftFirst;
+				uint32_t* tmpIdx = tmp + node.leftFirst;
+				SweepBounds* tmpBnd = tmpBnds + node.leftFirst;
+				uint32_t p0 = 0, p1 = 0;
 				for (uint32_t i = 0; i < node.triCount; i++)
 				{
-					const uint32_t fi = sortedIdx[a][node.leftFirst + i];
-					if (flag[fi]) tmp[node.leftFirst + p1++] = fi; else sortedIdx[a][node.leftFirst + p0++] = fi;
+					const uint32_t fi = idx[i];
+					if (flag[fi]) tmpIdx[p1] = fi, tmpBnd[p1] = bnd[i], p1++;
+					else idx[p0] = fi, bnd[p0] = bnd[i], p0++;
 				}
-				memcpy( &sortedIdx[a][node.leftFirst + p0], tmp + node.leftFirst, p1 * 4 );
+				memcpy( idx + p0, tmpIdx, p1 * 4 );
+				memcpy( bnd + p0, tmpBnd, p1 * sizeof( SweepBounds ) );
 			}
 			// create child nodes
 			uint32_t leftCount = splitPos, rightCount = node.triCount - leftCount;
@@ -2822,16 +2865,20 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 			bvhNode[n + 1].leftFirst = node.leftFirst + leftCount;
 			bvhNode[n + 1].triCount = rightCount;
 			node.leftFirst = n, node.triCount = 0;
-			if (threadedBuild && depth < MT_SPAWN_DEPTH)
+		#ifdef ENABLE_THREADED_BUILDS
+			if (threadedBuild && depth < MT_SPAWN_DEPTH &&
+				tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS)
 			{
-				// spawn the right subtree, continue with the left; root barrier joins.
-				BVHBuildSubtreeArgs a = { this, (uint32_t)n + 1, depth + 1 };
+				// spawn the larger subtree, continue with the smaller one; root barrier joins.
+				BVHBuildSubtreeArgs a = { this, leftCount > rightCount ? (uint32_t)n : (uint32_t)n + 1, depth + 1 };
 				tinybvh_spawn( context, &BVHBuildFullSweepSubtree, &a, sizeof( a ) );
-				nodeIdx = n;
+				nodeIdx = leftCount > rightCount ? ((uint32_t)n + 1) : (uint32_t)n;
 				continue;
 			}
-			// recurse
-			task[taskCount++] = n + 1, nodeIdx = n;
+		#endif
+			// recurse: push the larger child and continue with the smaller one.
+			if (leftCount > rightCount) task[taskCount++] = n, nodeIdx = n + 1;
+			else task[taskCount++] = n + 1, nodeIdx = n;
 		}
 		// fetch subdivision task from stack
 		if (taskCount == 0) break; else nodeIdx = task[--taskCount];
@@ -2848,9 +2895,11 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 			atomicNewNodePtr = 0;
 		}
 	#endif
-		for (int a = 0; a < 3; a++) AlignedFree( sortedIdx[a] );
-		AlignedFree( SARs );
-		AlignedFree( flag );
+		for (int a = 0; a < 3; a++) AlignedFree( sortedIdx[a] ), sortedIdx[a] = 0;
+		for (int a = 0; a < 3; a++) AlignedFree( sortedBnds[a] ), sortedBnds[a] = 0;
+		AlignedFree( tmpBnds ), tmpBnds = 0;
+		AlignedFree( SARs ), SARs = 0;
+		AlignedFree( flag ), flag = 0;
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = true; // not using spatial splits: can refit this BVH
 		may_have_holes = false; // this builder produces a continuous list of nodes
