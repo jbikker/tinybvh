@@ -384,7 +384,7 @@ float Experiment::RunGPU_BVH2( char* raySet, const int N, const char* tgaFile )
 	// create OpenCL buffers for the BVH data calculated by tiny_bvh.h
 	tinyocl::Buffer gpuNodes( bvh_gpu->usedNodes * sizeof( BVH_GPU::BVHNode ), bvh_gpu->bvhNode );
 	tinyocl::Buffer idxData( bvh_gpu->idxCount * sizeof( unsigned ), bvh_gpu->bvh.primIdx );
-	tinyocl::Buffer triData( cachedPrimSet[primSet]->primCount * sizeof( tinybvh::bvhvec4 ) * 3, cachedPrimSet[primSet]->verts );
+	tinyocl::Buffer triData( bvh_gpu->idxCount * sizeof( tinybvh::bvhvec4 ) * 3, (bvhvec4*)bvh_gpu->orderedVerts.data );
 	gpuNodes.CopyToDevice();
 	idxData.CopyToDevice();
 	triData.CopyToDevice();
@@ -418,7 +418,7 @@ float Experiment::RunGPU_BVH2_Any( char* raySet, const int N )
 	// create OpenCL buffers for the BVH data calculated by tiny_bvh.h
 	tinyocl::Buffer gpuNodes( bvh_gpu->usedNodes * sizeof( BVH_GPU::BVHNode ), bvh_gpu->bvhNode );
 	tinyocl::Buffer idxData( bvh_gpu->idxCount * sizeof( unsigned ), bvh_gpu->bvh.primIdx );
-	tinyocl::Buffer triData( cachedPrimSet[primSet]->primCount * 3 * sizeof( tinybvh::bvhvec4 ), cachedPrimSet[primSet]->verts );
+	tinyocl::Buffer triData( bvh_gpu->idxCount *  3 * sizeof( tinybvh::bvhvec4 ), (bvhvec4*)bvh_gpu->orderedVerts.data );
 	gpuNodes.CopyToDevice();
 	idxData.CopyToDevice();
 	triData.CopyToDevice();
