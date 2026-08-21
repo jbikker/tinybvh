@@ -20,6 +20,8 @@ errorlog.txt
 *.tri
 *.xlsx
 *.pptx
+*.fxh
+*.cso
 cache/ibl.dat
 external/glm
 external/cv2pdb
