@@ -1414,9 +1414,10 @@ public:
 	void Optimize( const uint32_t iterations = 25, bool extreme = false, bool stochastic = false );
 private:
 	struct SortItem { uint32_t idx; float cost; };
-	float RefitUp( uint32_t nodeIdx );
+	struct RefitRecord { bvhvec3 bmin; uint32_t node; bvhvec3 bmax; uint32_t dummy; }; // 32 bytes
+	double RefitUp( uint32_t nodeIdx, RefitRecord* journal, uint32_t& journalPtr, const uint32_t journalCap );
 	float SAHCostUp( uint32_t nodeIdx ) const;
-	uint32_t FindBestNewPosition( const uint32_t Lid ) const;
+	uint32_t FindBestNewPosition( const uint32_t Lid, float& cost ) const;
 	uint32_t CountSubtreeTris( const uint32_t nodeIdx, uint32_t* counters );
 	void MergeSubtree( const uint32_t nodeIdx, uint32_t* newIdx, uint32_t& newIdxPtr );
 public:
@@ -1620,6 +1621,7 @@ class BVH8_CPU : public BVHBase
 {
 public:
 	enum { EMPTY_BIT = 1 << 31, LEAF_BIT = 1 << 30 };
+	static constexpr int32_t STACK_SIZE = 256;
 	struct BVHNode
 	{
 		// 8-way BVH node, optimized for CPU rendering.
@@ -1628,9 +1630,8 @@ public:
 		SIMDVEC8 xmin8, xmax8;
 		SIMDVEC8 ymin8, ymax8;
 		SIMDVEC8 zmin8, zmax8;
-		SIMDIVEC8 child8; // bits: 31..29 = flags, 28..0: node index.
+		SIMDIVEC8 child8; // bit 30: leaf flag, bits 28..0: index of child node or leaf.
 		SIMDIVEC8 perm8;
-		// flag bits: 000 is an empty node, 010 is an interior node. 1xx is leaf; xx = tricount.
 	};
 	struct BVHNodeCompact
 	{
@@ -1755,16 +1756,16 @@ namespace tinybvh {
 TINYBVH_FORCEINLINE uint32_t __bfind( uint32_t x ) // https://github.com/mackron/refcode/blob/master/lzcnt.c
 {
 #if defined _MSC_VER && !defined __clang__
-	return 31 - __lzcnt( x );
+	return 31 ^ __lzcnt( x );
 #elif defined __EMSCRIPTEN__
-	return 31 - __builtin_clz( x );
+	return 31 ^ __builtin_clz( x );
 #elif defined __GNUC__ || defined __clang__
 #if defined __APPLE__ || __has_builtin(__builtin_clz)
-	return 31 - __builtin_clz( x );
+	return 31 ^ __builtin_clz( x );
 #else
 	uint32_t r;
 	__asm__ __volatile__( "lzcnt{l %1, %0| %0, %1}" : "=r"(r) : "r"(x) : "cc" );
-	return 31 - r;
+	return 31 ^ r;
 #endif
 #endif
 }
@@ -4024,6 +4025,7 @@ void BVH::Optimize( const uint32_t iterations, bool extreme, bool stochastic )
 	BVH_Verbose* verbose = new BVH_Verbose();
 	verbose->ConvertFrom( *this );
 	verbose->Optimize( iterations, extreme, stochastic );
+	verbose->SortIndices();
 	ConvertFrom( *verbose );
 	delete verbose; // safe: ~BVH_Verbose only releases its own node pool.
 }
@@ -5301,14 +5303,17 @@ void BVH_Verbose::Compact()
 void BVH_Verbose::SortIndices()
 {
 	// create a new primIdx array which has the primitive indices sorted by depth-first traversal order.
-	uint32_t nodeIdx = 0, stack[256], stackPtr = 0, * tmp = new uint32_t[triCount], nextIdx = 0;
+	if (bvhNode == 0 || idxCount == 0) return;
+	uint32_t* tmp = (uint32_t*)AlignedAlloc( idxCount * 4 );
+	uint32_t* stack = (uint32_t*)AlignedAlloc( usedNodes * 4 );
+	uint32_t nodeIdx = 0, stackPtr = 0, nextIdx = 0;
 	while (1)
 	{
 		BVHNode& node = bvhNode[nodeIdx];
 		if (node.isLeaf())
 		{
-			uint32_t tmpFirst = nextIdx;
-			for (unsigned i = 0; i < node.triCount; i++) tmp[nextIdx++] = primIdx[node.firstTri + i];
+			const uint32_t tmpFirst = nextIdx;
+			for (uint32_t i = 0; i < node.triCount; i++) tmp[nextIdx++] = primIdx[node.firstTri + i];
 			node.firstTri = tmpFirst;
 			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
 			continue;
@@ -5316,16 +5321,22 @@ void BVH_Verbose::SortIndices()
 		nodeIdx = node.left;
 		stack[stackPtr++] = node.right;
 	}
-	memcpy( primIdx, tmp, triCount * 4 );
-	delete[] tmp;
+	memcpy( primIdx, tmp, nextIdx * 4 );
+	AlignedFree( stack );
+	AlignedFree( tmp );
 }
 
 void BVH_Verbose::Optimize( const uint32_t iterations, const bool extreme, bool stochastic )
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH_Verbose::Optimize( .. ), bvhNode == 0." );
 	BVH_FATAL_ERROR_IF( may_have_holes, "BVH_Verbose::Optimize( .. ), bvh may have holes; Compact() first." );
-	// allocate array for sorting; size is upper-bound.
+	if (iterations == 0 || usedNodes < 6 || bvhNode[0].isLeaf()) return;
+	// working memory, allocated once.
 	SortItem* sortList = (SortItem*)AlignedAlloc( usedNodes * sizeof( SortItem ) );
+	const uint32_t journalCap = 4096; // >> 3x max tree depth
+	RefitRecord* journal = (RefitRecord*)AlignedAlloc( journalCap * sizeof( RefitRecord ) );
+	const double minGain = -1e-7 * (double)bvhNode[0].SA();
+	uint32_t seed = 0x12345678u;
 	// optimize by reinserting subtrees with a high cost - Section 3.4 of the paper.
 	for (uint32_t i = 0; i < iterations; i++)
 	{
@@ -5338,18 +5349,18 @@ void BVH_Verbose::Optimize( const uint32_t iterations, const bool extreme, bool 
 			// skip the two children of the root: they have no grandparent to reattach to.
 			if (node.parent == 0) continue;
 			const float A = node.SA(), AL = bvhNode[node.left].SA(), AR = bvhNode[node.right].SA();
-			float Mmin = A / tinybvh_max( 1e-10f, tinybvh_min( AL, AR ) );
-			float Msum = A / tinybvh_max( 1e-10f, 0.5f * (AL + AR) );
-			float Mcomb = A * Msum * Mmin;
-			sortList[interiorNodes].idx = j, sortList[interiorNodes++].cost = Mcomb;
+			const float Mmin = A / tinybvh_max( 1e-10f, tinybvh_min( AL, AR ) );
+			const float Msum = A / tinybvh_max( 1e-10f, 0.5f * (AL + AR) );
+			sortList[interiorNodes].idx = j, sortList[interiorNodes++].cost = A * Msum * Mmin;
 		}
+		if (interiorNodes == 0) break;
 		// last couple of iterations we will process more nodes.
 		const float portion = stochastic ? 0.5f : (extreme ? (0.01f + (0.6f * (float)i) / (float)iterations) : 0.01f);
-		const int limit = (uint32_t)(portion * (float)interiorNodes);
+		const int limit = tinybvh_max( 1, tinybvh_min( (int)interiorNodes, (int)(portion * (float)interiorNodes) ) );
 		const int step = tinybvh_max( 1, (int)(portion / 0.02f) );
-		// sort list - partial quick sort.
-		struct Task { uint32_t first, last; } stack[4096];
-		int pivot, first = 0, last = (int)interiorNodes - 1, stackPtr = 0;
+		// partial descending sort: only the first 'limit' entries need to end up in order.
+		struct Task { int first, last; } stack[128];
+		int first = 0, last = (int)interiorNodes - 1, stackPtr = 0;
 		while (1)
 		{
 			if (first >= last)
@@ -5357,12 +5368,19 @@ void BVH_Verbose::Optimize( const uint32_t iterations, const bool extreme, bool 
 				if (stackPtr == 0) break; else first = stack[--stackPtr].first, last = stack[stackPtr].last;
 				continue;
 			}
-			pivot = first;
-			SortItem t, e = sortList[first];
+			// median-of-three pivot
+			SortItem t;
+			const int mid = first + ((last - first) >> 1);
+			if (sortList[mid].cost > sortList[first].cost) t = sortList[mid], sortList[mid] = sortList[first], sortList[first] = t;
+			if (sortList[last].cost > sortList[first].cost) t = sortList[last], sortList[last] = sortList[first], sortList[first] = t;
+			if (sortList[last].cost > sortList[mid].cost) t = sortList[last], sortList[last] = sortList[mid], sortList[mid] = t;
+			t = sortList[mid], sortList[mid] = sortList[first], sortList[first] = t;
+			int pivot = first;
+			const SortItem e = sortList[first];
 			for (int j = first + 1; j <= last; j++) if (sortList[j].cost > e.cost)
 				t = sortList[j], sortList[j] = sortList[++pivot], sortList[pivot] = t;
 			t = sortList[pivot], sortList[pivot] = sortList[first], sortList[first] = t;
-			if (pivot < limit) stack[stackPtr].first = pivot + 1, stack[stackPtr++].last = last;
+			if (pivot + 1 < limit && stackPtr < 128) stack[stackPtr].first = pivot + 1, stack[stackPtr++].last = last;
 			last = pivot - 1;
 		}
 		// reinsert selected nodes
@@ -5370,56 +5388,78 @@ void BVH_Verbose::Optimize( const uint32_t iterations, const bool extreme, bool 
 		int start = 0;
 		if (stochastic)
 		{
-			float r = (float)rand() / (float)RAND_MAX;
+			float r = tinybvh_rndfloat( seed );
 			r = tinybvh_max( 0.0f, (r * 1.2f) - 0.3f ); // 0 .. 0.9f
 			start = (int)((float)limit * r);
 		}
-		for (int j = start; j < limit; j += stochastic ? ((rand() & 63) + 1) : step)
+		uint32_t accepted = 0;
+		for (int j = start; j < limit; j += stochastic ? (int)((tinybvh_rnduint( seed ) & 63) + 1) : step)
 		{
 			// prepare change
 			const uint32_t Nid = sortList[j].idx;
 			BVHNode& N = bvhNode[Nid]; // N must have a grandparent to reattach its sibling to.
-			if (N.parent == 0) continue;
+			if (N.isLeaf() || N.parent == 0 || N.parent == 0xffffffff) continue;
 			const uint32_t Pid = N.parent;
 			BVHNode& P = bvhNode[Pid];
 			const uint32_t X1 = P.parent, X2 = (P.left == Nid ? P.right : P.left);
+			uint32_t jPtr = 0;
 			// execute the change, accumulating the exact SAH delta as we go.
 			bckp[0] = bvhNode[X1];
 			if (bvhNode[X1].left == Pid) bvhNode[X1].left = X2;
-			else /* verbose[X1].right == Pid */ bvhNode[X1].right = X2;
+			else /* bvhNode[X1].right == Pid */ bvhNode[X1].right = X2;
 			const uint32_t p2 = bvhNode[X2].parent;
 			bvhNode[X2].parent = X1;
 			const uint32_t Lid = N.left, Rid = N.right;
-			float deltaArea = RefitUp( X2 );
-			// ReinsertNode( L, Nid ); ReinsertNode( R, Pid );
-			const uint32_t Xbest1 = FindBestNewPosition( Lid ), XA = bvhNode[Xbest1].parent;
+			double deltaArea = RefitUp( X2, journal, jPtr, journalCap );
+			float cost1, cost2;
+			const uint32_t Xbest1 = FindBestNewPosition( Lid, cost1 );
+			if (Xbest1 == 0)
+			{
+				while (jPtr) --jPtr, bvhNode[journal[jPtr].node].aabbMin = journal[jPtr].bmin,
+					bvhNode[journal[jPtr].node].aabbMax = journal[jPtr].bmax;
+				bvhNode[X2].parent = p2, bvhNode[X1] = bckp[0];
+				continue;
+			}
+			const uint32_t XA = bvhNode[Xbest1].parent;
 			bckp[1] = bvhNode[Nid];
 			N.left = Xbest1, N.right = Lid, N.parent = XA;
 			bckp[2] = bvhNode[XA];
 			if (bvhNode[XA].left == Xbest1) bvhNode[XA].left = Nid; else bvhNode[XA].right = Nid;
 			const uint32_t p3 = bvhNode[Xbest1].parent, p4 = bvhNode[Lid].parent;
 			bvhNode[Xbest1].parent = Nid, bvhNode[Lid].parent = Nid;
-			deltaArea += RefitUp( Nid );
-			const uint32_t Xbest2 = FindBestNewPosition( Rid ), XB = bvhNode[Xbest2].parent;
+			deltaArea += RefitUp( Nid, journal, jPtr, journalCap );
+			const uint32_t Xbest2 = FindBestNewPosition( Rid, cost2 );
+			if (Xbest2 == 0) // [10] defensive, as above.
+			{
+				bvhNode[Lid].parent = p4, bvhNode[Xbest1].parent = p3;
+				bvhNode[XA] = bckp[2], bvhNode[Nid] = bckp[1];
+				bvhNode[X2].parent = p2, bvhNode[X1] = bckp[0];
+				while (jPtr) --jPtr, bvhNode[journal[jPtr].node].aabbMin = journal[jPtr].bmin,
+					bvhNode[journal[jPtr].node].aabbMax = journal[jPtr].bmax;
+				continue;
+			}
+			const uint32_t XB = bvhNode[Xbest2].parent;
 			bckp[3] = bvhNode[Pid];
 			P.left = Xbest2, P.right = Rid, P.parent = XB;
 			bckp[4] = bvhNode[XB];
 			if (bvhNode[XB].left == Xbest2) bvhNode[XB].left = Pid; else bvhNode[XB].right = Pid;
 			const uint32_t p1 = bvhNode[Xbest2].parent, p0 = bvhNode[Rid].parent;
 			bvhNode[Xbest2].parent = Pid, bvhNode[Rid].parent = Pid;
-			deltaArea += RefitUp( Pid );
-			// keep the change if it strictly reduced the SAH cost of the tree.
-			if (deltaArea < 0) continue;
+			deltaArea += RefitUp( Pid, journal, jPtr, journalCap );
+			// keep the change if it meaningfully reduced the SAH cost of the tree.
+			if (deltaArea < minGain) { accepted++; continue; }
 			// undo change, mind the order.
 			bvhNode[Rid].parent = p0, bvhNode[Xbest2].parent = p1, bvhNode[XB] = bckp[4];
 			bvhNode[Pid] = bckp[3], bvhNode[Lid].parent = p4, bvhNode[Xbest1].parent = p3;
 			bvhNode[XA] = bckp[2], bvhNode[Nid] = bckp[1], bvhNode[X2].parent = p2, bvhNode[X1] = bckp[0];
-			RefitUp( XB );
-			RefitUp( XA );
-			RefitUp( Nid );
+			// restore the boxes from the journal, newest first.
+			while (jPtr) --jPtr, bvhNode[journal[jPtr].node].aabbMin = journal[jPtr].bmin,
+				bvhNode[journal[jPtr].node].aabbMax = journal[jPtr].bmax;
 		}
-		Refit( 0, true );
+		if (accepted == 0 && !stochastic && !extreme) break;
 	}
+	Refit( 0, true );
+	AlignedFree( journal );
 	AlignedFree( sortList );
 }
 
@@ -6701,6 +6741,11 @@ void BVH8_CPU::ConvertFrom( MBVH<8>& original )
 	uint32_t nodesNeeded = bvh8.usedNodes, leafsNeeded = bvh8.LeafCount();
 	uint32_t blocksNeeded = nodesNeeded * (sizeof( BVHNode ) / 64); // here, block = cacheline.
 	blocksNeeded += leafsNeeded * (sizeof( BVHTri4Leaf ) / 64);
+	// reserve one extra leaf at the end; a degenerate 'null leaf' that unused child slots point to.
+	const uint32_t nullLeafBlock = blocksNeeded;
+	blocksNeeded += sizeof( BVHTri4Leaf ) / 64;
+	// Child slots store the block index in 29 bits; refuse to build beyond that.
+	BVH_FATAL_ERROR_IF( blocksNeeded > 0x1fffffff, "BVH8_CPU::ConvertFrom, BVH does not fit in 29-bit block indices." );
 	if (allocatedBlocks < blocksNeeded)
 	{
 		AlignedFree( bvh8Data );
@@ -6709,6 +6754,7 @@ void BVH8_CPU::ConvertFrom( MBVH<8>& original )
 		allocatedBlocks = blocksNeeded;
 	}
 	CopyBasePropertiesFrom( bvh8 );
+	memset( bvh8Data + nullLeafBlock, 0, sizeof( BVHTri4Leaf ) );
 	// start conversion
 	uint32_t newBlockPtr = 0, nodeIdx = 0, stack[256], stackPtr = 0;
 	while (1)
@@ -6772,7 +6818,7 @@ void BVH8_CPU::ConvertFrom( MBVH<8>& original )
 			((float*)&newNode->xmin8)[cidx] = BVH_FAR, ((float*)&newNode->xmax8)[cidx] = -BVH_FAR;
 			((float*)&newNode->ymin8)[cidx] = BVH_FAR, ((float*)&newNode->ymax8)[cidx] = -BVH_FAR;
 			((float*)&newNode->zmin8)[cidx] = BVH_FAR, ((float*)&newNode->zmax8)[cidx] = -BVH_FAR;
-			((uint32_t*)&newNode->child8)[cidx] |= EMPTY_BIT;
+			((uint32_t*)&newNode->child8)[cidx] = nullLeafBlock + LEAF_BIT;
 		}
 		// pop next task
 		if (!stackPtr) break;
@@ -6780,7 +6826,8 @@ void BVH8_CPU::ConvertFrom( MBVH<8>& original )
 		const uint32_t offset = stack[--stackPtr];
 		((uint32_t*)bvh8Data)[offset] = newBlockPtr;
 	}
-	usedBlocks = newBlockPtr;
+	BVH_FATAL_ERROR_IF( newBlockPtr > nullLeafBlock, "BVH8_CPU::ConvertFrom, block count underestimated." );
+	usedBlocks = nullLeafBlock + sizeof( BVHTri4Leaf ) / 64;
 }
 
 // BVH8_CWBVH implementation
@@ -7703,7 +7750,7 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 		#else
 			n = newNodePtr, newNodePtr += 2;
 		#endif
-			*(__m256*)& bvhNode[n] = _mm256_xor_ps( bestLBox, signFlip8 );
+			* (__m256*)& bvhNode[n] = _mm256_xor_ps( bestLBox, signFlip8 );
 			bvhNode[n].leftFirst = node.leftFirst, bvhNode[n].triCount = leftCount;
 			node.leftFirst = n, node.triCount = 0;
 			*(__m256*)& bvhNode[n + 1] = _mm256_xor_ps( bestRBox, signFlip8 );
@@ -8235,40 +8282,78 @@ int32_t BVH8_CWBVH::Intersect( Ray& ray ) const
 
 #ifdef BVH_USEAVX2
 
-#define TO256(x) _mm256_cvtepu8_epi32( _mm_cvtsi64_si128( x ) )
-ALIGNED( 64 ) static const __m256i idxLUT256[256] = {
-	TO256( 506097522914230528 ), TO256( 1976943448883713 ), TO256( 1976943448883712 ), TO256( 7722435347202 ), TO256( 1976943448883456 ), TO256( 7722435347201 ), TO256(
-	7722435347200 ), TO256( 30165763075 ), TO256( 1976943448817920 ), TO256( 7722435346945 ), TO256( 7722435346944 ), TO256( 30165763074 ), TO256( 7722435346688 ), TO256(
-	30165763073 ), TO256( 30165763072 ), TO256( 117835012 ), TO256( 1976943432040704 ), TO256( 7722435281409 ), TO256( 7722435281408 ), TO256( 30165762818 ), TO256(
-	7722435281152 ), TO256( 30165762817 ), TO256( 30165762816 ), TO256( 117835011 ), TO256( 7722435215616 ), TO256( 30165762561 ), TO256( 30165762560 ), TO256( 117835010 ), TO256(
-	30165762304 ), TO256( 117835009 ), TO256( 117835008 ), TO256( 460293 ), TO256( 1976939137073408 ), TO256( 7722418504193 ), TO256( 7722418504192 ), TO256( 30165697282 ), TO256(
-	7722418503936 ), TO256( 30165697281 ), TO256( 30165697280 ), TO256( 117834755 ), TO256( 7722418438400 ), TO256( 30165697025 ), TO256( 30165697024 ), TO256( 117834754 ), TO256(
-	30165696768 ), TO256( 117834753 ), TO256( 117834752 ), TO256( 460292 ), TO256( 7722401661184 ), TO256( 30165631489 ), TO256( 30165631488 ), TO256( 117834498 ), TO256( 30165631232 ), TO256(
-	117834497 ), TO256( 117834496 ), TO256( 460291 ), TO256( 30165565696 ), TO256( 117834241 ), TO256( 117834240 ), TO256( 460290 ), TO256( 117833984 ), TO256( 460289 ), TO256( 460288 ), TO256( 1798 ), TO256(
-	1975839625445632 ), TO256( 7718123536897 ), TO256( 7718123536896 ), TO256( 30148920066 ), TO256( 7718123536640 ), TO256( 30148920065 ), TO256( 30148920064 ), TO256(
-	117769219 ), TO256( 7718123471104 ), TO256( 30148919809 ), TO256( 30148919808 ), TO256( 117769218 ), TO256( 30148919552 ), TO256( 117769217 ), TO256( 117769216 ), TO256( 460036 ), TO256(
-	7718106693888 ), TO256( 30148854273 ), TO256( 30148854272 ), TO256( 117768962 ), TO256( 30148854016 ), TO256( 117768961 ), TO256( 117768960 ), TO256( 460035 ), TO256( 30148788480 ), TO256(
-	117768705 ), TO256( 117768704 ), TO256( 460034 ), TO256( 117768448 ), TO256( 460033 ), TO256( 460032 ), TO256( 1797 ), TO256( 7713811726592 ), TO256( 30132077057 ), TO256( 30132077056 ), TO256(
-	117703426 ), TO256( 30132076800 ), TO256( 117703425 ), TO256( 117703424 ), TO256( 459779 ), TO256( 30132011264 ), TO256( 117703169 ), TO256( 117703168 ), TO256( 459778 ), TO256( 117702912 ), TO256(
-	459777 ), TO256( 459776 ), TO256( 1796 ), TO256( 30115234048 ), TO256( 117637633 ), TO256( 117637632 ), TO256( 459522 ), TO256( 117637376 ), TO256( 459521 ), TO256( 459520 ), TO256( 1795 ), TO256( 117571840 ), TO256(
-	459265 ), TO256( 459264 ), TO256( 1794 ), TO256( 459008 ), TO256( 1793 ), TO256( 1792 ), TO256( 7 ), TO256( 1694364648734976 ), TO256( 6618611909121 ), TO256( 6618611909120 ), TO256( 25853952770 ), TO256(
-	6618611908864 ), TO256( 25853952769 ), TO256( 25853952768 ), TO256( 100992003 ), TO256( 6618611843328 ), TO256( 25853952513 ), TO256( 25853952512 ), TO256( 100992002 ), TO256(
-	25853952256 ), TO256( 100992001 ), TO256( 100992000 ), TO256( 394500 ), TO256( 6618595066112 ), TO256( 25853886977 ), TO256( 25853886976 ), TO256( 100991746 ), TO256( 25853886720 ), TO256(
-	100991745 ), TO256( 100991744 ), TO256( 394499 ), TO256( 25853821184 ), TO256( 100991489 ), TO256( 100991488 ), TO256( 394498 ), TO256( 100991232 ), TO256( 394497 ), TO256( 394496 ), TO256( 1541 ), TO256(
-	6614300098816 ), TO256( 25837109761 ), TO256( 25837109760 ), TO256( 100926210 ), TO256( 25837109504 ), TO256( 100926209 ), TO256( 100926208 ), TO256( 394243 ), TO256( 25837043968 ), TO256(
-	100925953 ), TO256( 100925952 ), TO256( 394242 ), TO256( 100925696 ), TO256( 394241 ), TO256( 394240 ), TO256( 1540 ), TO256( 25820266752 ), TO256( 100860417 ), TO256( 100860416 ), TO256( 393986 ), TO256(
-	100860160 ), TO256( 393985 ), TO256( 393984 ), TO256( 1539 ), TO256( 100794624 ), TO256( 393729 ), TO256( 393728 ), TO256( 1538 ), TO256( 393472 ), TO256( 1537 ), TO256( 1536 ), TO256( 6 ), TO256( 5514788471040 ), TO256(
-	21542142465 ), TO256( 21542142464 ), TO256( 84148994 ), TO256( 21542142208 ), TO256( 84148993 ), TO256( 84148992 ), TO256( 328707 ), TO256( 21542076672 ), TO256( 84148737 ), TO256(
-	84148736 ), TO256( 328706 ), TO256( 84148480 ), TO256( 328705 ), TO256( 328704 ), TO256( 1284 ), TO256( 21525299456 ), TO256( 84083201 ), TO256( 84083200 ), TO256( 328450 ), TO256( 84082944 ), TO256( 328449 ), TO256(
-	328448 ), TO256( 1283 ), TO256( 84017408 ), TO256( 328193 ), TO256( 328192 ), TO256( 1282 ), TO256( 327936 ), TO256( 1281 ), TO256( 1280 ), TO256( 5 ), TO256( 17230332160 ), TO256( 67305985 ), TO256( 67305984 ), TO256( 262914 ), TO256(
-	67305728 ), TO256( 262913 ), TO256( 262912 ), TO256( 1027 ), TO256( 67240192 ), TO256( 262657 ), TO256( 262656 ), TO256( 1026 ), TO256( 262400 ), TO256( 1025 ), TO256( 1024 ), TO256( 4 ), TO256( 50462976 ), TO256( 197121 ), TO256(
-	197120 ), TO256( 770 ), TO256( 196864 ), TO256( 769 ), TO256( 768 ), TO256( 3 ), TO256( 131328 ), TO256( 513 ), TO256( 512 ), TO256( 2 ), TO256( 256 ), TO256( 1 ), TO256( 0 ), TO256( 0 )
+// lane compaction table for the traversal stack: idxLUT256[255 - mask].
+ALIGNED( 64 ) static const uint32_t idxLUT256[256][8] = {
+	{ 0,1,2,3,4,5,6,7 }, { 1,2,3,4,5,6,7,0 }, { 0,2,3,4,5,6,7,0 }, { 2,3,4,5,6,7,0,0 },
+	{ 0,1,3,4,5,6,7,0 }, { 1,3,4,5,6,7,0,0 }, { 0,3,4,5,6,7,0,0 }, { 3,4,5,6,7,0,0,0 },
+	{ 0,1,2,4,5,6,7,0 }, { 1,2,4,5,6,7,0,0 }, { 0,2,4,5,6,7,0,0 }, { 2,4,5,6,7,0,0,0 },
+	{ 0,1,4,5,6,7,0,0 }, { 1,4,5,6,7,0,0,0 }, { 0,4,5,6,7,0,0,0 }, { 4,5,6,7,0,0,0,0 },
+	{ 0,1,2,3,5,6,7,0 }, { 1,2,3,5,6,7,0,0 }, { 0,2,3,5,6,7,0,0 }, { 2,3,5,6,7,0,0,0 },
+	{ 0,1,3,5,6,7,0,0 }, { 1,3,5,6,7,0,0,0 }, { 0,3,5,6,7,0,0,0 }, { 3,5,6,7,0,0,0,0 },
+	{ 0,1,2,5,6,7,0,0 }, { 1,2,5,6,7,0,0,0 }, { 0,2,5,6,7,0,0,0 }, { 2,5,6,7,0,0,0,0 },
+	{ 0,1,5,6,7,0,0,0 }, { 1,5,6,7,0,0,0,0 }, { 0,5,6,7,0,0,0,0 }, { 5,6,7,0,0,0,0,0 },
+	{ 0,1,2,3,4,6,7,0 }, { 1,2,3,4,6,7,0,0 }, { 0,2,3,4,6,7,0,0 }, { 2,3,4,6,7,0,0,0 },
+	{ 0,1,3,4,6,7,0,0 }, { 1,3,4,6,7,0,0,0 }, { 0,3,4,6,7,0,0,0 }, { 3,4,6,7,0,0,0,0 },
+	{ 0,1,2,4,6,7,0,0 }, { 1,2,4,6,7,0,0,0 }, { 0,2,4,6,7,0,0,0 }, { 2,4,6,7,0,0,0,0 },
+	{ 0,1,4,6,7,0,0,0 }, { 1,4,6,7,0,0,0,0 }, { 0,4,6,7,0,0,0,0 }, { 4,6,7,0,0,0,0,0 },
+	{ 0,1,2,3,6,7,0,0 }, { 1,2,3,6,7,0,0,0 }, { 0,2,3,6,7,0,0,0 }, { 2,3,6,7,0,0,0,0 },
+	{ 0,1,3,6,7,0,0,0 }, { 1,3,6,7,0,0,0,0 }, { 0,3,6,7,0,0,0,0 }, { 3,6,7,0,0,0,0,0 },
+	{ 0,1,2,6,7,0,0,0 }, { 1,2,6,7,0,0,0,0 }, { 0,2,6,7,0,0,0,0 }, { 2,6,7,0,0,0,0,0 },
+	{ 0,1,6,7,0,0,0,0 }, { 1,6,7,0,0,0,0,0 }, { 0,6,7,0,0,0,0,0 }, { 6,7,0,0,0,0,0,0 },
+	{ 0,1,2,3,4,5,7,0 }, { 1,2,3,4,5,7,0,0 }, { 0,2,3,4,5,7,0,0 }, { 2,3,4,5,7,0,0,0 },
+	{ 0,1,3,4,5,7,0,0 }, { 1,3,4,5,7,0,0,0 }, { 0,3,4,5,7,0,0,0 }, { 3,4,5,7,0,0,0,0 },
+	{ 0,1,2,4,5,7,0,0 }, { 1,2,4,5,7,0,0,0 }, { 0,2,4,5,7,0,0,0 }, { 2,4,5,7,0,0,0,0 },
+	{ 0,1,4,5,7,0,0,0 }, { 1,4,5,7,0,0,0,0 }, { 0,4,5,7,0,0,0,0 }, { 4,5,7,0,0,0,0,0 },
+	{ 0,1,2,3,5,7,0,0 }, { 1,2,3,5,7,0,0,0 }, { 0,2,3,5,7,0,0,0 }, { 2,3,5,7,0,0,0,0 },
+	{ 0,1,3,5,7,0,0,0 }, { 1,3,5,7,0,0,0,0 }, { 0,3,5,7,0,0,0,0 }, { 3,5,7,0,0,0,0,0 },
+	{ 0,1,2,5,7,0,0,0 }, { 1,2,5,7,0,0,0,0 }, { 0,2,5,7,0,0,0,0 }, { 2,5,7,0,0,0,0,0 },
+	{ 0,1,5,7,0,0,0,0 }, { 1,5,7,0,0,0,0,0 }, { 0,5,7,0,0,0,0,0 }, { 5,7,0,0,0,0,0,0 },
+	{ 0,1,2,3,4,7,0,0 }, { 1,2,3,4,7,0,0,0 }, { 0,2,3,4,7,0,0,0 }, { 2,3,4,7,0,0,0,0 },
+	{ 0,1,3,4,7,0,0,0 }, { 1,3,4,7,0,0,0,0 }, { 0,3,4,7,0,0,0,0 }, { 3,4,7,0,0,0,0,0 },
+	{ 0,1,2,4,7,0,0,0 }, { 1,2,4,7,0,0,0,0 }, { 0,2,4,7,0,0,0,0 }, { 2,4,7,0,0,0,0,0 },
+	{ 0,1,4,7,0,0,0,0 }, { 1,4,7,0,0,0,0,0 }, { 0,4,7,0,0,0,0,0 }, { 4,7,0,0,0,0,0,0 },
+	{ 0,1,2,3,7,0,0,0 }, { 1,2,3,7,0,0,0,0 }, { 0,2,3,7,0,0,0,0 }, { 2,3,7,0,0,0,0,0 },
+	{ 0,1,3,7,0,0,0,0 }, { 1,3,7,0,0,0,0,0 }, { 0,3,7,0,0,0,0,0 }, { 3,7,0,0,0,0,0,0 },
+	{ 0,1,2,7,0,0,0,0 }, { 1,2,7,0,0,0,0,0 }, { 0,2,7,0,0,0,0,0 }, { 2,7,0,0,0,0,0,0 },
+	{ 0,1,7,0,0,0,0,0 }, { 1,7,0,0,0,0,0,0 }, { 0,7,0,0,0,0,0,0 }, { 7,0,0,0,0,0,0,0 },
+	{ 0,1,2,3,4,5,6,0 }, { 1,2,3,4,5,6,0,0 }, { 0,2,3,4,5,6,0,0 }, { 2,3,4,5,6,0,0,0 },
+	{ 0,1,3,4,5,6,0,0 }, { 1,3,4,5,6,0,0,0 }, { 0,3,4,5,6,0,0,0 }, { 3,4,5,6,0,0,0,0 },
+	{ 0,1,2,4,5,6,0,0 }, { 1,2,4,5,6,0,0,0 }, { 0,2,4,5,6,0,0,0 }, { 2,4,5,6,0,0,0,0 },
+	{ 0,1,4,5,6,0,0,0 }, { 1,4,5,6,0,0,0,0 }, { 0,4,5,6,0,0,0,0 }, { 4,5,6,0,0,0,0,0 },
+	{ 0,1,2,3,5,6,0,0 }, { 1,2,3,5,6,0,0,0 }, { 0,2,3,5,6,0,0,0 }, { 2,3,5,6,0,0,0,0 },
+	{ 0,1,3,5,6,0,0,0 }, { 1,3,5,6,0,0,0,0 }, { 0,3,5,6,0,0,0,0 }, { 3,5,6,0,0,0,0,0 },
+	{ 0,1,2,5,6,0,0,0 }, { 1,2,5,6,0,0,0,0 }, { 0,2,5,6,0,0,0,0 }, { 2,5,6,0,0,0,0,0 },
+	{ 0,1,5,6,0,0,0,0 }, { 1,5,6,0,0,0,0,0 }, { 0,5,6,0,0,0,0,0 }, { 5,6,0,0,0,0,0,0 },
+	{ 0,1,2,3,4,6,0,0 }, { 1,2,3,4,6,0,0,0 }, { 0,2,3,4,6,0,0,0 }, { 2,3,4,6,0,0,0,0 },
+	{ 0,1,3,4,6,0,0,0 }, { 1,3,4,6,0,0,0,0 }, { 0,3,4,6,0,0,0,0 }, { 3,4,6,0,0,0,0,0 },
+	{ 0,1,2,4,6,0,0,0 }, { 1,2,4,6,0,0,0,0 }, { 0,2,4,6,0,0,0,0 }, { 2,4,6,0,0,0,0,0 },
+	{ 0,1,4,6,0,0,0,0 }, { 1,4,6,0,0,0,0,0 }, { 0,4,6,0,0,0,0,0 }, { 4,6,0,0,0,0,0,0 },
+	{ 0,1,2,3,6,0,0,0 }, { 1,2,3,6,0,0,0,0 }, { 0,2,3,6,0,0,0,0 }, { 2,3,6,0,0,0,0,0 },
+	{ 0,1,3,6,0,0,0,0 }, { 1,3,6,0,0,0,0,0 }, { 0,3,6,0,0,0,0,0 }, { 3,6,0,0,0,0,0,0 },
+	{ 0,1,2,6,0,0,0,0 }, { 1,2,6,0,0,0,0,0 }, { 0,2,6,0,0,0,0,0 }, { 2,6,0,0,0,0,0,0 },
+	{ 0,1,6,0,0,0,0,0 }, { 1,6,0,0,0,0,0,0 }, { 0,6,0,0,0,0,0,0 }, { 6,0,0,0,0,0,0,0 },
+	{ 0,1,2,3,4,5,0,0 }, { 1,2,3,4,5,0,0,0 }, { 0,2,3,4,5,0,0,0 }, { 2,3,4,5,0,0,0,0 },
+	{ 0,1,3,4,5,0,0,0 }, { 1,3,4,5,0,0,0,0 }, { 0,3,4,5,0,0,0,0 }, { 3,4,5,0,0,0,0,0 },
+	{ 0,1,2,4,5,0,0,0 }, { 1,2,4,5,0,0,0,0 }, { 0,2,4,5,0,0,0,0 }, { 2,4,5,0,0,0,0,0 },
+	{ 0,1,4,5,0,0,0,0 }, { 1,4,5,0,0,0,0,0 }, { 0,4,5,0,0,0,0,0 }, { 4,5,0,0,0,0,0,0 },
+	{ 0,1,2,3,5,0,0,0 }, { 1,2,3,5,0,0,0,0 }, { 0,2,3,5,0,0,0,0 }, { 2,3,5,0,0,0,0,0 },
+	{ 0,1,3,5,0,0,0,0 }, { 1,3,5,0,0,0,0,0 }, { 0,3,5,0,0,0,0,0 }, { 3,5,0,0,0,0,0,0 },
+	{ 0,1,2,5,0,0,0,0 }, { 1,2,5,0,0,0,0,0 }, { 0,2,5,0,0,0,0,0 }, { 2,5,0,0,0,0,0,0 },
+	{ 0,1,5,0,0,0,0,0 }, { 1,5,0,0,0,0,0,0 }, { 0,5,0,0,0,0,0,0 }, { 5,0,0,0,0,0,0,0 },
+	{ 0,1,2,3,4,0,0,0 }, { 1,2,3,4,0,0,0,0 }, { 0,2,3,4,0,0,0,0 }, { 2,3,4,0,0,0,0,0 },
+	{ 0,1,3,4,0,0,0,0 }, { 1,3,4,0,0,0,0,0 }, { 0,3,4,0,0,0,0,0 }, { 3,4,0,0,0,0,0,0 },
+	{ 0,1,2,4,0,0,0,0 }, { 1,2,4,0,0,0,0,0 }, { 0,2,4,0,0,0,0,0 }, { 2,4,0,0,0,0,0,0 },
+	{ 0,1,4,0,0,0,0,0 }, { 1,4,0,0,0,0,0,0 }, { 0,4,0,0,0,0,0,0 }, { 4,0,0,0,0,0,0,0 },
+	{ 0,1,2,3,0,0,0,0 }, { 1,2,3,0,0,0,0,0 }, { 0,2,3,0,0,0,0,0 }, { 2,3,0,0,0,0,0,0 },
+	{ 0,1,3,0,0,0,0,0 }, { 1,3,0,0,0,0,0,0 }, { 0,3,0,0,0,0,0,0 }, { 3,0,0,0,0,0,0,0 },
+	{ 0,1,2,0,0,0,0,0 }, { 1,2,0,0,0,0,0,0 }, { 0,2,0,0,0,0,0,0 }, { 2,0,0,0,0,0,0,0 },
+	{ 0,1,0,0,0,0,0,0 }, { 1,0,0,0,0,0,0,0 }, { 0,0,0,0,0,0,0,0 }, { 0,0,0,0,0,0,0,0 }
 };
 
 int32_t BVH8_CPU::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
-	const bool posX = ray.D.x >= 0, posY = ray.D.y >= 0, posZ = ray.D.z >= 0;
+	const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
 	if (!posX) goto negx;
 	if (posY) { if (posZ) return Intersect<true, true, true>( ray ); else return Intersect<true, true, false>( ray ); }
 	if (posZ) return Intersect<true, false, true>( ray ); else return Intersect<true, false, false>( ray );
@@ -8279,15 +8364,17 @@ negx:
 
 template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray ) const
 {
-	ALIGNED( 64 ) int32_t nodeStack[256];
-	ALIGNED( 64 ) float distStack[256];
+	ALIGNED( 64 ) uint32_t nodeStack[STACK_SIZE + 8];
+	ALIGNED( 64 ) float distStack[STACK_SIZE + 8];
 	const __m256 zero8 = _mm256_setzero_ps();
 	__m256 t8 = _mm256_set1_ps( ray.hit.t );
-	ALIGNED( 64 ) int32_t stackPtr = 0, nodeIdx = 0;
+	int32_t stackPtr = 0;
+	uint32_t nodeIdx = 0;
 	constexpr int signShift = (posX ? 3 : 0) + (posY ? 6 : 0) + (posZ ? 12 : 0);
 	const __m256 rx8 = _mm256_set1_ps( ray.O.x * ray.rD.x ), rdx8 = _mm256_set1_ps( ray.rD.x );
 	const __m256 ry8 = _mm256_set1_ps( ray.O.y * ray.rD.y ), rdy8 = _mm256_set1_ps( ray.rD.y );
 	const __m256 rz8 = _mm256_set1_ps( ray.O.z * ray.rD.z ), rdz8 = _mm256_set1_ps( ray.rD.z );
+	const __m256i lane8 = _mm256_setr_epi32( 0, 1, 2, 3, 4, 5, 6, 7 );
 	const __m128 ox4 = _mm_set1_ps( ray.O.x ), oy4 = _mm_set1_ps( ray.O.y ), oz4 = _mm_set1_ps( ray.O.z );
 	const __m128 dx4 = _mm_set1_ps( ray.D.x ), dy4 = _mm_set1_ps( ray.D.y ), dz4 = _mm_set1_ps( ray.D.z );
 	const __m128 one4 = _mm_set1_ps( 1 ), inf4 = _mm_set1_ps( 1e34f );
@@ -8297,20 +8384,20 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 #endif
 	while (1)
 	{
-	#ifdef _DEBUG
-		steps++;
-	#endif
 		while (!(nodeIdx & LEAF_BIT)) ISLIKELY
 		{
-			const BVHNode * n = (BVHNode*)(bvh8Data + nodeIdx);
+		#ifdef _DEBUG
+			steps++;
+		#endif
+			const BVHNode* n = (BVHNode*)(bvh8Data + nodeIdx);
 			const __m256 tx1 = _mm256_fmsub_ps( posX ? n->xmin8 : n->xmax8, rdx8, rx8 );
 			const __m256 ty1 = _mm256_fmsub_ps( posY ? n->ymin8 : n->ymax8, rdy8, ry8 );
 			const __m256 tz1 = _mm256_fmsub_ps( posZ ? n->zmin8 : n->zmax8, rdz8, rz8 );
 			const __m256 tx2 = _mm256_fmsub_ps( posX ? n->xmax8 : n->xmin8, rdx8, rx8 );
 			const __m256 ty2 = _mm256_fmsub_ps( posY ? n->ymax8 : n->ymin8, rdy8, ry8 );
 			const __m256 tz2 = _mm256_fmsub_ps( posZ ? n->zmax8 : n->zmin8, rdz8, rz8 );
-			__m256 tmin = _mm256_max_ps( _mm256_max_ps( _mm256_max_ps( zero8, tx1 ), ty1 ), tz1 );
-			__m256 tmax = _mm256_min_ps( _mm256_min_ps( _mm256_min_ps( tx2, t8 ), ty2 ), tz2 );
+			const __m256 tmin = _mm256_max_ps( _mm256_max_ps( tx1, ty1 ), _mm256_max_ps( tz1, zero8 ) );
+			const __m256 tmax = _mm256_min_ps( _mm256_min_ps( tx2, ty2 ), _mm256_min_ps( tz2, t8 ) );
 			const __m256 mask8 = _mm256_cmp_ps( tmin, tmax, _CMP_LE_OQ );
 			const uint32_t mask = _mm256_movemask_ps( mask8 );
 			const uint32_t validNodes = __popc( mask );
@@ -8323,15 +8410,21 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 			{
 				const __m256i index = _mm256_srli_epi32( n->perm8, signShift );
 				const uint32_t m = _mm256_movemask_ps( _mm256_permutevar8x32_ps( mask8, index ) );
-				tmin = _mm256_permutevar8x32_ps( tmin, index );
-				const __m256i cpi = idxLUT256[255 - m];
 				const __m256i c8 = _mm256_permutevar8x32_epi32( n->child8, index );
-				const __m256 dist8 = _mm256_permutevar8x32_ps( tmin, cpi );
+				nodeIdx = (uint32_t)_mm_cvtsi128_si32( _mm256_castsi256_si128(
+					_mm256_permutevar8x32_epi32( c8, _mm256_set1_epi32( (int32_t)__bfind( m ) ) ) ) );
+				// start the fill for the child we are about to descend into; the LUT
+				// load, two permutes and two stores below hide the L1/L2 latency.
+				_mm_prefetch( (const char*)(bvh8Data + (nodeIdx & 0x1fffffff)), _MM_HINT_T0 );
+				const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - m] );
+				const __m256 dist8 = _mm256_permutevar8x32_ps( _mm256_permutevar8x32_ps( tmin, index ), cpi );
 				const __m256i child8 = _mm256_permutevar8x32_epi32( c8, cpi );
 				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), child8 );
-				_mm256_storeu_ps( (float*)(distStack + stackPtr), dist8 );
+				_mm256_storeu_ps( distStack + stackPtr, dist8 );
 				stackPtr += validNodes - 1;
-				nodeIdx = nodeStack[stackPtr];
+			#ifdef _DEBUG
+				BVH_FATAL_ERROR_IF( stackPtr > STACK_SIZE - 8, "BVH8_CPU::Intersect, traversal stack overflow." );
+			#endif
 			}
 			else
 			{
@@ -8339,10 +8432,18 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 				nodeIdx = nodeStack[--stackPtr];
 			}
 		}
-			// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
-		uint32_t n;
-		memcpy( &n, &nodeIdx, 4 );
-		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (n & 0x1fffffff));
+		if (stackPtr) ISLIKELY
+		{
+			// An interior node is 256 bytes: x planes, y planes, z planes, child8+perm8 -
+			// all four cachelines are read by the node test. A leaf is 192 bytes (3 lines).
+			// Nodes sit at arbitrary 64-byte multiples (leafs are 3 blocks, nodes 4), so the
+			// adjacent-line prefetcher cannot be relied on to fill in the gaps: issue all four.
+			const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
+			_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
+			_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
+		}
+		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
+		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, leaf->e2z4, _mm_mul_ps( dz4, leaf->e2y4 ) );
 		const __m128 hy4 = _mm_fmsub_ps( dz4, leaf->e2x4, _mm_mul_ps( dx4, leaf->e2z4 ) );
 		const __m128 hz4 = _mm_fmsub_ps( dx4, leaf->e2y4, _mm_mul_ps( dy4, leaf->e2x4 ) );
@@ -8359,65 +8460,70 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 		const __m128 mask1 = _mm_cmpge_ps( u4, _mm_setzero_ps() ), mask2 = _mm_cmpge_ps( v4, _mm_setzero_ps() );
 		const __m128 mask3 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
 		const __m128 mask4 = _mm_cmpgt_ps( ta4, _mm_setzero_ps() );
-		const __m128 mask5 = _mm_cmplt_ps( ta4, _mm256_extractf128_ps( t8, 0 ) );
+		const __m128 mask5 = _mm_cmplt_ps( ta4, _mm256_castps256_ps128( t8 ) );
 		__m128 combined = _mm_and_ps( _mm_and_ps( _mm_and_ps( mask1, mask2 ), _mm_and_ps( mask3, mask4 ) ), mask5 );
 		uint32_t imask = _mm_movemask_ps( combined );
-		// evaluate opacity map, if present (SSE version).
-		if (opmap) ISUNLIKELY if (imask)
-		{
-			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
-			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
-			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
-			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
-			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
-			union { uint32_t idx[4]; __m128i idx4; };
-			union { uint32_t omask[4]; __m128 omask4; };
-			idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
-			// proceed with scalar code for gather operation - TODO: better approach?
-			omask[0] = omask[1] = omask[2] = omask[3] = 0;
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
-			}
-			// combine
-			combined = _mm_and_ps( combined, omask4 );
-			imask = _mm_movemask_ps( combined );
-		}
 		if (imask)
 		{
-			// compute broadcasted horizontal minimum of dist4
-			const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
-			const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
-			const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
-			const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
-			// update hit record
-			const __m128 _d4 = dist4;
-			const float t = ((float*)&_d4)[lane];
-			const __m128 _u4 = u4, _v4 = v4;
-			ray.hit.t = t, ray.hit.u = ((float*)&_u4)[lane], ray.hit.v = ((float*)&_v4)[lane];
-		#if INST_IDX_BITS == 32
-			ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
-		#else
-			ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
-		#endif
-			t8 = _mm256_set1_ps( t );
-			// compress stack
-			uint32_t outStackPtr = 0;
-			for (int32_t i = 0; i < stackPtr; i += 8)
+			// evaluate opacity map, if present (SSE version).
+			if (opmap) ISUNLIKELY
 			{
-				__m256i node8 = _mm256_load_si256( (__m256i*)(nodeStack + i) );
-				__m256 dist8 = _mm256_load_ps( (float*)(distStack + i) );
-				const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) );
-				const __m256i cpi = idxLUT256[255 - mask];
-				dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
-				_mm256_storeu_ps( (float*)(distStack + outStackPtr), dist8 );
-				_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
-				const int32_t numItems = tinybvh_min( 8, stackPtr - i ), validMask = (1 << numItems) - 1;
-				outStackPtr += __popc( mask & validMask );
+				const __m128 fN4 = _mm_set1_ps( (float)opmapN );
+				const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
+				const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
+				const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+				const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
+				const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
+				union { uint32_t idx[4]; __m128i idx4; };
+				union { uint32_t omask[4]; __m128 omask4; };
+				idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
+				// proceed with scalar code for gather operation - TODO: better approach?
+				omask[0] = omask[1] = omask[2] = omask[3] = 0;
+				for (int i = 0; i < 4; i++) if (imask & (1 << i))
+				{
+					uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
+					if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
+				}
+				// combine
+				combined = _mm_and_ps( combined, omask4 );
+				imask = _mm_movemask_ps( combined );
 			}
-			stackPtr = outStackPtr;
+			if (imask)
+			{
+				// compute broadcasted horizontal minimum of dist4
+				const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
+				const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
+				const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+				const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
+				// update hit record.
+				const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
+				const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
+				ray.hit.t = t;
+				ray.hit.u = _mm_cvtss_f32( _mm_permutevar_ps( u4, lane4 ) );
+				ray.hit.v = _mm_cvtss_f32( _mm_permutevar_ps( v4, lane4 ) );
+			#if INST_IDX_BITS == 32
+				ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
+			#else
+				ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
+			#endif
+				t8 = _mm256_set1_ps( t );
+				// compress stack
+				int32_t outStackPtr = 0;
+				for (int32_t i = 0; i < stackPtr; i += 8)
+				{
+					const int32_t numItems = tinybvh_min( 8, stackPtr - i );
+					const __m256i valid8 = _mm256_cmpgt_epi32( _mm256_set1_epi32( numItems ), lane8 );
+					__m256i node8 = _mm256_maskload_epi32( (const int32_t*)(nodeStack + i), valid8 );
+					__m256 dist8 = _mm256_maskload_ps( distStack + i, valid8 );
+					const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) ) & ((1u << numItems) - 1);
+					const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
+					dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
+					_mm256_storeu_ps( distStack + outStackPtr, dist8 );
+					_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
+					outStackPtr += __popc( mask );
+				}
+				stackPtr = outStackPtr;
+			}
 		}
 		if (!stackPtr) ISUNLIKELY break;
 		nodeIdx = nodeStack[--stackPtr];
@@ -8433,7 +8539,7 @@ the_end:
 bool BVH8_CPU::IsOccluded( const Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
-	const bool posX = ray.D.x >= 0, posY = ray.D.y >= 0, posZ = ray.D.z >= 0;
+	const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
 	if (!posX) goto negx;
 	if (posY) { if (posZ) return IsOccluded<true, true, true>( ray ); else return IsOccluded<true, true, false>( ray ); }
 	if (posZ) return IsOccluded<true, false, true>( ray ); else return IsOccluded<true, false, false>( ray );
@@ -8444,8 +8550,10 @@ negx:
 
 template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray& ray ) const
 {
-	ALIGNED( 64 ) uint32_t nodeStack[256];
-	ALIGNED( 64 ) int32_t stackPtr = 0, nodeIdx = 0;
+	ALIGNED( 64 ) uint32_t nodeStack[STACK_SIZE + 8];
+	int32_t stackPtr = 0;
+	uint32_t nodeIdx = 0;
+	const __m256 zero8 = _mm256_setzero_ps();
 	const __m256 t8 = _mm256_set1_ps( ray.hit.t );
 	const __m256 rx8 = _mm256_set1_ps( ray.O.x * ray.rD.x ), rdx8 = _mm256_set1_ps( ray.rD.x );
 	const __m256 ry8 = _mm256_set1_ps( ray.O.y * ray.rD.y ), rdy8 = _mm256_set1_ps( ray.rD.y );
@@ -8453,7 +8561,7 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 	const __m128 ox4 = _mm_set1_ps( ray.O.x ), oy4 = _mm_set1_ps( ray.O.y ), oz4 = _mm_set1_ps( ray.O.z );
 	const __m128 dx4 = _mm_set1_ps( ray.D.x ), dy4 = _mm_set1_ps( ray.D.y ), dz4 = _mm_set1_ps( ray.D.z );
 	const __m128 t4 = _mm_set1_ps( ray.hit.t );
-	const __m128 one4 = _mm_set1_ps( 1.0f ), zero4 = _mm_setzero_ps();
+	const __m128 one4 = _mm_set1_ps( 1.0f ), zero4 = _mm_setzero_ps(), sign4 = _mm_set1_ps( -0.0f );
 	while (1)
 	{
 		while (!(nodeIdx & LEAF_BIT)) ISLIKELY
@@ -8466,10 +8574,10 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 			const __m256 tx2 = _mm256_fmsub_ps( posX ? n->xmax8 : n->xmin8, rdx8, rx8 );
 			const __m256 ty2 = _mm256_fmsub_ps( posY ? n->ymax8 : n->ymin8, rdy8, ry8 );
 			const __m256 tz2 = _mm256_fmsub_ps( posZ ? n->zmax8 : n->zmin8, rdz8, rz8 );
-			const __m256 tmin = _mm256_max_ps( _mm256_max_ps( _mm256_max_ps( _mm256_setzero_ps(), tx1 ), ty1 ), tz1 );
-			const __m256 tmax = _mm256_min_ps( _mm256_min_ps( _mm256_min_ps( tx2, t8 ), ty2 ), tz2 );
+			const __m256 tmin = _mm256_max_ps( _mm256_max_ps( tx1, ty1 ), _mm256_max_ps( tz1, zero8 ) );
+			const __m256 tmax = _mm256_min_ps( _mm256_min_ps( tx2, ty2 ), _mm256_min_ps( tz2, t8 ) );
 			const __m256 mask8 = _mm256_cmp_ps( tmin, tmax, _CMP_LE_OQ );
-			const uint32_t mask = _mm256_movemask_ps( mask8 ); // _mm256_or_ps( _mm256_castsi256_ps( c8 ), mask8 ) );
+			const uint32_t mask = _mm256_movemask_ps( mask8 );
 			const uint32_t validNodes = __popc( mask );
 			if (validNodes == 1)
 			{
@@ -8478,11 +8586,15 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 			}
 			else if (validNodes > 0)
 			{
-				const __m256i cpi = idxLUT256[255 - mask];
+				nodeIdx = (uint32_t)_mm_cvtsi128_si32( _mm256_castsi256_si128(
+					_mm256_permutevar8x32_epi32( c8, _mm256_set1_epi32( (int32_t)__bfind( mask ) ) ) ) );
+				const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
 				const __m256i child8 = _mm256_permutevar8x32_epi32( c8, cpi );
 				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), child8 );
 				stackPtr += validNodes - 1;
-				nodeIdx = nodeStack[stackPtr];
+			#ifdef _DEBUG
+				BVH_FATAL_ERROR_IF( stackPtr > STACK_SIZE - 8, "BVH8_CPU::IsOccluded, traversal stack overflow." );
+			#endif
 			}
 			else
 			{
@@ -8490,10 +8602,13 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 				nodeIdx = nodeStack[--stackPtr];
 			}
 		}
-		uint32_t n;
-		memcpy( &n, &nodeIdx, 4 );
-		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
-		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (n & 0x1fffffff));
+			if (stackPtr) ISLIKELY
+			{
+				const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
+				_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 128, _MM_HINT_T0 );
+			}
+				// Moeller-Trumbore ray/triangle intersection algorithm for four triangles.
+		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, leaf->e2z4, _mm_mul_ps( dz4, leaf->e2y4 ) );
 		const __m128 hy4 = _mm_fmsub_ps( dz4, leaf->e2x4, _mm_mul_ps( dx4, leaf->e2z4 ) );
 		const __m128 hz4 = _mm_fmsub_ps( dx4, leaf->e2y4, _mm_mul_ps( dy4, leaf->e2x4 ) );
@@ -8504,25 +8619,29 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 		const __m128 qz4 = _mm_fmsub_ps( sx4, leaf->e1y4, _mm_mul_ps( sy4, leaf->e1x4 ) );
 		const __m128 qx4 = _mm_fmsub_ps( sy4, leaf->e1z4, _mm_mul_ps( sz4, leaf->e1y4 ) );
 		const __m128 qy4 = _mm_fmsub_ps( sz4, leaf->e1x4, _mm_mul_ps( sx4, leaf->e1z4 ) );
-		const __m128 inv_det4 = fastrcp4( det4 );
-		const __m128 u4 = _mm_mul_ps( _mm_fmadd_ps( sz4, hz4, _mm_fmadd_ps( sx4, hx4, _mm_mul_ps( sy4, hy4 ) ) ), inv_det4 );
-		const __m128 v4 = _mm_mul_ps( _mm_fmadd_ps( dz4, qz4, _mm_fmadd_ps( dx4, qx4, _mm_mul_ps( dy4, qy4 ) ) ), inv_det4 );
-		const __m128 ta4 = _mm_mul_ps( _mm_fmadd_ps( leaf->e2z4, qz4, _mm_fmadd_ps( leaf->e2x4, qx4, _mm_mul_ps( leaf->e2y4, qy4 ) ) ), inv_det4 );
+		const __m128 nu4 = _mm_fmadd_ps( sz4, hz4, _mm_fmadd_ps( sx4, hx4, _mm_mul_ps( sy4, hy4 ) ) );
+		const __m128 nv4 = _mm_fmadd_ps( dz4, qz4, _mm_fmadd_ps( dx4, qx4, _mm_mul_ps( dy4, qy4 ) ) );
+		const __m128 nt4 = _mm_fmadd_ps( leaf->e2z4, qz4, _mm_fmadd_ps( leaf->e2x4, qx4, _mm_mul_ps( leaf->e2y4, qy4 ) ) );
+		const __m128 dsign4 = _mm_and_ps( det4, sign4 ), adet4 = _mm_andnot_ps( sign4, det4 );
+		const __m128 u4 = _mm_xor_ps( nu4, dsign4 ), v4 = _mm_xor_ps( nv4, dsign4 );
+		const __m128 ta4 = _mm_xor_ps( nt4, dsign4 );
 		const __m128 mask1 = _mm_cmpge_ps( u4, zero4 );
 		const __m128 mask2 = _mm_cmpge_ps( v4, zero4 );
-		const __m128 mask3 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
-		const __m128 mask4 = _mm_cmplt_ps( ta4, t4 );
+		const __m128 mask3 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), adet4 );
+		const __m128 mask4 = _mm_cmplt_ps( ta4, _mm_mul_ps( t4, adet4 ) );
 		const __m128 mask5 = _mm_cmpgt_ps( ta4, zero4 );
-		__m128 combined = _mm_and_ps( _mm_and_ps( _mm_and_ps( mask1, mask2 ), _mm_and_ps( mask3, mask4 ) ), mask5 );
+		const __m128 combined = _mm_and_ps( _mm_and_ps( _mm_and_ps( mask1, mask2 ), _mm_and_ps( mask3, mask4 ) ), mask5 );
 		if (_mm_movemask_ps( combined ))
 		{
 			if (!opmap) return true;
 			// evaluate opacity map, SSE version.
+			const __m128 inv_det4 = fastrcp4( det4 );
+			const __m128 bu4 = _mm_mul_ps( nu4, inv_det4 ), bv4 = _mm_mul_ps( nv4, inv_det4 );
 			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
-			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
-			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
+			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( bu4, bv4 ), fN4 ) );
+			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, bu4 ), fN4 ) );
 			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
+			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( bv4, fN4 ) );
 			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
 			union { uint32_t idx[4]; __m128i idx4; };
 			idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
@@ -9927,9 +10046,10 @@ bool BVH::ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhve
 
 // RefitUp: Update bounding boxes of ancestors of the specified node.
 // Returns the change in the summed surface area of the nodes it updated.
-float BVH_Verbose::RefitUp( uint32_t nodeIdx )
+double BVH_Verbose::RefitUp( uint32_t nodeIdx, RefitRecord* journal, uint32_t& journalPtr, const uint32_t journalCap )
 {
-	float deltaArea = 0;
+	double deltaArea = 0;
+	bool first = true;
 	while (1)
 	{
 		BVHNode& node = bvhNode[nodeIdx];
@@ -9937,11 +10057,21 @@ float BVH_Verbose::RefitUp( uint32_t nodeIdx )
 		{
 			const BVHNode& left = bvhNode[node.left];
 			const BVHNode& right = bvhNode[node.right];
+			const bvhvec3 bmin = tinybvh_min( left.aabbMin, right.aabbMin );
+			const bvhvec3 bmax = tinybvh_max( left.aabbMax, right.aabbMax );
+			// early out: if this node's box is unchanged, no ancestor changes either.
+			if (!first &&
+				bmin.x == node.aabbMin.x && bmin.y == node.aabbMin.y && bmin.z == node.aabbMin.z &&
+				bmax.x == node.aabbMax.x && bmax.y == node.aabbMax.y && bmax.z == node.aabbMax.z) break;
+			if (journalPtr == journalCap) return BVH_FAR; // overflow: force a reject.
+			journal[journalPtr].node = nodeIdx;
+			journal[journalPtr].bmin = node.aabbMin;
+			journal[journalPtr++].bmax = node.aabbMax;
 			const float areaBefore = node.SA();
-			node.aabbMin = tinybvh_min( left.aabbMin, right.aabbMin );
-			node.aabbMax = tinybvh_max( left.aabbMax, right.aabbMax );
-			deltaArea += node.SA() - areaBefore;
+			node.aabbMin = bmin, node.aabbMax = bmax;
+			deltaArea += (double)node.SA() - (double)areaBefore;
 		}
+		first = false;
 		if (nodeIdx == 0) break; else nodeIdx = node.parent;
 	}
 	return deltaArea;
@@ -9962,37 +10092,57 @@ float BVH_Verbose::SAHCostUp( uint32_t nodeIdx ) const
 
 // FindBestNewPosition
 // Part of "Fast Insertion-Based Optimization of Bounding Volume Hierarchies"
-// K.I.S.S. version with brute-force array search.
-uint32_t BVH_Verbose::FindBestNewPosition( const uint32_t Lid ) const
+uint32_t BVH_Verbose::FindBestNewPosition( const uint32_t Lid, float& bestCost ) const
 {
 	struct Task { float ci; uint32_t node; };
 	static const int maxTasks = 512;
 	ALIGNED( 64 ) Task task[maxTasks];
-	float Cbest = BVH_FAR;
-	int tasks = 1 /* doesn't exceed 70 for Crytek Sponza */, Xbest = 0;
 	const BVHNode& L = bvhNode[Lid];
-	// reinsert L into BVH
-	task[0].node = 0, task[0].ci = 0;
+	const bvhvec3 Lmin = L.aabbMin, Lmax = L.aabbMax;
+	const float LSA = L.SA();
+	float Cbest = BVH_FAR;
+	uint32_t Xbest = 0;
+	int tasks = 1;
+	task[0].ci = 0, task[0].node = 0;
 	while (tasks > 0)
 	{
-		// 'pop' task with smallest Ci
-		uint32_t bestTask = 0;
-		float minCi = task[0].ci; // tnx Brian
-		for (int j = 1; j < tasks; j++) if (task[j].ci < minCi) minCi = task[j].ci, bestTask = j;
-		const uint32_t Xid = task[bestTask].node;
-		const float CiLX = task[bestTask].ci;
-		if (--tasks > 0) task[bestTask] = task[tasks];
-		// execute task
+		// pop the task with the smallest induced cost
+		const uint32_t Xid = task[0].node;
+		const float CiLX = task[0].ci;
+		if (--tasks > 0)
+		{
+			task[0] = task[tasks];
+			for (int i = 0; ; )
+			{
+				const int l = 2 * i + 1, r = l + 1;
+				int s = i;
+				if (l < tasks && task[l].ci < task[s].ci) s = l;
+				if (r < tasks && task[r].ci < task[s].ci) s = r;
+				if (s == i) break;
+				const Task t = task[i]; task[i] = task[s]; task[s] = t; i = s;
+			}
+		}
+		// if the popped task has the lowest induced cost in the queue: done.
+		if (CiLX + LSA >= Cbest) break;
 		const BVHNode& X = bvhNode[Xid];
-		if (CiLX + L.SA() >= Cbest) break;
-		const float CdLX = SA( tinybvh_min( L.aabbMin, X.aabbMin ), tinybvh_max( L.aabbMax, X.aabbMax ) );
+		const float CdLX = SA( tinybvh_min( Lmin, X.aabbMin ), tinybvh_max( Lmax, X.aabbMax ) );
 		const float CLX = CiLX + CdLX;
 		if (CLX < Cbest && Xid != 0) Cbest = CLX, Xbest = Xid;
 		const float Ci = CLX - X.SA();
-		if (Ci + L.SA() >= Cbest || X.isLeaf() || tasks + 2 > maxTasks) continue;
-		task[tasks].node = X.left, task[tasks++].ci = Ci;
-		task[tasks].node = X.right, task[tasks++].ci = Ci;
+		if (Ci + LSA >= Cbest || X.isLeaf() || tasks + 2 > maxTasks) continue;
+		for (int c = 0; c < 2; c++)
+		{
+			int i = tasks++;
+			task[i].ci = Ci, task[i].node = c ? X.right : X.left;
+			while (i > 0)
+			{
+				const int p = (i - 1) >> 1;
+				if (task[p].ci <= task[i].ci) break;
+				const Task t = task[p]; task[p] = task[i]; task[i] = t; i = p;
+			}
+		}
 	}
+	bestCost = Cbest;
 	return Xbest;
 }
 
