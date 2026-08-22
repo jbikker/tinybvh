@@ -541,7 +541,9 @@ TINYBVH_FORCEINLINE double tinybvh_max( const double a, const double b ) { retur
 TINYBVH_FORCEINLINE int32_t tinybvh_min( const int32_t a, const int32_t b ) { return a < b ? a : b; }
 TINYBVH_FORCEINLINE int32_t tinybvh_max( const int32_t a, const int32_t b ) { return a > b ? a : b; }
 TINYBVH_FORCEINLINE uint32_t tinybvh_min( const uint32_t a, const uint32_t b ) { return a < b ? a : b; }
+TINYBVH_FORCEINLINE uint64_t tinybvh_min( const uint64_t a, const uint64_t b ) { return a < b ? a : b; }
 TINYBVH_FORCEINLINE uint32_t tinybvh_max( const uint32_t a, const uint32_t b ) { return a > b ? a : b; }
+TINYBVH_FORCEINLINE uint64_t tinybvh_max( const uint64_t a, const uint64_t b ) { return a > b ? a : b; }
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_min( const bvhvec3& a, const bvhvec3& b ) { return bvhvec3( tinybvh_min( a.x, b.x ), tinybvh_min( a.y, b.y ), tinybvh_min( a.z, b.z ) ); }
 TINYBVH_FORCEINLINE bvhvec4 tinybvh_min( const bvhvec4& a, const bvhvec4& b ) { return bvhvec4( tinybvh_min( a.x, b.x ), tinybvh_min( a.y, b.y ), tinybvh_min( a.z, b.z ), tinybvh_min( a.w, b.w ) ); }
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_max( const bvhvec3& a, const bvhvec3& b ) { return bvhvec3( tinybvh_max( a.x, b.x ), tinybvh_max( a.y, b.y ), tinybvh_max( a.z, b.z ) ); }
@@ -9006,7 +9008,7 @@ void BVH_Double::Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&
 	}
 	// copy relevant data from instance array
 	BVHNode& root = bvhNode[0];
-	root.leftFirst = 0, root.triCount = primCount, root.aabbMin = bvhvec3( BVH_FAR ), root.aabbMax = bvhvec3( -BVH_FAR );
+	root.leftFirst = 0, root.triCount = primCount, root.aabbMin = bvhdbl3( BVH_DBL_FAR ), root.aabbMax = bvhdbl3( -BVH_DBL_FAR );
 	for (uint32_t i = 0; i < primCount; i++)
 	{
 		customGetAABB( i, fragment[i].bmin, fragment[i].bmax, customUserdata );
@@ -9149,31 +9151,34 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 		{
 			BVHNode& node = bvhNode[nodeIdx];
 			const double SA = node.SurfaceArea();
+			if (SA == 0) break; // can't split an infinitely small node.
 			// find optimal object split
 			bvhdbl3 binMin[3][BVHBINS], binMax[3][BVHBINS];
 			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < BVHBINS; i++)
 				binMin[a][i] = bvhdbl3( BVH_DBL_FAR ), binMax[a][i] = bvhdbl3( -BVH_DBL_FAR );
-			uint32_t count[3][BVHBINS] = { 0 };
+			uint64_t count[3][BVHBINS] = { 0 };
 			const bvhdbl3 extent = node.aabbMax - node.aabbMin;
 			const bvhdbl3 nmin3 = node.aabbMin, rpd3 = bvhdbl3(
 				extent.x > minDim.x ? (BVHBINS / extent.x) : 0,
 				extent.y > minDim.y ? (BVHBINS / extent.y) : 0,
 				extent.z > minDim.z ? (BVHBINS / extent.z) : 0
 			);
-			for (uint32_t i = 0; i < node.triCount; i++) // process all tris for x,y and z at once
+			const uint64_t* nodeFragIdx = primIdx + node.leftFirst;
+			for (uint64_t i = 0; i < node.triCount; i++) // process all tris for x,y and z at once
 			{
-				const uint64_t fi = primIdx[node.leftFirst + i];
-				const bvhdbl3 fbi = ((fragment[fi].bmin + fragment[fi].bmax) * 0.5 - nmin3) * rpd3;
+				const Fragment& frag = fragment[nodeFragIdx[i]];
+				const bvhdbl3 fbmin = frag.bmin, fbmax = frag.bmax;
+				const bvhdbl3 fbi = ((fbmin + fbmax) * 0.5 - nmin3) * rpd3;
 				bvhint3 bi( (int32_t)fbi.x, (int32_t)fbi.y, (int32_t)fbi.z );
 				bi.x = tinybvh_clamp( bi.x, 0, BVHBINS - 1 );
 				bi.y = tinybvh_clamp( bi.y, 0, BVHBINS - 1 );
 				bi.z = tinybvh_clamp( bi.z, 0, BVHBINS - 1 );
-				binMin[0][bi.x] = tinybvh_min( binMin[0][bi.x], fragment[fi].bmin );
-				binMax[0][bi.x] = tinybvh_max( binMax[0][bi.x], fragment[fi].bmax ), count[0][bi.x]++;
-				binMin[1][bi.y] = tinybvh_min( binMin[1][bi.y], fragment[fi].bmin );
-				binMax[1][bi.y] = tinybvh_max( binMax[1][bi.y], fragment[fi].bmax ), count[1][bi.y]++;
-				binMin[2][bi.z] = tinybvh_min( binMin[2][bi.z], fragment[fi].bmin );
-				binMax[2][bi.z] = tinybvh_max( binMax[2][bi.z], fragment[fi].bmax ), count[2][bi.z]++;
+				binMin[0][bi.x] = tinybvh_min( binMin[0][bi.x], fbmin );
+				binMax[0][bi.x] = tinybvh_max( binMax[0][bi.x], fbmax ), count[0][bi.x]++;
+				binMin[1][bi.y] = tinybvh_min( binMin[1][bi.y], fbmin );
+				binMax[1][bi.y] = tinybvh_max( binMax[1][bi.y], fbmax ), count[1][bi.y]++;
+				binMin[2][bi.z] = tinybvh_min( binMin[2][bi.z], fbmin );
+				binMax[2][bi.z] = tinybvh_max( binMax[2][bi.z], fbmax ), count[2][bi.z]++;
 			}
 			// calculate per-split totals
 			double splitCost = BVH_DBL_FAR;
@@ -9183,7 +9188,7 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 				bvhdbl3 lBMin[BVHBINS - 1], rBMin[BVHBINS - 1], l1( BVH_DBL_FAR ), l2( -BVH_DBL_FAR );
 				bvhdbl3 lBMax[BVHBINS - 1], rBMax[BVHBINS - 1], r1( BVH_DBL_FAR ), r2( -BVH_DBL_FAR );
 				double ANL[BVHBINS - 1], ANR[BVHBINS - 1];
-				for (uint32_t lN = 0, rN = 0, i = 0; i < BVHBINS - 1; i++)
+				for (uint64_t lN = 0, rN = 0, i = 0; i < BVHBINS - 1; i++)
 				{
 					lBMin[i] = l1 = tinybvh_min( l1, binMin[a][i] );
 					rBMin[BVHBINS - 2 - i] = r1 = tinybvh_min( r1, binMin[a][BVHBINS - 1 - i] );
@@ -9231,14 +9236,18 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 			bvhNode[n + 1].aabbMin = bestRMin, bvhNode[n + 1].aabbMax = bestRMax;
 			bvhNode[n + 1].leftFirst = j, bvhNode[n + 1].triCount = rightCount;
 			node.leftFirst = n, node.triCount = 0;
-			if (depth < MT_SPAWN_DEPTH && threadedBuild)
+		#ifdef ENABLE_THREADED_BUILDS
+			// only hand work to the pool if the subtrees are large enough to pay for the task overhead.
+			if (threadedBuild && depth < MT_SPAWN_DEPTH &&
+				tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS)
 			{
-				// spawn both child subtrees and return; the root barrier joins them.
-				BVHDoubleBuildSubtreeArgs a0 = { this, n, depth + 1 }, a1 = { this, n + 1, depth + 1 };
-				tinybvh_spawn( context, &BVHDoubleBuildSubtree, &a0, sizeof( a0 ) );
-				tinybvh_spawn( context, &BVHDoubleBuildSubtree, &a1, sizeof( a1 ) );
-				break;
+				// spawn the larger subtree, continue with the small one; root barrier joins.
+				BVHDoubleBuildSubtreeArgs a = { this, leftCount > rightCount ? n : n + 1, depth + 1 };
+				tinybvh_spawn( context, &BVHDoubleBuildSubtree, &a, sizeof( a ) );
+				nodeIdx = leftCount > rightCount ? (n + 1) : n;
+				continue;
 			}
+		#endif
 			// recurse
 			task[taskCount++] = n + 1, nodeIdx = n;
 		}
