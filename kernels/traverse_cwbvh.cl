@@ -6,15 +6,7 @@
 
 // preliminaries
 
-inline uint __activemask() // OpenCL alternative for CUDA's native __activemask
-{
-	uint mask;
-#ifdef ISNVIDIA
-	// this obviously only works on NVIDIA hardware.
-	asm( "activemask.b32 %0;" : "=r"(mask) );
-#endif
-	return mask;
-}
+#define CWBVH_STACK 24
 
 inline uint __bfind( const uint v ) // OpenCL alternative for CUDA's native __bfind
 {
@@ -121,16 +113,16 @@ inline unsigned sign_extend_s8x4( const unsigned i )
 // based on CUDA code by AlanWBFT https://github.com/AlanIWBFT
 
 #ifdef SIMD_AABBTEST
-float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwbvhTris, const float4 O, const float4 D, const float4 rD, const float t, uint* stepCount )
+float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwbvhTris, const float4 O, const float4 D, const float4 rD, const float t )
 #else
-float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwbvhTris, const float3 O, const float3 D, const float3 rD, const float t, uint* stepCount )
+float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwbvhTris, const float3 O, const float3 D, const float3 rD, const float t )
 #endif
 {
 	// initialize ray
 	const unsigned threadId = get_global_id( 0 );
 	float4 hit = (float4)( t, 0, 0, 0 ); // not fetching t from ray data to avoid one memory operation.
 	// prepare traversal
-	uint2 stack[STACK_SIZE];
+	uint2 stack[CWBVH_STACK];
 	uint hitAddr, stackPtr = 0, steps = 0;
 	float2 uv;
 	float tmax = t;
@@ -138,7 +130,6 @@ float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwb
 	uint2 ngroup = (uint2)(0, 0b10000000000000000000000000000000), tgroup = (uint2)(0);
 	do
 	{
-		steps++;
 		if (ngroup.y > 0x00FFFFFF)
 		{
 			const unsigned hits = ngroup.y, imask = ngroup.y;
@@ -336,7 +327,6 @@ float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwb
 			}
 		}
 	} while (true);
-	if (stepCount) *stepCount += steps;
 	return hit;
 }
 
@@ -349,7 +339,7 @@ bool isoccluded_cwbvh( global const float4* cwbvhNodes, global const float4* cwb
 	// initialize ray
 	const unsigned threadId = get_global_id( 0 );
 	// prepare traversal
-	uint2 stack[STACK_SIZE];
+	uint2 stack[CWBVH_STACK];
 	uint stackPtr = 0;
 	float tmax = t;
 	const uint octinv4 = (7 - ((D.x < 0 ? 4 : 0) | (D.y < 0 ? 2 : 0) | (D.z < 0 ? 1 : 0))) * 0x1010101;
@@ -564,7 +554,7 @@ void kernel batch_cwbvh( global const float4* cwbvhNodes, global const float4* c
 	const float4 O4 = rayData[threadId].O;
 	const float4 D4 = rayData[threadId].D;
 	const float4 rD4 = rayData[threadId].rD;
-	float4 hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4.xyz, D4.xyz, rD4.xyz, 1e30f, 0 );
+	float4 hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4.xyz, D4.xyz, rD4.xyz, 1e30f );
 #endif
 	rayData[threadId].hit = hit;
 }
