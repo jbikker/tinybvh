@@ -16,7 +16,7 @@ struct Ray
 	float4 hit; // 16 byte
 };
 
-// #define CWBVH_COMPRESSED_TRIS // sync with tiny_bvh.h
+#define CWBVH_COMPRESSED_TRIS // sync with tiny_bvh.h
 // #define BVH4_GPU_COMPRESSED_TRIS // sync with tiny_bvh.h
 
 // BVH traversal stack size 

@@ -16,10 +16,21 @@ StructuredBuffer<float4> cwbvhNodes : register(t4, space1); // 5x float4 per CWB
 StructuredBuffer<float4> cwbvhTris : register(t5, space1); // 3x (or 4x) float4 per triangle
 RWTexture2D<float4> uav : register(u0); // render target
 
+#define CWBVH_COMPRESSED_TRIS
+
 #ifdef CWBVH_COMPRESSED_TRIS
 #define TRI_STRIDE 4 // must match the tiny_bvh.h build define
 #else
 #define TRI_STRIDE 3
+#endif
+
+#define QUNPACK_BITTRICK 1
+#if QUNPACK_BITTRICK
+#define QUNPACK_SCALE 256.0f
+#define QUNPACK_BIAS  1.0f
+#else
+#define QUNPACK_SCALE 1.0f
+#define QUNPACK_BIAS  0.0f
 #endif
 
 #define GROUP_X    8
@@ -46,17 +57,20 @@ float safe_rcp(float x)
     return 1.0f / (sign(x) * max(abs(x), 1e-5f));
 }
 
-float4 as_uchar4(const float v)
+// Unpack four quantized child bounds.
+float4 unpack_q8x4(const uint w)
 {
-    const uint u = asuint(v);
-    return float4(uint4(u, u >> 8, u >> 16, u >> 24) & 255);
+#if QUNPACK_BITTRICK
+    const uint m = 0x007F8000u, b = 0x3F800000u; // mantissa slot 22..15, exponent 0
+    return asfloat((uint4(w << 15, w << 7, w >> 1, w >> 9) & m) | b);
+#else
+    return float4(uint4(w, w >> 8, w >> 16, w >> 24) & 255);
+#endif
 }
 
 #define bfind(x) firstbithigh(x)
 
-// Slab test for one group of four children. Returns the bits this quad
-// contributes to the node's hitmask; the caller ORs the two quads together.
-// 'lo'/'hi' are the quantized child bounds, already swapped per ray sign.
+// slab test for one group of four children
 uint intersect_quad(const uint meta4, const uint octinv4,
                     const float4 lox4, const float4 hix4,
                     const float4 loy4, const float4 hiy4,
@@ -64,10 +78,12 @@ uint intersect_quad(const uint meta4, const uint octinv4,
                     const float3 idir, const float3 orig, const float tmax)
 {
     const uint is_inner4 = (meta4 & (meta4 << 1)) & 0x10101010;
-    const uint inner_mask4 = (is_inner4 >> 4) * 255;
+    // expand the 0x10 marker in each byte to 0xFF: (x << 4) - (x >> 4) is
+    // 0x100 - 0x01 per marked byte, with no carry into the neighbours.
+    const uint inner_mask4 = (is_inner4 << 4) - (is_inner4 >> 4);
     const uint bit_index4 = (meta4 ^ (octinv4 & inner_mask4)) & 0x1F1F1F1F;
     const uint child_bits4 = (meta4 >> 5) & 0x07070707;
-    // dequantize and intersect all four children at once
+    // intersect all four children at once
     const float4 tminx = lox4 * idir.xxxx + orig.xxxx, tmaxx = hix4 * idir.xxxx + orig.xxxx;
     const float4 tminy = loy4 * idir.yyyy + orig.yyyy, tmaxy = hiy4 * idir.yyyy + orig.yyyy;
     const float4 tminz = loz4 * idir.zzzz + orig.zzzz, tmaxz = hiz4 * idir.zzzz + orig.zzzz;
@@ -95,6 +111,7 @@ float4 traverse_cwbvh(const float3 O, const float3 D, const float3 rD, const flo
     float2 uv = float2(0, 0);
     float tmax = t;
     const uint octinv4 = (7 - ((D.x < 0 ? 4 : 0) | (D.y < 0 ? 2 : 0) | (D.z < 0 ? 1 : 0))) * 0x01010101;
+    const float3 rDs = rD * QUNPACK_SCALE; // per-ray, hoisted out of the node loop
     // a 'group' is (base index, mask); the root is node 0 with only bit 31 set.
     uint2 ngroup = uint2(0, 0x80000000), tgroup = uint2(0, 0);
     while (true)
@@ -117,28 +134,28 @@ float4 traverse_cwbvh(const float3 O, const float3 D, const float3 rD, const flo
             const float4 n3 = cwbvhNodes[child_node_index + 3];
             const float4 n4 = cwbvhNodes[child_node_index + 4];
             ngroup.x = asuint(n1.x), tgroup = uint2(asuint(n1.y), 0);
-            // n0.w packs three signed per-axis exponents plus imask; sign-extend
-            // each byte, then (e + 127) << 23 is simply 2^e as a float.
+            // n0.w packs three signed per-axis exponents plus imask
             const uint packed_e = asuint(n0.w);
             const int3 e = int3(asint(packed_e << 24), asint(packed_e << 16),
                                 asint(packed_e << 8)) >> 24; // arithmetic shift
             const float3 idir = float3(asfloat((e.x + 127) << 23),
                                        asfloat((e.y + 127) << 23),
-                                       asfloat((e.z + 127) << 23)) * rD;
-            const float3 orig = (n0.xyz - O) * rD;
+                                       asfloat((e.z + 127) << 23)) * rDs;
+            // dequantized bounds start at QUNPACK_BIAS, not 0; subtract it once
+            // per node instead of per child.
+            const float3 orig = (n0.xyz - O) * rD - QUNPACK_BIAS * idir;
             // children 0..3: quantized bounds live in the low bytes of n2/n3/n4
-            const uint hitmask0 = intersect_quad(asuint(n1.z), octinv4,
-                as_uchar4(rD.x < 0 ? n3.z : n2.x), as_uchar4(rD.x < 0 ? n2.x : n3.z),
-                as_uchar4(rD.y < 0 ? n4.x : n2.z), as_uchar4(rD.y < 0 ? n2.z : n4.x),
-                as_uchar4(rD.z < 0 ? n4.z : n3.x), as_uchar4(rD.z < 0 ? n3.x : n4.z),
+            uint hitmask = intersect_quad(asuint(n1.z), octinv4,
+                unpack_q8x4(asuint(rD.x < 0 ? n3.z : n2.x)), unpack_q8x4(asuint(rD.x < 0 ? n2.x : n3.z)),
+                unpack_q8x4(asuint(rD.y < 0 ? n4.x : n2.z)), unpack_q8x4(asuint(rD.y < 0 ? n2.z : n4.x)),
+                unpack_q8x4(asuint(rD.z < 0 ? n4.z : n3.x)), unpack_q8x4(asuint(rD.z < 0 ? n3.x : n4.z)),
                 idir, orig, tmax);
             // children 4..7: same, one float further into each pair
-            const uint hitmask1 = intersect_quad(asuint(n1.w), octinv4,
-                as_uchar4(rD.x < 0 ? n3.w : n2.y), as_uchar4(rD.x < 0 ? n2.y : n3.w),
-                as_uchar4(rD.y < 0 ? n4.y : n2.w), as_uchar4(rD.y < 0 ? n2.w : n4.y),
-                as_uchar4(rD.z < 0 ? n4.w : n3.y), as_uchar4(rD.z < 0 ? n3.y : n4.w),
+            hitmask |= intersect_quad(asuint(n1.w), octinv4,
+                unpack_q8x4(asuint(rD.x < 0 ? n3.w : n2.y)), unpack_q8x4(asuint(rD.x < 0 ? n2.y : n3.w)),
+                unpack_q8x4(asuint(rD.y < 0 ? n4.y : n2.w)), unpack_q8x4(asuint(rD.y < 0 ? n2.w : n4.y)),
+                unpack_q8x4(asuint(rD.z < 0 ? n4.w : n3.y)), unpack_q8x4(asuint(rD.z < 0 ? n3.y : n4.w)),
                 idir, orig, tmax);
-            const uint hitmask = hitmask0 | hitmask1;
             // split the hitmask: high byte selects child nodes, low 24 bits triangles
             ngroup.y = (hitmask & 0xFF000000) | (packed_e >> 24);
             tgroup.y = hitmask & 0x00FFFFFF;

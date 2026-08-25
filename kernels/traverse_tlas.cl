@@ -39,9 +39,9 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 				const global float4* blasNodes = instIdx == 0 ? bistroNodes : dragonNodes;
 				const global float4* blasTris = instIdx == 0 ? bistroTris : dragonTris;
 			#ifdef SIMD_AABBTEST
-				const float4 blasHit = traverse_cwbvh( blasNodes, blasTris, (float4)(Oblas, 1), (float4)(Dblas, 0), (float4)(rDblas, 1), hit.x, stepCount );
+				const float4 blasHit = traverse_cwbvh( blasNodes, blasTris, (float4)(Oblas, 1), (float4)(Dblas, 0), (float4)(rDblas, 1), hit.x );
 			#else
-				const float4 blasHit = traverse_cwbvh( blasNodes, blasTris, Oblas, Dblas, rDblas, hit.x, stepCount );
+				const float4 blasHit = traverse_cwbvh( blasNodes, blasTris, Oblas, Dblas, rDblas, hit.x );
 			#endif
 			#else
 				// this code handles arbitrary tlas/blas scenes.
@@ -55,9 +55,9 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 					const global float4* nodes = blasCWNodes + blasDesc[blas].node8Offset * 5;
 					const global float4* tris = blasTri8 + blasDesc[blas].tri8Offset * 4;
 				#ifdef SIMD_AABBTEST
-					blasHit = traverse_cwbvh( nodes, tris, (float4)(Oblas, 1), (float4)(Dblas, 0), (float4)(rDblas, 1), hit.x, stepCount );
+					blasHit = traverse_cwbvh( nodes, tris, (float4)(Oblas, 1), (float4)(Dblas, 0), (float4)(rDblas, 1), hit.x );
 				#else
-					blasHit = traverse_cwbvh( nodes, tris, Oblas, Dblas, rDblas, hit.x, stepCount );
+					blasHit = traverse_cwbvh( nodes, tris, Oblas, Dblas, rDblas, hit.x );
 				#endif
 				}
 				else // if (blasType == 2 || blasType == 3 /* GPU_DYNAMIC or GPU_RIGID */)

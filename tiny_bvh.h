@@ -199,7 +199,7 @@ THE SOFTWARE.
 // Experimental / WIP features
 
 // CWBVH triangle format - doesn't seem to help on GPU?
-// #define CWBVH_COMPRESSED_TRIS
+#define CWBVH_COMPRESSED_TRIS
 // BVH4 triangle format
 // #define BVH4_GPU_COMPRESSED_TRIS
 #define CWBVH_REPORT_FULLNESS
