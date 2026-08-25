@@ -355,10 +355,12 @@ void InitMeshes()
 	meshVB = makeAndCopy( verts, (uint64_t)triCount * 3 * sizeof( bvhvec4 ) );
 	// One spatial-split build, converted to both GPU layouts.
 	bvh2.BuildHQ( verts, triCount );
+	bvh2.Optimize();
 	bvh.ConvertFrom( bvh2, true );    // Aila & Laine 64-byte nodes + primIdx + separate tris
 	mbvh4.ConvertFrom( bvh2, true );  // collapse the BVH2 into a 4-wide BVH
 	bvh4.ConvertFrom( mbvh4, true );  // quantize into the single-blob BVH4_GPU layout
 	cwbvh.BuildHQ( verts, triCount ); // separate SBVH build: see the note at 'cwbvh'.
+	cwbvh.Optimize();
 }
 
 ID3D12Resource* MakeAccelerationStructure( const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, UINT64* updateScratchSize = nullptr )

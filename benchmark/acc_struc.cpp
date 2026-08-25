@@ -153,7 +153,7 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 		if (flags & BuildFlags::AVXBUILD) bvh->settings.useSIMDifavailable = true;
 		if (flags & BuildFlags::PRESPLIT) bvh->settings.usePresplitting = true;
 		if (flags & BuildFlags::FULLSWEEP) bvh->settings.useFullSweep = true;
-		if (flags & BuildFlags::OPTIMIZE) bvh->settings.postOptimize = true, bvh->settings.optimizeIterations = 50;
+		if (flags & BuildFlags::OPTIMIZE) bvh->settings.postOptimize = true, bvh->settings.optimizeIterations = 100;
 	}
 	switch (layout)
 	{
