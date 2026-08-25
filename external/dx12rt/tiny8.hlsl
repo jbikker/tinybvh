@@ -134,13 +134,9 @@ float4 traverse_cwbvh(const float3 O, const float3 D, const float3 rD, const flo
             const float4 n3 = cwbvhNodes[child_node_index + 3];
             const float4 n4 = cwbvhNodes[child_node_index + 4];
             ngroup.x = asuint(n1.x), tgroup = uint2(asuint(n1.y), 0);
-            // n0.w packs three signed per-axis exponents plus imask
+            // n0.w packs three 127-biased per-axis exponents plus imask.
             const uint packed_e = asuint(n0.w);
-            const int3 e = int3(asint(packed_e << 24), asint(packed_e << 16),
-                                asint(packed_e << 8)) >> 24; // arithmetic shift
-            const float3 idir = float3(asfloat((e.x + 127) << 23),
-                                       asfloat((e.y + 127) << 23),
-                                       asfloat((e.z + 127) << 23)) * rDs;
+            const float3 idir = asfloat((uint3(packed_e, packed_e >> 8, packed_e >> 16) & 255) << 23) * rDs;
             // dequantized bounds start at QUNPACK_BIAS, not 0; subtract it once
             // per node instead of per child.
             const float3 orig = (n0.xyz - O) * rD - QUNPACK_BIAS * idir;
@@ -174,9 +170,12 @@ float4 traverse_cwbvh(const float3 O, const float3 D, const float3 rD, const flo
             const float4 T2 = cwbvhTris[triAddr + 2];
             const float transS = T2.x * O.x + T2.y * O.y + T2.z * O.z + T2.w;
             const float transD = T2.x * D.x + T2.y * D.y + T2.z * D.z;
-            const float d = -transS / transD;
-            if (d <= 0 || d >= tmax)
-                continue;
+            const float s = -transS;
+            if (s * transD <= 0)
+                continue; // d <= 0, or transD == 0
+            if (abs(s) >= tmax * abs(transD))
+                continue; // d >= tmax
+            const float d = s / transD; // only for survivors
             const float4 T0 = cwbvhTris[triAddr + 0], T1 = cwbvhTris[triAddr + 1];
             const float3 I = O + d * D;
             const float u = T0.x * I.x + T0.y * I.y + T0.z * I.z + T0.w;

@@ -21,7 +21,16 @@ extern "C" { __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #pragma comment(lib, "d3d12")
 #pragma comment(lib, "dxgi")
 
+// settings
 constexpr UINT rtWidth = 1024, rtHeight = 1024;
+constexpr float presplitFactor = 0.0f;
+#define ENABLE_DXR			true	// display info on DXR reference performance
+#define ENABLE_BVH2			true	// display info on BVH_GPU performance
+#define ENABLE_BVH4			false	// display info on BVH4_GPU performance
+#define ENABLE_CWBVH		true	// display info on BVH8_CWBVH performance
+#define ENABLE_RAY_QUERIES	false	// display info on inline ray query performance
+
+// internal data
 constexpr DXGI_SAMPLE_DESC NO_AA = { .Count = 1, .Quality = 0 };
 constexpr D3D12_HEAP_PROPERTIES UPLOAD_HEAP = { .Type = D3D12_HEAP_TYPE_UPLOAD };
 constexpr D3D12_HEAP_PROPERTIES DEFAULT_HEAP = { .Type = D3D12_HEAP_TYPE_DEFAULT };
@@ -56,6 +65,7 @@ enum Backend {
 	BACKEND_DXR = 0, BACKEND_BVH_GPU, BACKEND_BVH4_GPU, BACKEND_BVH8_CWBVH, BACKEND_INLINE_RT, BACKEND_COUNT
 };
 static const char* backendName[BACKEND_COUNT] = { "DXR", "BVH_GPU", "BVH4_GPU", "CWBVH", "InlineRT" };
+static const bool backendPrint[BACKEND_COUNT] = { ENABLE_DXR, ENABLE_BVH2, ENABLE_BVH4, ENABLE_CWBVH, ENABLE_RAY_QUERIES };
 // Inline ray tracing needs D3D12_RAYTRACING_TIER_1_1, which is a step above the
 // tier 1.0 the DXR path requires. If it is missing we simply cycle one backend
 // fewer rather than failing to start.
@@ -65,6 +75,14 @@ int activeBackends = BACKEND_COUNT;
 #define TINYBVH_IMPLEMENTATION
 #include "../../tiny_bvh.h"
 using namespace tinybvh;
+#include "presplit.h" // geometric triangle pre-splitting; needs bvhvec3 / BVH_FAR.
+
+// Geometry handed to DXR. BVH::Presplit() splits fragments, which a BLAS cannot
+// consume, so presplit.h cuts real triangles using the same heuristic. Set the
+// factor to 0 for the unsplit baseline; the software backends keep tracing the
+// original triangles either way, so they act as an unchanged control.
+bvhvec4* dxrVerts = nullptr;
+int dxrTriCount = 0;
 
 // One high-quality (SBVH) BVH2 is built; BVH_GPU and BVH4_GPU are derived from it.
 BVH bvh2;
@@ -352,7 +370,16 @@ void InitMeshes()
 		return res;
 		};
 	AddMesh( "../../testdata/cryteksponza.bin" );
-	meshVB = makeAndCopy( verts, (uint64_t)triCount * 3 * sizeof( bvhvec4 ) );
+	// Pre-split for DXR only. The surface is unchanged, so the traced depth image
+	// must be identical to the unsplit run; what changes is BLAS quality, size
+	// and build time.
+	if (presplitFactor > 0)
+	{
+		dxrVerts = PresplitTriangles( verts, triCount, presplitFactor, dxrTriCount );
+		printf( "presplit: %i -> %i tris (%.2fx)\n", triCount, dxrTriCount, (float)dxrTriCount / triCount );
+	}
+	else dxrVerts = verts, dxrTriCount = triCount;
+	meshVB = makeAndCopy( dxrVerts, (uint64_t)dxrTriCount * 3 * sizeof( bvhvec4 ) );
 	// One spatial-split build, converted to both GPU layouts.
 	bvh2.BuildHQ( verts, triCount );
 	bvh2.Optimize();
@@ -441,6 +468,9 @@ ID3D12Resource* CompactBLAS( ID3D12Resource* as )
 	compactionSizeReadback->Map( 0, &readRange, &mapped );
 	compactedSize = *reinterpret_cast<UINT64*>(mapped);
 	compactionSizeReadback->Unmap( 0, &writeRange );
+	// The dispatch timer only measures tracing; presplitting pays for that in BLAS
+	// memory and build time, so report the memory side here.
+	printf( "BLAS: %i tris, %.2f MB compacted\n", dxrTriCount, (double)compactedSize / (1024 * 1024) );
 	D3D12_RESOURCE_DESC compactDesc = BASIC_BUFFER_DESC;
 	compactDesc.Width = compactedSize;
 	compactDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -634,12 +664,10 @@ void Render()
 		if (alpha < 0.99f) alpha += 0.005f;
 		// DXR is the reference; report the software kernels as a fraction of it.
 		const double ref = smoothed[BACKEND_DXR];
-		if (k == BACKEND_DXR || ref <= 0.0)
-			printf( "%s: %6.1f MRays/s",
-				backendName[k], smoothed[k] / 1e6 );
+		if (backendPrint[k]) if (k == BACKEND_DXR || ref <= 0.0)
+			printf( "%s: %6.1f MRays/s", backendName[k], smoothed[k] / 1e6 );
 		else
-			printf( "%s: %6.1f MRays/s, %4.1f%% of DXR",
-				backendName[k], smoothed[k] / 1e6, 100.0 * smoothed[k] / ref );
+			printf( "%s: %6.1f MRays/s, %4.1f%% of DXR", backendName[k], smoothed[k] / 1e6, 100.0 * smoothed[k] / ref );
 		if (k == activeBackends - 1) printf( "\n" ); else printf( "; " );
 	}
 	cmdAllocs[frameIndex]->Reset();
@@ -736,7 +764,7 @@ void Init( HWND hwnd )
 	InitMeshes();
 	InitBVHBuffers();
 	UpdateRayBuffer();
-	blas = CompactBLAS( MakeBLAS( meshVB, triCount * 3, sizeof( bvhvec4 ) ) );
+	blas = CompactBLAS( MakeBLAS( meshVB, dxrTriCount * 3, sizeof( bvhvec4 ) ) );
 	InitScene();
 	InitTopLevel();
 	InitRootSignature();

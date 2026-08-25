@@ -12,5 +12,6 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\tiny_bvh.h" />
+    <ClInclude Include="presplit.h" />
   </ItemGroup>
 </Project>
