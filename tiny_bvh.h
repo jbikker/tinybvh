@@ -1105,13 +1105,13 @@ private:
 	uint32_t CombineLeafs( const uint32_t primCount, uint32_t& firstIdx, uint32_t nodeIdx = 0 );
 	float SplitPriority( const Fragment& f ) const;
 	uint32_t Presplit();
-	int SplitCount( const float prio, const float sumPrio, const int triCount, const float factor ) const;
 	static float GetNodeSize( const float extent, const float globalSize );
 	void PresplitPostPass();
 	inline float SplitCostSAH( const float rAparent, const float Aleft, const int Nleft, const float Aright, const int Nright ) const;
 	inline float NoSplitCostSAH( const int Nparent ) const;
 	float EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx = 0 );
-	float PrimArea( const uint32_t p ) const;
+	float TriArea( const uint32_t primIdx ) const;
+	float PrimArea( const uint32_t slot ) const;
 protected:
 	template <bool posX, bool posY, bool posZ> int32_t Intersect( Ray& ray ) const;
 	template <bool posX, bool posY, bool posZ> int32_t IntersectTLAS( Ray& ray ) const;
@@ -3719,13 +3719,18 @@ void BVH::ConvertFrom( const BVH_Verbose& original, bool compact )
 	usedNodes = original.usedNodes;
 }
 
-float BVH::PrimArea( const uint32_t p ) const
+float BVH::TriArea( const uint32_t primIdx ) const
 {
-	uint32_t vidx = primIdx[p] * 3;
+	const uint32_t vidx = primIdx * 3;
 	bvhvec3 v0, v1, v2;
 	if (vertIdx) v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
 	else v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
 	return 0.5f * tinybvh_length( tinybvh_cross( v1 - v0, v2 - v0 ) );
+}
+
+float BVH::PrimArea( const uint32_t slot ) const
+{
+	return TriArea( primIdx[slot] );
 }
 
 inline bool tinybvh_aabbs_overlap( const BVH::BVHNode& node1, const BVH::BVHNode& node2 )
@@ -3911,39 +3916,33 @@ void BVH::SplitLeafs( const uint32_t maxPrims )
 float BVH::SplitPriority( const Fragment& f ) const
 {
 	auto fastCbrt = []( float x ) {
-		// x >= 0.0f is assumed
-		uint32_t i = *(uint32_t*)&x;
+		uint32_t i = *(uint32_t*)&x; // assume x >= 0.0f
 		i = 0x2A51067Fu + i / 3u;
 		float y = *(float*)&i;
-
-		// Refine with Newton-Raphson iterations
-		y = (2.0f * y + x / (y * y)) * (1.0f / 3.0f);
-
+		y = (2.0f * y + x / (y * y)) * (1.0f / 3.0f); // refine with Newton-Raphson iterations.
 		return y;
 		};
-
 	const bvhvec3 extent = f.bmax - f.bmin;
 	const float extentPrio = tinybvh_sqrf( extent[tinybvh_maxdim( extent )] );
-	const float boxArea = 2 * tinybvh_halfarea( extent ); // TODO: half of this seems more appropriate?
-	const float triArea = PrimArea( f.primIdx );
-	const float emptyAreaPrio = boxArea - triArea;
+	const float boxArea = tinybvh_halfarea( extent );
+	const float triArea = TriArea( f.primIdx );
+	const float emptyAreaPrio = tinybvh_max( boxArea - triArea, 0.0f );
 	return fastCbrt( extentPrio * emptyAreaPrio );
-}
-
-int BVH::SplitCount( const float prio, const float sumPrio, const int tris, const float factor ) const
-{
-	const float shareOfTris = prio / sumPrio * tris;
-	return 1 + (int)(shareOfTris * factor);
 }
 
 float BVH::GetNodeSize( const float extent, const float globalSize )
 {
 	// transform into [0.0, 1.0]
-	float alpha = extent / globalSize;
+	const float alpha = extent / globalSize;
 	// compute 2^(floor(log2(alpha)))
-	uint32_t exponentBits = (*(uint32_t*)&alpha) & (255u << 23);
+	uint32_t exponentBits;
+	std::memcpy( &exponentBits, &alpha, sizeof( exponentBits ) );
+	exponentBits &= 255u << 23;
+	float nodeSize;
+	std::memcpy( &nodeSize, &exponentBits, sizeof( nodeSize ) );
 	// transform back into global space
-	return *(float*)&exponentBits * globalSize;
+	nodeSize *= globalSize;
+	return nodeSize > 0 ? nodeSize : extent * 0.5f;
 }
 
 uint32_t BVH::Presplit()
@@ -3952,24 +3951,27 @@ uint32_t BVH::Presplit()
 	// Volume Hierarchies", Karras and Aila, 2013, and BoyBaykiller's implementation,
 	// which is in turn based on code by MadMann91.
 	uint32_t fragCount = triCount;
-	float factor = settings.presplitFactor;
+	const float factor = settings.presplitFactor;
 	const uint32_t splitBudget = (int)(triCount * settings.presplitFactor);
-	// determine per-triangle split count.
-	float* prio = new float[triCount + splitBudget];
-	int* splits = new int[triCount + splitBudget], s;
-	while (1)
+	float* prio = (float*)AlignedAlloc( triCount * sizeof( float ) );
+	int* splits = (int*)AlignedAlloc( (triCount + splitBudget) * sizeof( int ) );
+	double summedPrio = 0;
+	for (uint32_t i = 0; i < triCount; i++)
+		prio[i] = SplitPriority( fragment[i] ), summedPrio += prio[i];
+	// hand out the budget in a single pass.
+	if (summedPrio > 0)
 	{
-		float summedPrio = 0, p;
-		for (uint32_t i = 0; i < triCount; i++)
-			p = SplitPriority( fragment[i] ),
-			prio[i] = p, summedPrio += p;
-		uint32_t totalSplits = 0;
-		for (uint32_t i = 0; i < triCount; i++)
-			s = SplitCount( prio[i], summedPrio, triCount, factor ),
-			splits[i] = s, totalSplits += s;
-		if (totalSplits <= triCount + splitBudget) break;
-		factor *= 0.95f; // TODO: will this ever happen? also: tweak based on excess.
+		const float scale = (float)((double)triCount * (double)factor / summedPrio);
+		for (uint32_t i = 0, remaining = splitBudget; i < triCount; i++)
+	{
+			const float share = prio[i] * scale;
+			// '> 0' rather than '>= 0' so that a NaN share yields no extra splits.
+			uint32_t extra = share > 0 ? (uint32_t)tinybvh_min( share, (float)remaining ) : 0;
+			if (extra > remaining) extra = remaining; // (float)remaining may round up
+			splits[i] = 1 + extra, remaining -= extra;
+		}
 	}
+	else for (uint32_t i = 0; i < triCount; i++) splits[i] = 1; // fully degenerate input
 	// do actual splitting.
 	const BVHNode& root = bvhNode[0];
 	const bvhvec3 rootExtent = root.aabbMax - root.aabbMin;
@@ -3978,30 +3980,33 @@ uint32_t BVH::Presplit()
 	{
 		const Fragment& f = fragment[i];
 		const bvhvec3 extent = f.bmax - f.bmin;
-		const int splitAxis = tinybvh_maxdim( extent );
+		const uint32_t splitAxis = tinybvh_maxdim( extent );
+		if (!(extent[splitAxis] > 0)) { splits[i] = 1; continue; }
 		float nodeSize = GetNodeSize( extent[splitAxis], rootExtent[splitAxis] );
-		if (nodeSize >= extent[splitAxis] - 0.0001f) nodeSize *= 0.5f;
+		if (nodeSize > extent[splitAxis] * 0.9999f) nodeSize *= 0.5f;
 		// snap mid position to nearest split plane
 		const float midPos = (f.bmin[splitAxis] + f.bmax[splitAxis]) * 0.5f;
 		const float index = roundf( (midPos - root.aabbMin[splitAxis]) / nodeSize );
-		const float splitPos = root.aabbMin[splitAxis] + index * nodeSize;
-		// actual split
-		SplitFrag( fragment[i], part1, part2, splitAxis, splitPos );
+		float splitPos = root.aabbMin[splitAxis] + index * nodeSize;
+		if (!(splitPos > f.bmin[splitAxis] && splitPos < f.bmax[splitAxis])) splitPos = midPos;
+		if (!SplitFrag( fragment[i], part1, part2, splitAxis, splitPos )) { splits[i] = 1; continue; }
 		fragment[i] = part1, fragment[fragCount] = part2;
 		// distribute available splits over part1 and part2
 		const int toDivide = splits[i];
 		const bvhvec3 p1Extent = part1.bmax - part1.bmin, p2Extent = part2.bmax - part2.bmin;
 		const float p1Size = p1Extent[tinybvh_maxdim( p1Extent )];
 		const float p2Size = p2Extent[tinybvh_maxdim( p2Extent )];
-		const int p1Count = (int)((float)toDivide * p1Size / (p1Size + p2Size));
+		const float sumSize = p1Size + p2Size;
+		// sumSize is zero only if both halves are points; split the budget evenly.
+		const int p1Count = sumSize > 0 ? (int)((float)toDivide * p1Size / sumSize) : (toDivide / 2);
 		splits[i] = tinybvh_clamp( p1Count, 1, toDivide - 1 );
 		splits[fragCount] = toDivide - splits[i];
 		primIdx[fragCount] = fragCount;
 		fragCount++;
 	}
 	// cleanup
-	delete[] prio;
-	delete[] splits;
+	AlignedFree( prio );
+	AlignedFree( splits );
 	// all done.
 	return fragCount;
 }
@@ -7081,10 +7086,10 @@ void BVH8_CWBVH::ConvertFrom( const MBVH<8>& original, bool compact )
 			}
 		}
 		nodeBlocks++;
-		const uint8_t exyzAndimask[4] = { *(uint8_t*)&ex, *(uint8_t*)&ey, *(uint8_t*)&ez, imask };
-		bvh8Data[currentNodeAddr + 0] = bvhvec4( nodeLo, *(float*)&exyzAndimask );
-		bvh8Data[currentNodeAddr + 1].x = *(float*)&childBaseIndex;
-		bvh8Data[currentNodeAddr + 1].y = *(float*)&triangleBaseIndex;
+        const uint8_t exyzAndimask[4] = { (uint8_t)(ex + 127), (uint8_t)(ey + 127), (uint8_t)(ez + 127), imask };
+        bvh8Data[currentNodeAddr + 0] = bvhvec4( nodeLo, *(float*)&exyzAndimask );
+        bvh8Data[currentNodeAddr + 1].x = *(float*)&childBaseIndex;
+        bvh8Data[currentNodeAddr + 1].y = *(float*)&triangleBaseIndex;
 	}
 	AlignedFree( stackNodeIdx ), AlignedFree( stackNodeAddr );
 	usedBlocks = nodeDataPtr;
@@ -8194,13 +8199,13 @@ int32_t BVH8_CWBVH::Intersect( Ray& ray ) const
 				const bvhvec4 n0 = blasNodes[child_node_index * 5 + 0], n1 = blasNodes[child_node_index * 5 + 1];
 				const bvhvec4 n2 = blasNodes[child_node_index * 5 + 2], n3 = blasNodes[child_node_index * 5 + 3];
 				const bvhvec4 n4 = blasNodes[child_node_index * 5 + 4], p = n0;
-				bvhint3 e;
-				e.x = (int32_t) * ((int8_t*)&n0.w + 0), e.y = (int32_t) * ((int8_t*)&n0.w + 1), e.z = (int32_t) * ((int8_t*)&n0.w + 2);
-				ngroup.x = as_uint( n1.x ), tgroup.x = as_uint( n1.y ), tgroup.y = 0;
-				uint32_t hitmask = 0;
-				const uint32_t vx = (e.x + 127) << 23u; const float adjusted_idirx = *(float*)&vx * ray.rD.x;
-				const uint32_t vy = (e.y + 127) << 23u; const float adjusted_idiry = *(float*)&vy * ray.rD.y;
-				const uint32_t vz = (e.z + 127) << 23u; const float adjusted_idirz = *(float*)&vz * ray.rD.z;
+                // n0.w holds three 127-biased quantization exponents plus imask.
+                const uint32_t e4 = as_uint( n0.w );
+                ngroup.x = as_uint( n1.x ), tgroup.x = as_uint( n1.y ), tgroup.y = 0;
+                uint32_t hitmask = 0;
+                const uint32_t vx = (e4 & 255) << 23u; const float adjusted_idirx = *(float*)&vx * ray.rD.x;
+                const uint32_t vy = ((e4 >> 8) & 255) << 23u; const float adjusted_idiry = *(float*)&vy * ray.rD.y;
+                const uint32_t vz = ((e4 >> 16) & 255) << 23u; const float adjusted_idirz = *(float*)&vz * ray.rD.z;
 				const float origx = -(ray.O.x - p.x) * ray.rD.x;
 				const float origy = -(ray.O.y - p.y) * ray.rD.y;
 				const float origz = -(ray.O.z - p.z) * ray.rD.z;
