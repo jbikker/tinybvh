@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 //
 //        T R A V E R S E _ A I L A L A I N E
 // 
@@ -125,18 +125,16 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 		const float tminb = fmax( fmax( fmax( mintb.x, mintb.y ), mintb.z ), 0 );
 		const float tmaxa = fmin( fmin( fmin( maxta.x, maxta.y ), maxta.z ), hit.x );
 		const float tmaxb = fmin( fmin( fmin( maxtb.x, maxtb.y ), maxtb.z ), hit.x );
-		const float dist1 = tmina > tmaxa ? 1e30f : tmina;
-		const float dist2 = tminb > tmaxb ? 1e30f : tminb;
-		if (dist1 > dist2)
+		const bool hitA = tmina <= tmaxa, hitB = tminb <= tmaxb;
+		if (hitA && hitB)
 		{
-			if (dist2 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
-			else { nodeIdx = right; if (dist1 < 1e30f) stack[stackPtr++] = left; }
+			uint near = left, far = right;
+			if (tminb < tmina) near = right, far = left;
+			stack[stackPtr++] = far, nodeIdx = near;
 		}
-		else
-		{
-			if (dist1 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
-			else { nodeIdx = left; if (dist2 < 1e30f) stack[stackPtr++] = right; }
-		}
+		else if (hitA) nodeIdx = left;
+		else if (hitB) nodeIdx = right;
+		else { if (stackPtr == 0) break; nodeIdx = stack[--stackPtr]; }
 	}
 	if (stepCount) *stepCount += steps;
 	return hit;
@@ -163,7 +161,7 @@ bool isoccluded_ailalaine(
 				const float4 edge1 = orderedVerts[firstVert + 1];
 				const float4 edge2 = orderedVerts[firstVert + 2];
 				const float3 h = cross( D, edge2.xyz );
-				const float f = 1 / dot( edge1.xyz, h );
+				const float f = native_recip( dot( edge1.xyz, h ) );
 				const float3 s = O - vert0.xyz;
 				const float u = f * dot( s, h );
 				const float3 q = cross( s, edge1.xyz );
@@ -195,18 +193,16 @@ bool isoccluded_ailalaine(
 		const float tminb = fmax( fmax( fmax( mintb.x, mintb.y ), mintb.z ), 0 );
 		const float tmaxa = fmin( fmin( fmin( maxta.x, maxta.y ), maxta.z ), tmax );
 		const float tmaxb = fmin( fmin( fmin( maxtb.x, maxtb.y ), maxtb.z ), tmax );
-		const float dist1 = tmina > tmaxa ? 1e30f : tmina;
-		const float dist2 = tminb > tmaxb ? 1e30f : tminb;
-		if (dist1 > dist2)
+		const bool hitA = tmina <= tmaxa, hitB = tminb <= tmaxb;
+		if (hitA && hitB)
 		{
-			if (dist2 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
-			else { nodeIdx = right; if (dist1 < 1e30f) stack[stackPtr++] = left; }
+			uint near = left, far = right;
+			if (tminb < tmina) near = right, far = left;
+			stack[stackPtr++] = far, nodeIdx = near;
 		}
-		else
-		{
-			if (dist1 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
-			else { nodeIdx = left; if (dist2 < 1e30f) stack[stackPtr++] = right; }
-		}
+		else if (hitA) nodeIdx = left;
+		else if (hitB) nodeIdx = right;
+		else { if (stackPtr == 0) break; nodeIdx = stack[--stackPtr]; }
 	}
 	return false;
 }
