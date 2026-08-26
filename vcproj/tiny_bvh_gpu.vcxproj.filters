@@ -16,9 +16,6 @@
     <None Include="..\kernels\tools.cl">
       <Filter>opencl</Filter>
     </None>
-    <None Include="..\kernels\traverse.cl">
-      <Filter>opencl</Filter>
-    </None>
     <None Include="..\kernels\traverse_bvh2.cl">
       <Filter>opencl</Filter>
     </None>

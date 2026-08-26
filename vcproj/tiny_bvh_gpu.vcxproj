@@ -27,7 +27,6 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="..\kernels\tools.cl" />
-    <None Include="..\kernels\traverse.cl" />
     <None Include="..\kernels\traverse_bvh2.cl" />
     <None Include="..\kernels\wavefront.cl" />
   </ItemGroup>
