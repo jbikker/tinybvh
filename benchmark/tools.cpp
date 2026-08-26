@@ -3,8 +3,8 @@
 #ifdef ENABLE_OPENCL
 #define TINY_OCL_IMPLEMENTATION
 #include "tiny_ocl.h"
-tinyocl::Kernel* ailalaine_kernel = 0;
-tinyocl::Kernel* ailalaine_kernel_any = 0;
+tinyocl::Kernel* kernel_nearest = 0;
+tinyocl::Kernel* kernel_any = 0;
 tinyocl::Kernel* gpu4way_kernel = 0;
 tinyocl::Kernel* gpu4way_kernel_any = 0;
 tinyocl::Kernel* cwbvh_kernel = 0;
@@ -73,8 +73,8 @@ void InitOpenCL()
 {
 #ifdef ENABLE_OPENCL
 	// load and compile the OpenCL kernel code
-	ailalaine_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_ailalaine" );
-	ailalaine_kernel_any = new tinyocl::Kernel( "kernels/traverse.cl", "batch_ailalaine_any" );
+	kernel_nearest = new tinyocl::Kernel( "kernels/traverse.cl", "batch_nearest" );
+	kernel_any = new tinyocl::Kernel( "kernels/traverse.cl", "batch_any" );
 	gpu4way_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_gpu4way" );
 	gpu4way_kernel_any = new tinyocl::Kernel( "kernels/traverse.cl", "batch_gpu4way_any" );
 	cwbvh_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_cwbvh" );

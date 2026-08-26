@@ -106,7 +106,7 @@ void kernel Extend( global struct PathState* raysIn )
 		const float3 O = raysIn[pathId].O.xyz;
 		const float3 D = raysIn[pathId].D.xyz;
 		const float3 rD = native_recip( D );
-		raysIn[pathId].hit = traverse_ailalaine( bvhNodes, bvhIndices, bvhTris, 0, O, D, rD, 1e30f, 0 );
+		raysIn[pathId].hit = traverse( bvhNodes, bvhTris, 0, O, D, rD, 1e30f, 0 );
 	}
 }
 
@@ -264,7 +264,7 @@ void kernel Connect( global float4* accumulator, global struct Potential* shadow
 		const float4 O4 = shadowIn[rayId].O;
 		const float4 D4 = shadowIn[rayId].D;
 		const float3 rD = native_recip( D4.xyz );
-		if (isoccluded_ailalaine( bvhNodes, bvhIndices, bvhTris, 0, O4.xyz, D4.xyz, rD, D4.w )) continue;
+		if (isoccluded( bvhNodes, bvhTris, 0, O4.xyz, D4.xyz, rD, D4.w )) continue;
 		accumulator[as_uint( O4.w )] += T4;
 	}
 }

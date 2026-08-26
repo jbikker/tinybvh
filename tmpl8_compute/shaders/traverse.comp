@@ -17,7 +17,7 @@ layout (binding = 1) readonly buffer I1 { uint idx[]; } idxData;
 layout (binding = 2) readonly buffer I2 { vec4 tri[]; } triData;
 layout (binding = 3) writeonly buffer O { vec4 hit[]; } result;
 
-vec4 traverse_ailalaine( const vec3 O, const vec3 D, const vec3 rD, const float tmax )
+vec4 traverse( const vec3 O, const vec3 D, const vec3 rD, const float tmax )
 {
 	// traverse BVH
 	vec4 hit;
@@ -103,6 +103,6 @@ void main()
 	const vec3 rD = vec3( 1.0f / D.x, 1.0f / D.y, 1.0f / D.z );
 
 	// trace
-	vec4 hit = traverse_ailalaine( eye, D, rD, 1e30f );
+	vec4 hit = traverse( eye, D, rD, 1e30f );
 	result.hit[id] = hit;
 }

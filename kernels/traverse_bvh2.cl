@@ -4,7 +4,7 @@
 // 
 // ============================================================================
 
-uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* orderedVerts, const float3 O, const float3 D, const float3 rD, const float tmax )
+uint RRScost( const global struct BVHNode* bvhNode, const global float4* orderedVerts, const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// traverse BVH
 	float4 hit;
@@ -70,8 +70,8 @@ uint RRScost_ailalaine( const global struct BVHNode* bvhNode, const global uint*
 	return (uint)cost;
 }
 
-float4 traverse_ailalaine( const global struct BVHNode* bvhNode, 
-	const global uint* idx, const global float4* orderedVerts, const global uint* opmap,
+float4 traverse( const global struct BVHNode* bvhNode, 
+	const global float4* orderedVerts, const global uint* opmap,
 	const float3 O, const float3 D, const float3 rD, const float tmax, uint* stepCount )
 {
 	// prepare slab test
@@ -140,9 +140,9 @@ float4 traverse_ailalaine( const global struct BVHNode* bvhNode,
 	return hit;
 }
 
-bool isoccluded_ailalaine( 
+bool isoccluded( 
 	const global struct BVHNode* bvhNode, 
-	const global uint* idx, const global float4* orderedVerts, const global uint* opmap, 
+	const global float4* orderedVerts, const global uint* opmap, 
 	const float3 O, const float3 D, const float3 rD, const float tmax )
 {
 	// prepare slab test
@@ -207,7 +207,7 @@ bool isoccluded_ailalaine(
 	return false;
 }
 
-void kernel batch_ailalaine( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* orderedVerts, global struct Ray* rayData )
+void kernel batch_nearest( const global struct BVHNode* bvhNode, const global float4* orderedVerts, global struct Ray* rayData )
 {
 	// fetch ray
 	const uint threadId = get_global_id( 0 );
@@ -215,11 +215,11 @@ void kernel batch_ailalaine( const global struct BVHNode* bvhNode, const global 
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	float4 hit = traverse_ailalaine( bvhNode, idx, orderedVerts, 0, O, D, rD, 1e30f, 0 );
+	float4 hit = traverse( bvhNode, orderedVerts, 0, O, D, rD, 1e30f, 0 );
 	rayData[threadId].hit = hit;
 }
 
-void kernel batch_ailalaine_any( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* orderedVerts, global struct Ray* rayData )
+void kernel batch_any( const global struct BVHNode* bvhNode, const global float4* orderedVerts, global struct Ray* rayData )
 {
 	// fetch ray
 	const uint threadId = get_global_id( 0 );
@@ -229,11 +229,11 @@ void kernel batch_ailalaine_any( const global struct BVHNode* bvhNode, const glo
 	const float3 rD = rayData[threadId].rD.xyz;
 	const float tmax = 1e30f; // TODO: get this from the ray.
 	float4 hit = 0;
-	if (isoccluded_ailalaine( bvhNode, idx, orderedVerts, 0, O, D, rD, tmax )) hit.w = as_float( 1 );
+	if (isoccluded( bvhNode, orderedVerts, 0, O, D, rD, tmax )) hit.w = as_float( 1 );
 	rayData[threadId].hit = hit;
 }
 
-void kernel batch_ailalaine_rrs( const global struct BVHNode* bvhNode, const global uint* idx, const global float4* orderedVerts, global struct Ray* rayData, global uint* rrsResult )
+void kernel batch_rrs( const global struct BVHNode* bvhNode, const global float4* orderedVerts, global struct Ray* rayData, global uint* rrsResult )
 {
 	// fetch ray
 	const uint threadId = get_global_id( 0 );
@@ -241,5 +241,5 @@ void kernel batch_ailalaine_rrs( const global struct BVHNode* bvhNode, const glo
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	rrsResult[threadId] = RRScost_ailalaine( bvhNode, idx, orderedVerts, O, D, rD, 1e30f );
+	rrsResult[threadId] = RRScost( bvhNode, orderedVerts, O, D, rD, 1e30f );
 }

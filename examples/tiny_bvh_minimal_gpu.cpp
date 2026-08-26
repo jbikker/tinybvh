@@ -52,7 +52,7 @@ int main()
 	gpubvh.Build( triangles, TRIANGLE_COUNT );
 
 	// Load and compile the OpenCL kernel.
-	tinyocl::Kernel ailalaine_kernel( "kernels/traverse.cl", "batch_ailalaine" );
+	tinyocl::Kernel trace_kernel( "kernels/traverse.cl", "batch_nearest" );
 
 	// Create and populate the OpenCL buffers.
 	// 1. Triangle data: For each index, 3 times a vec4 vertex.
@@ -61,9 +61,7 @@ int main()
 	// 2. BVH node data: Taken from gpubvh.bvhNode; count is gpubvh.usedNodes.
 	//    If the tree is rebuilt per frame, use gpubvh.allocatedNodes instead.
 	tinyocl::Buffer* gpuNodes = new tinyocl::Buffer( gpubvh.usedNodes * sizeof( BVH_GPU::BVHNode ), gpubvh.bvhNode );
-	// 3. Triangle index data, used in BVH leafs. This is taken from the base BVH.
-	tinyocl::Buffer* idxData = new tinyocl::Buffer( gpubvh.idxCount * sizeof( uint32_t ), gpubvh.bvh.primIdx );
-	// 4. Ray buffer. We will always trace batches of rays, for efficiency.
+	// 3. Ray buffer. We will always trace batches of rays, for efficiency.
 	//    For GPU code, a ray is 64 bytes. On the CPU it has extra data, so copy carefully.
 	tinyocl::Buffer* rayData = new tinyocl::Buffer( 1024 * 64 );
 	unsigned char* hostData = (unsigned char*)rayData->GetHostPtr();
@@ -77,12 +75,11 @@ int main()
 	// 5. Sync all data to the GPU. Repeat if anything changes.
 	triData->CopyToDevice();
 	gpuNodes->CopyToDevice();
-	idxData->CopyToDevice();
 	rayData->CopyToDevice();
 
 	// Invoke the kernel.
-	ailalaine_kernel.SetArguments( gpuNodes, idxData, triData, rayData );
-	ailalaine_kernel.Run( 1024 /* a thread per ray, make it a multiple of 64. */ );
+	trace_kernel.SetArguments( gpuNodes, triData, rayData );
+	trace_kernel.Run( 1024 /* a thread per ray, make it a multiple of 64. */ );
 
 	// Obtain traversal result.
 	rayData->CopyFromDevice();
@@ -96,7 +93,6 @@ int main()
 	// All done.
 	delete triData;
 	delete gpuNodes;
-	delete idxData;
 	delete rayData;
 	return 0;
 }

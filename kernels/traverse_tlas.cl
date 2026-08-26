@@ -65,7 +65,7 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 					const global struct BVHNode* nodes = blasNodes + blasDesc[blas].nodeOffset; // TODO: read offset data as uint4
 					const global uint* idx = blasIdx + blasDesc[blas].indexOffset;
 					const global float4* tris = blasTris + blasDesc[blas].triOffset * 3;
-					blasHit = traverse_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, hit.x, stepCount );
+					blasHit = traverse( nodes, tris, opmap, Oblas, Dblas, rDblas, hit.x, stepCount );
 				}
 			#endif
 				if (blasHit.x < hit.x)
@@ -156,7 +156,7 @@ bool isoccluded_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 					const global struct BVHNode* nodes = blasNodes + blasDesc[blas].nodeOffset; // TODO: read offset data as uint4
 					const global uint* idx = blasIdx + blasDesc[blas].indexOffset;
 					const global float4* tris = blasTris + blasDesc[blas].triOffset * 3;
-					if (isoccluded_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, tmax )) return true;
+					if (isoccluded( nodes, tris, opmap, Oblas, Dblas, rDblas, tmax )) return true;
 				}
 			#endif
 			}
