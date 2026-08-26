@@ -86,14 +86,13 @@ void Init()
 	raysOut = new Buffer( N * sizeof( bvhvec4 ) * 4 );
 	connections = new Buffer( N * 3 * sizeof( bvhvec4 ) * 3 );
 	accumulator = new Buffer( N * sizeof( bvhvec4 ) );
-	pixels = new Buffer( N * sizeof( uint32_t ) );
 	LoadBlueNoise();
 	noise = new Buffer( 128 * 128 * 8 * sizeof( uint32_t ), blueNoise );
 	noise->CopyToDevice();
 	// load raw vertex data
 	AddMesh( "./testdata/cryteksponza.bin", 1, bvhvec3( 0 ), 0xffffff );
 	AddQuad( bvhvec3( -22, 12, 2 ), 9, 5, 0x1ffffff ); // hard-coded light source
-	// build bvh (here: 'compressed wide bvh', for efficient GPU rendering)
+	// build bvh
 	bvh.Build( tris, triCount );
 	// create OpenCL buffers for BVH data
 	bvhNodes = new Buffer( bvh.usedNodes * sizeof( BVH_GPU::BVHNode ), bvh.bvhNode );
