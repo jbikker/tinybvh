@@ -28,13 +28,14 @@ static Buffer* pixels, * bvhNodes = 0, * bvhIndices = 0, * hairs = 0, * hairVert
 // View pyramid for a pinhole camera
 struct RenderData
 {
-	bvhvec4 eye = bvhvec4( 0, 30, 0, 0 ), view = bvhvec4( -1, 0, 0, 0 ), C, p0, p1, p2;
-	uint32_t frameIdx, dummy1, dummy2, dummy3;
+	bvhvec4 eye = bvhvec4( 35, 5, -20, 0 );
+	bvhvec4 view = tinybvh_normalize( bvhvec4( -1, -0.1f, 0.5f, 0 ) );
+	bvhvec4 C, p0, p1, p2;
 } rd;
 
 // Hair data
 struct Strand { uint32_t offset, N; };
-constexpr float strandRadius = 0.1f;
+constexpr float strandRadius = 0.2f;
 uint32_t strandCount = 0, offset = 0;
 Strand* strands = 0;
 bvhaabb* strandBox = 0;
@@ -50,22 +51,25 @@ void LoadHair( const char* file )
 	memset( vertPool, 0, sizeof( bvhvec4 ) * 68 * strandCount );
 	strands = new Strand[strandCount];
 	strandBox = new bvhaabb[strandCount];
-	for (uint32_t i = 0; i < strandCount; i++)
+	uint32_t strnd = 0;
+	for (uint32_t i = 0; i < strandCount; i += 100, strnd++ )
 	{
-		s.read( (char*)&strands[i].N, 4 );
-		strands[i].offset = offset;
-		strandBox[i].minBounds = bvhvec3( BVH_FAR );
-		strandBox[i].maxBounds = bvhvec3( -BVH_FAR );
-		for (uint32_t j = 0; j < strands[i].N; j++, vertPtr++)
+		s.read( (char*)&strands[strnd].N, 4 );
+		strands[strnd].offset = offset;
+		strandBox[strnd].minBounds = bvhvec3( BVH_FAR );
+		strandBox[strnd].maxBounds = bvhvec3( -BVH_FAR );
+		for (uint32_t j = 0; j < strands[strnd].N; j++, vertPtr++)
 		{
 			s.read( (char*)vertPtr, 12 );
-			strandBox[i].minBounds = tinybvh_min( strandBox[i].minBounds, bvhvec3( *vertPtr ) );
-			strandBox[i].maxBounds = tinybvh_max( strandBox[i].maxBounds, bvhvec3( *vertPtr ) );
+			vertPtr->w = strandRadius;
+			strandBox[strnd].minBounds = tinybvh_min( strandBox[strnd].minBounds, bvhvec3( *vertPtr ) );
+			strandBox[strnd].maxBounds = tinybvh_max( strandBox[strnd].maxBounds, bvhvec3( *vertPtr ) );
 		}
-		strandBox[i].minBounds = strandBox[i].minBounds - bvhvec3( strandRadius );
-		strandBox[i].maxBounds = strandBox[i].maxBounds + bvhvec3( strandRadius );
-		offset += strands[i].N;
+		strandBox[strnd].minBounds = strandBox[strnd].minBounds - bvhvec3( strandRadius );
+		strandBox[strnd].maxBounds = strandBox[strnd].maxBounds + bvhvec3( strandRadius );
+		offset += strands[strnd].N;
 	}
+	strandCount = strnd;
 }
 
 // Application init

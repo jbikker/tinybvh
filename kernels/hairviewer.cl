@@ -40,11 +40,11 @@ void kernel SetRenderData( float4 _eye, float4 _p0, float4 _p1, float4 _p2 )
 }
 
 // BVH_GPU traversal 
-uint traverse_hair_bvh( const global struct BVHNode* bvhNode, const global uint* idx, const float3 O, const float3 D, const float3 rD, const float tmax )
+uint traverse_hair_bvh( const global struct BVHNode* bvhNode, const global uint* idx, const float3 O, const float3 D, const float3 rD, const float tmax, const global struct Strand* hairs, const global float4* hairVerts, float4* hitOut )
 {
 	// traverse BVH
 	const float3 rO = O * -rD;
-	float4 hit = (float4)( tmax, 0, 0, 0 );
+	float4 hit = (float4)( tmax, 0, 0, as_float( ~0u ) ); // .w = ~0: no strand hit
 	uint nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0, steps = 0;
 	while (1)
 	{
@@ -52,11 +52,11 @@ uint traverse_hair_bvh( const global struct BVHNode* bvhNode, const global uint*
 		if (nodeIdx & 0x80000000)
 		{
 			const uint hairCount = (nodeIdx >> 24) & 127;
-			uint firstHairIdx = (nodeIdx & 0xffffff) * 3;
+			uint firstHairIdx = nodeIdx & 0xffffff;
 			for( uint i = 0; i < hairCount; i++ )
 			{
 				uint hairIdx = idx[firstHairIdx + i];
-
+				eval_rocap( hairIdx, O, D, &hit, hairs, hairVerts );
 			}
 			if (stackPtr == 0) break;
 			nodeIdx = stack[--stackPtr];
@@ -84,6 +84,7 @@ uint traverse_hair_bvh( const global struct BVHNode* bvhNode, const global uint*
 		else if (hitB) nodeIdx = right;
 		else { if (stackPtr == 0) break; nodeIdx = stack[--stackPtr]; }
 	}
+	*hitOut = hit;
 	return steps;
 }
 
@@ -100,10 +101,17 @@ void kernel Render( global uint* pixels, const global struct BVHNode* bvhNode, c
 	const float3 D = normalize( (P - eye).xyz );
 	const float3 rD = native_recip( D );
 	// trace primary ray
-	const uint steps = traverse_hair_bvh( bvhNode, idx, O, D, rD, 1e30f );
+	float4 hit;
+	const uint steps = traverse_hair_bvh( bvhNode, idx, O, D, rD, 1e30f, hairs, hairVerts, &hit );
+	// hit.x = distance, hit.w = strand index (~0 if the ray missed). Shade with
+	// e.g. eval_rocap_normal( hit, O, D, hairs, hairVerts ) once you need normals.
 	// visualize result
-	const float c = steps * 0.05f;
-	const float4 p = (float4)( c, c, c, 1 );
+	float4 p = (float4)( 0 );
+	if (hit.x < 1e30f)
+	{
+		const float3 N = eval_rocap_normal( hit, O, D, hairs, hairVerts );
+		p = (float4)( (N + 1) * 0.5f, 1 );
+	}
 	int3 rgb = convert_int3( min( sqrt( p.xyz ), (float3)(1.0f, 1.0f, 1.0f) ) * 255.0f );
 	const uint pixelIdx = x + y * get_global_size( 0 );
 	pixels[pixelIdx] = (rgb.x << 16) + (rgb.y << 8) + rgb.z;
