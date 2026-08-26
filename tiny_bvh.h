@@ -1322,6 +1322,7 @@ public:
 	void Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( BLASInstance* instances, const uint32_t instCount, BVHBase** blasses, const uint32_t blasCount );
+	void BuildAABB( const bvhvec4* aabbs, const uint32_t primCount );
 	void BuildHQ( const bvhvec4* vertices, const uint32_t primCount );
 	void BuildHQ( const bvhvec4slice& vertices );
 	void BuildHQ( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
@@ -5581,9 +5582,9 @@ void BVH_GPU::Build( const bvhvec4* v, const uint32_t p ) { Build( bvhvec4slice(
 void BVH_GPU::Build( const bvhvec4slice& v ) { Build( v, 0, 0 ); }
 void BVH_GPU::Build( const bvhvec4* v, const uint32_t* i, const uint32_t p ) { Build( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
 void BVH_GPU::BuildHQ( const bvhvec4* v, const uint32_t p ) { BuildHQ( bvhvec4slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
-void BVH_GPU::BuildHQ( const bvhvec4slice& v ) { bvh.BuildHQ( v ); ConvertFrom( bvh, false ); }
 void BVH_GPU::BuildHQ( const bvhvec4* v, const uint32_t* i, const uint32_t p ) { BuildHQ( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
 void BVH_GPU::BuildHQ( const bvhvec4slice& v, const uint32_t* i, uint32_t p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+void BVH_GPU::BuildHQ( const bvhvec4slice& v ) { settings.useSpatialSplits = true; Build( v ); }
 
 void BVH_GPU::Build( const bvhvec4slice& vertices, const uint32_t* indices, uint32_t prims )
 {
@@ -5594,6 +5595,17 @@ void BVH_GPU::Build( const bvhvec4slice& vertices, const uint32_t* indices, uint
 	if (indices) bvh.Build( vertices, indices, prims ); else bvh.Build( vertices );
 	// convert to BVH_GPU layout
 	ConvertFrom( bvh, false );
+}
+
+void BVH_GPU::BuildAABB( const bvhvec4* aabbs, const uint32_t primCount )
+{
+	// build a TLAS based on the array of BLASInstance records.
+	bvh.context = context, bvh.settings = settings;
+	bvh.c_int = c_int, bvh.c_trav = c_trav;
+	// build underlying layout
+	bvh.BuildAABB( aabbs, primCount ); 
+	// convert to BVH_GPU layout
+	ConvertFrom( bvh );
 }
 
 void BVH_GPU::Build( BLASInstance* instances, const uint32_t instCount, BVHBase** blasses, const uint32_t blasCount )
