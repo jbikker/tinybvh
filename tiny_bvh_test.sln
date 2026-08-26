@@ -49,6 +49,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_double_test", "vcp
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_viewer", "vcproj\tiny_bvh_viewer.vcxproj", "{E8E37A71-0B3F-4ABC-A78A-69B1F12E80F4}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_gpu_hair", "vcproj\tiny_bvh_gpu_hair.vcxproj", "{FECD9B6D-15A9-4EE4-8D10-3152D9CF4C05}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -241,6 +243,14 @@ Global
 		{E8E37A71-0B3F-4ABC-A78A-69B1F12E80F4}.Release|x64.Build.0 = Release|x64
 		{E8E37A71-0B3F-4ABC-A78A-69B1F12E80F4}.Release|x86.ActiveCfg = Release|Win32
 		{E8E37A71-0B3F-4ABC-A78A-69B1F12E80F4}.Release|x86.Build.0 = Release|Win32
+		{FECD9B6D-15A9-4EE4-8D10-3152D9CF4C05}.Debug|x64.ActiveCfg = Debug|x64
+		{FECD9B6D-15A9-4EE4-8D10-3152D9CF4C05}.Debug|x64.Build.0 = Debug|x64
+		{FECD9B6D-15A9-4EE4-8D10-3152D9CF4C05}.Debug|x86.ActiveCfg = Debug|Win32
+		{FECD9B6D-15A9-4EE4-8D10-3152D9CF4C05}.Debug|x86.Build.0 = Debug|Win32
+		{FECD9B6D-15A9-4EE4-8D10-3152D9CF4C05}.Release|x64.ActiveCfg = Release|x64
+		{FECD9B6D-15A9-4EE4-8D10-3152D9CF4C05}.Release|x64.Build.0 = Release|x64
+		{FECD9B6D-15A9-4EE4-8D10-3152D9CF4C05}.Release|x86.ActiveCfg = Release|Win32
+		{FECD9B6D-15A9-4EE4-8D10-3152D9CF4C05}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

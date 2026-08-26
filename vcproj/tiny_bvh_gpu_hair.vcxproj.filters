@@ -1,0 +1,26 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="..\examples\tiny_bvh_gpu_hair.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\tiny_bvh.h" />
+    <ClInclude Include="..\tiny_ocl.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\kernels\tools.cl">
+      <Filter>kernels</Filter>
+    </None>
+    <None Include="..\kernels\hairviewer.cl">
+      <Filter>kernels</Filter>
+    </None>
+    <None Include="..\kernels\rocap.cl">
+      <Filter>kernels</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="kernels">
+      <UniqueIdentifier>{7009844d-0e0c-43b4-80fe-b7d92a884d8e}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
