@@ -57,7 +57,7 @@ int main()
 	tinyocl::Kernel trace_kernel( "kernels/traverse.cl", "batch_nearest" );
 
 	// create and populate GPU buffers
-	// 1. triangle data, per tri: vertex 0 (with the original triangle index in w), edge 0, edge 1.
+	// 1. triangle data, per tri: vertex 0 (with the original triangle index in w), edge 1, edge 2.
 	//    Note that the indirection used in BVH doesn't happen in BVH_GPU.
 	tinyocl::Buffer* triData = new tinyocl::Buffer( 
 		gpubvh.idxCount * 3 * sizeof( bvhvec4 ),	// size (in bytes) of the buffer
@@ -73,6 +73,8 @@ int main()
 	);
 	// 3. ray buffer. We will always trace batches of rays, for efficiency.
 	//    For GPU code, a ray is 64 bytes. On the CPU it has extra data, so copy carefully.
+	//    Note: the Ray constructor initializes tmax for each ray. The kernel overwrites
+	//    this with the distance of the nearest primitive along the ray.
 	tinyocl::Buffer* rayData = new tinyocl::Buffer( RAY_COUNT * GPU_RAY_SIZE );
 	unsigned char* hostData = (unsigned char*)rayData->GetHostPtr();
 	for (uint32_t i = 0; i < RAY_COUNT; i++)
@@ -98,9 +100,9 @@ int main()
 		Ray ray;
 		memcpy( &ray, hostData + GPU_RAY_SIZE * i, GPU_RAY_SIZE );
 		if (ray.hit.t < BVH_FAR)
-			printf( "ray %i hit prim %u at t=%f\n", i, ray.hit.prim, ray.hit.t );
+			printf( "ray %u hit prim %u at t=%f\n", i, ray.hit.prim, ray.hit.t );
 		else
-			printf( "ray %i, no hit\n", i );
+			printf( "ray %u, no hit\n", i );
 	}
 
 	// all done.

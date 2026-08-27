@@ -8,6 +8,7 @@ float4 traverse( const global struct BVHNode* bvhNode,
 	const global float4* orderedVerts, const global uint* opmap,
 	const float3 O, const float3 D, const float3 rD, const float tmax, uint* stepCount )
 {
+	// "find nearest" ray query using the BVH_GPU format.
 	const float3 rO = O * -rD; // precalculate for efficient slab test
 	float4 hit = (float4)( tmax, 0, 0, 0 );
 	uint nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0, steps = 0;
@@ -77,9 +78,8 @@ bool isoccluded(
 	const global float4* orderedVerts, const global uint* opmap, 
 	const float3 O, const float3 D, const float3 rD, const float tmax )
 {
-	// prepare slab test
+	// "any hit" ray query using the BVH_GPU format.
 	const float3 rO = O * -rD;
-	// traverse BVH
 	uint nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0;
 	while (1)
 	{
@@ -141,7 +141,7 @@ bool isoccluded(
 
 uint RRScost( const global struct BVHNode* bvhNode, const global float4* orderedVerts, const float3 O, const float3 D, const float3 rD, const float tmax )
 {
-	// traverse BVH
+	// Representative Ray Set function for establishing BVH cost.
 	float4 hit;
 	hit.x = tmax;
 	uint nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0;
@@ -213,7 +213,8 @@ void kernel batch_nearest( const global struct BVHNode* bvhNode, const global fl
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	float4 hit = traverse( bvhNode, orderedVerts, 0, O, D, rD, 1e30f, 0 );
+	const float tmax = rayData[threadId].hit.x;
+	float4 hit = traverse( bvhNode, orderedVerts, 0, O, D, rD, tmax, 0 );
 	rayData[threadId].hit = hit;
 }
 
@@ -225,7 +226,7 @@ void kernel batch_any( const global struct BVHNode* bvhNode, const global float4
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	const float tmax = 1e30f; // TODO: get this from the ray.
+	const float tmax = rayData[threadId].hit.x;
 	float4 hit = 0;
 	if (isoccluded( bvhNode, orderedVerts, 0, O, D, rD, tmax )) hit.w = as_float( 1 );
 	rayData[threadId].hit = hit;
@@ -239,5 +240,6 @@ void kernel batch_rrs( const global struct BVHNode* bvhNode, const global float4
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	rrsResult[threadId] = RRScost( bvhNode, orderedVerts, O, D, rD, 1e30f );
+	const float tmax = rayData[threadId].hit.x;
+	rrsResult[threadId] = RRScost( bvhNode, orderedVerts, O, D, rD, tmax );
 }
