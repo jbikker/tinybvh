@@ -1110,7 +1110,7 @@ private:
 	inline float SplitCostSAH( const float rAparent, const float Aleft, const int Nleft, const float Aright, const int Nright ) const;
 	inline float NoSplitCostSAH( const int Nparent ) const;
 	float EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx = 0 );
-	float TriArea( const uint32_t primIdx ) const;
+	float TriArea( const uint32_t triIdx ) const;
 	float PrimArea( const uint32_t slot ) const;
 protected:
 	template <bool posX, bool posY, bool posZ> int32_t Intersect( Ray& ray ) const;
@@ -3720,9 +3720,9 @@ void BVH::ConvertFrom( const BVH_Verbose& original, bool compact )
 	usedNodes = original.usedNodes;
 }
 
-float BVH::TriArea( const uint32_t primIdx ) const
+float BVH::TriArea( const uint32_t triIdx ) const
 {
-	const uint32_t vidx = primIdx * 3;
+	const uint32_t vidx = triIdx * 3;
 	bvhvec3 v0, v1, v2;
 	if (vertIdx) v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
 	else v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
