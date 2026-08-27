@@ -10,25 +10,27 @@ using namespace tinybvh;
 
 #include <cstdlib>
 #include <cstdio>
-
-#define TRIANGLE_COUNT	8192
+#include <cstring>
 
 // CPU-side data
-bvhvec4 triangles[TRIANGLE_COUNT * 3]; // must be 16 byte!
+static constexpr uint32_t TRIANGLE_COUNT = 8192;
+static constexpr uint32_t RAY_COUNT = 1024;
+static constexpr uint32_t GPU_RAY_SIZE = 64;
+static bvhvec4 vertices[TRIANGLE_COUNT * 3]; // must be 16 byte!
 
 // RNG convenience
 float uniform_rand() { return (float)rand() / (float)RAND_MAX; }
 
-// Application entry point
+// aplication entry point
 int main()
 {
-	// Create a scene consisting of some random small triangles.
-	for (int i = 0; i < TRIANGLE_COUNT; i++)
+	// create a scene consisting of some random small triangles
+	for (uint32_t i = 0; i < TRIANGLE_COUNT; i++)
 	{
 		// create a random triangle
-		bvhvec4& v0 = triangles[i * 3 + 0];
-		bvhvec4& v1 = triangles[i * 3 + 1];
-		bvhvec4& v2 = triangles[i * 3 + 2];
+		bvhvec4& v0 = vertices[i * 3 + 0];
+		bvhvec4& v1 = vertices[i * 3 + 1];
+		bvhvec4& v2 = vertices[i * 3 + 2];
 		// triangle position, x/y/z = 0..1
 		float x = uniform_rand();
 		float y = uniform_rand();
@@ -47,50 +49,61 @@ int main()
 		v2.z = z + 0.1f * uniform_rand();
 	}
 
-	// Build a BVH over the scene. We use the BVH_GPU layout.
+	// build a BVH over the scene, in a format suitable for GPU
 	tinybvh::BVH_GPU gpubvh;
-	gpubvh.Build( triangles, TRIANGLE_COUNT );
+	gpubvh.Build( vertices, TRIANGLE_COUNT );
 
-	// Load and compile the OpenCL kernel.
+	// load and compile the OpenCL kernel using tinyocl
 	tinyocl::Kernel trace_kernel( "kernels/traverse.cl", "batch_nearest" );
 
-	// Create and populate the OpenCL buffers.
-	// 1. Triangle data: For each index, 3 times a vec4 vertex.
-	//    Beware: BVH_GPU stores reordered vertex data to avoid the usual indirection.
-	tinyocl::Buffer* triData = new tinyocl::Buffer( gpubvh.idxCount * 3 * sizeof( bvhvec4 ), (bvhvec4*)gpubvh.orderedVerts.data );
-	// 2. BVH node data: Taken from gpubvh.bvhNode; count is gpubvh.usedNodes.
+	// create and populate GPU buffers
+	// 1. triangle data, per tri: vertex 0 (with the original triangle index in w), edge 0, edge 1.
+	//    Note that the indirection used in BVH doesn't happen in BVH_GPU.
+	tinyocl::Buffer* triData = new tinyocl::Buffer( 
+		gpubvh.idxCount * 3 * sizeof( bvhvec4 ),	// size (in bytes) of the buffer
+		(bvhvec4*)gpubvh.orderedVerts.data,			// location of the data on the host
+		tinyocl::Buffer::READONLY					// the device-side data will not be written to.
+	);
+	// 2. BVH node data: taken from gpubvh.bvhNode, count is gpubvh.usedNodes.
 	//    If the tree is rebuilt per frame, use gpubvh.allocatedNodes instead.
-	tinyocl::Buffer* gpuNodes = new tinyocl::Buffer( gpubvh.usedNodes * sizeof( BVH_GPU::BVHNode ), gpubvh.bvhNode );
-	// 3. Ray buffer. We will always trace batches of rays, for efficiency.
+	tinyocl::Buffer* gpuNodes = new tinyocl::Buffer( 
+		gpubvh.usedNodes * sizeof( BVH_GPU::BVHNode ), 
+		gpubvh.bvhNode, 
+		tinyocl::Buffer::READONLY
+	);
+	// 3. ray buffer. We will always trace batches of rays, for efficiency.
 	//    For GPU code, a ray is 64 bytes. On the CPU it has extra data, so copy carefully.
-	tinyocl::Buffer* rayData = new tinyocl::Buffer( 1024 * 64 );
+	tinyocl::Buffer* rayData = new tinyocl::Buffer( RAY_COUNT * GPU_RAY_SIZE );
 	unsigned char* hostData = (unsigned char*)rayData->GetHostPtr();
-	for (int i = 0; i < 1024; i++)
+	for (uint32_t i = 0; i < RAY_COUNT; i++)
 	{
 		bvhvec3 O( 0.5f, 0.5f, -1 );
 		bvhvec3 D( 0.1f, uniform_rand() - 0.5f, 2 );
 		Ray ray( O, D );
-		memcpy( hostData + 64 * i, &ray, 64 /* just the first 64 bytes! */ );
+		memcpy( hostData + GPU_RAY_SIZE * i, &ray, GPU_RAY_SIZE /* just the first 64 bytes! */ );
 	}
-	// 5. Sync all data to the GPU. Repeat if anything changes.
+	// 4. data is created on CPU - sync to GPU.
 	triData->CopyToDevice();
 	gpuNodes->CopyToDevice();
 	rayData->CopyToDevice();
 
-	// Invoke the kernel.
+	// invoke the kernel.
 	trace_kernel.SetArguments( gpuNodes, triData, rayData );
-	trace_kernel.Run( 1024 /* a thread per ray, make it a multiple of 64. */ );
+	trace_kernel.Run( RAY_COUNT /* a thread per ray, ensure a multiple of 64. */ );
 
-	// Obtain traversal result.
+	// obtain traversal result.
 	rayData->CopyFromDevice();
-	for (int i = 0; i < 1024; i++)
+	for (uint32_t i = 0; i < RAY_COUNT; i++)
 	{
 		Ray ray;
-		memcpy( &ray, hostData + 64 * i, 64 );
-		printf( "ray %i, nearest intersection: %f\n", i, ray.hit.t );
+		memcpy( &ray, hostData + GPU_RAY_SIZE * i, GPU_RAY_SIZE );
+		if (ray.hit.t < BVH_FAR)
+			printf( "ray %i hit prim %u at t=%f\n", i, ray.hit.prim, ray.hit.t );
+		else
+			printf( "ray %i, no hit\n", i );
 	}
 
-	// All done.
+	// all done.
 	delete triData;
 	delete gpuNodes;
 	delete rayData;

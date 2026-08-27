@@ -24,6 +24,10 @@
   <ItemGroup>
     <ClCompile Include="..\examples\tiny_bvh_minimal_gpu.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="..\kernels\traverse.cl" />
+    <None Include="..\kernels\traverse_bvh2.cl" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>

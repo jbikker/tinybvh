@@ -6,4 +6,17 @@
   <ItemGroup>
     <ClCompile Include="..\examples\tiny_bvh_minimal_gpu.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <Filter Include="opencl">
+      <UniqueIdentifier>{e1ced95d-ba40-4a4b-a24e-73813f858269}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\kernels\traverse_bvh2.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\kernels\traverse.cl">
+      <Filter>opencl</Filter>
+    </None>
+  </ItemGroup>
 </Project>
