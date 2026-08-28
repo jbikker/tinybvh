@@ -1042,7 +1042,7 @@ public:
 	void Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void Build( BLASInstance* instances, const uint32_t instCount, BVHBase** blasses, const uint32_t blasCount );
-	void Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&, void*), const uint32_t primCount );
+	void Build( void (*customGetAABB)(const uint32_t, bvhvec3&, bvhvec3&, void*), const uint32_t primCount );
 	void BuildAABB( const bvhvec4* aabbs, const uint32_t primCount );
 	void BuildHQ( const bvhvec4* vertices, const uint32_t primCount );
 	void BuildHQ( const bvhvec4slice& vertices );
@@ -1131,8 +1131,8 @@ public:
 	uint32_t nextFrag = 0;			// used during SBVH build to keep track of next free fragment.
 	Fragment* fragment = 0;			// input primitive bounding boxes.
 	// Custom geometry intersection callback
-	bool (*customIntersect)(Ray&, const unsigned, void*) = 0;
-	bool (*customIsOccluded)(const Ray&, const unsigned, void*) = 0;
+	bool (*customIntersect)(Ray&, const uint32_t, void*) = 0;
+	bool (*customIsOccluded)(const Ray&, const uint32_t, void*) = 0;
 	void* customUserdata = 0;
 private:
 #ifdef ENABLE_THREADED_BUILDS
@@ -2281,7 +2281,7 @@ void BVH::BuildAABB( const bvhvec4* aabbs, const uint32_t aabbCount )
 	Build();
 }
 
-void BVH::Build( void (*customGetAABB)(const unsigned, bvhvec3&, bvhvec3&, void*), const uint32_t primCount )
+void BVH::Build( void (*customGetAABB)(const uint32_t, bvhvec3&, bvhvec3&, void*), const uint32_t primCount )
 {
 	// BVH builder for custom geometry; AABBs are obtained via a function pointer in context.
 	BVH_FATAL_ERROR_IF( primCount == 0, "BVH::Build( void (*customGetAABB)( .. ), instCount ), instCount == 0." );
@@ -2653,9 +2653,9 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 }
 
 // radix sort
-static TINYBVH_FORCEINLINE unsigned FloatToKey( const float value )
+static TINYBVH_FORCEINLINE uint32_t FloatToKey( const float value )
 {
-	const unsigned f = *(unsigned*)&value, mask = (unsigned)((int)f >> 31 | (1 << 31));
+	const uint32_t f = *(uint32_t*)&value, mask = (uint32_t)((int)f >> 31 | (1 << 31));
 	return f ^ mask;
 }
 static void RadixSort( uint32_t* input, uint32_t* output, uint32_t* keys, int len )
@@ -2665,7 +2665,7 @@ static void RadixSort( uint32_t* input, uint32_t* output, uint32_t* keys, int le
 	int prefixSum[binSize * 3] = { 0 };
 	for (int i = 0; i < len; i++) // compute histogram for all passes
 	{
-		const unsigned key = keys[input[i]];
+		const uint32_t key = keys[input[i]];
 		prefixSum[key & mask]++, prefixSum[((key >> 11) & mask) + binSize]++;
 		prefixSum[((key >> 22) & mask) + 2 * binSize]++;
 	}
@@ -3413,7 +3413,7 @@ void BVH::BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, ui
 					// populate bins with clipped fragments
 					const float planeDist = (node.aabbMax[a] - node.aabbMin[a]) / (binCount * 0.9999f);
 					const float rPlaneDist = 1.0f / planeDist, nodeMin = node.aabbMin[a];
-					for (unsigned i = 0; i < node.triCount; i++)
+					for (uint32_t i = 0; i < node.triCount; i++)
 					{
 						const uint32_t fi = primIdx[node.leftFirst + i];
 						const int bin1 = tinybvh_clamp( (int32_t)((fragment[fi].bmin[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
@@ -3760,7 +3760,7 @@ float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx )
 	if (n.isLeaf())
 	{
 		const bvhvec3 bmin = subtree.aabbMin, bmax = subtree.aabbMax;
-		for (unsigned i = 0; i < n.triCount; i++)
+		for (uint32_t i = 0; i < n.triCount; i++)
 		{
 			// Early out: triangle fully inside the subtree AABB?
 			uint32_t vidx = primIdx[n.leftFirst + i] * 3;
@@ -5957,10 +5957,10 @@ template<int M> void MBVH<M>::Refit( const uint32_t nodeIdx )
 	}
 	else
 	{
-		for (unsigned i = 0; i < node.childCount; i++) Refit( node.child[i] );
+		for (uint32_t i = 0; i < node.childCount; i++) Refit( node.child[i] );
 		MBVHNode& firstChild = mbvhNode[node.child[0]];
 		bvhvec3 bmin = firstChild.aabbMin, bmax = firstChild.aabbMax;
-		for (unsigned i = 1; i < node.childCount; i++)
+		for (uint32_t i = 1; i < node.childCount; i++)
 		{
 			MBVHNode& child = mbvhNode[node.child[i]];
 			bmin = tinybvh_min( bmin, child.aabbMin );
@@ -5979,7 +5979,7 @@ template<int M> float MBVH<M>::SAHCost( const uint32_t nodeIdx ) const
 	const float sa = BVH::SA( n.aabbMin, n.aabbMax );
 	if (n.isLeaf()) return c_int * sa * n.triCount;
 	float cost = c_trav * sa;
-	for (unsigned i = 0; i < M; i++) if (n.child[i] != 0) cost += SAHCost( n.child[i] );
+	for (uint32_t i = 0; i < M; i++) if (n.child[i] != 0) cost += SAHCost( n.child[i] );
 	return nodeIdx == 0 ? (cost / sa) : cost;
 }
 
@@ -7149,7 +7149,7 @@ static uint32_t __popc( uint32_t x )
 #endif
 }
 
-static const unsigned __A = 0x03020100, __B = 0x07060504, __C = 0x0B0A0908, __D = 0x0F0E0D0C;
+static const uint32_t __A = 0x03020100, __B = 0x07060504, __C = 0x0B0A0908, __D = 0x0F0E0D0C;
 ALIGNED( 64 ) static __m128i idxLUT4_[16] = {
 	_mm_set_epi32( 0, 0, 0, 0 ),		// 0000
 	_mm_set_epi32( 0, 0, 0, __A ),		// 0001
