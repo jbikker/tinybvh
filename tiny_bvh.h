@@ -3971,7 +3971,7 @@ uint32_t BVH::Presplit()
 	{
 		const float scale = (float)((double)triCount * (double)factor / summedPrio);
 		for (uint32_t i = 0, remaining = splitBudget; i < triCount; i++)
-	{
+		{
 			const float share = prio[i] * scale;
 			// '> 0' rather than '>= 0' so that a NaN share yields no extra splits.
 			uint32_t extra = share > 0 ? (uint32_t)tinybvh_min( share, (float)remaining ) : 0;
@@ -4325,11 +4325,11 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				// the AVX-optimized BVH_SOA layout and the wide BVH4_CPU layout. When all
 				// BLASses are of the same layout this reduces to nearly zero cost for
 				// a small set of predictable branches.
-				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH4_CPU || blas->layout == LAYOUT_BVH8_AVX2
-				#ifdef ENABLE_VOXEL_SUPPORT
-					|| blas->layout == LAYOUT_VOXELSET
-				#endif
-				);
+			#ifdef ENABLE_VOXEL_SUPPORT
+				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH4_CPU || blas->layout == LAYOUT_BVH8_AVX2 || blas->layout == LAYOUT_VOXELSET );
+			#else
+				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH4_CPU || blas->layout == LAYOUT_BVH8_AVX2 );
+			#endif
 				if (blas->layout == LAYOUT_BVH)
 				{
 					// regular (triangle) BVH traversal
@@ -4474,11 +4474,11 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 				tmpRay.hit = ray.hit;
 				tmpRay.rD = tinybvh_rcp( tmpRay.D );
 				// 2. Traverse BLAS with the transformed ray
-				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH8_AVX2 || blas->layout == LAYOUT_BVH4_CPU
-				#ifdef ENABLE_VOXEL_SUPPORT
-					|| blas->layout == LAYOUT_VOXELSET
-				#endif
-				);
+			#ifdef ENABLE_VOXEL_SUPPORT
+				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH8_AVX2 || blas->layout == LAYOUT_BVH4_CPU || blas->layout == LAYOUT_VOXELSET );
+			#else
+				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH8_AVX2 || blas->layout == LAYOUT_BVH4_CPU );
+			#endif
 				if (blas->layout == LAYOUT_BVH)
 				{
 					// regular (triangle) BVH traversal
@@ -5634,7 +5634,7 @@ void BVH_GPU::BuildAABB( const bvhvec4* aabbs, const uint32_t primCount )
 	bvh.context = context, bvh.settings = settings;
 	bvh.c_int = c_int, bvh.c_trav = c_trav;
 	// build underlying layout
-	bvh.BuildAABB( aabbs, primCount ); 
+	bvh.BuildAABB( aabbs, primCount );
 	// convert to BVH_GPU layout
 	ConvertFrom( bvh );
 }
@@ -7129,10 +7129,10 @@ void BVH8_CWBVH::ConvertFrom( const MBVH<8>& original, bool compact )
 			}
 		}
 		nodeBlocks++;
-        const uint8_t exyzAndimask[4] = { (uint8_t)(ex + 127), (uint8_t)(ey + 127), (uint8_t)(ez + 127), imask };
-        bvh8Data[currentNodeAddr + 0] = bvhvec4( nodeLo, *(float*)&exyzAndimask );
-        bvh8Data[currentNodeAddr + 1].x = *(float*)&childBaseIndex;
-        bvh8Data[currentNodeAddr + 1].y = *(float*)&triangleBaseIndex;
+		const uint8_t exyzAndimask[4] = { (uint8_t)(ex + 127), (uint8_t)(ey + 127), (uint8_t)(ez + 127), imask };
+		bvh8Data[currentNodeAddr + 0] = bvhvec4( nodeLo, *(float*)&exyzAndimask );
+		bvh8Data[currentNodeAddr + 1].x = *(float*)&childBaseIndex;
+		bvh8Data[currentNodeAddr + 1].y = *(float*)&triangleBaseIndex;
 	}
 	AlignedFree( stackNodeIdx ), AlignedFree( stackNodeAddr );
 	usedBlocks = nodeDataPtr;
@@ -8242,13 +8242,13 @@ int32_t BVH8_CWBVH::Intersect( Ray& ray ) const
 				const bvhvec4 n0 = blasNodes[child_node_index * 5 + 0], n1 = blasNodes[child_node_index * 5 + 1];
 				const bvhvec4 n2 = blasNodes[child_node_index * 5 + 2], n3 = blasNodes[child_node_index * 5 + 3];
 				const bvhvec4 n4 = blasNodes[child_node_index * 5 + 4], p = n0;
-                // n0.w holds three 127-biased quantization exponents plus imask.
-                const uint32_t e4 = as_uint( n0.w );
-                ngroup.x = as_uint( n1.x ), tgroup.x = as_uint( n1.y ), tgroup.y = 0;
-                uint32_t hitmask = 0;
-                const uint32_t vx = (e4 & 255) << 23u; const float adjusted_idirx = *(float*)&vx * ray.rD.x;
-                const uint32_t vy = ((e4 >> 8) & 255) << 23u; const float adjusted_idiry = *(float*)&vy * ray.rD.y;
-                const uint32_t vz = ((e4 >> 16) & 255) << 23u; const float adjusted_idirz = *(float*)&vz * ray.rD.z;
+				// n0.w holds three 127-biased quantization exponents plus imask.
+				const uint32_t e4 = as_uint( n0.w );
+				ngroup.x = as_uint( n1.x ), tgroup.x = as_uint( n1.y ), tgroup.y = 0;
+				uint32_t hitmask = 0;
+				const uint32_t vx = (e4 & 255) << 23u; const float adjusted_idirx = *(float*)&vx * ray.rD.x;
+				const uint32_t vy = ((e4 >> 8) & 255) << 23u; const float adjusted_idiry = *(float*)&vy * ray.rD.y;
+				const uint32_t vz = ((e4 >> 16) & 255) << 23u; const float adjusted_idirz = *(float*)&vz * ray.rD.z;
 				const float origx = -(ray.O.x - p.x) * ray.rD.x;
 				const float origy = -(ray.O.y - p.y) * ray.rD.y;
 				const float origz = -(ray.O.z - p.z) * ray.rD.z;
@@ -8480,17 +8480,17 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 				nodeIdx = nodeStack[--stackPtr];
 			}
 		}
-		if (stackPtr) ISLIKELY
-		{
-			// An interior node is 256 bytes: x planes, y planes, z planes, child8+perm8 -
-			// all four cachelines are read by the node test. A leaf is 192 bytes (3 lines).
-			// Nodes sit at arbitrary 64-byte multiples (leafs are 3 blocks, nodes 4), so the
-			// adjacent-line prefetcher cannot be relied on to fill in the gaps: issue all four.
-			const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
-			_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
-			_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
-		}
-		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
+			if (stackPtr) ISLIKELY
+			{
+				// An interior node is 256 bytes: x planes, y planes, z planes, child8+perm8 -
+				// all four cachelines are read by the node test. A leaf is 192 bytes (3 lines).
+				// Nodes sit at arbitrary 64-byte multiples (leafs are 3 blocks, nodes 4), so the
+				// adjacent-line prefetcher cannot be relied on to fill in the gaps: issue all four.
+				const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
+				_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
+				_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
+			}
+				// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
 		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, leaf->e2z4, _mm_mul_ps( dz4, leaf->e2y4 ) );
 		const __m128 hy4 = _mm_fmsub_ps( dz4, leaf->e2x4, _mm_mul_ps( dx4, leaf->e2z4 ) );
@@ -8536,42 +8536,42 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 				combined = _mm_and_ps( combined, omask4 );
 				imask = _mm_movemask_ps( combined );
 			}
-			if (imask)
-			{
-				// compute broadcasted horizontal minimum of dist4
-				const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
-				const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
-				const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
-				const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
-				// update hit record.
-				const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
-				const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
-				ray.hit.t = t;
-				ray.hit.u = _mm_cvtss_f32( _mm_permutevar_ps( u4, lane4 ) );
-				ray.hit.v = _mm_cvtss_f32( _mm_permutevar_ps( v4, lane4 ) );
-			#if INST_IDX_BITS == 32
-				ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
-			#else
-				ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
-			#endif
-				t8 = _mm256_set1_ps( t );
-				// compress stack
-				int32_t outStackPtr = 0;
-				for (int32_t i = 0; i < stackPtr; i += 8)
+				if (imask)
 				{
-					const int32_t numItems = tinybvh_min( 8, stackPtr - i );
-					const __m256i valid8 = _mm256_cmpgt_epi32( _mm256_set1_epi32( numItems ), lane8 );
-					__m256i node8 = _mm256_maskload_epi32( (const int32_t*)(nodeStack + i), valid8 );
-					__m256 dist8 = _mm256_maskload_ps( distStack + i, valid8 );
-					const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) ) & ((1u << numItems) - 1);
-					const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
-					dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
-					_mm256_storeu_ps( distStack + outStackPtr, dist8 );
-					_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
-					outStackPtr += __popc( mask );
+					// compute broadcasted horizontal minimum of dist4
+					const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
+					const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
+					const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+					const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
+					// update hit record.
+					const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
+					const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
+					ray.hit.t = t;
+					ray.hit.u = _mm_cvtss_f32( _mm_permutevar_ps( u4, lane4 ) );
+					ray.hit.v = _mm_cvtss_f32( _mm_permutevar_ps( v4, lane4 ) );
+				#if INST_IDX_BITS == 32
+					ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
+				#else
+					ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
+				#endif
+					t8 = _mm256_set1_ps( t );
+					// compress stack
+					int32_t outStackPtr = 0;
+					for (int32_t i = 0; i < stackPtr; i += 8)
+					{
+						const int32_t numItems = tinybvh_min( 8, stackPtr - i );
+						const __m256i valid8 = _mm256_cmpgt_epi32( _mm256_set1_epi32( numItems ), lane8 );
+						__m256i node8 = _mm256_maskload_epi32( (const int32_t*)(nodeStack + i), valid8 );
+						__m256 dist8 = _mm256_maskload_ps( distStack + i, valid8 );
+						const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) ) & ((1u << numItems) - 1);
+						const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
+						dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
+						_mm256_storeu_ps( distStack + outStackPtr, dist8 );
+						_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
+						outStackPtr += __popc( mask );
+					}
+					stackPtr = outStackPtr;
 				}
-				stackPtr = outStackPtr;
-			}
 		}
 		if (!stackPtr) ISUNLIKELY break;
 		nodeIdx = nodeStack[--stackPtr];
