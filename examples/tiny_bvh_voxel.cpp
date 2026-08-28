@@ -1,3 +1,5 @@
+// Example of voxel traversal using TinyBVH.
+
 #define FENSTER_APP_IMPLEMENTATION
 #define SCRWIDTH 800
 #define SCRHEIGHT 600
