@@ -1192,6 +1192,9 @@ public:
 		float dummy2 = 0;		// 16 values, 64 bytes in total
 	};
 	VoxelSet();
+	~VoxelSet();
+	VoxelSet( const VoxelSet& ) = delete;		// owns raw allocations; copying would alias them
+	VoxelSet& operator=( const VoxelSet& ) = delete;
 	void Set( const uint32_t x, const uint32_t y, const uint32_t z, const uint32_t v );
 	void UpdateTopGrid();
 	bvhvec3 GetNormal( const Ray& ray ) const;
@@ -1214,6 +1217,10 @@ private:
 	static constexpr int groupSize = groupDim * groupDim * groupDim;
 	static constexpr int topGridDim = gridDim / groupDim;
 	static constexpr int topGridSize = topGridDim * topGridDim * topGridDim;
+	static constexpr int topGridWords = (topGridSize + 31) / 32;	// topGrid is read/written as uint32_t
+	static constexpr int topGridBytes = topGridWords * 4;
+	// nudge applied to a recomputed cell position, in cell units, to move it off an exact cell boundary in the direction of travel.
+	static constexpr float cellEps = 0.0001f;
 	// masks
 	static constexpr uint32_t topResMask = gridDim - groupDim;
 	static constexpr uint32_t superMask = topResMask + topResMask * gridDim + topResMask * gridDim * gridDim;
@@ -4318,7 +4325,11 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				// the AVX-optimized BVH_SOA layout and the wide BVH4_CPU layout. When all
 				// BLASses are of the same layout this reduces to nearly zero cost for
 				// a small set of predictable branches.
-				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH4_CPU || blas->layout == LAYOUT_BVH8_AVX2 );
+				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH4_CPU || blas->layout == LAYOUT_BVH8_AVX2
+				#ifdef ENABLE_VOXEL_SUPPORT
+					|| blas->layout == LAYOUT_VOXELSET
+				#endif
+				);
 				if (blas->layout == LAYOUT_BVH)
 				{
 					// regular (triangle) BVH traversal
@@ -4463,7 +4474,11 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 				tmpRay.hit = ray.hit;
 				tmpRay.rD = tinybvh_rcp( tmpRay.D );
 				// 2. Traverse BLAS with the transformed ray
-				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH8_AVX2 || blas->layout == LAYOUT_BVH4_CPU );
+				assert( blas->layout == LAYOUT_BVH || blas->layout == LAYOUT_BVH8_AVX2 || blas->layout == LAYOUT_BVH4_CPU
+				#ifdef ENABLE_VOXEL_SUPPORT
+					|| blas->layout == LAYOUT_VOXELSET
+				#endif
+				);
 				if (blas->layout == LAYOUT_BVH)
 				{
 					// regular (triangle) BVH traversal
@@ -4763,14 +4778,25 @@ VoxelSet::VoxelSet()
 	memset( grid, 0, gridSize * sizeof( uint32_t ) );
 	brick = (uint32_t*)AlignedAlloc( brickSize * brickCount * sizeof( uint32_t ) );
 	memset( brick, 0, brickSize * brickCount * sizeof( uint32_t ) );
-	topGrid = (uint32_t*)AlignedAlloc( topGridSize / 8 );
+	topGrid = (uint32_t*)AlignedAlloc( topGridBytes );
+	memset( topGrid, 0, topGridBytes );
 	freeBrickPtr = 1; // first available brick; we'll skip 0
+	layout = LAYOUT_VOXELSET;
 	aabbMin = bvhvec3( 0 ), aabbMax = bvhvec3( 1 ); // a voxel object is always (1,1,1) in object space.
+}
+
+VoxelSet::~VoxelSet()
+{
+	AlignedFree( grid );
+	AlignedFree( brick );
+	AlignedFree( topGrid );
+	grid = brick = topGrid = 0;
 }
 
 void VoxelSet::Set( const uint32_t x, const uint32_t y, const uint32_t z, const uint32_t v )
 {
 	// note: not thread-safe.
+	BVH_FATAL_ERROR_IF( x >= objectDim || y >= objectDim || z >= objectDim, "VoxelSet::Set( .. ), voxel coordinate out of range." );
 	const uint32_t bx = x / brickDim, by = y / brickDim, bz = z / brickDim;
 	const uint32_t gridIdx = bx + by * gridDim + bz * gridDim * gridDim;
 	uint32_t brickIdx = grid[gridIdx];
@@ -4793,7 +4819,7 @@ void VoxelSet::Set( const uint32_t x, const uint32_t y, const uint32_t z, const 
 
 void VoxelSet::UpdateTopGrid()
 {
-	memset( topGrid, 0, topGridSize / 8 );
+	memset( topGrid, 0, topGridBytes );
 	for (int x = 0; x < topGridDim; x++) for (int y = 0; y < topGridDim; y++) for (int z = 0; z < topGridDim; z++)
 	{
 		uint32_t* gridBase = grid + x * groupDim + y * groupDim * gridDim + z * groupDim * gridDim * gridDim;
@@ -4828,7 +4854,8 @@ bool VoxelSet::Setup3DDDA( const Ray& ray, const bvhvec3& Dsign, DDAState& state
 	}
 	// setup amanatides & woo - assume object size is 1x1x1, from (0,0,0) to (1,1,1)
 	static const float cellSize = 1.0f / topGridDim;
-	const bvhvec3 posInGrid = (ray.O + ray.D * (t + 0.0000025f)) * (float)topGridDim;
+	const bvhvec3 nudge( (float)step.x * cellEps, (float)step.y * cellEps, (float)step.z * cellEps );
+	const bvhvec3 posInGrid = (ray.O + ray.D * t) * (float)topGridDim + nudge;
 	const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * cellSize;
 	const bvhint3 P(
 		tinybvh_clamp( (int)posInGrid.x, 0, topGridDim - 1 ),
@@ -4862,6 +4889,7 @@ int32_t VoxelSet::Intersect( Ray& ray ) const
 	const uint32_t zsign = *(uint32_t*)&ray.D.z >> 31;
 	const bvhvec3 Dsign = bvhvec3( (float)xsign, (float)ysign, (float)zsign );
 	const bvhint3 step( 1 - (int)xsign * 2, 1 - (int)ysign * 2, 1 - (int)zsign * 2 );
+	const bvhvec3 nudge( (float)step.x * cellEps, (float)step.y * cellEps, (float)step.z * cellEps );
 	bvhvec3 tdelta;
 	float t = 0;
 	if (!Setup3DDDA( ray, Dsign, l1_, step, tdelta, t )) return 0;
@@ -4870,14 +4898,14 @@ int32_t VoxelSet::Intersect( Ray& ray ) const
 	uint32_t* gridBase = 0;
 	int32_t steps = 0;
 	// start stepping:
-	while (1)
+	while (t < ray.hit.t)	// a voxel beyond the current hit distance cannot win
 	{
 		const uint32_t tidx = l1_.X + l1_.Y * topGridDim + l1_.Z * topGridDim * topGridDim;
 		const uint32_t cell = topGrid[tidx >> 5] & (1 << (tidx & 31));
 		if (cell)
 		{
 			// setup midlevel traversal
-			const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * (float)gridDim;
+			const bvhvec3 posInGrid = (ray.O + t * ray.D) * (float)gridDim + nudge;
 			const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / gridDim);
 			l2_.X = tinybvh_clamp( (int)posInGrid.x, l1_.X * groupDim, l1_.X * groupDim + (groupDim - 1) );
 			l2_.Y = tinybvh_clamp( (int)posInGrid.y, l1_.Y * groupDim, l1_.Y * groupDim + (groupDim - 1) );
@@ -4893,7 +4921,7 @@ int32_t VoxelSet::Intersect( Ray& ray ) const
 				{
 					// setup 3DDDA for brick traversal
 					uint32_t* brickData = brick + brickCell * brickSize;
-					const bvhvec3 posInBrick = (ray.O + (t + 0.0000025f) * ray.D) * (float)objectDim;
+					const bvhvec3 posInBrick = (ray.O + t * ray.D) * (float)objectDim + nudge;
 					uint32_t X = tinybvh_clamp( (int)posInBrick.x - (l2_.X + l1_.X * groupDim) * brickDim, 0, brickDim - 1 );
 					uint32_t Y = tinybvh_clamp( (int)posInBrick.y - (l2_.Y + l1_.Y * groupDim) * brickDim, 0, brickDim - 1 );
 					uint32_t Z = tinybvh_clamp( (int)posInBrick.z - (l2_.Z + l1_.Z * groupDim) * brickDim, 0, brickDim - 1 );
@@ -4906,6 +4934,8 @@ int32_t VoxelSet::Intersect( Ray& ray ) const
 						const uint32_t v = brickData[X + Y * brickDim + Z * brickDim * brickDim];
 						if (v)
 						{
+							// traversal is front-to-back, so no closer voxel remains
+							if (t >= ray.hit.t) return steps;
 							ray.hit.t = t;
 						#if INST_IDX_BITS == 32
 							ray.hit.prim = v;
@@ -5013,6 +5043,7 @@ bool VoxelSet::IsOccluded( const Ray& ray ) const
 	const uint32_t zsign = *(uint32_t*)&ray.D.z >> 31;
 	const bvhvec3 Dsign = bvhvec3( (float)xsign, (float)ysign, (float)zsign );
 	const bvhint3 step( 1 - (int)xsign * 2, 1 - (int)ysign * 2, 1 - (int)zsign * 2 );
+	const bvhvec3 nudge( (float)step.x * cellEps, (float)step.y * cellEps, (float)step.z * cellEps );
 	bvhvec3 tdelta;
 	float t = 0;
 	if (!Setup3DDDA( ray, Dsign, l1_, step, tdelta, t )) return false;
@@ -5027,7 +5058,7 @@ bool VoxelSet::IsOccluded( const Ray& ray ) const
 		if (cell)
 		{
 			// setup midlevel traversal
-			const bvhvec3 posInGrid = (ray.O + (t + 0.0000025f) * ray.D) * (float)gridDim;
+			const bvhvec3 posInGrid = (ray.O + t * ray.D) * (float)gridDim + nudge;
 			const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / gridDim);
 			l2_.X = tinybvh_clamp( (int)posInGrid.x, l1_.X * groupDim, l1_.X * groupDim + (groupDim - 1) );
 			l2_.Y = tinybvh_clamp( (int)posInGrid.y, l1_.Y * groupDim, l1_.Y * groupDim + (groupDim - 1) );
@@ -5043,7 +5074,7 @@ bool VoxelSet::IsOccluded( const Ray& ray ) const
 				{
 					// setup 3DDDA for brick traversal
 					uint32_t* brickData = brick + brickCell * brickSize;
-					const bvhvec3 posInBrick = (ray.O + (t + 0.0000025f) * ray.D) * (float)objectDim;
+					const bvhvec3 posInBrick = (ray.O + t * ray.D) * (float)objectDim + nudge;
 					uint32_t X = tinybvh_clamp( (int)posInBrick.x - (l2_.X + l1_.X * groupDim) * brickDim, 0u, brickDim - 1 );
 					uint32_t Y = tinybvh_clamp( (int)posInBrick.y - (l2_.Y + l1_.Y * groupDim) * brickDim, 0u, brickDim - 1 );
 					uint32_t Z = tinybvh_clamp( (int)posInBrick.z - (l2_.Z + l1_.Z * groupDim) * brickDim, 0u, brickDim - 1 );
