@@ -36,7 +36,7 @@ uint32_t threadCount = tinybvh_max( 1u, std::thread::hardware_concurrency() );
 bvhvec3 eye( -15.24f, 21.5f, 2.54f ), p1, p2, p3;
 bvhvec3 view = tinybvh_normalize( bvhvec3( 0.83f, -0.44f, -0.36f ) );
 
-// directional light direction
+// directional light vector
 const bvhvec3 L = tinybvh_normalize( bvhvec3( 1, 2, 3 ) );
 
 // callback for custom geometry: ray/sphere intersection - "find nearest"
@@ -111,8 +111,8 @@ void UpdateCamera( float delta_time_s, fenster& f )
 	if (f.keys[18]) view = tinybvh_normalize( view + up * 0.1f * spd );
 	// recalculate right, up
 	right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), view ) ), up = 0.8f * tinybvh_cross( view, right );
-	bvhvec3 C = eye + 1.2f * view;
-	p1 = C - right + up, p2 = C + right + up, p3 = C - right - up;
+	bvhvec3 center = eye + 1.2f * view;
+	p1 = center - right + up, p2 = center + right + up, p3 = center - right - up;
 }
 
 // Worker thread renders tiles until no unclaimed tiles are left.
