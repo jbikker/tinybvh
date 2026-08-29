@@ -310,7 +310,11 @@ inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alig
 #define _ALIGNED_FREE(ptr) _aligned_free( ptr )
 #else // EMSCRIPTEN / gcc / clang / Android
 #define ALIGNED( x ) __attribute__( ( aligned( x ) ) )
-#if !defined TINYBVH_NO_SIMD && (defined __x86_64__ || defined _M_X64 || defined __wasm_simd128__ || defined __wasm_relaxed_simd__)
+#if defined(__EMSCRIPTEN__)
+// Emscripten strictly follows C11 aligned_alloc, which it always declares in <stdlib.h>.
+#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
+#define _ALIGNED_FREE(ptr) free( ptr )
+#elif !defined TINYBVH_NO_SIMD && (defined __x86_64__ || defined _M_X64)
 #include <xmmintrin.h>
 #define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment )
 #define _ALIGNED_FREE(ptr) _mm_free( ptr )
@@ -325,20 +329,9 @@ inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alig
 #define _ALIGNED_ALLOC(alignment,size) memalign( alignment, make_multiple_of( size, alignment ) )
 #endif
 #define _ALIGNED_FREE(ptr) free( ptr )
-#elif defined(__EMSCRIPTEN__) || defined(__APPLE__) || defined(__aarch64__)
-// Emscripten and Apple strictly follow C11 aligned_alloc
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
-#define _ALIGNED_FREE(ptr) free( ptr )
-#elif defined(__GNUC__)
-#ifdef __linux__
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
 #else
-#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment );
-#endif
-#define _ALIGNED_FREE(ptr) free( ptr )
-#else
-// Fallback
-#define _ALIGNED_ALLOC(alignment,size) malloc( size )
+// Everything else - Apple, aarch64, Linux, wasm without Emscripten, other Unices.
+#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
 #define _ALIGNED_FREE(ptr) free( ptr )
 #endif
 #endif
