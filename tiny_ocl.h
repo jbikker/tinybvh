@@ -22,6 +22,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+// Aug 29, '26: version 0.3.1 : Stability fixes; synced aligned alloc with tinybvh.
 // Jun 07, '26: version 0.3.0 : Upgraded to latest OpenCL version.
 // Mar 03, '25: version 0.2.0 : MacOS support, by wuyakuma.
 // Nov 18, '24: version 0.1.1 : Added custom alloc/free.
@@ -62,7 +63,11 @@ inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alig
 #define _ALIGNED_FREE(ptr) _aligned_free( ptr )
 #else // EMSCRIPTEN / gcc / clang / Android
 #define ALIGNED( x ) __attribute__( ( aligned( x ) ) )
-#if !defined TINYBVH_NO_SIMD && (defined __x86_64__ || defined _M_X64 || defined __wasm_simd128__ || defined __wasm_relaxed_simd__)
+#if defined(__EMSCRIPTEN__)
+// Emscripten strictly follows C11 aligned_alloc, which it always declares in <stdlib.h>.
+#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
+#define _ALIGNED_FREE(ptr) free( ptr )
+#elif !defined TINYBVH_NO_SIMD && (defined __x86_64__ || defined _M_X64)
 #include <xmmintrin.h>
 #define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment )
 #define _ALIGNED_FREE(ptr) _mm_free( ptr )
@@ -77,27 +82,19 @@ inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alig
 #define _ALIGNED_ALLOC(alignment,size) memalign( alignment, make_multiple_of( size, alignment ) )
 #endif
 #define _ALIGNED_FREE(ptr) free( ptr )
-#elif defined(__EMSCRIPTEN__) || defined(__APPLE__) || defined(__aarch64__)
-// Emscripten and Apple strictly follow C11 aligned_alloc
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
-#define _ALIGNED_FREE(ptr) free( ptr )
-#elif defined(__GNUC__)
-#ifdef __linux__
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
 #else
-#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment );
-#endif
-#define _ALIGNED_FREE(ptr) free( ptr )
-#else
-// Fallback
-#define _ALIGNED_ALLOC(alignment,size) malloc( size )
+// Everything else - Apple, aarch64, Linux, wasm without Emscripten, other Unices.
+#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
 #define _ALIGNED_FREE(ptr) free( ptr )
 #endif
 #endif
 #endif
 inline void* malloc64( size_t size, void* = nullptr ) { return size == 0 ? 0 : _ALIGNED_ALLOC( 64, size ); }
 inline void free64( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
-}; // namespace tiyocl
+// cleanup defines
+#undef _ALIGNED_ALLOC
+#undef _ALIGNED_FREE
+}; // namespace tinyocl
 
 namespace tinyocl {
 
@@ -146,9 +143,11 @@ class Buffer
 public:
 	enum { DEFAULT = 0, TEXTURE = 8, TARGET = 16, READONLY = 1, WRITEONLY = 2 };
 	// constructor / destructor
-	Buffer() : hostBuffer( 0 ) {}
+	Buffer() = default;
 	Buffer( unsigned int N, void* ptr = 0, unsigned int t = DEFAULT );
 	~Buffer();
+	Buffer( const Buffer& ) = delete;
+	Buffer& operator=( const Buffer& ) = delete;
 	cl_mem* GetDevicePtr() { return &deviceBuffer; }
 	unsigned int* GetHostPtr();
 	void CopyToDevice( const bool blocking = true );
@@ -161,10 +160,12 @@ public:
 private:
 	// data members
 public:
-	unsigned int* hostBuffer;
+	// note: all members are initialized here; a default-constructed Buffer used
+	// to leave size/type/ownData indeterminate, which the destructor then read.
+	unsigned int* hostBuffer = 0;
 	cl_mem deviceBuffer = 0;
-	unsigned int type, size /* in bytes */, textureID;
-	bool ownData, aligned;
+	unsigned int type = DEFAULT, size = 0 /* in bytes */, textureID = 0;
+	bool ownData = false, aligned = false;
 };
 
 // OpenCL kernel
@@ -176,6 +177,8 @@ public:
 	Kernel( const char* file, const char* entryPoint );
 	Kernel( cl_program& existingProgram, char* entryPoint );
 	~Kernel();
+	Kernel( const Kernel& ) = delete;
+	Kernel& operator=( const Kernel& ) = delete;
 	// get / set
 	cl_kernel& GetKernel() { return kernel; }
 	cl_program& GetProgram() { return program; }
@@ -353,7 +356,7 @@ private:
 			// probably int3 / float3; pad to 16 bytes
 			unsigned tmp[4] = {};
 			memcpy( tmp, &value, 12 );
-			clSetKernelArg( kernel, idx, 16, &value );
+			clSetKernelArg( kernel, idx, 16, &tmp );
 		}
 		else
 		{
@@ -411,6 +414,8 @@ using namespace std;
 using namespace tinyocl;
 
 #include <stdarg.h>
+#include <stdlib.h> // EXIT_FAILURE
+#include <string.h> // memset, strlen, strstr
 #ifdef _MSC_VER
 #include <direct.h>
 #define getcwd _getcwd
@@ -432,9 +437,10 @@ void FatalError( const char* fmt, ... )
 #if defined _WINDOWS_ && !defined SKIP_MESSAGEBOXA // i.e., windows.h has been included.
 	MessageBoxA( NULL, t, "Fatal error", MB_OK );
 #else
-	fprintf( stderr, t );
+	fprintf( stderr, "%s\n", t );
+	fflush( stderr );
 #endif
-	while (1) exit( 0 );
+	exit( EXIT_FAILURE );
 }
 
 static string ReadTextFile( const char* _File )
@@ -600,6 +606,7 @@ Buffer::Buffer( unsigned int N, void* ptr, unsigned int t )
 	}
 	else
 	{
+		size = 0; // a texture buffer has no host-side byte count
 		textureID = N; // representing texture N
 		if (!Kernel::candoInterop) FatalError( "didn't expect to get here." );
 		int error = 0;
@@ -860,29 +867,37 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 	else
 	{
 		// obtain the error log from the cl compiler
-		if (!log) log = new char[256 * 1024]; // can be quite large
-		log[0] = 0;
-		clGetProgramBuildInfo( program, getFirstDevice( context ), CL_PROGRAM_BUILD_LOG, 256 * 1024, log, &size );
+		size_t logSize = 0;
+		clGetProgramBuildInfo( program, getFirstDevice( context ), CL_PROGRAM_BUILD_LOG, 0, 0, &logSize );
+		delete[] log;
+		log = new char[logSize + 4096];
+		memset( log, 0, logSize + 4096 );
+		if (logSize > 0)
+			clGetProgramBuildInfo( program, getFirstDevice( context ), CL_PROGRAM_BUILD_LOG, logSize, log, 0 );
+		log[logSize] = 0;
 		// save error log for closer inspection
 		FILE* f = fopen( "errorlog.txt", "wb" );
-		fwrite( log, 1, size, f );
-		fclose( f );
+		if (f) // may fail: we chdir'ed into the kernel folder, which can be read-only.
+		{
+			fwrite( log, 1, strlen( log ), f );
+			fclose( f );
+		}
 	#if 0
 		// find and display the first errormat; just dump it to a window
 		log[2048] = 0; // truncate very long logs
-		FatalError( log, "Build error" );
+		FatalError( "%s", log );
 	#else
 		// find and display the first error. Note: platform specific sadly; code below is for NVIDIA
 		char* errorString = strstr( log, ": error:" );
 		if (errorString)
 		{
-			int errorPos = (int)(errorString - log);
+			size_t errorPos = (size_t)(errorString - log);
 			while (errorPos > 0) if (log[errorPos - 1] == '\n') break; else errorPos--;
 			// translate file and line number of error and report
 			log[errorPos + 2048] = 0;
 			int lineNr = 0, linePos = 0;
 			char* lns = strstr( log + errorPos, ">:" ), * eol;
-			if (!lns) FatalError( log + errorPos ); else
+			if (!lns) FatalError( "%s", log + errorPos ); else
 			{
 				lns += 2;
 				while (*lns >= '0' && *lns <= '9') lineNr = lineNr * 10 + (*lns++ - '0');
@@ -915,15 +930,15 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 				// present error message
 				char t[1024];
 				snprintf( t, 1024, "file %s, line %i, pos %i:\n%s", errorFile.c_str(), lineNr + 1, linePos, lns );
-				FatalError( t, "Build error" );
+				FatalError( "%s", t );
 			}
 		}
 		else
 		{
 			// error string has unknown format; just dump it to a window
 			log[2048] = 0; // truncate very long logs
-			if (!log[0]) snprintf( log, 2048, "Failed to build entry point %s in %s", entryPoint, file ); 
-			FatalError( log, "Build error" );
+			if (!log[0]) snprintf( log, 2048, "Failed to build entry point %s in %s", entryPoint, file );
+			FatalError( "%s", log );
 		}
 	#endif
 	}
@@ -949,10 +964,16 @@ Kernel::Kernel( cl_program& existingProgram, char* entryPoint )
 // ----------------------------------------------------------------------------
 Kernel::~Kernel()
 {
+	// remove ourselves from the source file cache before dying
+	for (int s = (int)loadedKernels.size(), i = 0; i < s; i++) if (loadedKernels[i] == this)
+	{
+		loadedKernels.erase( loadedKernels.begin() + i );
+		break;
+	}
 	if (kernel) clReleaseKernel( kernel );
-	// if (program) clReleaseProgram( program ); // NOTE: may be shared with other kernels
 	kernel = 0;
-	// program = 0;
+	delete[] sourceFile;
+	sourceFile = 0;
 }
 
 // InitCL method
