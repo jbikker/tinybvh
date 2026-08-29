@@ -185,7 +185,6 @@ THE SOFTWARE.
 #endif
 // #define TINYBVH_USE_CUSTOM_VECTOR_TYPES
 // #define TINYBVH_NO_SIMD
-// #define ENABLE_LBVH_CODE
 
 // C++ features
 #if __cplusplus >= 202002L
@@ -772,8 +771,8 @@ struct Intersection
 #endif
 	float t, u, v;	// distance along ray & barycentric coordinates of the intersection
 	uint32_t prim;	// primitive index
-	// 64 byte of custom data -
-	// assuming struct Ray is aligned, this starts at a cache line boundary.
+	// 64 byte of custom data - For the typical case, where Intersection is
+	// a member of a cache-aligned Ray, this starts at a cache line boundary.
 	void* auxData;
 	union
 	{
@@ -866,6 +865,10 @@ struct RayEx
 void tinybvh_builtin_spawn( void (*fn)(void* payload), const void* payload, uint32_t payload_size, void* userdata );
 void tinybvh_builtin_barrier( void* userdata );
 void tinybvh_builtin_parallel_for( uint32_t n, void (*fn)(uint32_t index, void* payload), void* payload, void* userdata );
+// tinybvh_shutdown_builtin_pool: Releases the calling thread's build pool, joining its worker threads. 
+// Optional; a thread's pool is released automatically when that thread exits. Call this explicitly if 
+// you need teardown to happen at a controlled point rather than in an exit-time destructor.
+void tinybvh_shutdown_builtin_pool();
 #define TINYBVH_DEFAULT_SPAWN tinybvh_builtin_spawn
 #define TINYBVH_DEFAULT_BARRIER tinybvh_builtin_barrier
 #define TINYBVH_DEFAULT_PARALLEL_FOR tinybvh_builtin_parallel_for
@@ -918,7 +921,6 @@ struct BVHBuildSettings
 	bool presplitPostPass = true;	// attempt to un-split primitives in leafs after a presplit build.
 	float presplitFactor = 0.3f;	// presplit budget relative to input data size.
 	bool useFullSweep = false;		// for experiments only; full-sweep SAH builder.
-	bool useLBVH = false;			// for experiments only for now; LBVH builder.
 	bool postOptimize = false;		// optimize generated BVH using tree rotations.
 	int optimizeIterations = 25;	// default optimization iterations.
 	bool useSIMDifavailable = true;	// set to false to use the scalar reference builder.
@@ -1019,7 +1021,7 @@ public:
 		// 'Traditional' 32-byte BVH node layout, as proposed by Ingo Wald.
 		// When aligned to a cache line boundary, two of these fit together.
 		bvhvec3 aabbMin; uint32_t leftFirst; // 16 bytes
-		bvhvec3 aabbMax; union { uint32_t triCount; uint32_t right; /* only for LBVH */ }; // 16 bytes
+		bvhvec3 aabbMax; uint32_t triCount;  // 16 bytes
 		bool isLeaf() const { return triCount > 0; /* empty BVH leaves do not exist */ }
 		bool Intersect( const bvhvec3& bmin, const bvhvec3& bmax ) const;
 		float SurfaceArea() const { return BVH::SA( aabbMin, aabbMax ); }
@@ -1052,7 +1054,6 @@ public:
 	void BuildAVX( const bvhvec4slice& vertices );
 	void BuildAVX( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void BuildAVX( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
-	void BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	bool IntersectSphere( const bvhvec3& pos, const float r ) const;
@@ -1146,12 +1147,6 @@ private:
 	float SAHCostRec( uint32_t nodeIdx, uint32_t depth, float* costs, std::atomic<uint32_t>& slot );
 	static void SAHCostSubtree( void* payload );
 #endif
-	// internal methods and data for the LBVH builder
-#ifdef ENABLE_LBVH_CODE
-	void LBVHRadixSort();
-	void LBVHStdSort();
-#endif
-	void ReorderLBVH( uint32_t rootNodeIndex );
 	BVHNode* leafNodes = 0; // will point inside node array
 	uint32_t* scratchPad = 0; // for sorting
 	uint32_t numLeafNodes = 0;
@@ -1189,7 +1184,7 @@ public:
 		uint32_t X, Y, Z;		// 12 bytes
 		float dummy1 = 0;		// 16 bytes
 		bvhvec3 tmax;
-		float dummy2 = 0;		// 16 values, 64 bytes in total
+		float dummy2 = 0;		// 32 bytes in total
 	};
 	VoxelSet();
 	~VoxelSet();
@@ -1219,8 +1214,14 @@ private:
 	static constexpr int topGridSize = topGridDim * topGridDim * topGridDim;
 	static constexpr int topGridWords = (topGridSize + 31) / 32;	// topGrid is read/written as uint32_t
 	static constexpr int topGridBytes = topGridWords * 4;
-	// nudge applied to a recomputed cell position, in cell units, to move it off an exact cell boundary in the direction of travel.
-	static constexpr float cellEps = 0.0001f;
+	static float NudgeScale( const bvhvec3& O )
+	{
+		// float resolution near the evaluated point scales with the larger of |O| and t;
+		// for a ray that reaches the unit-sized object, |O| is a good proxy for both.
+		static constexpr float voxelEps = 4.0f * objectDim * 1.1920929e-7f;
+		const float m = tinybvh_max( fabsf( O.x ), tinybvh_max( fabsf( O.y ), fabsf( O.z ) ) );
+		return voxelEps * tinybvh_max( 1.0f, m );
+	}
 	// masks
 	static constexpr uint32_t topResMask = gridDim - groupDim;
 	static constexpr uint32_t superMask = topResMask + topResMask * gridDim + topResMask * gridDim * gridDim;
@@ -1901,184 +1902,6 @@ const bvhdbl3& bvhdbl3slice::operator[]( size_t i ) const
 
 #endif // DOUBLE_PRECISION_SUPPORT
 
-// LBVH builder helpers
-// ----------------------------------------------------------------------------
-
-#ifdef ENABLE_LBVH_CODE
-
-static uint32_t Expand2D32( uint32_t x )
-{
-	// 32 bit function to expand an axiscode to 2D bits
-	// For an input : xxxxxxxxxxxxxxx...the output is: _x_x_x_x_x_x_x_...
-	x = x >> 16U; // Use 16 bits
-	x = (x | (x << 8U)) & 0x00FF00FFU; // [8]8[8]8
-	x = (x | (x << 4U)) & 0x0F0F0F0FU; // [4]4[4]4[4]4[4]4
-	x = (x | (x << 2U)) & 0x33333333U; // [2]2[2]2[2]2[2]2[2]2[2]2[2]2[2]2
-	return (x | (x << 1U)) & 0x55555555U; // [1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1
-}
-
-static uint32_t ExpandFor2DBits32( uint32_t x )
-{
-	// 32 bit function to expand an existing code for insertion of 2D bits
-	// For an input : xxxxxxxxxxxxxxx... the output is: x_x_x_x_x_x_x_x..
-	x &= 0xFFFF0000U; // input is 16 bits, at the top
-	x = (x | (x >> 8U)) & 0xFF00FF00U; // 8[8]8[8]
-	x = (x | (x >> 4U)) & 0xF0F0F0F0U; // 4[4]4[4]4[4]4[4]
-	x = (x | (x >> 2U)) & 0xCCCCCCCCU; // 2[2]2[2]2[2]2[2]2[2]2[2]2[2]2[2]
-	x = (x | (x >> 1U)) & 0xAAAAAAAAU; // 1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]1[1]
-	return x;
-}
-
-static uint32_t Expand3D32( uint32_t code )
-{
-	// 32 bit function to expand an axiscode to 3D bits
-	// For an input : xxxxxxxxxxxxxxx...the output is: x__x__x__x__x__....
-	uint32_t x = code & 0xFFE00000U; // we only look at the first 11 bits
-	x = (x | x >> 12U) & 0xFC003E00U; // 6[12]5[9]
-	x = (x | x >> 6U) & 0xE0703818U; // 3[6]3[6]3[6]2[3]
-	x = (x | x >> 2U) & 0x984C2618U; // 1[2]2[4]1[2]2[4]1[2]2[4]2[3]
-	return (x | x >> 2U) & 0x92492492U; // 1[2]1[2]1[2]1[2]1[2]1[2]1[2]1[2]1[2]1[2]1[1]
-}
-
-static uint32_t ExpandFor3DBits32( uint32_t x )
-{
-	// 32 bit function to expand an existing code for insertion of 3D bits
-	// For an input : xyxyxyxyxyxyxy... the output is: xy_xy_xy_xy_xy_....
-	x &= 0xFFFFFC00U; // input is 22 bits, at the top
-	uint32_t mask = 0x000FFC00U;
-	x = ((x & mask) >> 6U) | (x & ~mask); // 12[6]10[4]
-	mask = 0x03F000F0U, x = ((x & mask) >> 3U) | (x & ~mask); // 6[3]6[3]6[3]4[1]
-	mask = 0x0C060300U, x = ((x & mask) >> 2U) | (x & ~mask); // 4[2]2[1]4[2]2[1]4[2]2[1]4[1]
-	mask = 0x30180C06U; // 2[1]2[1]2[1]2[1]2[1]2[1]2[1]2[1]2[1]2[1]2
-	return ((x & mask) >> 1U) | (x & ~mask);
-}
-
-static uint32_t MortonCode3D32( uint32_t x, uint32_t y, uint32_t z )
-{
-	// Generates a 32 bit regular morton code in xyzxyz...
-	const uint32_t xx = Expand3D32( x ); // x__x__x__x__x__x__x...
-	const uint32_t yy = Expand3D32( y ); // y__y__y__y__y__y__y...
-	const uint32_t zz = Expand3D32( z ); // z__z__z__z__z__z__z...
-	return (xx) | (yy >> 1U) | (zz >> 2U); // Shift and or to obtain xyzxyzxyzxyz....
-}
-
-static uint32_t CreatePrebitMask32( uint32_t prebits )
-{
-	// Generates a 32 bit mask for the given number of prebits
-	// E.G. Input = 4 : Output = 111100000....
-	return prebits > 0U ? 0xFFFFFFFFU << (32U - prebits) : 0U;
-}
-
-static uint32_t FastVariableBitMorton32( bvhuint3 codes, uint32_t prebitsXY, uint32_t prebitsXZ, uint32_t prebitsYZ )
-{
-	// Generates a 32-bit variable bit morton code
-	// NOTE: all comments here will assume the order is xyz of largest to smallest axis
-	uint32_t mortonCode;
-	if (prebitsXZ == 0U) // there are no prebits in this code, so early exit preventing 1 expansion
-		mortonCode = MortonCode3D32( codes.x, codes.y, codes.z );
-	else // This code has prebits
-	{
-		mortonCode = codes.x; // start with only x bits
-		// Fetch the prebits from different axes
-		// This calculation computes the number of bits required BEFORE x becomes smaller than z to prevent resorting
-		const uint32_t prebits1D = prebitsXY;
-		// < 31, as we'd first insert x again, but that is already present in the current code
-		if (prebits1D < 31U)
-		{
-			const uint32_t prebitMask1D = CreatePrebitMask32( prebits1D );
-			const uint32_t prebits2D = prebitsXZ + prebitsYZ;
-			// Check if there are no 2D prebits
-			if (prebits1D == prebits2D) // short circuit from 1D to 3D bits, prevents 1 expansion
-			{
-				// regular tail: xyzxyzxyz
-				uint32_t tail = MortonCode3D32( codes.x << prebits1D, codes.y, codes.z );
-				// E.G. 1D prebits = 4:
-				//      1D mask = xxxx________...
-				//      tail    = ____xyzxyzxy... (shifted by prebits1D)
-				//      Or op   = xxxxxyzxyzxy...
-				mortonCode = (mortonCode & prebitMask1D) | (tail >> prebits1D);
-			}
-			else // default case with 1D and 2D prebits
-			{
-				// Mask out 1D prebits and 'weave' in 2D tail
-				// ExpandFor2DBits = x_x_x_x_x_x_...
-				// Expand2D        = _y_y_y_y_y_y...
-				// Or op           = xyxyxyxyxyxy...
-				uint32_t tail2D = ExpandFor2DBits32( mortonCode << (prebits1D) ) | (Expand2D32( codes.y ));
-				// E.G. 1D prebits = 6:
-				//      1D mask = xxxxxx______...
-				//      tail2D  = ______xyxyxy... (shifted by prebits1D)
-				//      Or op   = xxxxxxxyxyxy...
-				mortonCode = (mortonCode & prebitMask1D) | (tail2D >> prebits1D);
-				// Check to prevent overshifting, 30 as we'd first insert xy again, but that already is currently in the code
-				if (prebits2D < 30U) // contains all 1D and 2D prebits
-				{
-					const uint32_t prebitMask2D = CreatePrebitMask32( prebits2D );
-					// Mask out 1D and 2D prebits and 'weave' in 3D tail
-					// ExpandFor3DBits = xy_xy_xy_xy_...
-					// Expand3D        = __z__z__z__z... (shifted by 2U)
-					// Or op           = xyzxyzxyzxyz...
-					uint32_t tail3D = ExpandFor3DBits32( mortonCode << (prebits2D) ) | (Expand3D32( codes.z ) >> 2U);
-					// E.G. 2D prebits = 6 (Includes 1D prebits)
-					//      2D mask = xxxyxy______... (2 1D bits + 4 2D bits)
-					//      tail3D  = ______xyzxyz... (shifted by prebits2D)
-					//      Or op   = xxxyxyxyzxyz...
-					// OR (in case of uneven 2D prebits)
-					//      2D prebits = 5 (Includes 1D prebits)
-					//      2D mask = xxxyx_______... (2 1D bits + 3 2D bits)
-					//      tail3D  = _____yxzyxzy... (shifted by prebits2D)
-					//      Or op   = xxxyxyxzyxzy...
-					mortonCode = (mortonCode & prebitMask2D) | (tail3D >> prebits2D);
-				}
-			}
-		}
-	}
-	return mortonCode;
-}
-
-static uint32_t LBVHSortOrder( bvhvec3 extents )
-{
-	uint32_t order = (0 << 0) | (1 << 2);
-	// Sort extents
-	if (extents.x < extents.y)
-	{
-		if (extents.y < extents.z) // z y x
-		{
-			tinybvh_swap( extents[0], extents[2] );
-			order = (2 << 0) | (1 << 2);
-		}
-		else if (extents.x < extents.z) // y z x
-		{
-			tinybvh_swap( extents[0], extents[1] ); // y x z
-			tinybvh_swap( extents[1], extents[2] ); // y z x
-			order = (2 << 0) | (0 << 2);
-		}
-		else // y x z
-		{
-			tinybvh_swap( extents[0], extents[1] );
-			order = (1 << 0) | (0 << 2);
-		}
-	}
-	else
-	{
-		if (extents.x < extents.z) // z x y
-		{
-			tinybvh_swap( extents[0], extents[1] ); // y x z
-			tinybvh_swap( extents[0], extents[2] ); // z x y
-			order = (1 << 0) | (2 << 2);
-		}
-		else if (extents.y < extents.z) // x z y
-		{
-			tinybvh_swap( extents[1], extents[2] );
-			order = (0 << 0) | (2 << 2);
-		}
-		// other case is xyz, but extents is already in that order
-	}
-	return order;
-}
-
-#endif
-
 // BVHBase implementation
 // ----------------------------------------------------------------------------
 
@@ -2236,12 +2059,6 @@ void BVH::Build( const bvhvec4slice& vertices, const uint32_t* indices, uint32_t
 		PrepareBuild( vertices, indices, prims );
 		BuildFullSweep();
 	}
-#ifdef ENABLE_LBVH_CODE
-	else if (settings.useLBVH) // LBVH builder requested
-	{
-		BuildLBVH( vertices, indices, prims );
-	}
-#endif
 #ifdef BVH_USEAVX
 	else if (settings.useSIMDifavailable) // No preference: use fast AVX builder
 	{
@@ -2269,7 +2086,7 @@ void BVH::BuildAABB( const bvhvec4* aabbs, const uint32_t aabbCount )
 		AlignedFree( fragment );
 		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
 		allocatedNodes = spaceNeeded;
-		memset( &bvhNode[1], 0, 32 );	// node 1 remains unused, for cache line alignment.
+		memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // node 1 remains unused, for cache line alignment.
 		primIdx = (uint32_t*)AlignedAlloc( aabbCount * sizeof( uint32_t ) );
 		fragment = (Fragment*)AlignedAlloc( aabbCount * sizeof( Fragment ) );
 	}
@@ -2301,7 +2118,7 @@ void BVH::Build( void (*customGetAABB)(const uint32_t, bvhvec3&, bvhvec3&, void*
 		AlignedFree( fragment );
 		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
 		allocatedNodes = spaceNeeded;
-		memset( &bvhNode[1], 0, 32 );	// node 1 remains unused, for cache line alignment.
+		memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // node 1 remains unused, for cache line alignment.
 		primIdx = (uint32_t*)AlignedAlloc( primCount * sizeof( uint32_t ) );
 		fragment = (Fragment*)AlignedAlloc( primCount * sizeof( Fragment ) );
 	}
@@ -2333,7 +2150,7 @@ void BVH::Build( BLASInstance* instances, const uint32_t instCount, BVHBase** bl
 		AlignedFree( fragment );
 		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
 		allocatedNodes = spaceNeeded;
-		memset( &bvhNode[1], 0, 32 );	// node 1 remains unused, for cache line alignment.
+		memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // node 1 remains unused, for cache line alignment.
 		primIdx = (uint32_t*)AlignedAlloc( instCount * sizeof( uint32_t ) );
 		fragment = (Fragment*)AlignedAlloc( instCount * sizeof( Fragment ) );
 	}
@@ -2359,23 +2176,27 @@ void BVH::BuildQuick( const bvhvec4* v, const uint32_t p ) { BuildQuick( bvhvec4
 void BVH::BuildQuick( const bvhvec4slice& vertices )
 {
 	// Basic single-function BVH builder, using mid-point splits.
-	BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH::BuildQuick( .. ), primCount == 0." );
+	BVH_FATAL_ERROR_IF( vertices.count < 3, "BVH::BuildQuick( .. ), primCount == 0." );
 	// allocate on first build
 	const uint32_t primCount = vertices.count / 3;
 	const uint32_t spaceNeeded = primCount * 2; // upper limit
-	if (allocatedNodes < spaceNeeded)
+	// a rebuild is unsafe once the tree has been converted, whether or not we reallocate.
+	BVH_FATAL_ERROR_IF( allocatedNodes > 0 && !rebuildable, "BVH::BuildQuick( .. ), bvh not rebuildable." );
+	// (re)allocate if the node pool is too small, or if the scratch buffers are absent.
+	if (allocatedNodes < spaceNeeded || primIdx == 0 || fragment == 0)
 	{
 		AlignedFree( bvhNode );
 		AlignedFree( primIdx );
 		AlignedFree( fragment );
 		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
 		allocatedNodes = spaceNeeded;
-		memset( &bvhNode[1], 0, 32 );	// node 1 remains unused, for cache line alignment.
+		memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // node 1 remains unused, for cache line alignment.
 		primIdx = (uint32_t*)AlignedAlloc( primCount * sizeof( uint32_t ) );
 		fragment = (Fragment*)AlignedAlloc( primCount * sizeof( Fragment ) );
 	}
-	else BVH_FATAL_ERROR_IF( !rebuildable, "BVH::BuildQuick( .. ), bvh not rebuildable." );
 	verts = vertices; // note: we're not copying this data; don't delete.
+	vertIdx = 0, bvh_over_indices = false, bvh_over_aabbs = false;
+	instList = 0, blasList = 0, blasCount = 0;
 	idxCount = triCount = primCount, newNodePtr = 2;
 	// assign all triangles to the root node
 	BVHNode& root = bvhNode[0];
@@ -2384,6 +2205,7 @@ void BVH::BuildQuick( const bvhvec4slice& vertices )
 	for (uint32_t i = 0; i < triCount; i++)
 		fragment[i].bmin = tinybvh_min( tinybvh_min( verts[i * 3], verts[i * 3 + 1] ), verts[i * 3 + 2] ),
 		fragment[i].bmax = tinybvh_max( tinybvh_max( verts[i * 3], verts[i * 3 + 1] ), verts[i * 3 + 2] ),
+		fragment[i].primIdx = i, fragment[i].clipped = 0,
 		root.aabbMin = tinybvh_min( root.aabbMin, fragment[i].bmin ),
 		root.aabbMax = tinybvh_max( root.aabbMax, fragment[i].bmax ), primIdx[i] = i;
 	// subdivide recursively
@@ -2925,300 +2747,6 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 	}
 }
 
-#ifdef ENABLE_LBVH_CODE
-
-// LBVH implementation - by Sietze Riemersma (AMD)
-// ----------------------------------------------------------------------------
-// https://github.com/GPUOpen-Drivers/gpurt/blob/dev/src/shaders/MortonCodes.hlsl
-// Copyright (c) Advanced Micro Devices, Inc. All Rights Reserved.
-// For morton code functions based on libmorton: MIT License - Copyright(c) 2016 Jeroen Baert
-// For 32 bit morton code functions based on inkblot-sdnbhd
-// https://github.com/inkblot-sdnbhd/Morton-Z-Code-C-library/blob/master/MZC2D32.h
-// The MIT License(MIT) - Copyright(c) 2015 Inkblot Sdn.Bhd.
-
-void BVH::BuildLBVH( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount )
-{
-	BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH_LBVH::Build( .. ), primCount == 0." );
-	// allocate on first build
-	if (indices) triCount = primCount; else triCount = vertices.count / 3;
-	const uint32_t spaceNeeded = triCount * 2; // upper limit
-	if (allocatedNodes < spaceNeeded)
-	{
-		AlignedFree( bvhNode );
-		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
-		AlignedFree( primIdx );
-		// we do not need a primIdx array right now, created in conversion
-		allocatedNodes = spaceNeeded;
-		// leaf nodes take half the nodes
-		leafNodes = &bvhNode[triCount - 1];
-		// allocate scratchpad
-		AlignedFree( scratchPad );
-		scratchPad = (uint32_t*)AlignedAlloc( triCount * 4 * sizeof( uint32_t ) );
-	}
-	else BVH_FATAL_ERROR_IF( !rebuildable, "BVH_LBVH::Build( .. ), bvh not rebuildable." );
-	verts = vertices; // note: we're not copying this data; don't delete.
-	vertIdx = (uint32_t*)indices;
-	idxCount = triCount;
-	numLeafNodes = triCount;
-	numInternalNodes = triCount - 1;
-	// scene bounds
-	aabbMin = bvhvec3( BVH_FAR ), aabbMax = bvhvec3( -BVH_FAR );
-	BVHNode nullBox;
-	nullBox.aabbMin = bvhvec3( BVH_FAR ), nullBox.aabbMax = bvhvec3( -BVH_FAR );
-	nullBox.leftFirst = nullBox.right = 0;
-	// init all nodes to invalid
-	for (uint32_t i = 0; i < numInternalNodes; i++) bvhNode[i] = nullBox;
-	if (indices)
-	{
-		// initialize primitive nodes
-		for (uint32_t i = 0; i < triCount; i++)
-		{
-			const int i0 = indices[i * 3 + 0], i1 = indices[i * 3 + 1], i2 = indices[i * 3 + 2];
-			const bvhvec3 v0 = verts[i0], v1 = verts[i1], v2 = verts[i2];
-			const bvhvec3 min = tinybvh_min( tinybvh_min( v0, v1 ), v2 );
-			const bvhvec3 max = tinybvh_max( tinybvh_max( v0, v1 ), v2 );
-			leafNodes[i].aabbMin = min, leafNodes[i].aabbMax = max, leafNodes[i].leftFirst = i;
-			aabbMin = tinybvh_min( aabbMin, min ), aabbMax = tinybvh_max( aabbMax, max );
-		}
-	}
-	else
-	{
-		// initialize primitive nodes
-		for (uint32_t i = 0; i < triCount; i++)
-		{
-			const bvhvec3 v0 = verts[i * 3 + 0], v1 = verts[i * 3 + 1], v2 = verts[i * 3 + 2];
-			const bvhvec3 min = tinybvh_min( tinybvh_min( v0, v1 ), v2 );
-			const bvhvec3 max = tinybvh_max( tinybvh_max( v0, v1 ), v2 );
-			leafNodes[i].aabbMin = min, leafNodes[i].aabbMax = max, leafNodes[i].leftFirst = i;
-			aabbMin = tinybvh_min( aabbMin, min ), aabbMax = tinybvh_max( aabbMax, max );
-		}
-	}
-	// Sort generates MC, allowing one pass to be skipped for LBVHRadixSort
-	// We select sort based on num prims, merge sort is slightly faster
-	// for lower prim counts as radixsort has to compute the radix  multiple times.
-	if (triCount <= 3200) LBVHStdSort(); else LBVHRadixSort();
-	// reuse swap space array
-	uint32_t* mortonCode = &scratchPad[0];
-	uint32_t* primIds = &scratchPad[1 * triCount];
-	uint32_t* parentRange = &scratchPad[2 * triCount];
-	uint32_t* triCountArray = &scratchPad[3 * triCount];
-	memset( parentRange, 0xFFFFFFFFU, triCount * sizeof( uint32_t ) );
-	uint32_t rootNodeIndex = 0;
-	// After processing all prims, we will have succesfully built the tree
-	for (uint32_t i = 0; i < triCount; i++)
-	{
-		// primIds hods sorted primArray;
-		uint32_t prim = primIds[i];
-		uint32_t left = prim;
-		uint32_t right = prim;
-		// actual node index of the primitive
-		uint32_t currentNode = numInternalNodes + i;
-		bvhvec3 bmin = bvhNode[currentNode].aabbMin;
-		bvhvec3 bmax = bvhNode[currentNode].aabbMax;
-		while (1)
-		{
-			// choose parent node
-			uint32_t parentOtherRange = 0;
-			uint32_t parentNodeIndex = 0xFFFFFFFFU;
-			bool useRight = true;
-			if (left != 0)
-			{
-				if (right == numInternalNodes) useRight = false; else
-				{
-					useRight = (__bfind( mortonCode[right] ^ mortonCode[right + 1] ) > __bfind( mortonCode[left - 1] ^ mortonCode[left] ));
-				}
-			}
-			parentNodeIndex = useRight ? right : left - 1;
-			if (parentNodeIndex == numInternalNodes) rootNodeIndex = currentNode;
-			// set value in parent
-			if (parentNodeIndex != numInternalNodes)
-			{
-				// 8 dwords in raw data array
-				BVHNode& parentNode = bvhNode[parentNodeIndex];
-				// Update our current node for moving upwards
-				bmin = tinybvh_min( parentNode.aabbMin, bmin );
-				bmax = tinybvh_max( parentNode.aabbMax, bmax );
-				parentNode.aabbMin = bmin, parentNode.aabbMax = bmax;
-				if (useRight) parentNode.leftFirst = currentNode;
-				else parentNode.right = currentNode;
-			}
-			const uint32_t previousRange = parentRange[parentNodeIndex];
-			const bool canMoveUp = previousRange != 0xFFFFFFFFU;
-			if (canMoveUp)
-			{
-				if (useRight) right = previousRange;
-				else left = previousRange;
-			}
-			else
-			{
-				const uint32_t range = useRight ? left : right;
-				parentRange[parentNodeIndex] = useRight ? left : right;
-			}
-			if (canMoveUp) currentNode = parentNodeIndex; else break;
-		}
-	}
-	// all done.
-	refittable = true; // not using spatial splits: can refit this BVH
-	may_have_holes = false; // the reference builder produces a continuous list of nodes
-	// LBVH completed; turn it into a valid BVH
-	ReorderLBVH( rootNodeIndex );
-	// At this point we should at least have a proper BVH, ready to trace.
-	// TODO: Optimize, combine leafs using SAH
-}
-
-void BVH::ReorderLBVH( uint32_t rootNodeIndex )
-{
-	BVHNode* tmpNodes = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * allocatedNodes );
-	// Now create primIdx
-	uint32_t* primIdx = (uint32_t*)AlignedAlloc( sizeof( uint32_t ) * idxCount );
-	// copy root node
-	tmpNodes[0] = bvhNode[rootNodeIndex];
-	memset( tmpNodes + sizeof( BVHNode ), 0, sizeof( BVHNode ) ); // clear node 1
-	newNodePtr = 2; // skip index 1 for alignment (I see you Jacco)  ;)
-	uint32_t newIdxPtr = 0, nodeIdx = 0, stack[16384], stackPtr = 0;
-	const uint32_t leafMarker = 0x80000000U;
-	const uint32_t nodeIdxMask = ~leafMarker;
-	while (1)
-	{
-		const bool isLeaf = (nodeIdx & leafMarker) > 0;
-		BVHNode& node = tmpNodes[nodeIdx & nodeIdxMask];
-		if (isLeaf)
-		{
-			primIdx[newIdxPtr++] = node.leftFirst;
-			node.triCount = 1; // count is always 1 for LBVH
-			if (!stackPtr) break; else nodeIdx = stack[--stackPtr];
-		}
-		else
-		{
-			const BVHNode& left = bvhNode[node.leftFirst];
-			const BVHNode& right = bvhNode[node.right];
-			const uint32_t leftIsLeafMarker = node.leftFirst >= triCount - 1 ? leafMarker : 0U;
-			const uint32_t rightIsLeafMarker = node.right >= triCount - 1 ? leafMarker : 0U;
-			tmpNodes[newNodePtr] = left, tmpNodes[newNodePtr + 1] = right;
-			const uint32_t todo = (newNodePtr + 1) | rightIsLeafMarker;
-			node.leftFirst = newNodePtr, node.triCount = 0;
-			nodeIdx = (newNodePtr | leftIsLeafMarker), newNodePtr += 2, stack[stackPtr++] = todo;
-		}
-	}
-	AlignedFree( bvhNode );
-	usedNodes = newNodePtr, bvhNode = tmpNodes;
-}
-
-void BVH::StdSort()
-{
-	bvhvec3 extents = aabbMax - aabbMin;
-	uint32_t order = LBVHSortOrder( extents );
-	// Fetch the prebits from different axes
-	// This calculation computes the number of bits required BEFORE x becomes smaller than z to prevent resorting
-	const uint32_t prebitsXY = (uint32_t)tinybvh_min( log2( extents.x / extents.y ), 32.0f );
-	const uint32_t prebitsXZ = (uint32_t)tinybvh_min( log2( extents.x / extents.z ), 32.0f );
-	const uint32_t prebitsYZ = (uint32_t)tinybvh_min( log2( extents.y / extents.z ), 32.0f );
-	bvhuint3 axisCodes = 0;
-	bvhuint3 sortedAxisCodes = 0;
-	// sort array on swap space
-	uint32_t* mortonCode = &scratchPad[0];
-	uint32_t* primIds = &scratchPad[1 * triCount];
-	uint64_t* sortArray = (uint64_t*)&scratchPad[2 * triCount];
-	for (uint32_t prim = 0; prim < triCount; prim++)
-	{
-		const bvhvec3 middle = (leafNodes[prim].aabbMax + leafNodes[prim].aabbMin) * 0.5f;
-		const bvhvec3 unitPoint = tinybvh_min( ((middle - aabbMin) / extents), 0.9999994f ); // cap at just below 1 to get 0xFFFFFFFF for max points
-		axisCodes[(order & 0x3)] = (uint32_t)(unitPoint.x * 0xFFFFFFFFU);
-		axisCodes[((order >> 2U) & 0x3)] = (uint32_t)(unitPoint.y * 0xFFFFFFFFU);
-		axisCodes[((~(order ^ (order >> 2U))) & 0x3)] = (uint32_t)(unitPoint.z * 0xFFFFFFFFU);
-		const uint32_t mc = FastVariableBitMorton32( axisCodes, prebitsXY, prebitsXZ, prebitsYZ );
-		sortArray[prim] = (((uint64_t)mc) << 32ULL) | prim;
-	}
-	std::stable_sort( sortArray, &sortArray[triCount] );
-	for (uint32_t prim = 0; prim < triCount; prim++)
-	{
-		uint64_t value = sortArray[prim];
-		mortonCode[prim] = (uint32_t)(value >> 32ULL);
-		primIds[prim] = (uint32_t)value;
-	}
-}
-
-void BVH::RadixSort()
-{
-	uint32_t* mortonCode = &scratchPad[0];
-	uint32_t* primIdx = &scratchPad[1 * triCount];
-	uint32_t* mortonCodeSwap = &scratchPad[2 * triCount];
-	uint32_t* primIdxSwap = &scratchPad[3 * triCount];
-	constexpr uint32_t mortonBits = 32;
-	constexpr uint32_t radixBitsPerPass = 8;
-	constexpr uint32_t radixPassMask = (1U << radixBitsPerPass) - 1U;
-	constexpr uint32_t radixSortPasses = 1 + ((32 - 1) / radixBitsPerPass);
-	constexpr uint32_t radixBins = 1 << radixBitsPerPass;
-	uint32_t radi[radixBins];
-	uint32_t radiSwap[radixBins];
-	// Reset array to 0
-	memset( &radi[0], 0, radixBins * sizeof( uint32_t ) );
-	bvhvec3 extents = aabbMax - aabbMin;
-	uint32_t order = LBVHSortOrder( extents );
-	// Fetch the prebits from different axes
-	// This calculation computes the number of bits required BEFORE x becomes smaller than z to prevent resorting
-	const uint32_t prebitsXY = (uint32_t)tinybvh_min( log2( extents.x / extents.y ), 32.0f );
-	const uint32_t prebitsXZ = (uint32_t)tinybvh_min( log2( extents.x / extents.z ), 32.0f );
-	const uint32_t prebitsYZ = (uint32_t)tinybvh_min( log2( extents.y / extents.z ), 32.0f );
-	bvhuint3 axisCodes = 0;
-	bvhuint3 sortedAxisCodes = 0;
-	for (uint32_t prim = 0; prim < triCount; prim++)
-	{
-		const bvhvec3 middle = (leafNodes[prim].aabbMax + leafNodes[prim].aabbMin) * 0.5f;
-		const bvhvec3 unitPoint = tinybvh_min( ((middle - aabbMin) / extents), 0.9999994f ); // cap at just below 1 to get 0xFFFFFFFF for max points
-		axisCodes[(order & 0x3)] = (uint32_t)(unitPoint.x * 0xFFFFFFFFU);
-		axisCodes[((order >> 2U) & 0x3)] = (uint32_t)(unitPoint.y * 0xFFFFFFFFU);
-		axisCodes[((~(order ^ (order >> 2U))) & 0x3)] = (uint32_t)(unitPoint.z * 0xFFFFFFFFU);
-		const uint32_t mc = FastVariableBitMorton32( axisCodes, prebitsXY, prebitsXZ, prebitsYZ );
-		primIdx[prim] = prim;
-		mortonCode[prim] = mc;
-		radi[mc & radixPassMask]++;
-	}
-	uint32_t radixPrefixSum;
-	uint32_t* srcPrimIdx = &primIdx[0];
-	uint32_t* dstPrimIdx = &primIdxSwap[0];
-	uint32_t* srcMortonCode = &mortonCode[0];
-	uint32_t* dstMortonCode = &mortonCodeSwap[0];
-	uint32_t* srcRadi = &radi[0];
-	uint32_t* dstRadi = &radiSwap[0];
-	for (uint32_t pass = 0; pass < radixSortPasses; pass++)
-	{
-		// Reset other radi for new iteration
-		memset( &dstRadi[0], 0, radixBins * sizeof( uint32_t ) );
-		// Prefix sum
-		radixPrefixSum = 0;
-		for (uint32_t i = 0; i < radixBins; i++)
-		{
-			const uint32_t value = srcRadi[i];
-			srcRadi[i] = radixPrefixSum;
-			radixPrefixSum += value;
-		}
-		// Scatter
-		for (uint32_t i = 0; i < triCount; i++)
-		{
-			const uint32_t mc = srcMortonCode[i];
-			const uint32_t primID = srcPrimIdx[i];
-			const uint32_t bin = (mc >> (radixBitsPerPass * pass)) & radixPassMask;
-			const uint32_t nextBin = (mc >> (radixBitsPerPass * (pass + 1))) & radixPassMask;
-			const uint32_t index = srcRadi[bin]++; // Moves the int forward for other prims
-			dstRadi[nextBin]++;
-			dstMortonCode[index] = mc;
-			dstPrimIdx[index] = primID;
-		}
-		tinybvh_swap( srcPrimIdx, dstPrimIdx );
-		tinybvh_swap( srcMortonCode, dstMortonCode );
-		tinybvh_swap( srcRadi, dstRadi );
-	}
-	// uneven, need to copy the swap to result
-	if (radixSortPasses & 1U)
-	{
-		memcpy( primIdx, primIdxSwap, triCount * sizeof( uint32_t ) );
-		memcpy( mortonCode, mortonCodeSwap, triCount * sizeof( uint32_t ) );
-	}
-}
-
-#endif
-
 // SBVH builder. This builder introduces spatial splits during construction,
 // improving tree quality at the expense of construction time.
 void BVH::BuildHQ( const bvhvec4* v, const uint32_t p ) { BuildHQ( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) } ); }
@@ -3231,6 +2759,8 @@ void BVH::PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices,
 	uint32_t primCount = prims > 0 ? prims : vertices.count / 3;
 	const uint32_t slack = primCount >> 1; // for split prims
 	const uint32_t spaceNeeded = primCount * 3;
+	// a rebuild is unsafe once the tree has been converted, whether or not we reallocate.
+	BVH_FATAL_ERROR_IF( allocatedNodes > 0 && !rebuildable, "BVH::PrepareHQBuild( .. ), bvh not rebuildable." );
 	// allocate memory on first build
 	if (allocatedNodes < spaceNeeded)
 	{
@@ -3239,11 +2769,10 @@ void BVH::PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices,
 		AlignedFree( fragment );
 		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
 		allocatedNodes = spaceNeeded;
-		memset( &bvhNode[1], 0, 32 );	// node 1 remains unused, for cache line alignment.
+		memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // node 1 remains unused, for cache line alignment.
 		primIdx = (uint32_t*)AlignedAlloc( (primCount + slack) * sizeof( uint32_t ) );
 		fragment = (Fragment*)AlignedAlloc( (primCount + slack) * sizeof( Fragment ) );
 	}
-	else BVH_FATAL_ERROR_IF( !rebuildable, "BVH::PrepareHQBuild( .. ), bvh not rebuildable." );
 	verts = vertices; // note: we're not copying this data; don't delete.
 	idxCount = primCount + slack, triCount = primCount, vertIdx = (uint32_t*)indices;
 	// prepare fragments
@@ -4854,7 +4383,8 @@ bool VoxelSet::Setup3DDDA( const Ray& ray, const bvhvec3& Dsign, DDAState& state
 	}
 	// setup amanatides & woo - assume object size is 1x1x1, from (0,0,0) to (1,1,1)
 	static const float cellSize = 1.0f / topGridDim;
-	const bvhvec3 nudge( (float)step.x * cellEps, (float)step.y * cellEps, (float)step.z * cellEps );
+	const float eps = NudgeScale( ray.O ) * (1.0f / (brickDim * groupDim));	// voxel units -> top-cell units
+	const bvhvec3 nudge( (float)step.x * eps, (float)step.y * eps, (float)step.z * eps );
 	const bvhvec3 posInGrid = (ray.O + ray.D * t) * (float)topGridDim + nudge;
 	const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * cellSize;
 	const bvhint3 P(
@@ -4889,7 +4419,8 @@ int32_t VoxelSet::Intersect( Ray& ray ) const
 	const uint32_t zsign = *(uint32_t*)&ray.D.z >> 31;
 	const bvhvec3 Dsign = bvhvec3( (float)xsign, (float)ysign, (float)zsign );
 	const bvhint3 step( 1 - (int)xsign * 2, 1 - (int)ysign * 2, 1 - (int)zsign * 2 );
-	const bvhvec3 nudge( (float)step.x * cellEps, (float)step.y * cellEps, (float)step.z * cellEps );
+	const float eps = NudgeScale( ray.O );	// voxel units; scaled down per level below
+	const bvhvec3 nudge( (float)step.x * eps, (float)step.y * eps, (float)step.z * eps );
 	bvhvec3 tdelta;
 	float t = 0;
 	if (!Setup3DDDA( ray, Dsign, l1_, step, tdelta, t )) return 0;
@@ -4905,7 +4436,7 @@ int32_t VoxelSet::Intersect( Ray& ray ) const
 		if (cell)
 		{
 			// setup midlevel traversal
-			const bvhvec3 posInGrid = (ray.O + t * ray.D) * (float)gridDim + nudge;
+			const bvhvec3 posInGrid = (ray.O + t * ray.D) * (float)gridDim + nudge * (1.0f / brickDim);
 			const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / gridDim);
 			l2_.X = tinybvh_clamp( (int)posInGrid.x, l1_.X * groupDim, l1_.X * groupDim + (groupDim - 1) );
 			l2_.Y = tinybvh_clamp( (int)posInGrid.y, l1_.Y * groupDim, l1_.Y * groupDim + (groupDim - 1) );
@@ -5043,7 +4574,8 @@ bool VoxelSet::IsOccluded( const Ray& ray ) const
 	const uint32_t zsign = *(uint32_t*)&ray.D.z >> 31;
 	const bvhvec3 Dsign = bvhvec3( (float)xsign, (float)ysign, (float)zsign );
 	const bvhint3 step( 1 - (int)xsign * 2, 1 - (int)ysign * 2, 1 - (int)zsign * 2 );
-	const bvhvec3 nudge( (float)step.x * cellEps, (float)step.y * cellEps, (float)step.z * cellEps );
+	const float eps = NudgeScale( ray.O );	// voxel units; scaled down per level below
+	const bvhvec3 nudge( (float)step.x * eps, (float)step.y * eps, (float)step.z * eps );
 	bvhvec3 tdelta;
 	float t = 0;
 	if (!Setup3DDDA( ray, Dsign, l1_, step, tdelta, t )) return false;
@@ -5058,7 +4590,7 @@ bool VoxelSet::IsOccluded( const Ray& ray ) const
 		if (cell)
 		{
 			// setup midlevel traversal
-			const bvhvec3 posInGrid = (ray.O + t * ray.D) * (float)gridDim + nudge;
+			const bvhvec3 posInGrid = (ray.O + t * ray.D) * (float)gridDim + nudge * (1.0f / brickDim);
 			const bvhvec3 gridPlanes = (bvhvec3( ceilf( posInGrid.x ), ceilf( posInGrid.y ), ceilf( posInGrid.z ) ) - Dsign) * (1.0f / gridDim);
 			l2_.X = tinybvh_clamp( (int)posInGrid.x, l1_.X * groupDim, l1_.X * groupDim + (groupDim - 1) );
 			l2_.Y = tinybvh_clamp( (int)posInGrid.y, l1_.Y * groupDim, l1_.Y * groupDim + (groupDim - 1) );
@@ -7582,6 +7114,8 @@ void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices
 	const uint32_t primCount = prims > 0 ? prims : vertices.count / 3;
 	const uint32_t splitBudget = settings.usePresplitting ? ((int)(primCount * settings.presplitFactor)) : 0;
 	const uint32_t spaceNeeded = (primCount + splitBudget) * 2; // upper limit
+	// a rebuild is unsafe once the tree has been converted, whether or not we reallocate.
+	BVH_FATAL_ERROR_IF( allocatedNodes > 0 && !rebuildable, "BVH::PrepareAVXBuild( .. ), bvh not rebuildable." );
 	if (allocatedNodes < spaceNeeded)
 	{
 		AlignedFree( bvhNode );
@@ -7590,10 +7124,9 @@ void BVH::PrepareAVXBuild( const bvhvec4slice& vertices, const uint32_t* indices
 		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
 		allocatedNodes = spaceNeeded;
 		primIdx = (uint32_t*)AlignedAlloc( (primCount + splitBudget) * sizeof( uint32_t ) );
-		memset( &bvhNode[1], 0, 32 ); // avoid crash in refit.
+		memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // avoid crash in refit.
 		fragment = (Fragment*)AlignedAlloc( (primCount + splitBudget) * sizeof( Fragment ) );
 	}
-	else BVH_FATAL_ERROR_IF( !rebuildable, "BVH::PrepareAVXBuild( .. ), bvh not rebuildable." );
 	triCount = primCount;
 	verts = vertices; // note: we're not copying this data; don't delete.
 	vertIdx = (uint32_t*)indices;
@@ -8771,6 +8304,8 @@ void BVH::PrepareNEONBuild( const bvhvec4slice& vertices, const uint32_t* indice
 	// reset node pool
 	uint32_t primCount = prims > 0 ? prims : vertices.count / 3;
 	const uint32_t spaceNeeded = primCount * 2;
+	// a rebuild is unsafe once the tree has been converted, whether or not we reallocate.
+	BVH_FATAL_ERROR_IF( allocatedNodes > 0 && !rebuildable, "BVH::BuildAVX( .. ), bvh not rebuildable." );
 	if (allocatedNodes < spaceNeeded)
 	{
 		AlignedFree( bvhNode );
@@ -8779,10 +8314,9 @@ void BVH::PrepareNEONBuild( const bvhvec4slice& vertices, const uint32_t* indice
 		primIdx = (uint32_t*)AlignedAlloc( primCount * sizeof( uint32_t ) );
 		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
 		allocatedNodes = spaceNeeded;
-		memset( &bvhNode[1], 0, 32 ); // avoid crash in refit.
+		memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // avoid crash in refit.
 		fragment = (Fragment*)AlignedAlloc( primCount * sizeof( Fragment ) );
 	}
-	else BVH_FATAL_ERROR_IF( !rebuildable, "BVH::BuildAVX( .. ), bvh not rebuildable." );
 	verts = vertices; // note: we're not copying this data; don't delete.
 	vertIdx = (uint32_t*)indices;
 	triCount = idxCount = primCount;
@@ -10248,12 +9782,9 @@ public:
 	~JobSystem()
 	{
 		if (res.numThreads == 0) return;
-		res.alive.store( false );
-		bool wake_loop = true;
-		std::thread waker( [&] { while (wake_loop) res.sleepingCondition.notify_all(); } );
-		for (auto& thread : res.threads) thread.join();
-		wake_loop = false;
-		waker.join();
+		{ std::scoped_lock lock( res.sleepingMutex ); res.alive.store( false ); }
+		res.sleepingCondition.notify_all();
+		for (auto& thread : res.threads) if (thread.joinable()) thread.join();
 		res.jobQueue.reset();
 		res.threads.clear();
 		res.numThreads = 0;
@@ -10311,10 +9842,13 @@ public:
 		{
 			std::thread& worker = res.threads.emplace_back( [&c, threadID, &r]
 				{
-					while (r.alive.load())
+					for (;;)
 					{
 						r.work( c, threadID );
 						std::unique_lock<std::mutex> lock( r.sleepingMutex );
+						// checked under sleepingMutex, so we can never park after ~JobSystem
+						// cleared the flag and sent its notify. See ~JobSystem.
+						if (!r.alive.load()) break;
 						r.sleepingCondition.wait( lock );
 					}
 				} );
@@ -10377,14 +9911,40 @@ struct PoolPair
 	}
 };
 
-// One pair per host thread, owned by that thread and freed (its threads joined) at thread exit.
+// One pair per host thread, owned by that thread and freed (its threads joined) when
+// that thread exits. For the main thread 'thread exit' means process exit, i.e. this
+// runs as an exit-time destructor; ~JobSystem above is written to be safe there.
+// Worker threads of a pool never own a pair - they adopt their host's, see below.
 static thread_local PoolPair* tinybvh_tl_pair = nullptr;
+
+// Holds the pair this thread owns. Releasing clears tinybvh_tl_pair as well, so a
+// later call can never be handed a pointer to an already-destroyed pool.
+struct PoolPairOwner
+{
+	PoolPair* pair = nullptr;
+	PoolPair* acquire() { if (!pair) pair = new PoolPair(); return pair; }
+	void release()
+	{
+		if (!pair) return; // this thread never owned a pool; nothing to do
+		PoolPair* p = pair;
+		pair = nullptr;
+		if (tinybvh_tl_pair == p) tinybvh_tl_pair = nullptr;
+		delete p; // joins the worker threads of both job systems
+	}
+	~PoolPairOwner() { release(); }
+};
+
+static PoolPairOwner& tinybvh_pool_owner()
+{
+	static thread_local PoolPairOwner owner;
+	return owner;
+}
 static PoolPair* tinybvh_pool_pair()
 {
-	static thread_local std::unique_ptr<PoolPair> owned;
-	if (!tinybvh_tl_pair) tinybvh_tl_pair = (owned = std::make_unique<PoolPair>()).get();
+	if (!tinybvh_tl_pair) tinybvh_tl_pair = tinybvh_pool_owner().acquire();
 	return tinybvh_tl_pair;
 }
+void tinybvh_shutdown_builtin_pool() { tinybvh_pool_owner().release(); }
 
 // Spawned tasks run [pair][fn] ahead of the payload: the worker adopts 'pair' so its
 // nested spawns reuse this host's pools. Keeps the pool/TLS logic out of JobSystem.
