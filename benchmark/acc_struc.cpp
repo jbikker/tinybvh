@@ -32,7 +32,7 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		bvh->settings.useFullSweep = false;
 		bvh->settings.useSIMDifavailable = false;
 		if (flags & BuildFlags::FULLSWEEP) bvh->settings.useFullSweep = true;
-		if (flags & BuildFlags::LBVH) bvh->settings.useLBVH = true;
+		// if (flags & BuildFlags::LBVH) bvh->settings.useLBVH = true;
 		if (flags & BuildFlags::PRESPLIT) bvh->settings.usePresplitting = true;
 		if (flags & BuildFlags::AVXBUILD) bvh->settings.useSIMDifavailable = true;
 		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
