@@ -15,8 +15,8 @@ VoxelSet voxels;
 
 // setup view pyramid for a pinhole camera:
 // eye, p1 (top-left), p2 (top-right) and p3 (bottom-left)
-static bvhvec3 eye( 0.15f, 0.354f, -0.105f ), p1, p2, p3;
-static bvhvec3 view = tinybvh_normalize( bvhvec3( 0.350f, -0.402f, 0.717f ) );
+bvhvec3 eye( 0.15f, 0.354f, -0.105f ), p1, p2, p3;
+bvhvec3 view = tinybvh_normalize( bvhvec3( 0.350f, -0.402f, 0.717f ) );
 
 void Init()
 {
@@ -44,14 +44,14 @@ void Init()
 void UpdateCamera( float delta_time_s, fenster& f )
 {
 	static bvhvec3 right, up;
-	float spd = 10.0f * delta_time_s;
+	float spd = delta_time_s;
 	if (f.keys['A'] || f.keys['D']) eye += right * (f.keys['D'] ? spd : -spd);
 	if (f.keys['W'] || f.keys['S']) eye += view * (f.keys['W'] ? spd : -spd);
-	if (f.keys['R'] || f.keys['F']) eye += up * 2.0f * (f.keys['R'] ? spd : -spd);
-	if (f.keys[20]) view = tinybvh_normalize( view + right * -0.1f * spd );
-	if (f.keys[19]) view = tinybvh_normalize( view + right * 0.1f * spd );
-	if (f.keys[17]) view = tinybvh_normalize( view + up * -0.1f * spd );
-	if (f.keys[18]) view = tinybvh_normalize( view + up * 0.1f * spd );
+	if (f.keys['R'] || f.keys['F']) eye += up * (f.keys['R'] ? spd : -spd);
+	if (f.keys[20]) view = tinybvh_normalize( view + right * -spd );
+	if (f.keys[19]) view = tinybvh_normalize( view + right * spd );
+	if (f.keys[17]) view = tinybvh_normalize( view + up * -spd );
+	if (f.keys[18]) view = tinybvh_normalize( view + up * spd );
 	// recalculate right, up
 	right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), view ) ), up = 0.8f * tinybvh_cross( view, right );
 	bvhvec3 center = eye + 1.2f * view;
@@ -62,7 +62,6 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 {
 	// handle user input and update camera
 	UpdateCamera( delta_time_s, f );
-
 	// visualize result
 	const bvhvec3 L = tinybvh_normalize( bvhvec3( 1, 2, -3 ) );
 	for (int y = 0; y < SCRHEIGHT; y++) for (int x = 0; x < SCRWIDTH; x++)
