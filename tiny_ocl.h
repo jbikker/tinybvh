@@ -1,4 +1,4 @@
-/*
+﻿/*
 The MIT License (MIT)
 
 Copyright (c) 2024-2026, Jacco Bikker / Breda University of Applied Sciences.
@@ -22,6 +22,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+// Aug 29, '26: version 0.3.2 : Device query and teardown fixes.
 // Aug 29, '26: version 0.3.1 : Stability fixes; synced aligned alloc with tinybvh.
 // Jun 07, '26: version 0.3.0 : Upgraded to latest OpenCL version.
 // Mar 03, '25: version 0.2.0 : MacOS support, by wuyakuma.
@@ -186,7 +187,6 @@ public:
 	static cl_command_queue& GetQueue2() { return queue2; }
 	static cl_context& GetContext() { return context; }
 	static cl_device_id& GetDevice() { return device; }
-	static OpenCL ocl;
 	// run methods
 #if 1
 	void Run( cl_event* eventToWaitFor = 0, cl_event* eventToSet = 0 );
@@ -374,7 +374,6 @@ private:
 	char* sourceFile = 0;
 	Buffer* acqBuffer = 0;
 	cl_kernel kernel;
-	cl_mem vbo_cl;
 	cl_program program;
 	inline static cl_device_id device;
 	inline static cl_context context; // simplifies some things, but limits us to one device
@@ -681,6 +680,12 @@ void Buffer::CopyToDevice2( const bool blocking, cl_event* eventToSet, const siz
 {
 	if (size == 0) return;
 	cl_int error;
+	if (!hostBuffer)
+	{
+		hostBuffer = (unsigned*)OpenCL::GetInstance()->AlignedAlloc( size );
+		ownData = true;
+		aligned = true;
+	}
 	CHECKCL( error = clEnqueueWriteBuffer( Kernel::GetQueue2(), deviceBuffer, blocking ? CL_TRUE : CL_FALSE, 0, s == 0 ? size : s, hostBuffer, 0, 0, eventToSet ) );
 }
 
@@ -847,22 +852,31 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 	// handle errors
 	if (error == CL_SUCCESS)
 	{
+	#ifdef TINY_OCL_DUMP_BINARIES
 		// dump PTX via: https://forums.developer.nvidia.com/t/pre-compiling-opencl-kernels-tutorial/17089
 		// and: https://stackoverflow.com/questions/12868889/clgetprograminfo-cl-program-binary-sizes-incorrect-results
-		cl_uint devCount;
+		cl_uint devCount = 0;
 		CHECKCL( clGetProgramInfo( program, CL_PROGRAM_NUM_DEVICES, sizeof( cl_uint ), &devCount, NULL ) );
-		size_t* sizes = new size_t[devCount];
-		sizes[0] = 0;
-		size_t received;
-		CHECKCL( clGetProgramInfo( program, CL_PROGRAM_BINARY_SIZES /* wrong data... */, devCount * sizeof( size_t ), sizes, &received ) );
-		char** binaries = new char* [devCount];
-		for (unsigned i = 0; i < devCount; i++)
-			binaries[i] = new char[sizes[i] + 1];
-		CHECKCL( clGetProgramInfo( program, CL_PROGRAM_BINARIES, devCount * sizeof( size_t ), binaries, NULL ) );
-		FILE* f = fopen( "buildlog.txt", "wb" );
-		for (unsigned i = 0; i < devCount; i++)
-			fwrite( binaries[i], 1, sizes[i] + 1, f );
-		fclose( f );
+		if (devCount > 0)
+		{
+			size_t* sizes = new size_t[devCount]();
+			CHECKCL( clGetProgramInfo( program, CL_PROGRAM_BINARY_SIZES, devCount * sizeof( size_t ), sizes, NULL ) );
+			unsigned char** binaries = new unsigned char* [devCount]();
+			for (cl_uint i = 0; i < devCount; i++) binaries[i] = new unsigned char[sizes[i] + 1]();
+			// note: CL_PROGRAM_BINARIES receives an array of *pointers*.
+			CHECKCL( clGetProgramInfo( program, CL_PROGRAM_BINARIES, devCount * sizeof( unsigned char* ), binaries, NULL ) );
+			FILE* f = fopen( "binaries.bin", "wb" );
+			if (f) // may fail: we chdir'ed into the kernel folder, which can be read-only.
+			{
+				// note: sizes[i], not sizes[i] + 1; the driver fills exactly sizes[i] bytes.
+				for (cl_uint i = 0; i < devCount; i++) fwrite( binaries[i], 1, sizes[i], f );
+				fclose( f );
+			}
+			for (cl_uint i = 0; i < devCount; i++) delete[] binaries[i];
+			delete[] binaries;
+			delete[] sizes;
+		}
+	#endif
 	}
 	else
 	{
@@ -1002,9 +1016,10 @@ bool Kernel::InitCL()
 		{
 			char* extensions = (char*)malloc( extensionSize );
 			CHECKCL( error = clGetDeviceInfo( devices[i], CL_DEVICE_EXTENSIONS, extensionSize, extensions, &extensionSize ) );
-			string deviceList( extensions );
+			// pad with spaces so the first and last name in the list match too
+			string deviceList = " " + string( extensions ) + " ";
 			free( extensions );
-			string mustHave[] = {
+			const string mustHave[] = {
 #if defined(__APPLE__) && defined(__MACH__)
 				"cl_APPLE_gl_sharing",
 #else
@@ -1013,18 +1028,8 @@ bool Kernel::InitCL()
 				"cl_khr_global_int32_base_atomics"
 			};
 			bool hasAll = true;
-			for (int j = 0; j < 2; j++)
-			{
-				size_t o = 0, s = deviceList.find( ' ', o );
-				bool hasFeature = false;
-				while (s != deviceList.npos)
-				{
-					string subs = deviceList.substr( o, s - o );
-					if (strcmp( mustHave[j].c_str(), subs.c_str() ) == 0) hasFeature = true;
-					do { o = s + 1, s = deviceList.find( ' ', o ); } while (s == o);
-				}
-				if (!hasFeature) hasAll = false;
-			}
+			for (size_t j = 0; j < sizeof( mustHave ) / sizeof( mustHave[0] ); j++)
+				if (deviceList.find( " " + mustHave[j] + " " ) == string::npos) hasAll = false;
 			if (hasAll)
 			{
 				cl_context_properties props[] =
@@ -1053,15 +1058,15 @@ bool Kernel::InitCL()
 	// print device name
 	clGetDeviceInfo( devices[deviceUsed], CL_DEVICE_NAME, 1024, &device_string, NULL );
 	clGetDeviceInfo( devices[deviceUsed], CL_DEVICE_VERSION, 1024, &device_platform, NULL );
-	printf( "Device # %u, %s (%s)\n", deviceUsed, device_string, device_platform );
+	printf( "Device # %i, %s (%s)\n", deviceUsed, device_string, device_platform );
 	// print compute unit count
-	size_t computeUnits;
-	clGetDeviceInfo( devices[deviceUsed], CL_DEVICE_MAX_COMPUTE_UNITS, sizeof( size_t ), &computeUnits, NULL );
-	printf( "Compute units / SM count: %iKB\n", (int)computeUnits );
+	cl_uint computeUnits = 0;
+	clGetDeviceInfo( devices[deviceUsed], CL_DEVICE_MAX_COMPUTE_UNITS, sizeof( cl_uint ), &computeUnits, NULL );
+	printf( "Compute units / SM count: %u\n", computeUnits );
 	// print local memory size
-	size_t localMem;
-	clGetDeviceInfo( devices[deviceUsed], CL_DEVICE_LOCAL_MEM_SIZE, sizeof( size_t ), &localMem, NULL );
-	printf( "Local memory size: %iKB\n", (int)localMem >> 10 );
+	cl_ulong localMem = 0;
+	clGetDeviceInfo( devices[deviceUsed], CL_DEVICE_LOCAL_MEM_SIZE, sizeof( cl_ulong ), &localMem, NULL );
+	printf( "Local memory size: %uKB\n", (unsigned)(localMem >> 10) );
 	// digest device string
 	char* d = device_string;
 	for (int l = (int)strlen( d ), i = 0; i < l; i++) if (d[i] >= 'A' && d[i] <= 'Z') d[i] -= 'A' - 'a';
@@ -1179,9 +1184,21 @@ bool Kernel::InitCL()
 void Kernel::KillCL()
 {
 	if (!clStarted) return;
+	// release the cached programs
+	for (int s = (int)loadedKernels.size(), i = 0; i < s; i++) clReleaseProgram( loadedKernels[i]->program );
+	loadedKernels.clear();
 	clReleaseCommandQueue( queue2 );
 	clReleaseCommandQueue( queue );
 	clReleaseContext( context );
+	queue = 0, queue2 = 0, context = 0, device = 0;
+	delete[] log;
+	log = 0;
+	// reset detection state so a subsequent InitCL starts from scratch
+	isNVidia = isAMD = isIntel = isApple = isOther = false;
+	isAmpere = isTuring = isPascal = false;
+	isAda = isBlackwell = isRubin = isHopper = false;
+	candoInterop = false, vendorLines = 0;
+	clStarted = false;
 }
 
 // CheckCLStarted method
