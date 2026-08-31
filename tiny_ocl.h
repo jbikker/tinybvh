@@ -22,6 +22,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+// Aug 31, '26: version 0.3.4 : Dead code removal; include and version fixes.
+// Aug 31, '26: version 0.3.3 : Interop detection, buffer cleanup, leak fixes.
 // Aug 29, '26: version 0.3.2 : Device query and teardown fixes.
 // Aug 29, '26: version 0.3.1 : Stability fixes; synced aligned alloc with tinybvh.
 // Jun 07, '26: version 0.3.0 : Upgraded to latest OpenCL version.
@@ -42,13 +44,21 @@ THE SOFTWARE.
 #ifndef TINY_OCL_H_
 #define TINY_OCL_H_
 
-#define CL_TARGET_OPENCL_VERSION 310
+#ifndef CL_TARGET_OPENCL_VERSION
+// note: valid values are 100, 110, 120, 200, 210, 220 and 300.
+#define CL_TARGET_OPENCL_VERSION 300
+#endif
+#if CL_TARGET_OPENCL_VERSION < 200
+// tiny_ocl uses clCreateCommandQueueWithProperties.
+#error "tiny_ocl requires CL_TARGET_OPENCL_VERSION >= 200."
+#endif
 #ifdef __APPLE__
 #include <OpenCL/cl.h>  // use with -framework OpenCL
 #else
 #include <cl.h>
 #endif
 #include <vector>
+#include <stdlib.h>
 
 // aligned memory allocation
 // note: formally, size needs to be a multiple of 'alignment', see:
@@ -166,7 +176,7 @@ public:
 	unsigned int* hostBuffer = 0;
 	cl_mem deviceBuffer = 0;
 	unsigned int type = DEFAULT, size = 0 /* in bytes */, textureID = 0;
-	bool ownData = false, aligned = false;
+	bool ownData = false;
 };
 
 // OpenCL kernel
@@ -373,8 +383,8 @@ private:
 	// data members
 	char* sourceFile = 0;
 	Buffer* acqBuffer = 0;
-	cl_kernel kernel;
-	cl_program program;
+	cl_kernel kernel = 0;
+	cl_program program = 0;
 	inline static cl_device_id device;
 	inline static cl_context context; // simplifies some things, but limits us to one device
 	inline static cl_command_queue queue, queue2;
@@ -595,7 +605,6 @@ Buffer::Buffer( unsigned int N, void* ptr, unsigned int t )
 	int rwFlags = CL_MEM_READ_WRITE;
 	if (t & READONLY) rwFlags = CL_MEM_READ_ONLY;
 	if (t & WRITEONLY) rwFlags = CL_MEM_WRITE_ONLY;
-	aligned = false;
 	if ((t & (TEXTURE | TARGET)) == 0)
 	{
 		size = N;
@@ -607,10 +616,10 @@ Buffer::Buffer( unsigned int N, void* ptr, unsigned int t )
 	{
 		size = 0; // a texture buffer has no host-side byte count
 		textureID = N; // representing texture N
-		if (!Kernel::candoInterop) FatalError( "didn't expect to get here." );
+		if (!Kernel::candoInterop) FatalError( "Texture/target buffers require OpenGL interop;\nbuild with TINY_OCL_GLINTEROP defined." );
 		int error = 0;
 	#ifdef TINY_OCL_GLINTEROP
-		if (t == TARGET) deviceBuffer = clCreateFromGLTexture( Kernel::GetContext(), CL_MEM_WRITE_ONLY, GL_TEXTURE_2D, 0, N, &error );
+		if (t & TARGET) deviceBuffer = clCreateFromGLTexture( Kernel::GetContext(), CL_MEM_WRITE_ONLY, GL_TEXTURE_2D, 0, N, &error );
 		else deviceBuffer = clCreateFromGLTexture( Kernel::GetContext(), CL_MEM_READ_ONLY, GL_TEXTURE_2D, 0, N, &error );
 	#endif
 		CHECKCL( error );
@@ -622,14 +631,15 @@ Buffer::Buffer( unsigned int N, void* ptr, unsigned int t )
 // ----------------------------------------------------------------------------
 Buffer::~Buffer()
 {
-	if (size > 0)
-	{
 		if (ownData)
 		{
 			OpenCL::GetInstance()->AlignedFree( hostBuffer );
 			hostBuffer = 0;
 		}
-		if ((type & (TEXTURE | TARGET)) == 0) clReleaseMemObject( deviceBuffer );
+	if (deviceBuffer)
+	{
+		clReleaseMemObject( deviceBuffer );
+		deviceBuffer = 0;
 	}
 }
 
@@ -642,7 +652,6 @@ unsigned int* Buffer::GetHostPtr()
 	{
 		hostBuffer = (unsigned*)OpenCL::GetInstance()->AlignedAlloc( size );
 		ownData = true;
-		aligned = true;
 	}
 	return hostBuffer;
 }
@@ -657,7 +666,6 @@ void Buffer::CopyToDevice( const bool blocking )
 	{
 		hostBuffer = (unsigned*)OpenCL::GetInstance()->AlignedAlloc( size );
 		ownData = true;
-		aligned = true;
 	}
 	CHECKCL( error = clEnqueueWriteBuffer( Kernel::GetQueue(), deviceBuffer, blocking, 0, size, hostBuffer, 0, 0, 0 ) );
 }
@@ -669,7 +677,6 @@ void Buffer::CopyToDevice( const int offset, const int byteCount, const bool blo
 	{
 		hostBuffer = (unsigned*)OpenCL::GetInstance()->AlignedAlloc( size );
 		ownData = true;
-		aligned = true;
 	}
 	CHECKCL( error = clEnqueueWriteBuffer( Kernel::GetQueue(), deviceBuffer, blocking, offset, byteCount, hostBuffer, 0, 0, 0 ) );
 }
@@ -684,7 +691,6 @@ void Buffer::CopyToDevice2( const bool blocking, cl_event* eventToSet, const siz
 	{
 		hostBuffer = (unsigned*)OpenCL::GetInstance()->AlignedAlloc( size );
 		ownData = true;
-		aligned = true;
 	}
 	CHECKCL( error = clEnqueueWriteBuffer( Kernel::GetQueue2(), deviceBuffer, blocking ? CL_TRUE : CL_FALSE, 0, s == 0 ? size : s, hostBuffer, 0, 0, eventToSet ) );
 }
@@ -699,7 +705,6 @@ void Buffer::CopyFromDevice( const bool blocking )
 	{
 		hostBuffer = (unsigned*)OpenCL::GetInstance()->AlignedAlloc( size );
 		ownData = true;
-		aligned = true;
 	}
 	CHECKCL( error = clEnqueueReadBuffer( Kernel::GetQueue(), deviceBuffer, blocking, 0, size, hostBuffer, 0, 0, 0 ) );
 }
@@ -711,7 +716,6 @@ void Buffer::CopyFromDevice( const int offset, const int byteCount, const bool b
 	{
 		hostBuffer = (unsigned*)OpenCL::GetInstance()->AlignedAlloc( size );
 		ownData = true;
-		aligned = true;
 	}
 	CHECKCL( error = clEnqueueReadBuffer( Kernel::GetQueue(), deviceBuffer, blocking, offset, byteCount, hostBuffer, 0, 0, 0 ) );
 }
@@ -779,6 +783,7 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 	sourceFile = new char[strlen( file ) + 1];
 	strcpy( sourceFile, file );
 	string csText = ReadTextFile( fileName );
+	delete[] dir; // note: fileName points into dir; neither is valid past here
 	if (csText.size() == 0) FatalError( "File %s not found", file );
 	// add vendor defines
 	vendorLines = 0;
@@ -919,7 +924,7 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 				while (*lns >= '0' && *lns <= '9') linePos = linePos * 10 + (*lns++ - '0');
 				lns += 9; // proceed to error message
 				eol = lns;
-				while (*eol != '\n' && *eol > 0) eol++;
+				while (*eol != '\n' && *eol != 0) eol++;
 				*eol = 0;
 				lineNr--; // we count from 0 instead of 1
 				// adjust file and linenr based on include file data
@@ -1044,7 +1049,9 @@ bool Kernel::InitCL()
 				context = clCreateContext( props, 1, &devices[i], NULL, NULL, &error );
 				if (error == CL_SUCCESS)
 				{
+				#ifdef TINY_OCL_GLINTEROP
 					candoInterop = true;
+				#endif
 					deviceUsed = i;
 					break;
 				}
@@ -1110,7 +1117,8 @@ bool Kernel::InitCL()
 			if (strstr( d, "titan x" )) isPascal = true;
 		}
 	}
-	else if (strstr( d, "amd" ) || strstr( d, "ellesmere" ) || strstr( d, "AMD" ) || strstr( d, "RDNA" ) ||
+	// note: d has been lowercased above.
+	else if (strstr( d, "amd" ) || strstr( d, "ellesmere" ) || strstr( d, "rdna" ) ||
 		strstr( d, "gfx11" ) || strstr( d, "gfx10" ) || strstr( d, "gfx9" ) || strstr( d, "gfx8" ))
 	{
 		isAMD = true;
