@@ -798,9 +798,8 @@ struct ALIGNED( 64 ) Ray
 	Ray() = default;
 	Ray( bvhvec3 origin, bvhvec3 direction, float t = BVH_FAR, uint32_t rayMask = RAY_MASK_INTERSECT_ALL )
 	{
-		memset( this, 0, sizeof( Ray ) );
 		O = origin, D = tinybvh_normalize( direction ), rD = tinybvh_rcp( D );
-		hit.t = t;
+		hit.t = hit.u = hit.v = 0, hit.prim = 0;
 		mask = rayMask & RAY_MASK_INTERSECT_ALL;
 	}
 	ALIGNED( 16 ) bvhvec3 O; uint32_t mask = RAY_MASK_INTERSECT_ALL;
@@ -841,12 +840,11 @@ struct RayEx
 	RayEx() = default;
 	RayEx( bvhdbl3 origin, bvhdbl3 direction, double tmax = BVH_DBL_FAR, uint32_t rayMask = RAY_MASK_INTERSECT_ALL )
 	{
-		memset( this, 0, sizeof( RayEx ) );
 		O = origin, D = direction;
 		double rl = 1.0 / sqrt( D.x * D.x + D.y * D.y + D.z * D.z );
 		D.x *= rl, D.y *= rl, D.z *= rl;
 		rD = tinybvh_rcp( D );
-		hit.u = hit.v = 0, hit.t = tmax;
+		hit.u = hit.v = 0, hit.t = tmax, hit.prim = 0;
 		instIdx = 0;
 		mask = rayMask & RAY_MASK_INTERSECT_ALL;
 	}
@@ -989,8 +987,8 @@ public:
 	bool hasOpacityMicroMaps() const { return opmapN > 0; }
 	void SetOpacityMicroMaps( uint32_t* mapData, uint32_t N ) { opmap = mapData, opmapN = N; }
 	// Custom memory allocation
-	void* AlignedAlloc( size_t size );
-	void AlignedFree( void* ptr );
+	void* AlignedAlloc( size_t size ) const;
+	void AlignedFree( void* ptr ) const;
 	// Single-object allocation - used for the atomic build counters.
 	template <class T, class V> T* ContextNew( const V& init )
 	{
@@ -1013,6 +1011,17 @@ protected:
 
 class BLASInstance;
 class BVH_Verbose;
+class BVH;
+struct BVHMetricArgs
+{
+	const BVH* bvh;
+	const uint32_t* node;		// node indices to score
+	uint32_t nodeCount, tasks;
+	double* epo;				// [tasks] EPO accumulators, or 0 to skip
+	double* sah;				// [tasks] SAH accumulators, or 0 to skip
+	double* area;				// [tasks] primitive area accumulators, or 0 to skip
+	uint32_t primCount;
+};
 class BVH : public BVHBase
 {
 public:
@@ -1073,8 +1082,10 @@ public:
 	void ConvertFrom( const BVH_Verbose& original, bool compact = true );
 	void SplitLeafs( const uint32_t maxPrims );
 	void CombineLeafs( const uint32_t nodeIdx = 0 );
-	float SAHCost( const uint32_t nodeIdx = 0, uint32_t depth = 0 );
-	float EPOCost( const uint32_t nodeIdx = 0, uint32_t depth = 0 );
+	float SAHCost( const uint32_t nodeIdx = 0, uint32_t depth = 0 ) const;
+	float EPOCost( const uint32_t nodeIdx = 0, uint32_t depth = 0 ) const;
+	uint32_t CollectNodes( const uint32_t root, uint32_t* list, const uint32_t cap ) const;
+	static void MetricTask( const uint32_t task, void* payload );
 	void Refit( const uint32_t nodeIdx = 0 );
 	void Compact();
 	void Optimize( const uint32_t iterations = 25, bool extreme = false, bool stochastic = false );
@@ -1127,7 +1138,7 @@ private:
 	void PresplitPostPass();
 	inline float SplitCostSAH( const float rAparent, const float Aleft, const int Nleft, const float Aright, const int Nright ) const;
 	inline float NoSplitCostSAH( const int Nparent ) const;
-	float EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx = 0 );
+	float EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx = 0 ) const;
 	float TriArea( const uint32_t triIdx ) const;
 	float PrimArea( const uint32_t slot ) const;
 protected:
@@ -1157,12 +1168,6 @@ private:
 	// Atomic counters for threaded builds
 	std::atomic<uint32_t>* atomicNewNodePtr = 0;
 	std::atomic<uint32_t>* atomicNextFrag = 0;
-	// Threaded EPOCost: recursion helper + the task that scores one spawned right subtree.
-	float EPOCostRec( uint32_t nodeIdx, uint32_t depth, float* costs, std::atomic<uint32_t>& slot );
-	static void EPOCostSubtree( void* payload );
-	// Threaded SAHCost: recursion helper + the task that scores one spawned right subtree.
-	float SAHCostRec( uint32_t nodeIdx, uint32_t depth, float* costs, std::atomic<uint32_t>& slot );
-	static void SAHCostSubtree( void* payload );
 #endif
 	BVHNode* leafNodes = 0; // will point inside node array
 	uint32_t* scratchPad = 0; // for sorting
@@ -1806,7 +1811,7 @@ float tinybvh_rndfloat( uint32_t& s ) { return tinybvh_rnduint( s ) * 2.32830643
 bvhvec3 tinybvh_rndvec3( uint32_t& s )
 {
 	bvhvec3 R;
-loop: R = bvhvec3( tinybvh_rndfloat( s ) - 0.5f, tinybvh_rndfloat( s ) * 0.5f, tinybvh_rndfloat( s ) * 0.5f );
+loop: R = bvhvec3( tinybvh_rndfloat( s ) - 0.5f, tinybvh_rndfloat( s ) - 0.5f, tinybvh_rndfloat( s ) - 0.5f );
 	if (tinybvh_dot( R, R ) > 0.25f) goto loop;
 	return tinybvh_normalize( R );
 }
@@ -1921,12 +1926,12 @@ const bvhdbl3& bvhdbl3slice::operator[]( size_t i ) const
 // BVHBase implementation
 // ----------------------------------------------------------------------------
 
-void* BVHBase::AlignedAlloc( size_t size )
+void* BVHBase::AlignedAlloc( size_t size ) const
 {
 	return context.malloc ? context.malloc( size, context.userdata ) : nullptr;
 }
 
-void BVHBase::AlignedFree( void* ptr )
+void BVHBase::AlignedFree( void* ptr ) const
 {
 	if (context.free && ptr)
 		context.free( ptr, context.userdata );
@@ -2021,7 +2026,7 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	if (!s) return false;
 	BVHContext ctxBackup = context;
 	uint32_t* opmapBackup = opmap, opmapNBackup = opmapN;
-	bool expectIndexed = (indices != nullptr), saveNewVersion = false;
+	bool expectIndexed = (indices != nullptr);
 	uint32_t header, fileTriCount;
 	s.read( (char*)&header, sizeof( uint32_t ) );
 	if ((header >> 24) != layout) return false;
@@ -2061,7 +2066,6 @@ bool BVH::Load( const char* fileName, const bvhvec4slice& vertices, const uint32
 	verts = vertices; // we can't load vertices since the BVH doesn't own this data.
 	vertIdx = (uint32_t*)indices;
 	// all ok.
-	if (saveNewVersion) Save( fileName );
 	return true;
 }
 
@@ -2520,7 +2524,9 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 // radix sort
 static TINYBVH_FORCEINLINE uint32_t FloatToKey( const float value )
 {
-	const uint32_t f = *(uint32_t*)&value, mask = (uint32_t)((int)f >> 31 | (1 << 31));
+	uint32_t f;
+	memcpy( &f, &value, sizeof( f ) );
+	uint32_t mask = (uint32_t)((int)f >> 31 | (1 << 31));
 	return f ^ mask;
 }
 static void RadixSort( uint32_t* input, uint32_t* output, uint32_t* keys, int len )
@@ -3190,62 +3196,89 @@ float BVH::NoSplitCostSAH( const int Nparent ) const
 
 // BVH TOOLS
 
+#define BVH_METRIC_TASKS 256 // reduction tasks for tree quality metrics.
+
 int32_t BVH::PrimCount( const uint32_t nodeIdx ) const
 {
-	// Determine the total number of primitives / fragments in leaf nodes.
+	// determine the total number of primitives / fragments in leaf nodes.
 	const BVHNode& n = bvhNode[nodeIdx];
 	return n.isLeaf() ? n.triCount : (PrimCount( n.leftFirst ) + PrimCount( n.leftFirst + 1 ));
 }
 
-#ifndef ENABLE_THREADED_BUILDS
-
-float BVH::SAHCost( const uint32_t nodeIdx, uint32_t )
+uint32_t BVH::CollectNodes( const uint32_t root, uint32_t* list, const uint32_t cap ) const
 {
-	// Determine the SAH cost of the tree. This provides an indication
-	// of the quality of the BVH: Lower is better.
-	const BVHNode& n = bvhNode[nodeIdx];
-	if (n.isLeaf()) return c_int * n.SurfaceArea() * n.triCount;
-	float cost = c_trav * n.SurfaceArea() + SAHCost( n.leftFirst ) + SAHCost( n.leftFirst + 1 );
-	return nodeIdx == 0 ? (cost / n.SurfaceArea()) : cost;
-}
-
-#else
-
-// threaded SAHCost: each spawned task scores one right subtree into a slot of the
-// node-0 call's stack scratch; the root sums the slots after the barrier.
-struct BVHSAHArgs { BVH* bvh; uint32_t node, depth; float* costs; std::atomic<uint32_t>* slot; };
-void BVH::SAHCostSubtree( void* payload )
-{
-	BVHSAHArgs* a = (BVHSAHArgs*)payload;
-	a->costs[(*a->slot)++] = a->bvh->SAHCostRec( a->node, a->depth, a->costs, *a->slot );
-}
-float BVH::SAHCostRec( uint32_t nodeIdx, uint32_t depth, float* costs, std::atomic<uint32_t>& slot )
-{
-	const BVHNode& n = bvhNode[nodeIdx];
-	if (n.isLeaf()) return c_int * n.SurfaceArea() * n.triCount;
-	float cost = c_trav * n.SurfaceArea();
-	if (depth > 6) cost += SAHCostRec( n.leftFirst, 99, costs, slot ) + SAHCostRec( n.leftFirst + 1, 99, costs, slot ); else
+	// iterative pre-order walk, storing the indices of the nodes reachable from 'root'.
+	uint32_t count = 0, nodeIdx = root, stack[TINYBVH_STACK_SIZE], stackPtr = 0;
+	while (1)
 	{
-		// spawn the right subtree into a slot, recurse the left inline.
-		BVHSAHArgs a = { this, n.leftFirst + 1, depth + 1, costs, &slot };
-		tinybvh_spawn( context, &BVH::SAHCostSubtree, &a, sizeof( a ) );
-		cost += SAHCostRec( n.leftFirst, depth + 1, costs, slot );
+		BVH_FATAL_ERROR_IF( count == cap, "BVH::CollectNodes, node list overflow; malformed tree?" );
+		list[count++] = nodeIdx;
+		const BVHNode& n = bvhNode[nodeIdx];
+		if (!n.isLeaf())
+		{
+			BVH_FATAL_ERROR_IF( stackPtr == TINYBVH_STACK_SIZE, "BVH::CollectNodes, tree too deep." );
+			stack[stackPtr++] = n.leftFirst + 1, nodeIdx = n.leftFirst;
+			continue;
+		}
+		if (stackPtr == 0) break;
+		nodeIdx = stack[--stackPtr];
 	}
-	return cost;
-}
-float BVH::SAHCost( const uint32_t nodeIdx, uint32_t depth )
-{
-	const BVHNode& n = bvhNode[nodeIdx];
-	if (n.isLeaf()) return c_int * n.SurfaceArea() * n.triCount;
-	float costs[128];
-	std::atomic<uint32_t> slot{ 0 };
-	float cost = SAHCostRec( nodeIdx, depth, costs, slot );
-	tinybvh_barrier( context );
-	for (uint32_t last = slot, i = 0; i < last; i++) cost += costs[i];
-	return nodeIdx == 0 ? (cost / n.SurfaceArea()) : cost;
+	return count;
 }
 
-#endif
+void BVH::MetricTask( const uint32_t task, void* payload )
+{
+	// score a contiguous slice of the node list
+	const BVHMetricArgs* a = (const BVHMetricArgs*)payload;
+	const BVH* bvh = a->bvh;
+	double epo = 0, sah = 0;
+	const uint32_t first = (uint32_t)(((uint64_t)a->nodeCount * task) / a->tasks);
+	const uint32_t last = (uint32_t)(((uint64_t)a->nodeCount * (task + 1)) / a->tasks);
+	for (uint32_t i = first; i < last; i++)
+	{
+		const uint32_t idx = a->node[i];
+		const BVHNode& n = bvh->bvhNode[idx];
+		const double w = n.isLeaf() ? ((double)bvh->c_int * n.triCount) : (double)bvh->c_trav;
+		if (a->sah) sah += w * (double)n.SurfaceArea();
+		if (a->epo) epo += w * (double)bvh->EPOArea( idx );
+	}
+	if (a->epo) a->epo[task] = epo;
+	if (a->sah) a->sah[task] = sah;
+	if (a->area)
+	{
+		double area = 0;
+		const uint32_t p0 = (uint32_t)(((uint64_t)a->primCount * task) / a->tasks);
+		const uint32_t p1 = (uint32_t)(((uint64_t)a->primCount * (task + 1)) / a->tasks);
+		for (uint32_t i = p0; i < p1; i++) area += (double)bvh->PrimArea( i );
+		a->area[task] = area;
+	}
+}
+
+float BVH::SAHCost( const uint32_t nodeIdx, uint32_t ) const
+{
+	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::SAHCost( .. ), bvhNode == 0." );
+	const BVHNode& root = bvhNode[nodeIdx];
+	if (root.isLeaf()) return c_int * root.SurfaceArea() * root.triCount;
+	double cost = 0;
+	uint32_t idx = nodeIdx, stack[TINYBVH_STACK_SIZE], stackPtr = 0;
+	while (1)
+	{
+		const BVHNode& n = bvhNode[idx];
+		if (n.isLeaf()) cost += (double)c_int * n.triCount * n.SurfaceArea();
+		else
+		{
+			cost += (double)c_trav * n.SurfaceArea();
+			BVH_FATAL_ERROR_IF( stackPtr == TINYBVH_STACK_SIZE, "BVH::SAHCost, tree too deep." );
+			stack[stackPtr++] = n.leftFirst + 1, idx = n.leftFirst;
+			continue;
+		}
+		if (stackPtr == 0) break;
+		idx = stack[--stackPtr];
+	}
+	if (nodeIdx != 0) return (float)cost;
+	const float rootArea = root.SurfaceArea();
+	return rootArea > 0 ? (float)(cost / rootArea) : 0.0f;
+}
 
 void BVH::ConvertFrom( const BVH_Verbose& original, bool compact )
 {
@@ -3330,7 +3363,7 @@ inline bool tinybvh_aabbs_overlap( const BVH::BVHNode& node1, const BVH::BVHNode
 #endif
 }
 
-float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx )
+float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx ) const
 {
 	// abort if we reached the subtree
 	if (nodeIdx == subtreeRoot) return 0;
@@ -3341,6 +3374,10 @@ float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx )
 	if (n.isLeaf())
 	{
 		const bvhvec3 bmin = subtree.aabbMin, bmax = subtree.aabbMax;
+	#ifdef BVH_USESSE
+		const __m128 bmin4 = _mm_setr_ps( bmin.x, bmin.y, bmin.z, 0 );
+		const __m128 bmax4 = _mm_setr_ps( bmax.x, bmax.y, bmax.z, 0 );
+	#endif
 		for (uint32_t i = 0; i < n.triCount; i++)
 		{
 			// Early out: triangle fully inside the subtree AABB?
@@ -3353,7 +3390,7 @@ float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx )
 			union { __m128 vmax4; bvhvec4 vmax; };
 			vmin4 = _mm_min_ps( _mm_min_ps( *(__m128*) & v0, *(__m128*) & v1 ), *(__m128*) & v2 );
 			vmax4 = _mm_max_ps( _mm_max_ps( *(__m128*) & v0, *(__m128*) & v1 ), *(__m128*) & v2 );
-			const bool allin = (_mm_movemask_ps( _mm_and_ps( _mm_cmpge_ps( vmin4, *(__m128*) & bmin ), _mm_cmple_ps( vmax4, *(__m128*) & bmax ) ) ) & 7) == 7;
+			const bool allin = (_mm_movemask_ps( _mm_and_ps( _mm_cmpge_ps( vmin4, bmin4 ), _mm_cmple_ps( vmax4, bmax4 ) ) ) & 7) == 7;
 		#else
 			bool allin = v0.x >= bmin.x && v0.x <= bmax.x && v0.y >= bmin.y && v0.y <= bmax.y && v0.z >= bmin.z && v0.z <= bmax.z;
 			allin &= v1.x >= bmin.x && v1.x <= bmax.x && v1.y >= bmin.y && v1.y <= bmax.y && v1.z >= bmin.z && v1.z <= bmax.z;
@@ -3401,68 +3438,35 @@ float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx )
 		return area;
 	}
 	// recurse if n is an inner node
-	BVHNode& left = bvhNode[n.leftFirst], & right = bvhNode[n.leftFirst + 1];
+	const BVHNode& left = bvhNode[n.leftFirst], & right = bvhNode[n.leftFirst + 1];
 	if (tinybvh_aabbs_overlap( left, subtree )) area += EPOArea( subtreeRoot, n.leftFirst );
 	if (tinybvh_aabbs_overlap( right, subtree )) area += EPOArea( subtreeRoot, n.leftFirst + 1 );
 	return area;
 }
 
-#ifndef ENABLE_THREADED_BUILDS
-
-float BVH::EPOCost( const uint32_t nodeIdx, uint32_t )
+float BVH::EPOCost( const uint32_t nodeIdx, uint32_t ) const
 {
-	// Determine the EPO cost of the tree. See:
-	// "On Quality Metrics of Bounding Volume Hierarchies", Aila et al., 2013.
-	const BVHNode& n = bvhNode[nodeIdx];
-	float cost = (n.isLeaf() ? (c_int * n.triCount) : c_trav) * EPOArea( nodeIdx ), totalArea = 0;
-	if (!n.isLeaf()) cost += EPOCost( n.leftFirst ) + EPOCost( n.leftFirst + 1 );
-	if (nodeIdx > 0) return cost;
-	// recursion ends with node 0: Finalize EPO calculation
-	for (uint32_t i = 0; i < triCount; i++) totalArea += PrimArea( i );
-	cost /= totalArea;
-	return (1.0f - W_EPO) * SAHCost( 0 ) + W_EPO * cost;
+	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::EPOCost( .. ), bvhNode == 0." );
+	BVH_FATAL_ERROR_IF( verts == 0, "BVH::EPOCost( .. ), bvh has no vertex data." );
+	uint32_t* list = (uint32_t*)AlignedAlloc( (size_t)usedNodes * sizeof( uint32_t ) );
+	const uint32_t count = CollectNodes( nodeIdx, list, usedNodes );
+	const uint32_t tasks = tinybvh_min( (uint32_t)BVH_METRIC_TASKS, count );
+	ALIGNED( 64 ) double epo[BVH_METRIC_TASKS] = {}, sah[BVH_METRIC_TASKS] = {}, area[BVH_METRIC_TASKS] = {};
+	// the SAH term and the total primitive area are sums over the same index
+	// ranges, so they ride along in the same pass instead of costing a second one.
+	BVHMetricArgs args = { this, list, count, tasks, epo, sah, area, triCount };
+	tinybvh_parallel_for( context, tasks, &BVH::MetricTask, &args );
+	double epoSum = 0, sahSum = 0, areaSum = 0;
+	for (uint32_t i = 0; i < tasks; i++)
+		epoSum += epo[i], sahSum += sah[i], areaSum += area[i];
+	AlignedFree( list );
+	// EPO is only defined for a whole tree - for a subtree we return the raw sum.
+	if (nodeIdx != 0) return (float)epoSum;
+	const float rootArea = bvhNode[0].SurfaceArea();
+	const float sahCost = rootArea > 0 ? (float)(sahSum / rootArea) : 0.0f;
+	if (!(areaSum > 0)) return sahCost; // degenerate geometry: no EPO term
+	return (1.0f - W_EPO) * sahCost + W_EPO * (float)(epoSum / areaSum);
 }
-
-#else
-
-// threaded EPOCost: each spawned task scores one right subtree into a slot of the
-// node-0 call's stack scratch; the root sums the slots after the barrier.
-struct BVHEPOArgs { BVH* bvh; uint32_t node, depth; float* costs; std::atomic<uint32_t>* slot; };
-void BVH::EPOCostSubtree( void* payload )
-{
-	BVHEPOArgs* a = (BVHEPOArgs*)payload;
-	a->costs[(*a->slot)++] = a->bvh->EPOCostRec( a->node, a->depth, a->costs, *a->slot );
-}
-float BVH::EPOCostRec( uint32_t nodeIdx, uint32_t depth, float* costs, std::atomic<uint32_t>& slot )
-{
-	const BVHNode& n = bvhNode[nodeIdx];
-	float cost = (n.isLeaf() ? (c_int * n.triCount) : c_trav) * EPOArea( nodeIdx );
-	if (!n.isLeaf())
-	{
-		if (depth > 9) cost += EPOCostRec( n.leftFirst, 99, costs, slot ) + EPOCostRec( n.leftFirst + 1, 99, costs, slot ); else
-		{
-			// spawn the right subtree into a slot, recurse the left inline.
-			BVHEPOArgs a = { this, n.leftFirst + 1, depth + 1, costs, &slot };
-			tinybvh_spawn( context, &BVH::EPOCostSubtree, &a, sizeof( a ) );
-			cost += EPOCostRec( n.leftFirst, depth + 1, costs, slot );
-		}
-	}
-	return cost;
-}
-float BVH::EPOCost( const uint32_t nodeIdx, uint32_t depth )
-{
-	float costs[1024];
-	std::atomic<uint32_t> slot{ 0 };
-	float cost = EPOCostRec( nodeIdx, depth, costs, slot );
-	tinybvh_barrier( context );
-	for (uint32_t last = slot, i = 0; i < last; i++) cost += costs[i];
-	float totalArea = 0;
-	for (uint32_t i = 0; i < triCount; i++) totalArea += PrimArea( i );
-	cost /= totalArea;
-	return (1.0f - W_EPO) * SAHCost( 0 ) + W_EPO * cost;
-}
-
-#endif
 
 void BVH::SplitLeafs( const uint32_t maxPrims )
 {
@@ -3498,7 +3502,8 @@ void BVH::SplitLeafs( const uint32_t maxPrims )
 float BVH::SplitPriority( const Fragment& f ) const
 {
 	auto fastCbrt = []( float x ) {
-		uint32_t i = *(uint32_t*)&x; // assume x >= 0.0f
+		uint32_t i;
+		memcpy( &i, &x, sizeof( i ) );
 		i = 0x2A51067Fu + i / 3u;
 		float y = *(float*)&i;
 		y = (2.0f * y + x / (y * y)) * (1.0f / 3.0f); // refine with Newton-Raphson iterations.
@@ -4460,9 +4465,11 @@ int32_t VoxelSet::Intersect( Ray& ray ) const
 {
 	// setup Amanatides & Woo grid traversal
 	ALIGNED( 64 ) DDAState l1_, l2_;
-	const uint32_t xsign = *(uint32_t*)&ray.D.x >> 31;
-	const uint32_t ysign = *(uint32_t*)&ray.D.y >> 31;
-	const uint32_t zsign = *(uint32_t*)&ray.D.z >> 31;
+	uint32_t xsign, ysign, zsign;
+	memcpy( &xsign, &ray.D.x, sizeof( xsign ) );
+	memcpy( &ysign, &ray.D.y, sizeof( xsign ) );
+	memcpy( &zsign, &ray.D.z, sizeof( xsign ) );
+	xsign >>= 31, ysign >>= 31, zsign >>= 31;
 	const bvhvec3 Dsign = bvhvec3( (float)xsign, (float)ysign, (float)zsign );
 	const bvhint3 step( 1 - (int)xsign * 2, 1 - (int)ysign * 2, 1 - (int)zsign * 2 );
 	const float eps = NudgeScale( ray.O );	// voxel units; scaled down per level below
@@ -5003,7 +5010,7 @@ void BVH_Verbose::Optimize( const uint32_t iterations, const bool extreme, bool 
 			for (int j = first + 1; j <= last; j++) if (sortList[j].cost > e.cost)
 				t = sortList[j], sortList[j] = sortList[++pivot], sortList[pivot] = t;
 			t = sortList[pivot], sortList[pivot] = sortList[first], sortList[first] = t;
-			if (pivot + 1 < limit && stackPtr < 128) stack[stackPtr].first = pivot + 1, stack[stackPtr++].last = last;
+			if (pivot + 1 < limit && stackPtr < TINYBVH_STACK_SIZE) stack[stackPtr].first = pivot + 1, stack[stackPtr++].last = last;
 			last = pivot - 1;
 		}
 		// reinsert selected nodes
@@ -6008,7 +6015,7 @@ void BVH4_GPU::ConvertFrom( const MBVH<4>& original, bool compact )
 #define SWAP(A,B,C,D) tmp=A,A=B,B=tmp,tmp2=C,C=D,D=tmp2;
 struct uchar4 { uint8_t x, y, z, w; };
 static uchar4 as_uchar4( const float v ) { union { float t; uchar4 t4; }; t = v; return t4; }
-static uint32_t as_uint( const float v ) { return *(uint32_t*)&v; }
+static uint32_t as_uint( const float v ) { uint32_t t; memcpy( &t, &v, sizeof( t ) ); return t; }
 int32_t BVH4_GPU::Intersect( Ray& ray ) const
 {
 	// traverse a blas
@@ -9495,7 +9502,7 @@ void BLASInstanceEx::Update( BVH_Double* blas )
 	InvertTransform(); // TODO: done unconditionally; for a big TLAS this may be wasteful. Detect changes automatically?
 	// transform the eight corners of the root node aabb using the
 	// instance transform and calculate the worldspace aabb over those.
-	aabbMin = bvhdbl3( BVH_FAR ), aabbMax = bvhdbl3( -BVH_FAR );
+	aabbMin = bvhdbl3( BVH_DBL_FAR ), aabbMax = bvhdbl3( -BVH_DBL_FAR );
 	bvhdbl3 bmin = blas->aabbMin, bmax = blas->aabbMax;
 	for (int32_t j = 0; j < 8; j++)
 	{
