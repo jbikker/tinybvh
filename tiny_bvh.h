@@ -3842,7 +3842,7 @@ int32_t BVH::Intersect( Ray& ray ) const
 	VALIDATE_RAY( ray );
 	if (!isTLAS())
 	{
-		const bool posX = ray.D.x >= 0, posY = ray.D.y >= 0, posZ = ray.D.z >= 0;
+		const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
 		if (!posX) goto negx1;
 		if (posY) { if (posZ) return Intersect<true, true, true>( ray ); else return Intersect<true, true, false>( ray ); }
 		if (posZ) return Intersect<true, false, true>( ray ); else return Intersect<true, false, false>( ray );
@@ -3852,7 +3852,7 @@ int32_t BVH::Intersect( Ray& ray ) const
 	}
 	else
 	{
-		const bool posX = ray.D.x >= 0, posY = ray.D.y >= 0, posZ = ray.D.z >= 0;
+		const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
 		if (!posX) goto negx2;
 		if (posY) { if (posZ) return IntersectTLAS<true, true, true>( ray ); else return IntersectTLAS<true, true, false>( ray ); }
 		if (posZ) return IntersectTLAS<true, false, true>( ray ); else return IntersectTLAS<true, false, false>( ray );
@@ -4008,7 +4008,7 @@ bool BVH::IsOccluded( const Ray& ray ) const
 	VALIDATE_RAY( ray );
 	if (!isTLAS())
 	{
-		const bool posX = ray.D.x >= 0, posY = ray.D.y >= 0, posZ = ray.D.z >= 0;
+		const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
 		if (!posX) goto negx1;
 		if (posY) { if (posZ) return IsOccluded<true, true, true>( ray ); else return IsOccluded<true, true, false>( ray ); }
 		if (posZ) return IsOccluded<true, false, true>( ray ); else return IsOccluded<true, false, false>( ray );
@@ -4018,7 +4018,7 @@ bool BVH::IsOccluded( const Ray& ray ) const
 	}
 	else
 	{
-		const bool posX = ray.D.x >= 0, posY = ray.D.y >= 0, posZ = ray.D.z >= 0;
+		const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
 		if (!posX) goto negx2;
 		if (posY) { if (posZ) return IsOccludedTLAS<true, true, true>( ray ); else return IsOccludedTLAS<true, true, false>( ray ); }
 		if (posZ) return IsOccludedTLAS<true, false, true>( ray ); else return IsOccludedTLAS<true, false, false>( ray );
@@ -6851,7 +6851,7 @@ ALIGNED( 64 ) static __m128i idxLUT4_[16] = {
 int32_t BVH4_CPU::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
-	const bool posX = ray.D.x >= 0, posY = ray.D.y >= 0, posZ = ray.D.z >= 0;
+	const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
 	if (!posX) goto negx;
 	if (posY) { if (posZ) return Intersect<true, true, true>( ray ); else return Intersect<true, true, false>( ray ); }
 	if (posZ) return Intersect<true, false, true>( ray ); else return Intersect<true, false, false>( ray );
@@ -7028,7 +7028,7 @@ the_end:
 bool BVH4_CPU::IsOccluded( const Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
-	const bool posX = ray.D.x >= 0, posY = ray.D.y >= 0, posZ = ray.D.z >= 0;
+	const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
 	if (!posX) goto negx;
 	if (posY) { if (posZ) return IsOccluded<true, true, true>( ray ); else return IsOccluded<true, true, false>( ray ); }
 	if (posZ) return IsOccluded<true, false, true>( ray ); else return IsOccluded<true, false, false>( ray );
@@ -7971,7 +7971,7 @@ int32_t BVH8_CWBVH::Intersect( Ray& ray ) const
 			const bvhvec3 I = ray.O + d * ray.D;
 			const float u = T0.x * I.x + T0.y * I.y + T0.z * I.z + T0.w;
 			const float v = T1.x * I.x + T1.y * I.y + T1.z * I.z + T1.w;
-			if (u < 0 || v < 0 || u + v >= 1) continue;
+			if (!(u >= 0 && v >= 0 && u + v <= 1)) continue;
 			triangleuv = bvhvec2( u, v ), tmax = d;
 			hitAddr = as_uint( blasTris[triAddr + 3].w );
 		#else
