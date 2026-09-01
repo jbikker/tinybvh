@@ -798,9 +798,8 @@ struct ALIGNED( 64 ) Ray
 	Ray() = default;
 	Ray( bvhvec3 origin, bvhvec3 direction, float t = BVH_FAR, uint32_t rayMask = RAY_MASK_INTERSECT_ALL )
 	{
-		memset( this, 0, sizeof( Ray ) );
 		O = origin, D = tinybvh_normalize( direction ), rD = tinybvh_rcp( D );
-		hit.t = hit.u = hit.v = 0, hit.prim = 0;
+		hit.t = t, hit.u = hit.v = 0, hit.prim = 0;
 		mask = rayMask & RAY_MASK_INTERSECT_ALL;
 	}
 	ALIGNED( 16 ) bvhvec3 O; uint32_t mask = RAY_MASK_INTERSECT_ALL;
@@ -841,7 +840,6 @@ struct RayEx
 	RayEx() = default;
 	RayEx( bvhdbl3 origin, bvhdbl3 direction, double tmax = BVH_DBL_FAR, uint32_t rayMask = RAY_MASK_INTERSECT_ALL )
 	{
-		memset( this, 0, sizeof( RayEx ) );
 		O = origin, D = direction;
 		double rl = 1.0 / sqrt( D.x * D.x + D.y * D.y + D.z * D.z );
 		D.x *= rl, D.y *= rl, D.z *= rl;
