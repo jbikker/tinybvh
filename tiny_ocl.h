@@ -398,7 +398,7 @@ public:
 	inline static bool candoInterop = false, clStarted = false;
 };
 
-} // namespace tinybvh
+} // namespace tinyocl
 
 #endif // TINY_OCL_H_
 
