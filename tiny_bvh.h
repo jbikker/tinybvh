@@ -6862,33 +6862,22 @@ static uint32_t __popc( uint32_t x )
 #endif
 }
 
-static const uint32_t __A = 0x03020100, __B = 0x07060504, __C = 0x0B0A0908, __D = 0x0F0E0D0C;
-ALIGNED( 64 ) static __m128i idxLUT4_[16] = {
-	_mm_set_epi32( 0, 0, 0, 0 ),		// 0000
-	_mm_set_epi32( 0, 0, 0, __A ),		// 0001
-	_mm_set_epi32( 0, 0, 0, __B ),		// 0010
-	_mm_set_epi32( 0, 0, __B, __A ),	// 0011
-	_mm_set_epi32( 0, 0, 0, __C ),		// 0100
-	_mm_set_epi32( 0, 0, __C, __A ),	// 0101
-	_mm_set_epi32( 0, 0, __C, __B ),	// 0110
-	_mm_set_epi32( 0, __C, __B, __A ),	// 0111
-	_mm_set_epi32( 0, 0, 0, __D ),		// 1000
-	_mm_set_epi32( 0, 0, __D, __A ),	// 1001
-	_mm_set_epi32( 0, 0, __D, __B ),	// 1010
-	_mm_set_epi32( 0, __D, __B, __A ),	// 1011
-	_mm_set_epi32( 0, 0, __D, __C ),	// 1100
-	_mm_set_epi32( 0, __D, __C, __A ),	// 1101
-	_mm_set_epi32( 0, __D, __C, __B ),	// 1110
-	_mm_set_epi32( __D, __C, __B, __A ) // 1111
-};
+// BVH4_CPU traversal, SSE version.
+// ----------------------------------------------------------------------------
+
+#define SSE_HIT( s ) ((m >> s) & 1)
+#define SSE_PUSH( c, s ) { nodeStack[stackPtr] = c; distStack[stackPtr] = tminSorted[s]; stackPtr++; }
 
 template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU::Intersect( Ray& ray ) const
 {
-	ALIGNED( 64 ) int32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
+	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	ALIGNED( 64 ) float distStack[TINYBVH_STACK_SIZE * 2];
+	ALIGNED( 16 ) float tminSorted[4];
 	const __m128 zero4 = _mm_setzero_ps();
 	__m128 t4 = _mm_set1_ps( ray.hit.t );
-	ALIGNED( 64 ) int32_t stackPtr = 0, nodeIdx = 0;
+	int32_t stackPtr = 0;
+	uint32_t nodeIdx = 0;
+	float tcur = ray.hit.t;
 	constexpr int signShift = (posX ? 2 : 0) + (posY ? 4 : 0) + (posZ ? 8 : 0);
 	const __m128 rx4 = _mm_set1_ps( ray.O.x * ray.rD.x ), rdx4 = _mm_set1_ps( ray.rD.x );
 	const __m128 ry4 = _mm_set1_ps( ray.O.y * ray.rD.y ), rdy4 = _mm_set1_ps( ray.rD.y );
@@ -6911,56 +6900,60 @@ template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU::Intersect( Ray& ray
 		while (!(nodeIdx & LEAF_BIT))
 		{
 			const BVHNode* n = (BVHNode*)(bvh4Data + nodeIdx);
+			const void* child = &n->child4, * perm = &n->perm4;
 			const __m128 tx1 = _mm_sub_ps( _mm_mul_ps( posX ? n->xmin4 : n->xmax4, rdx4 ), rx4 );
 			const __m128 ty1 = _mm_sub_ps( _mm_mul_ps( posY ? n->ymin4 : n->ymax4, rdy4 ), ry4 );
 			const __m128 tz1 = _mm_sub_ps( _mm_mul_ps( posZ ? n->zmin4 : n->zmax4, rdz4 ), rz4 );
 			const __m128 tx2 = _mm_sub_ps( _mm_mul_ps( posX ? n->xmax4 : n->xmin4, rdx4 ), rx4 );
 			const __m128 ty2 = _mm_sub_ps( _mm_mul_ps( posY ? n->ymax4 : n->ymin4, rdy4 ), ry4 );
 			const __m128 tz2 = _mm_sub_ps( _mm_mul_ps( posZ ? n->zmax4 : n->zmin4, rdz4 ), rz4 );
-			__m128 tmin = _mm_max_ps( _mm_max_ps( _mm_max_ps( zero4, tx1 ), ty1 ), tz1 );
+			const __m128 tmin = _mm_max_ps( _mm_max_ps( _mm_max_ps( zero4, tx1 ), ty1 ), tz1 );
 			const __m128 tmax = _mm_min_ps( _mm_min_ps( _mm_min_ps( tx2, t4 ), ty2 ), tz2 );
 			const __m128 mask4 = _mm_cmple_ps( tmin, tmax );
-			const uint32_t mask = _mm_movemask_ps( mask4 );
-			const uint32_t validNodes = __popc( mask );
-			if (validNodes == 1)
+			// child index at each sorted position, loaded independently of the slab test
+			const uint32_t c3 = tinybvh_getlane_u( child, (tinybvh_getlane_u( perm, 3 ) >> signShift) & 3 );
+			const uint32_t c2 = tinybvh_getlane_u( child, (tinybvh_getlane_u( perm, 2 ) >> signShift) & 3 );
+			const uint32_t c1 = tinybvh_getlane_u( child, (tinybvh_getlane_u( perm, 1 ) >> signShift) & 3 );
+			const uint32_t c0 = tinybvh_getlane_u( child, (tinybvh_getlane_u( perm, 0 ) >> signShift) & 3 );
+			// slab mask and entry distances in sorted order
+		#ifdef __AVX__
+			const __m128i index = _mm_srli_epi32( n->perm4, signShift );
+			const uint32_t m = _mm_movemask_ps( _mm_permutevar_ps( mask4, index ) );
+			_mm_store_ps( tminSorted, _mm_permutevar_ps( tmin, index ) );
+		#else
+			const __m128i raw4 = _mm_and_si128( _mm_srli_epi32( n->perm4, signShift ), shftmsk4 );
+			const __m128i shfl16 = _mm_add_epi32( _mm_mullo_epi32( raw4, mul4 ), add4 );
+			const uint32_t m = _mm_movemask_ps( _mm_castsi128_ps( _mm_shuffle_epi8( _mm_castps_si128( mask4 ), shfl16 ) ) );
+			_mm_store_ps( tminSorted, _mm_castsi128_ps( _mm_shuffle_epi8( _mm_castps_si128( tmin ), shfl16 ) ) );
+		#endif
+			// continue with the nearest valid child and push the others, farthest first
+			if (SSE_HIT( 3 ))
 			{
-				const uint32_t lane = __bfind( mask );
-				nodeIdx = tinybvh_getlane_u( &n->child4, lane );
+				if (SSE_HIT( 0 )) SSE_PUSH( c0, 0 );
+				if (SSE_HIT( 1 )) SSE_PUSH( c1, 1 );
+				if (SSE_HIT( 2 )) SSE_PUSH( c2, 2 );
+				nodeIdx = c3;
 			}
-			else if (validNodes)
+			else if (SSE_HIT( 2 ))
 			{
-			#ifdef __AVX__
-				// avx1 path
-				const __m128i index = _mm_srli_epi32( n->perm4, signShift );
-				const uint32_t m = _mm_movemask_ps( _mm_permutevar_ps( mask4, index ) );
-				tmin = _mm_permutevar_ps( tmin, index );
-				const __m128i c4 = _mm_castps_si128( _mm_permutevar_ps( _mm_castsi128_ps( n->child4 ), index ) );
-			#else
-				// sse4.2 path, 3 extra ops to emulate _mm_permutevar_ps via _mm_shuffle_epi8
-				const __m128i raw4 = _mm_and_si128( _mm_srli_epi32( n->perm4, signShift ), shftmsk4 );
-				const __m128i shfl16 = _mm_add_epi32( _mm_mullo_epi32( raw4, mul4 ), add4 );
-				const uint32_t m = _mm_movemask_ps( _mm_castsi128_ps( _mm_shuffle_epi8( _mm_castps_si128( mask4 ), shfl16 ) ) );
-				tmin = _mm_castsi128_ps( _mm_shuffle_epi8( _mm_castps_si128( tmin ), shfl16 ) );
-				const __m128i c4 = _mm_shuffle_epi8( n->child4, shfl16 );
-			#endif
-				const __m128i cpi = idxLUT4_[m];
-				const __m128 dist4 = _mm_castsi128_ps( _mm_shuffle_epi8( _mm_castps_si128( tmin ), cpi ) );
-				const __m128i child4 = _mm_shuffle_epi8( c4, cpi );
-				_mm_storeu_si128( (__m128i*)(nodeStack + stackPtr), child4 );
-				_mm_storeu_ps( (float*)(distStack + stackPtr), dist4 );
-				stackPtr += validNodes - 1;
-				nodeIdx = nodeStack[stackPtr];
+				if (SSE_HIT( 0 )) SSE_PUSH( c0, 0 );
+				if (SSE_HIT( 1 )) SSE_PUSH( c1, 1 );
+				nodeIdx = c2;
 			}
+			else if (SSE_HIT( 1 ))
+			{
+				if (SSE_HIT( 0 )) SSE_PUSH( c0, 0 );
+				nodeIdx = c1;
+			}
+			else if (SSE_HIT( 0 )) nodeIdx = c0;
 			else
 			{
-				if (!stackPtr) goto the_end;
-				nodeIdx = nodeStack[--stackPtr];
+				// skip entries behind the current hit
+				do { if (!stackPtr) goto the_end; nodeIdx = nodeStack[--stackPtr]; } while (distStack[stackPtr] > tcur);
 			}
 		}
 		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
-		uint32_t n;
-		memcpy( &n, &nodeIdx, 4 );
-		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + (n & 0x1fffffff));
+		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_sub_ps( _mm_mul_ps( dy4, leaf->e2z4 ), _mm_mul_ps( dz4, leaf->e2y4 ) );
 		const __m128 hy4 = _mm_sub_ps( _mm_mul_ps( dz4, leaf->e2x4 ), _mm_mul_ps( dx4, leaf->e2z4 ) );
 		const __m128 hz4 = _mm_sub_ps( _mm_mul_ps( dx4, leaf->e2y4 ), _mm_mul_ps( dy4, leaf->e2x4 ) );
@@ -7016,26 +7009,10 @@ template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU::Intersect( Ray& ray
 		#else
 			ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
 		#endif
-			t4 = _mm_set1_ps( t );
-			// compress stack
-			uint32_t outStackPtr = 0;
-			for (int32_t i = 0; i < stackPtr; i += 4)
-			{
-				__m128i node4 = _mm_load_si128( (__m128i*)(nodeStack + i) );
-				__m128 d4 = _mm_load_ps( (float*)(distStack + i) );
-				const uint32_t mask = _mm_movemask_ps( _mm_cmple_ps( d4, t4 ) );
-				const __m128i shfl16 = idxLUT4_[mask];
-				const __m128i dst4 = _mm_shuffle_epi8( _mm_castps_si128( d4 ), shfl16 );
-				node4 = _mm_shuffle_epi8( node4, shfl16 );
-				_mm_storeu_si128( (__m128i*)(distStack + outStackPtr), dst4 );
-				_mm_storeu_si128( (__m128i*)(nodeStack + outStackPtr), node4 );
-				const int32_t numItems = tinybvh_min( 4, stackPtr - i ), validMask = (1 << numItems) - 1;
-				outStackPtr += __popc( mask & validMask );
-			}
-			stackPtr = outStackPtr;
+			t4 = _mm_set1_ps( t ), tcur = t;
 		}
-		if (!stackPtr) break;
-		nodeIdx = nodeStack[--stackPtr];
+		// skip entries behind the current hit
+		do { if (!stackPtr) goto the_end; nodeIdx = nodeStack[--stackPtr]; } while (distStack[stackPtr] > tcur);
 	}
 the_end:
 #ifdef _DEBUG
@@ -7045,10 +7022,13 @@ the_end:
 #endif
 }
 
+#undef SSE_PUSH
+
 template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
-	ALIGNED( 64 ) int32_t stackPtr = 0, nodeIdx = 0;
+	int32_t stackPtr = 0;
+	uint32_t nodeIdx = 0;
 	const __m128 t4 = _mm_set1_ps( ray.hit.t );
 	const __m128 rx4 = _mm_set1_ps( ray.O.x * ray.rD.x ), rdx4 = _mm_set1_ps( ray.rD.x );
 	const __m128 ry4 = _mm_set1_ps( ray.O.y * ray.rD.y ), rdy4 = _mm_set1_ps( ray.rD.y );
@@ -7061,40 +7041,46 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 		while (!(nodeIdx & LEAF_BIT))
 		{
 			const BVHNode* n = (BVHNode*)(bvh4Data + nodeIdx);
+			const void* child = &n->child4;
 			const __m128 tx1 = _mm_sub_ps( _mm_mul_ps( posX ? n->xmin4 : n->xmax4, rdx4 ), rx4 );
 			const __m128 ty1 = _mm_sub_ps( _mm_mul_ps( posY ? n->ymin4 : n->ymax4, rdy4 ), ry4 );
 			const __m128 tz1 = _mm_sub_ps( _mm_mul_ps( posZ ? n->zmin4 : n->zmax4, rdz4 ), rz4 );
 			const __m128 tx2 = _mm_sub_ps( _mm_mul_ps( posX ? n->xmax4 : n->xmin4, rdx4 ), rx4 );
 			const __m128 ty2 = _mm_sub_ps( _mm_mul_ps( posY ? n->ymax4 : n->ymin4, rdy4 ), ry4 );
 			const __m128 tz2 = _mm_sub_ps( _mm_mul_ps( posZ ? n->zmax4 : n->zmin4, rdz4 ), rz4 );
-			const __m128 tmin = _mm_max_ps( _mm_max_ps( _mm_max_ps( _mm_setzero_ps(), tx1 ), ty1 ), tz1 );
+			const __m128 tmin = _mm_max_ps( _mm_max_ps( _mm_max_ps( zero4, tx1 ), ty1 ), tz1 );
 			const __m128 tmax = _mm_min_ps( _mm_min_ps( _mm_min_ps( tx2, t4 ), ty2 ), tz2 );
-			const __m128 mask4 = _mm_cmple_ps( tmin, tmax );
-			const uint32_t mask = _mm_movemask_ps( mask4 );
-			const uint32_t validNodes = __popc( mask );
-			if (validNodes == 1)
+			// slab mask in lane order, the children are visited in any order
+			const uint32_t m = _mm_movemask_ps( _mm_cmple_ps( tmin, tmax ) );
+			const uint32_t c0 = tinybvh_getlane_u( child, 0 ), c1 = tinybvh_getlane_u( child, 1 );
+			const uint32_t c2 = tinybvh_getlane_u( child, 2 ), c3 = tinybvh_getlane_u( child, 3 );
+			if (SSE_HIT( 0 ))
 			{
-				const uint32_t lane = __bfind( mask );
-				nodeIdx = tinybvh_getlane_u( &n->child4, lane );
+				if (SSE_HIT( 3 )) nodeStack[stackPtr++] = c3;
+				if (SSE_HIT( 2 )) nodeStack[stackPtr++] = c2;
+				if (SSE_HIT( 1 )) nodeStack[stackPtr++] = c1;
+				nodeIdx = c0;
 			}
-			else if (validNodes)
+			else if (SSE_HIT( 1 ))
 			{
-				const __m128i cpi = idxLUT4_[mask];
-				const __m128i child4 = _mm_shuffle_epi8( n->child4, cpi );
-				_mm_storeu_si128( (__m128i*)(nodeStack + stackPtr), child4 );
-				stackPtr += validNodes - 1;
-				nodeIdx = nodeStack[stackPtr];
+				if (SSE_HIT( 3 )) nodeStack[stackPtr++] = c3;
+				if (SSE_HIT( 2 )) nodeStack[stackPtr++] = c2;
+				nodeIdx = c1;
 			}
+			else if (SSE_HIT( 2 ))
+			{
+				if (SSE_HIT( 3 )) nodeStack[stackPtr++] = c3;
+				nodeIdx = c2;
+			}
+			else if (SSE_HIT( 3 )) nodeIdx = c3;
 			else
 			{
 				if (!stackPtr) return false;
 				nodeIdx = nodeStack[--stackPtr];
 			}
 		}
-		uint32_t n;
-		memcpy( &n, &nodeIdx, 4 );
 		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
-		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + (n & 0x1fffffff));
+		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_sub_ps( _mm_mul_ps( dy4, leaf->e2z4 ), _mm_mul_ps( dz4, leaf->e2y4 ) );
 		const __m128 hy4 = _mm_sub_ps( _mm_mul_ps( dz4, leaf->e2x4 ), _mm_mul_ps( dx4, leaf->e2z4 ) );
 		const __m128 hz4 = _mm_sub_ps( _mm_mul_ps( dx4, leaf->e2y4 ), _mm_mul_ps( dy4, leaf->e2x4 ) );
@@ -7110,9 +7096,9 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 		const __m128 mask1 = _mm_and_ps( _mm_cmpge_ps( u4, zero4 ), _mm_cmpge_ps( v4, zero4 ) );
 		const __m128 mask2 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
 		const __m128 mask3 = _mm_and_ps( _mm_cmplt_ps( ta4, t4 ), _mm_cmpgt_ps( ta4, zero4 ) );
-		__m128 combined = _mm_and_ps( _mm_and_ps( mask1, mask2 ), mask3 );
-		// evaluate opacity map, if present (SSE version).
-		if (_mm_movemask_ps( combined ))
+		const __m128 combined = _mm_and_ps( _mm_and_ps( mask1, mask2 ), mask3 );
+		const uint32_t imask = _mm_movemask_ps( combined );
+		if (imask)
 		{
 			if (!opmap) return true;
 			// evaluate opacity map, SSE version.
@@ -7125,7 +7111,6 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 			uint32_t idx[4];
 			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
 			// proceed with scalar code for gather operation - TODO: better approach?
-			const uint32_t imask = _mm_movemask_ps( combined );
 			for (int i = 0; i < 4; i++) if (imask & (1 << i))
 			{
 				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
@@ -7137,6 +7122,8 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 		nodeIdx = nodeStack[--stackPtr];
 	}
 }
+
+#undef SSE_HIT
 
 #endif // BVH_USESSE
 
