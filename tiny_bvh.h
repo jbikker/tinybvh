@@ -540,13 +540,13 @@ TINYBVH_FORCEINLINE void tinybvh_store8( void* p, const float32x4x2_t v ) { memc
 TINYBVH_FORCEINLINE bool tinybvh_isfinite( float f )
 {
 	uint32_t i;
-	std::memcpy( &i, &f, sizeof( i ) );
+	memcpy( &i, &f, sizeof( i ) );
 	return (i & 0x7F800000) != 0x7F800000; // ieee-754: finite if not all exponent bits are 1.
 }
 TINYBVH_FORCEINLINE bool tinybvh_isnan( float f )
 {
 	uint32_t i;
-	std::memcpy( &i, &f, sizeof( i ) );
+	memcpy( &i, &f, sizeof( i ) );
 	return (i & 0x7F800000) == 0x7F800000 && (i & 0x007FFFFF) != 0; // ieee-754
 }
 // Clamp to BVH_FAR rather than FLT_MAX: precomputed products such as
