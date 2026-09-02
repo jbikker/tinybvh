@@ -525,6 +525,11 @@ TINYBVH_FORCEINLINE __m128 tinybvh_load4( const void* p ) { __m128 r; memcpy( &r
 TINYBVH_FORCEINLINE __m128i tinybvh_load4i( const void* p ) { __m128i r; memcpy( &r, p, 16 ); return r; }
 TINYBVH_FORCEINLINE void tinybvh_store4( void* p, const __m128 v ) { memcpy( p, &v, 16 ); }
 TINYBVH_FORCEINLINE void tinybvh_store4i( void* p, const __m128i v ) { memcpy( p, &v, 16 ); }
+// extract a single 32-bit lane straight out of a register
+#define TINYBVH_LANE0(V) ((uint32_t)_mm_cvtsi128_si32( V ))
+#define TINYBVH_LANE1(V) ((uint32_t)_mm_extract_epi32( V, 1 ))
+#define TINYBVH_LANE2(V) ((uint32_t)_mm_extract_epi32( V, 2 ))
+#define TINYBVH_LANE3(V) ((uint32_t)_mm_extract_epi32( V, 3 ))
 #endif
 #ifdef BVH_USEAVX
 TINYBVH_FORCEINLINE __m256 tinybvh_load8( const void* p ) { __m256 r; memcpy( &r, p, 32 ); return r; }
@@ -3436,8 +3441,7 @@ float BVH::EPOArea( const uint32_t subtreeRoot, const uint32_t nodeIdx ) const
 			if (vertIdx) v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
 			else v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
 		#ifdef BVH_USESSE
-			union { __m128 vmin4; bvhvec4 vmin; };
-			union { __m128 vmax4; bvhvec4 vmax; };
+			__m128 vmin4, vmax4;
 			vmin4 = _mm_min_ps( _mm_min_ps( tinybvh_load4( &v0 ), tinybvh_load4( &v1 ) ), tinybvh_load4( &v2 ) );
 			vmax4 = _mm_max_ps( _mm_max_ps( tinybvh_load4( &v0 ), tinybvh_load4( &v1 ) ), tinybvh_load4( &v2 ) );
 			const bool allin = (_mm_movemask_ps( _mm_and_ps( _mm_cmpge_ps( vmin4, bmin4 ), _mm_cmple_ps( vmax4, bmax4 ) ) ) & 7) == 7;
@@ -6064,7 +6068,7 @@ void BVH4_GPU::ConvertFrom( const MBVH<4>& original, bool compact )
 // This code replicates how traversal on GPU happens.
 #define SWAP(A,B,C,D) tmp=A,A=B,B=tmp,tmp2=C,C=D,D=tmp2;
 struct uchar4 { uint8_t x, y, z, w; };
-static uchar4 as_uchar4( const float v ) { union { float t; uchar4 t4; }; t = v; return t4; }
+static uchar4 as_uchar4( const float v ) { return tinybvh_bitcast<uchar4>( v ); }
 static uint32_t as_uint( const float v ) { uint32_t t; memcpy( &t, &v, sizeof( t ) ); return t; }
 int32_t BVH4_GPU::Intersect( Ray& ray ) const
 {
@@ -6244,7 +6248,8 @@ float BVH4_CPU::SAHCost( const uint32_t nodeIdx ) const
 	return bvh4.SAHCost( nodeIdx );
 }
 
-#define SORT(a,b) { if (dist[a] < dist[b]) { float h = dist[a]; dist[a] = dist[b], dist[b] = h; } }
+#define SORT(a,b) { if (tinybvh_as_float( idist[a] ) < tinybvh_as_float( idist[b] )) \
+	{ const uint32_t h = idist[a]; idist[a] = idist[b], idist[b] = h; } }
 
 void BVH4_CPU::ConvertFrom( MBVH<4>& original )
 {
@@ -6283,14 +6288,14 @@ void BVH4_CPU::ConvertFrom( MBVH<4>& original )
 		for (uint32_t q = 0; q < 8; q++)
 		{
 			const bvhvec3 D( q & 1 ? 1.0f : -1.0f, q & 2 ? 1.0f : -1.0f, q & 4 ? 1.0f : -1.0f );
-			union { float dist[4]; uint32_t idist[4]; };
+			uint32_t idist[4];
 			for (int i = 0; i < 4; i++) if (orig.child[i] == 0)
-				dist[i] = 1e30f, idist[i] = (idist[i] & 0xfffffffc) + i;
+				idist[i] = (tinybvh_as_uint( 1e30f ) & 0xfffffffc) + i;
 			else
 			{
 				const MBVH<4>::MBVHNode& c = bvh4.mbvhNode[orig.child[i]];
 				const bvhvec3 p( q & 1 ? c.aabbMin.x : c.aabbMax.x, q & 2 ? c.aabbMin.y : c.aabbMax.y, q & 4 ? c.aabbMin.z : c.aabbMax.z );
-				dist[i] = tinybvh_dot( D, p ), idist[i] = (idist[i] & 0xfffffff8) + i;
+				idist[i] = (tinybvh_as_uint( tinybvh_dot( D, p ) ) & 0xfffffff8) + i;
 			}
 			// apply sorting network - https://bertdobbelaere.github.io/sorting_networks.html#N4L5D3
 			SORT( 0, 2 ); SORT( 1, 3 ); SORT( 0, 1 ); SORT( 2, 3 ); SORT( 1, 2 );
@@ -6469,14 +6474,14 @@ void BVH8_CPU::ConvertFrom( MBVH<8>& original )
 		for (uint32_t q = 0; q < 8; q++)
 		{
 			const bvhvec3 D( q & 1 ? 1.0f : -1.0f, q & 2 ? 1.0f : -1.0f, q & 4 ? 1.0f : -1.0f );
-			union { float dist[8]; uint32_t idist[8]; };
+			uint32_t idist[8];
 			for (int i = 0; i < 8; i++) if (orig.child[i] == 0)
-				dist[i] = 1e30f, idist[i] = (idist[i] & 0xfffffff8) + i;
+				idist[i] = (tinybvh_as_uint( BVH_FAR ) & 0xfffffff8) + i;
 			else
 			{
 				const MBVH<8>::MBVHNode& c = bvh8.mbvhNode[orig.child[i]];
 				const bvhvec3 p( q & 1 ? c.aabbMin.x : c.aabbMax.x, q & 2 ? c.aabbMin.y : c.aabbMax.y, q & 4 ? c.aabbMin.z : c.aabbMax.z );
-				dist[i] = tinybvh_dot( D, p ), idist[i] = (idist[i] & 0xfffffff8) + i;
+				idist[i] = (tinybvh_as_uint( tinybvh_dot( D, p ) ) & 0xfffffff8) + i;
 			}
 			// apply sorting network - https://bertdobbelaere.github.io/sorting_networks.html#N8L19D6
 			SORT( 0, 2 ); SORT( 1, 3 ); SORT( 4, 6 ); SORT( 5, 7 ); SORT( 0, 4 );
@@ -6965,18 +6970,16 @@ template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU::Intersect( Ray& ray
 			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
 			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
 			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
-			union { uint32_t idx[4]; __m128i idx4; };
-			union { uint32_t omask[4]; __m128 omask4; };
-			idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
+			uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
+			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
 			// proceed with scalar code for gather operation - TODO: better approach?
-			omask[0] = omask[1] = omask[2] = omask[3] = 0;
 			for (int i = 0; i < 4; i++) if (imask & (1 << i))
 			{
 				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
 				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
 			}
 			// combine
-			combined = _mm_and_ps( combined, omask4 );
+			combined = _mm_and_ps( combined, tinybvh_load4( omask ) );
 			imask = _mm_movemask_ps( combined );
 		}
 		if (imask)
@@ -7114,8 +7117,8 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
 			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
 			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
-			union { uint32_t idx[4]; __m128i idx4; };
-			idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
+			uint32_t idx[4];
+			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
 			// proceed with scalar code for gather operation - TODO: better approach?
 			const uint32_t imask = _mm_movemask_ps( combined );
 			for (int i = 0; i < 4; i++) if (imask & (1 << i))
@@ -7297,10 +7300,9 @@ void BVH::BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* bi
 	uint32_t fi = primIdx[first];
 	__m256 r0, r1, r2, f = _mm256_xor_ps( tinybvh_load8( fragment + fi ), signFlip8 );
 	const __m128i zero4i = _mm_setzero_si128();
-	union { __m128i bc4; uint32_t bc[4]; };
-	bc4 = _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_add_ps(
+	__m128i bc4 = _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_add_ps(
 		tinybvh_load4( &fragment[fi].bmax ), tinybvh_load4( &fragment[fi].bmin ) ), nmin4 ), rpd4 ) ), zero4i );
-	uint32_t i0 = bc[0], i1 = bc[1], i2 = bc[2], * ti = primIdx + first + 1;
+	uint32_t i0 = TINYBVH_LANE0( bc4 ), i1 = TINYBVH_LANE1( bc4 ), i2 = TINYBVH_LANE2( bc4 ), * ti = primIdx + first + 1;
 	for (uint32_t i = first; i < last - 1; i++)
 	{
 		uint32_t fid = *ti++;
@@ -7313,9 +7315,9 @@ void BVH::BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* bi
 		bc4 = _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_add_ps( frmax, frmin ), nmin4 ), rpd4 ) ), zero4i );
 		f = _mm256_xor_ps( tinybvh_load8( fragment + fid ), signFlip8 );
 		count[i0]++, count[AVXBINS + i1]++, count[AVXBINS * 2 + i2]++;
-		binbox[i0] = r0, i0 = bc[0];
-		binbox[AVXBINS + i1] = r1, i1 = bc[1];
-		binbox[2 * AVXBINS + i2] = r2, i2 = bc[2];
+		binbox[i0] = r0, i0 = TINYBVH_LANE0( bc4 );
+		binbox[AVXBINS + i1] = r1, i1 = TINYBVH_LANE1( bc4 );
+		binbox[2 * AVXBINS + i2] = r2, i2 = TINYBVH_LANE2( bc4 );
 	}
 	// final business for final fragment
 	const __m256 b0 = binbox[i0], b1 = binbox[AVXBINS + i1], b2 = binbox[2 * AVXBINS + i2];
@@ -8192,18 +8194,16 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 				const __m128i v0 = _mm_mullo_epi32( row4, row4 );
 				const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
 				const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
-				union { uint32_t idx[4]; __m128i idx4; };
-				union { uint32_t omask[4]; __m128 omask4; };
-				idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
+				uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
+				tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
 				// proceed with scalar code for gather operation - TODO: better approach?
-				omask[0] = omask[1] = omask[2] = omask[3] = 0;
 				for (int i = 0; i < 4; i++) if (imask & (1 << i))
 				{
 					uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
 					if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
 				}
 				// combine
-				combined = _mm_and_ps( combined, omask4 );
+				combined = _mm_and_ps( combined, tinybvh_load4( omask ) );
 				imask = _mm_movemask_ps( combined );
 			}
 				if (imask)
@@ -8361,8 +8361,8 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
 			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( bv4, fN4 ) );
 			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
-			union { uint32_t idx[4]; __m128i idx4; };
-			idx4 = _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 );
+			uint32_t idx[4];
+			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
 			// proceed with scalar code for gather operation - TODO: better approach?
 			const uint32_t imask = _mm_movemask_ps( combined );
 			for (int i = 0; i < 4; i++) if (imask & (1 << i))
@@ -9734,18 +9734,14 @@ bool BVH::BVHNode::Intersect( const bvhvec3& bmin, const bvhvec3& bmax ) const
 bool BVH::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const
 {
 #ifdef BVH_USESSE
-	union { __m128 lbmin4; bvhvec4 lbmin; };
-	union { __m128 lbmax4; bvhvec4 lbmax; };
-	union { __m128 rbmin4; bvhvec4 rbmin; };
-	union { __m128 rbmax4; bvhvec4 rbmax; };
+	__m128 lbmin4, lbmax4, rbmin4, rbmax4;
 	lbmin4 = _mm_set1_ps( BVH_FAR ), rbmin4 = lbmin4;
 	lbmax4 = _mm_set1_ps( -BVH_FAR ), rbmax4 = lbmax4;
-	union { __m128 v0_4; bvhvec4 v0; };
-	union { __m128 v1_4; bvhvec4 v1; };
-	union { __m128 v2_4; bvhvec4 v2; };
+	bvhvec4 v0, v1, v2;
 	const uint32_t vidx = orig.primIdx * 3;
 	if (!vertIdx) v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
 	else v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
+	const __m128 v0_4 = tinybvh_load4( &v0 ), v1_4 = tinybvh_load4( &v1 ), v2_4 = tinybvh_load4( &v2 );
 	const bool l0 = v0[axis] <= pos, l1 = v1[axis] <= pos, l2 = v2[axis] <= pos;
 	if (l0) lbmin4 = _mm_min_ps( lbmin4, v0_4 ), lbmax4 = _mm_max_ps( lbmax4, v0_4 );
 	else rbmin4 = _mm_min_ps( rbmin4, v0_4 ), rbmax4 = _mm_max_ps( rbmax4, v0_4 );
@@ -9753,17 +9749,17 @@ bool BVH::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, cons
 	else rbmin4 = _mm_min_ps( rbmin4, v1_4 ), rbmax4 = _mm_max_ps( rbmax4, v1_4 );
 	if (l2) lbmin4 = _mm_min_ps( lbmin4, v2_4 ), lbmax4 = _mm_max_ps( lbmax4, v2_4 );
 	else rbmin4 = _mm_min_ps( rbmin4, v2_4 ), rbmax4 = _mm_max_ps( rbmax4, v2_4 );
-	union { __m128 c4; bvhvec4 c; };
+	bvhvec4 c; __m128 c4;
 	if (l0 ^ l1)
-		c = v0 + (pos - v0[axis]) / (v1[axis] - v0[axis]) * (v1 - v0), c[axis] = pos,
+		c = v0 + (pos - v0[axis]) / (v1[axis] - v0[axis]) * (v1 - v0), c[axis] = pos, c4 = tinybvh_load4( &c ),
 		lbmin4 = _mm_min_ps( lbmin4, c4 ), lbmax4 = _mm_max_ps( lbmax4, c4 ),
 		rbmin4 = _mm_min_ps( rbmin4, c4 ), rbmax4 = _mm_max_ps( rbmax4, c4 );
 	if (l1 ^ l2)
-		c = v1 + (pos - v1[axis]) / (v2[axis] - v1[axis]) * (v2 - v1), c[axis] = pos,
+		c = v1 + (pos - v1[axis]) / (v2[axis] - v1[axis]) * (v2 - v1), c[axis] = pos, c4 = tinybvh_load4( &c ),
 		lbmin4 = _mm_min_ps( lbmin4, c4 ), lbmax4 = _mm_max_ps( lbmax4, c4 ),
 		rbmin4 = _mm_min_ps( rbmin4, c4 ), rbmax4 = _mm_max_ps( rbmax4, c4 );
 	if (l2 ^ l0)
-		c = v2 + (pos - v2[axis]) / (v0[axis] - v2[axis]) * (v0 - v2), c[axis] = pos,
+		c = v2 + (pos - v2[axis]) / (v0[axis] - v2[axis]) * (v0 - v2), c[axis] = pos, c4 = tinybvh_load4( &c ),
 		lbmin4 = _mm_min_ps( lbmin4, c4 ), lbmax4 = _mm_max_ps( lbmax4, c4 ),
 		rbmin4 = _mm_min_ps( rbmin4, c4 ), rbmax4 = _mm_max_ps( rbmax4, c4 );
 	if (orig.clipped) // clip against orig box
@@ -9805,35 +9801,31 @@ bool BVH::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, cons
 bool BVH::ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, const uint32_t axis ) const
 {
 #ifdef BVH_USESSE
-	union { __m128 t1min4; bvhvec4 t1min; };
-	union { __m128 t1max4; bvhvec4 t1max; };
-	union { __m128 t2min4; bvhvec4 t2min; };
-	union { __m128 t2max4; bvhvec4 t2max; };
+	__m128 t1min4, t1max4, t2min4, t2max4;
 	t1min4 = t2min4 = _mm_set1_ps( BVH_FAR );
 	t1max4 = t2max4 = _mm_set1_ps( -BVH_FAR );
-	union { __m128 v0_4; bvhvec4 v0; };
-	union { __m128 v1_4; bvhvec4 v1; };
-	union { __m128 v2_4; bvhvec4 v2; };
+	bvhvec4 v0, v1, v2;
 	const uint32_t vidx = orig.primIdx * 3;
 	if (!vertIdx) v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
 	else v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
+	const __m128 v0_4 = tinybvh_load4( &v0 ), v1_4 = tinybvh_load4( &v1 ), v2_4 = tinybvh_load4( &v2 );
 	const float left = bmin[axis], right = bmax[axis];
 	// clip against min bounds
 	bool in0 = v0[axis] >= left, in1 = v1[axis] >= left, in2 = v2[axis] >= left;
 	if (in0) t1min4 = _mm_min_ps( t1min4, v0_4 ), t1max4 = _mm_max_ps( t1max4, v0_4 );
 	if (in1) t1min4 = _mm_min_ps( t1min4, v1_4 ), t1max4 = _mm_max_ps( t1max4, v1_4 );
 	if (in2) t1min4 = _mm_min_ps( t1min4, v2_4 ), t1max4 = _mm_max_ps( t1max4, v2_4 );
-	union { __m128 c4; bvhvec4 c; };
+	bvhvec4 c; __m128 c4;
 	if (in0 ^ in1)
-		c = v0 + (left - v0[axis]) / (v1[axis] - v0[axis]) * (v1 - v0), c[axis] = left,
+		c = v0 + (left - v0[axis]) / (v1[axis] - v0[axis]) * (v1 - v0), c[axis] = left, c4 = tinybvh_load4( &c ),
 		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 ),
 		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 );
 	if (in1 ^ in2)
-		c = v1 + (left - v1[axis]) / (v2[axis] - v1[axis]) * (v2 - v1), c[axis] = left,
+		c = v1 + (left - v1[axis]) / (v2[axis] - v1[axis]) * (v2 - v1), c[axis] = left, c4 = tinybvh_load4( &c ),
 		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 ),
 		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 );
 	if (in2 ^ in0)
-		c = v2 + (left - v2[axis]) / (v0[axis] - v2[axis]) * (v0 - v2), c[axis] = left,
+		c = v2 + (left - v2[axis]) / (v0[axis] - v2[axis]) * (v0 - v2), c[axis] = left, c4 = tinybvh_load4( &c ),
 		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 ),
 		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 );
 	// clip against max bounds
@@ -9842,15 +9834,15 @@ bool BVH::ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhve
 	if (in1) t2min4 = _mm_min_ps( t2min4, v1_4 ), t2max4 = _mm_max_ps( t2max4, v1_4 );
 	if (in2) t2min4 = _mm_min_ps( t2min4, v2_4 ), t2max4 = _mm_max_ps( t2max4, v2_4 );
 	if (in0 ^ in1)
-		c = v0 + (right - v0[axis]) / (v1[axis] - v0[axis]) * (v1 - v0), c[axis] = right,
+		c = v0 + (right - v0[axis]) / (v1[axis] - v0[axis]) * (v1 - v0), c[axis] = right, c4 = tinybvh_load4( &c ),
 		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 ),
 		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 );
 	if (in1 ^ in2)
-		c = v1 + (right - v1[axis]) / (v2[axis] - v1[axis]) * (v2 - v1), c[axis] = right,
+		c = v1 + (right - v1[axis]) / (v2[axis] - v1[axis]) * (v2 - v1), c[axis] = right, c4 = tinybvh_load4( &c ),
 		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 ),
 		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 );
 	if (in2 ^ in0)
-		c = v2 + (right - v2[axis]) / (v0[axis] - v2[axis]) * (v0 - v2), c[axis] = right,
+		c = v2 + (right - v2[axis]) / (v0[axis] - v2[axis]) * (v0 - v2), c[axis] = right, c4 = tinybvh_load4( &c ),
 		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 ),
 		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 );
 	__m128 finalmin4, finalmax4;
