@@ -19,7 +19,7 @@ float uniform_rand() { return (float)rand() / (float)RAND_MAX; }
 int main()
 {
 	// create a scene consisting of some random small triangles
-	for (int i = 0; i < TRIANGLE_COUNT; i++)
+	for (uint32_t i = 0; i < TRIANGLE_COUNT; i++)
 	{
 		// create a random triangle
 		tinybvh::bvhvec4& v0 = vertices[i * 3 + 0];
