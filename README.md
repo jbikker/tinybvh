@@ -40,7 +40,7 @@ Apart from the default BVH layout (simply named ````BVH````), several other layo
 * ````BVH```` : A compact format that stores the AABB for a node, along with child pointers and leaf information in a cross-platform-friendly way. The 32-byte size allows for cache-line alignment.
 * ````BVH_Double```` : Double-precision version of ````BVH````.
 * ````MBVH<M>```` : In this (templated) format, each node stores _M_ child pointers, reducing the depth of the tree. This improves performance for divergent rays. Based on the [2008 paper](https://graphics.stanford.edu/~boulos/papers/multi_rt08.pdf) by Ingo Wald et al.
-* ````BVH4_CPU```` : SSE-optimized wide BVH traversal (["WiVe"](https://web.cs.ucdavis.edu/~hamann/FuetterlingLojewskiPfreundtHamannEbertHPG2017PaperFinal06222017.pdf)). The fastest option for CPUs that do not support AVX.
+* ````BVH4_CPU```` : SSE/NEON-optimized wide BVH traversal (["WiVe"](https://web.cs.ucdavis.edu/~hamann/FuetterlingLojewskiPfreundtHamannEbertHPG2017PaperFinal06222017.pdf)). The fastest option for CPUs that do not support AVX.
 * ````BVH8_CPU```` : AVX2-optimized wide BVH traversal (["WiVe"](https://web.cs.ucdavis.edu/~hamann/FuetterlingLojewskiPfreundtHamannEbertHPG2017PaperFinal06222017.pdf)). This is the fastest option on CPU.
 * ````BVH_GPU```` : This format uses 64 bytes per node and stores the AABBs of the two child nodes. This is the format presented in the [2009 Aila & Laine paper](https://research.nvidia.com/sites/default/files/pubs/2009-08_Understanding-the-Efficiency/aila2009hpg_paper.pdf). It can be traversed with a simple GPU kernel.
 * ````BVH4_GPU```` : A compact version of the ````BVH4```` format, which may be faster for GPU ray tracing.
@@ -178,7 +178,7 @@ TinyBVH is a cross-platfrom library and should build on any platform that suppor
 * ````x86/x64 Windows/Linux````: These platforms benefit from highly optimized SSE/AVX/AVX2 traversal kernels.
 * ````OPENCL````: Although TinyBVH does not directly use OpenCL, GPU-specific BVHs can be constructed and example code for BLAS/TLAS traversal in OpenCL is provided.
 * ````OpenGL/compute````: Example compute shader code for BLAS traversal is also provided.
-* ````ARM_NEON````: Efficient BVH construction code is provided for ARM NEON. The ````BVH_SoA```` layout uses NEON intrinsics for fast traversal.
+* ````ARM_NEON````: Efficient BVH construction code is provided for ARM NEON. The ````BVH_SoA```` and ````BVH4_CPU```` layouts use NEON intrinsics for fast traversal.
 * ````ANDROID````: This platform benefits from ARM NEON support as well as aligned memory allocation.
 * ````APPLE````: This platform benefits from ARM NEON support, dedicated paths in GPU example code and specialized support in TinyBVH itself.
   

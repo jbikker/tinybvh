@@ -204,7 +204,7 @@ float TestPrimaryRays( uint32_t layout, unsigned N, unsigned passes, float* avgC
 		case _DEFAULT: for (unsigned i = 0; i < N; i++) travCost += ref_bvh->Intersect( batch[i] ); break;
 		case _GPU2: for (unsigned i = 0; i < N; i++) travCost += bvh_gpu->Intersect( batch[i] ); break;
 		case _GPU4: for (unsigned i = 0; i < N; i++) travCost += bvh4_gpu->Intersect( batch[i] ); break;
-		#ifdef BVH_USESSE
+		#if defined BVH_USESSE || defined BVH_USENEON
 		case _CPU4: for (unsigned i = 0; i < N; i++) travCost += bvh4_cpu->Intersect( batch[i] ); break;
 		#endif
 		#ifdef BVH_USEAVX
@@ -243,7 +243,7 @@ float TestDiffuseRays( uint32_t layout, unsigned passes, float* avgCost = 0 )
 		case _DEFAULT: for (unsigned i = 0; i < Nsmall; i++) travCost += ref_bvh->Intersect( batch[i] ); break;
 		case _GPU2: for (unsigned i = 0; i < Nsmall; i++) travCost += bvh_gpu->Intersect( batch[i] ); break;
 		case _GPU4: for (unsigned i = 0; i < Nsmall; i++) travCost += bvh4_gpu->Intersect( batch[i] ); break;
-		#ifdef BVH_USESSE
+		#if defined BVH_USESSE || defined BVH_USENEON
 		case _CPU4: for (unsigned i = 0; i < Nsmall; i++) travCost += bvh4_cpu->Intersect( batch[i] ); break;
 		#endif
 		#ifdef BVH_USEAVX
@@ -312,7 +312,7 @@ float TestShadowRays( uint32_t layout, unsigned N, unsigned passes )
 		occluded = 0;
 		switch (layout)
 		{
-		#ifdef BVH_USESSE
+		#if defined BVH_USESSE || defined BVH_USENEON
 		case _CPU4: for (unsigned i = 0; i < N; i++) occluded += bvh4_cpu->IsOccluded( batch[i] ); break;
 		#endif
 		#ifdef BVH_USEAVX2
@@ -954,7 +954,7 @@ int main()
 
 #endif
 
-#if defined TRAVERSE_4WAY && defined BVH_USESSE
+#if defined TRAVERSE_4WAY && (defined BVH_USESSE || defined BVH_USENEON)
 
 	// BVH4_CPU
 	if (!bvh4_cpu)
@@ -962,7 +962,11 @@ int main()
 		bvh4_cpu = new BVH4_CPU();
 		bvh4_cpu->BuildHQ( triangles, verts / 3 );
 	}
+#ifdef BVH_USENEON
+	printf( "- BVH4 (NEON) - primary: " );
+#else
 	printf( "- BVH4 (SSE)  - primary: " );
+#endif
 	PrepareTest();
 	traceTime = TestPrimaryRays( _CPU4, Nsmall, 3 );
 	ValidateTraceResult( refDist, Nsmall, __LINE__ );
