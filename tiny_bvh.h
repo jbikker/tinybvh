@@ -155,7 +155,9 @@ THE SOFTWARE.
 
 // 'Infinity' values
 #define BVH_FAR	1e30f		// actual valid ieee range: 3.40282347E+38
+#define BVH_RCP_FAR	0x1p100f	// reciprocal of a zero direction component; see tinybvh_safercp
 #define BVH_DBL_FAR 1e300	// actual valid ieee range: 1.797693134862315E+308
+#define BVH_DBL_RCP_FAR 0x1p1000	// double precision counterpart of BVH_RCP_FAR
 
 // Threaded builds: spawn subtree tasks down to this depth (up to 2^N tasks).
 #ifndef MT_SPAWN_DEPTH
@@ -556,19 +558,16 @@ TINYBVH_FORCEINLINE bool tinybvh_isnan( float f )
 	memcpy( &i, &f, sizeof( i ) );
 	return (i & 0x7F800000) == 0x7F800000 && (i & 0x007FFFFF) != 0; // ieee-754
 }
-// Clamp to BVH_FAR rather than FLT_MAX: precomputed products such as
-// ray.O.x * ray.rD.x must not overflow to inf, since inf slab bounds
-// yield NaN or (under FP contraction) -inf and break traversal.
 TINYBVH_FORCEINLINE float tinybvh_safercp( const float x )
 {
 	const float r = 1 / x;
-	if (!(fabsf( r ) <= BVH_FAR)) return copysignf( BVH_FAR, x );
+	if (!(fabsf( r ) <= BVH_RCP_FAR)) return copysignf( BVH_RCP_FAR, x );
 	return r;
 }
 TINYBVH_FORCEINLINE double tinybvh_safercp( const double x )
 {
 	const double r = 1 / x;
-	if (!(fabs( r ) <= BVH_DBL_FAR)) return copysign( BVH_DBL_FAR, x );
+	if (!(fabs( r ) <= BVH_DBL_RCP_FAR)) return copysign( BVH_DBL_RCP_FAR, x );
 	return r;
 }
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_safercp( const bvhvec3 a ) { return bvhvec3( tinybvh_safercp( a.x ), tinybvh_safercp( a.y ), tinybvh_safercp( a.z ) ); }
