@@ -5206,7 +5206,7 @@ template<int M> void MBVH<M>::Build( const bvhvec4* v, const uint32_t p ) { Buil
 template<int M> void MBVH<M>::Build( const bvhvec4* v, const uint32_t* i, const uint32_t p ) { Build( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
 template<int M> void MBVH<M>::Build( const bvhvec4slice& v ) { Build( v, 0, 0 ); }
 template<int M> void MBVH<M>::BuildHQ( const bvhvec4* v, const uint32_t p ) { BuildHQ( bvhvec4slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
-template<int M> void MBVH<M>::BuildHQ( const bvhvec4* v, const uint32_t* indices, const uint32_t p ) { Build( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) }, indices, p ); }
+template<int M> void MBVH<M>::BuildHQ( const bvhvec4* v, const uint32_t* indices, const uint32_t p ) { BuildHQ( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) }, indices, p ); }
 template<int M> void MBVH<M>::BuildHQ( const bvhvec4slice& v ) { BuildHQ( v, 0, 0 ); }
 template<int M> void MBVH<M>::BuildHQ( const bvhvec4slice& v, const uint32_t* i, uint32_t p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
@@ -5653,7 +5653,7 @@ void BVH4_CPU::Build( const bvhvec4* v, const uint32_t* i, const uint32_t p ) { 
 void BVH4_CPU::Build( const bvhvec4* v, const uint32_t p ) { Build( bvhvec4slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
 void BVH4_CPU::Build( const bvhvec4slice& v ) { Build( v, 0, 0 ); }
 void BVH4_CPU::BuildHQ( const bvhvec4* v, const uint32_t p ) { BuildHQ( bvhvec4slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
-void BVH4_CPU::BuildHQ( const bvhvec4* v, const uint32_t* i, const uint32_t p ) { Build( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
+void BVH4_CPU::BuildHQ( const bvhvec4* v, const uint32_t* i, const uint32_t p ) { BuildHQ( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
 void BVH4_CPU::BuildHQ( const bvhvec4slice& v ) { BuildHQ( v, 0, 0 ); }
 void BVH4_CPU::BuildHQ( const bvhvec4slice& v, const uint32_t* i, uint32_t p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
@@ -5833,7 +5833,7 @@ void BVH8_CPU::Build( const bvhvec4slice& vertices ) { Build( vertices, 0, 0 ); 
 void BVH8_CPU::Build( const bvhvec4* v, const uint32_t* i, const uint32_t p ) { Build( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
 void BVH8_CPU::BuildHQ( const bvhvec4* v, const uint32_t p ) { BuildHQ( bvhvec4slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
 void BVH8_CPU::BuildHQ( const bvhvec4slice& vertices ) { BuildHQ( vertices, 0, 0 ); }
-void BVH8_CPU::BuildHQ( const bvhvec4* v, const uint32_t* i, const uint32_t p ) { Build( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
+void BVH8_CPU::BuildHQ( const bvhvec4* v, const uint32_t* i, const uint32_t p ) { BuildHQ( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
 void BVH8_CPU::BuildHQ( const bvhvec4slice& v, const uint32_t* i, uint32_t p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
 void BVH8_CPU::Build( const bvhvec4slice& vertices, const uint32_t* indices, uint32_t prims )
@@ -6017,7 +6017,7 @@ void BVH8_CWBVH::Build( const bvhvec4slice& v ) { Build( v, 0, 0 ); }
 void BVH8_CWBVH::Build( const bvhvec4* v, const uint32_t* i, const uint32_t p ) { Build( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
 void BVH8_CWBVH::BuildHQ( const bvhvec4* v, const uint32_t p ) { BuildHQ( bvhvec4slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
 void BVH8_CWBVH::BuildHQ( const bvhvec4slice& vertices ) { BuildHQ( vertices, 0, 0 ); }
-void BVH8_CWBVH::BuildHQ( const bvhvec4* v, const uint32_t* i, const uint32_t p ) { Build( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
+void BVH8_CWBVH::BuildHQ( const bvhvec4* v, const uint32_t* i, const uint32_t p ) { BuildHQ( bvhvec4slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
 void BVH8_CWBVH::BuildHQ( const bvhvec4slice& v, const uint32_t* i, uint32_t p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
 void BVH8_CWBVH::Build( const bvhvec4slice& vertices, const uint32_t* indices, uint32_t prims )
