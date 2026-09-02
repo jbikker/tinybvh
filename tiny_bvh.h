@@ -6820,13 +6820,6 @@ void BVH8_CWBVH::ConvertFrom( const MBVH<8>& original, bool compact )
 
 #ifdef BVH_USESSE
 
-TINYBVH_FORCEINLINE __m128 fastrcp4( const __m128 a )
-{
-	__m128 res = _mm_rcp_ps( a );
-	__m128 muls = _mm_mul_ps( a, _mm_mul_ps( res, res ) );
-	return _mm_sub_ps( _mm_add_ps( res, res ), muls );
-}
-
 static uint32_t __popc( uint32_t x )
 {
 #if defined _MSC_VER && !defined __clang__
@@ -6955,7 +6948,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU::Intersect( Ray& ray
 		const __m128 qz4 = _mm_sub_ps( _mm_mul_ps( sx4, leaf->e1y4 ), _mm_mul_ps( sy4, leaf->e1x4 ) );
 		const __m128 qx4 = _mm_sub_ps( _mm_mul_ps( sy4, leaf->e1z4 ), _mm_mul_ps( sz4, leaf->e1y4 ) );
 		const __m128 qy4 = _mm_sub_ps( _mm_mul_ps( sz4, leaf->e1x4 ), _mm_mul_ps( sx4, leaf->e1z4 ) );
-		const __m128 inv_det4 = fastrcp4( det4 );
+		const __m128 inv_det4 = _mm_div_ps( one4, det4 );
 		const __m128 u4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( sz4, hz4 ), _mm_add_ps( _mm_mul_ps( sx4, hx4 ), _mm_mul_ps( sy4, hy4 ) ) ), inv_det4 );
 		const __m128 v4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( dz4, qz4 ), _mm_add_ps( _mm_mul_ps( dx4, qx4 ), _mm_mul_ps( dy4, qy4 ) ) ), inv_det4 );
 		const __m128 ta4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( leaf->e2z4, qz4 ), _mm_add_ps( _mm_mul_ps( leaf->e2x4, qx4 ), _mm_mul_ps( leaf->e2y4, qy4 ) ) ), inv_det4 );
@@ -7103,7 +7096,7 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 		const __m128 qz4 = _mm_sub_ps( _mm_mul_ps( sx4, leaf->e1y4 ), _mm_mul_ps( sy4, leaf->e1x4 ) );
 		const __m128 qx4 = _mm_sub_ps( _mm_mul_ps( sy4, leaf->e1z4 ), _mm_mul_ps( sz4, leaf->e1y4 ) );
 		const __m128 qy4 = _mm_sub_ps( _mm_mul_ps( sz4, leaf->e1x4 ), _mm_mul_ps( sx4, leaf->e1z4 ) );
-		const __m128 inv_det4 = fastrcp4( det4 );
+		const __m128 inv_det4 = _mm_div_ps( one4, det4 );
 		const __m128 u4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( sz4, hz4 ), _mm_add_ps( _mm_mul_ps( sx4, hx4 ), _mm_mul_ps( sy4, hy4 ) ) ), inv_det4 );
 		const __m128 v4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( dz4, qz4 ), _mm_add_ps( _mm_mul_ps( dx4, qx4 ), _mm_mul_ps( dy4, qy4 ) ) ), inv_det4 );
 		const __m128 ta4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( leaf->e2z4, qz4 ), _mm_add_ps( _mm_mul_ps( leaf->e2x4, qx4 ), _mm_mul_ps( leaf->e2y4, qy4 ) ) ), inv_det4 );
@@ -7150,11 +7143,6 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 #else
 #define LANE8(a,b) a[b]
 #endif
-TINYBVH_FORCEINLINE __m256 fastrcp8( const __m256 a )
-{
-	const __m256 res = _mm256_rcp_ps( a ), muls = _mm256_mul_ps( a, _mm256_mul_ps( res, res ) );
-	return _mm256_sub_ps( _mm256_add_ps( res, res ), muls );
-}
 TINYBVH_FORCEINLINE float halfArea( const __m256& a /* a contains aabb itself, with min.xyz negated */ )
 {
 #ifndef _MSC_VER
@@ -8184,7 +8172,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU::Intersect( Ray& ray
 		const __m128 qz4 = _mm_fmsub_ps( sx4, leaf->e1y4, _mm_mul_ps( sy4, leaf->e1x4 ) );
 		const __m128 qx4 = _mm_fmsub_ps( sy4, leaf->e1z4, _mm_mul_ps( sz4, leaf->e1y4 ) );
 		const __m128 qy4 = _mm_fmsub_ps( sz4, leaf->e1x4, _mm_mul_ps( sx4, leaf->e1z4 ) );
-		const __m128 inv_det4 = fastrcp4( det4 );
+		const __m128 inv_det4 = _mm_div_ps( one4, det4 );
 		const __m128 u4 = _mm_mul_ps( _mm_fmadd_ps( sz4, hz4, _mm_fmadd_ps( sx4, hx4, _mm_mul_ps( sy4, hy4 ) ) ), inv_det4 );
 		const __m128 v4 = _mm_mul_ps( _mm_fmadd_ps( dz4, qz4, _mm_fmadd_ps( dx4, qx4, _mm_mul_ps( dy4, qy4 ) ) ), inv_det4 );
 		const __m128 ta4 = _mm_mul_ps( _mm_fmadd_ps( leaf->e2z4, qz4, _mm_fmadd_ps( leaf->e2x4, qx4, _mm_mul_ps( leaf->e2y4, qy4 ) ) ), inv_det4 );
@@ -8366,7 +8354,7 @@ template <bool posX, bool posY, bool posZ> bool BVH8_CPU::IsOccluded( const Ray&
 		{
 			if (!opmap) return true;
 			// evaluate opacity map, SSE version.
-			const __m128 inv_det4 = fastrcp4( det4 );
+			const __m128 inv_det4 = _mm_div_ps( one4, det4 );
 			const __m128 bu4 = _mm_mul_ps( nu4, inv_det4 ), bv4 = _mm_mul_ps( nv4, inv_det4 );
 			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
 			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( bu4, bv4 ), fN4 ) );
