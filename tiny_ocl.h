@@ -58,53 +58,57 @@ THE SOFTWARE.
 #include <cl.h>
 #endif
 #include <vector>
-#include <stdlib.h>
+#include <stdlib.h> // for posix_memalign / free
+#include <stdint.h> // for SIZE_MAX
+#ifdef _WIN32 // MSVC / MinGW / clang-cl: _aligned_malloc lives here.
+#include <malloc.h>
+#endif
 
 // aligned memory allocation
-// note: formally, size needs to be a multiple of 'alignment', see:
-// https://en.cppreference.com/w/c/memory/aligned_alloc.
-// EMSCRIPTEN enforces this.
-// Copy of the same construct in tinybvh, in a different namespace.
-namespace tinyocl {
-inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alignment - 1)) & ~(alignment - 1); }
-#ifndef _ALIGNED_ALLOC
-#ifdef _MSC_VER // Visual Studio / C11
+#if defined(TINYOCL_ALIGNED_ALLOC) != defined(TINYOCL_ALIGNED_FREE)
+#error "Define both TINYOCL_ALIGNED_ALLOC and TINYOCL_ALIGNED_FREE, or neither."
+#endif
+#ifndef ALIGNED
+#ifdef _MSC_VER
 #define ALIGNED( x ) __declspec( align( x ) )
-#define _ALIGNED_ALLOC(alignment,size) _aligned_malloc( make_multiple_of( size, alignment ), alignment )
-#define _ALIGNED_FREE(ptr) _aligned_free( ptr )
-#else // EMSCRIPTEN / gcc / clang / Android
-#define ALIGNED( x ) __attribute__( ( aligned( x ) ) )
-#if defined(__EMSCRIPTEN__)
-// Emscripten strictly follows C11 aligned_alloc, which it always declares in <stdlib.h>.
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
-#define _ALIGNED_FREE(ptr) free( ptr )
-#elif !defined TINYBVH_NO_SIMD && (defined __x86_64__ || defined _M_X64)
-#include <xmmintrin.h>
-#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment )
-#define _ALIGNED_FREE(ptr) _mm_free( ptr )
-#elif defined(__ANDROID__)
-#include <malloc.h>
-#include <android/api-level.h>
-// Android API 28+ supports aligned_alloc, but older versions (like API 24) 
-// require memalign for aligned memory.
-#if defined(__ANDROID_API__) && (__ANDROID_API__ >= 28) // Modern Android (9.0+)
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
-#else // Legacy Android
-#define _ALIGNED_ALLOC(alignment,size) memalign( alignment, make_multiple_of( size, alignment ) )
-#endif
-#define _ALIGNED_FREE(ptr) free( ptr )
 #else
-// Everything else - Apple, aarch64, Linux, wasm without Emscripten, other Unices.
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
-#define _ALIGNED_FREE(ptr) free( ptr )
+#define ALIGNED( x ) __attribute__( ( aligned( x ) ) )
 #endif
 #endif
+#define TINYOCL_ALIGNED( x ) ALIGNED( x ) // prefixed alias; 'ALIGNED' may collide.
+namespace tinyocl {
+// Round 'x' up to a multiple of 'alignment', which must be a power of two.
+inline size_t make_multiple_of( size_t x, size_t alignment )
+{
+	if (x > SIZE_MAX - (alignment - 1)) return 0; // would overflow
+	return (x + (alignment - 1)) & ~(alignment - 1);
+}
+inline void* malloc64( size_t size, void* = nullptr )
+{
+	if (size == 0) return nullptr;
+	size = make_multiple_of( size, 64 );
+	if (size == 0) return nullptr; // overflowed in make_multiple_of
+#ifdef TINYOCL_ALIGNED_ALLOC
+	return TINYOCL_ALIGNED_ALLOC( 64, size );
+#elif defined _WIN32 // MSVC / MinGW / clang-cl: the CRT provides _aligned_malloc.
+	return _aligned_malloc( size, 64 );
+#else // Linux, Apple, Android, Emscripten, other Unices; 32-bit and 64-bit.
+	// posix_memalign rather than C11 aligned_alloc: the latter isn't declared by
+	// glibc < 2.27 in strict C++ mode and is macOS 10.15+ / iOS 13+ only.
+	void* ptr = nullptr;
+	return posix_memalign( &ptr, 64, size ) == 0 ? ptr : nullptr;
 #endif
-inline void* malloc64( size_t size, void* = nullptr ) { return size == 0 ? 0 : _ALIGNED_ALLOC( 64, size ); }
-inline void free64( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
-// cleanup defines
-#undef _ALIGNED_ALLOC
-#undef _ALIGNED_FREE
+}
+inline void free64( void* ptr, void* = nullptr )
+{
+#ifdef TINYOCL_ALIGNED_FREE
+	TINYOCL_ALIGNED_FREE( ptr );
+#elif defined _WIN32
+	_aligned_free( ptr );
+#else
+	free( ptr );
+#endif
+}
 }; // namespace tinyocl
 
 namespace tinyocl {
