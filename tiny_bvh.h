@@ -1816,7 +1816,7 @@ public:
 // turn off the gcc warning here until the end of the file.
 #ifdef __GNUC__
 #pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstrict-aliasing"
+// #pragma GCC diagnostic ignored "-Wstrict-aliasing"
 #endif
 
 // Some constexpr stuff to produce nice-looking branches in
@@ -8566,7 +8566,7 @@ void BVH::PrepareNEONBuild( const bvhvec4slice& vertices, const uint32_t* indice
 	}
 	else PrepareNEONBuildFragSlice( 0, triCount, indices, vertData, stride4, (void*)fragment, &rootMin, &rootMax );
 	BVHNode& root = bvhNode[0];
-	root.aabbMin = tinybvh_bit_cast<bvhvec4>( rootMin ), root.aabbMax = tinybvh_bit_cast<bvhvec4>( rootMax );
+	root.aabbMin = tinybvh_bitcast<bvhvec4>( rootMin ), root.aabbMax = tinybvh_bitcast<bvhvec4>( rootMax );
 	// presplitting
 	uint32_t fragCount = primCount;
 	if (settings.usePresplitting)
