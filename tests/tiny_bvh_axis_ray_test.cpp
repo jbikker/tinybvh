@@ -169,7 +169,7 @@ int main()
 		bvh.BuildHQ( verts, triCount ), TestFloat( "BVH_SoA::BuildHQ", bvh );
 	}
 #endif
-#if defined BVH_USESSE && !defined BVH_USENEON
+#if defined BVH_USESSE || defined BVH_USENEON
 	{
 		BVH4_CPU bvh;
 		bvh.Build( verts, triCount ), TestFloat( "BVH4_CPU::Build", bvh ), TestFloatTLAS( "TLAS over BVH4_CPU", &bvh );

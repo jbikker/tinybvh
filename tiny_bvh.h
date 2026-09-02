@@ -1614,11 +1614,11 @@ public:
 	struct BVHNode
 	{
 		// 4-way BVH node, optimized for CPU rendering.
-		// SSE version.
+		// Used by the SSE and NEON kernels.
 		SIMDVEC4 xmin4, xmax4;
 		SIMDVEC4 ymin4, ymax4;
 		SIMDVEC4 zmin4, zmax4;
-		SIMDIVEC4 child4, perm4; // total 128 bytes.
+		SIMDIVEC4 child4, perm4; // total 128 bytes. perm4: sorted lane order per octant, see ConvertFrom.
 	};
 	struct CacheLine { SIMDVEC4 a, b, c, d; };
 	BVH4_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH4_CPU; context = ctx; c_int = 2; l_quads = true; }
@@ -1882,9 +1882,9 @@ loop: R = bvhvec3( tinybvh_rndfloat( s ) - 0.5f, tinybvh_rndfloat( s ) - 0.5f, t
 #define BVH_FATAL_ERROR(s) BVH_FATAL_ERROR_IF(1,s)
 
 // fallbacks to be used in the absence of HW SIMD support.
-#if !defined BVH_USESSE || defined BVH_USENEON
-int32_t BVH4_CPU::Intersect( Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::Intersect requires SSE. " ); }
-bool BVH4_CPU::IsOccluded( const Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::IsOccluded requires SSE. " ); }
+#if !defined BVH_USESSE && !defined BVH_USENEON
+int32_t BVH4_CPU::Intersect( Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::Intersect requires SSE or NEON." ); }
+bool BVH4_CPU::IsOccluded( const Ray& ) const { BVH_FATAL_ERROR( "BVH4_CPU::IsOccluded requires SSE or NEON." ); }
 #endif
 #if !defined BVH_USEAVX || defined BVH_USENEON
 void BVH::BuildAVX( const bvhvec4*, const uint32_t ) { BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX." ); }
@@ -3971,7 +3971,7 @@ template <bool posX, bool posY, bool posZ> int32_t BVH::IntersectTLAS( Ray& ray 
 				}
 				else
 				{
-				#ifdef BVH_USESSE
+				#if defined BVH_USESSE || defined BVH_USENEON
 					if (blas->layout == LAYOUT_BVH4_CPU) cost += ((BVH4_CPU*)blas)->Intersect( tmpRay );
 				#endif
 				#if defined BVH_USEAVX && defined ENABLE_BVH_SOA
@@ -4120,7 +4120,7 @@ template <bool posX, bool posY, bool posZ> bool BVH::IsOccludedTLAS( const Ray& 
 				}
 				else
 				{
-				#ifdef BVH_USESSE
+				#if defined BVH_USESSE || defined BVH_USENEON
 					if (blas->layout == LAYOUT_BVH4_CPU) { if (((BVH4_CPU*)blas)->IsOccluded( tmpRay )) return true; }
 				#endif
 				#if defined BVH_USEAVX && defined ENABLE_BVH_SOA
@@ -6268,6 +6268,8 @@ void BVH4_CPU::ConvertFrom( MBVH<4>& original )
 	uint32_t nodesNeeded = bvh4.usedNodes, leafsNeeded = bvh4.LeafCount();
 	uint32_t blocksNeeded = nodesNeeded * (sizeof( BVHNode ) / 64); // here, block = cacheline.
 	blocksNeeded += leafsNeeded * (sizeof( BVHTri4Leaf ) / 64);
+	// Child slots store the block index in 29 bits; refuse to build beyond that.
+	BVH_FATAL_ERROR_IF( blocksNeeded > 0x1fffffff, "BVH4_CPU::ConvertFrom, BVH does not fit in 29-bit block indices." );
 	if (allocatedBlocks < blocksNeeded)
 	{
 		AlignedFree( bvh4Data );
@@ -6816,6 +6818,33 @@ void BVH8_CWBVH::ConvertFrom( const MBVH<8>& original, bool compact )
 #endif
 }
 
+// BVH4_CPU: select the kernel specialized for the ray octant. Shared by SSE and NEON.
+#if defined BVH_USESSE || defined BVH_USENEON
+int32_t BVH4_CPU::Intersect( Ray& ray ) const
+{
+	VALIDATE_RAY( ray );
+	const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
+	if (!posX) goto negx;
+	if (posY) { if (posZ) return Intersect<true, true, true>( ray ); else return Intersect<true, true, false>( ray ); }
+	if (posZ) return Intersect<true, false, true>( ray ); else return Intersect<true, false, false>( ray );
+negx:
+	if (posY) { if (posZ) return Intersect<false, true, true>( ray ); else return Intersect<false, true, false>( ray ); }
+	if (posZ) return Intersect<false, false, true>( ray ); else return Intersect<false, false, false>( ray );
+}
+
+bool BVH4_CPU::IsOccluded( const Ray& ray ) const
+{
+	VALIDATE_RAY( ray );
+	const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
+	if (!posX) goto negx;
+	if (posY) { if (posZ) return IsOccluded<true, true, true>( ray ); else return IsOccluded<true, true, false>( ray ); }
+	if (posZ) return IsOccluded<true, false, true>( ray ); else return IsOccluded<true, false, false>( ray );
+negx:
+	if (posY) { if (posZ) return IsOccluded<false, true, true>( ray ); else return IsOccluded<false, true, false>( ray ); }
+	if (posZ) return IsOccluded<false, false, true>( ray ); else return IsOccluded<false, false, false>( ray );
+}
+#endif
+
 // ============================================================================
 //
 //        I M P L E M E N T A T I O N  -  A V X / S S E  C O D E
@@ -6852,18 +6881,6 @@ ALIGNED( 64 ) static __m128i idxLUT4_[16] = {
 	_mm_set_epi32( 0, __D, __C, __B ),	// 1110
 	_mm_set_epi32( __D, __C, __B, __A ) // 1111
 };
-
-int32_t BVH4_CPU::Intersect( Ray& ray ) const
-{
-	VALIDATE_RAY( ray );
-	const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
-	if (!posX) goto negx;
-	if (posY) { if (posZ) return Intersect<true, true, true>( ray ); else return Intersect<true, true, false>( ray ); }
-	if (posZ) return Intersect<true, false, true>( ray ); else return Intersect<true, false, false>( ray );
-negx:
-	if (posY) { if (posZ) return Intersect<false, true, true>( ray ); else return Intersect<false, true, false>( ray ); }
-	if (posZ) return Intersect<false, false, true>( ray ); else return Intersect<false, false, false>( ray );
-}
 
 template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU::Intersect( Ray& ray ) const
 {
@@ -7026,18 +7043,6 @@ the_end:
 #else
 	return 0;
 #endif
-}
-
-bool BVH4_CPU::IsOccluded( const Ray& ray ) const
-{
-	VALIDATE_RAY( ray );
-	const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
-	if (!posX) goto negx;
-	if (posY) { if (posZ) return IsOccluded<true, true, true>( ray ); else return IsOccluded<true, true, false>( ray ); }
-	if (posZ) return IsOccluded<true, false, true>( ray ); else return IsOccluded<true, false, false>( ray );
-negx:
-	if (posY) { if (posZ) return IsOccluded<false, true, true>( ray ); else return IsOccluded<false, true, false>( ray ); }
-	if (posZ) return IsOccluded<false, false, true>( ray ); else return IsOccluded<false, false, false>( ray );
 }
 
 template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray& ray ) const
@@ -8940,6 +8945,269 @@ bool BVH_SoA::IsOccluded( const Ray& ray ) const
 }
 
 #endif
+
+// BVH4_CPU traversal, NEON version.
+// ----------------------------------------------------------------------------
+// The next node is selected with predicted branches on the slab mask.
+
+// Substitute for _mm_movemask_ps. The lane weights place the lane mask in the
+// low nibble of the horizontal sum and the number of set lanes in the high nibble.
+static const uint32x4_t neon_laneBits = SIMD_SETRVECU( 0x11, 0x12, 0x14, 0x18 );
+TINYBVH_FORCEINLINE uint32_t neon_movemask_popc( const uint32x4_t mask )
+{
+	return vaddvq_u32( vandq_u32( mask, neon_laneBits ) );
+}
+
+#define NEON_HIT( s ) ((m64 >> (16 * s)) & 1)
+#define NEON_PUSH( c, s ) { nodeStack[stackPtr] = c; vst1q_lane_f32( distStack + stackPtr, tminSorted, s ); stackPtr++; }
+
+template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU::Intersect( Ray& ray ) const
+{
+	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
+	ALIGNED( 64 ) float distStack[TINYBVH_STACK_SIZE * 2];
+	const float32x4_t zero4 = vdupq_n_f32( 0 ), one4 = vdupq_n_f32( 1 ), inf4 = vdupq_n_f32( 1e34f );
+	float32x4_t t4 = vdupq_n_f32( ray.hit.t );
+	int32_t stackPtr = 0;
+	uint32_t nodeIdx = 0;
+	float tcur = ray.hit.t;
+	constexpr int signShift = (posX ? 2 : 0) + (posY ? 4 : 0) + (posZ ? 8 : 0);
+	// the slab test computes bound * rD - O * rD using a fused multiply-add.
+	const float32x4_t rx4 = vdupq_n_f32( -ray.O.x * ray.rD.x ), rdx4 = vdupq_n_f32( ray.rD.x );
+	const float32x4_t ry4 = vdupq_n_f32( -ray.O.y * ray.rD.y ), rdy4 = vdupq_n_f32( ray.rD.y );
+	const float32x4_t rz4 = vdupq_n_f32( -ray.O.z * ray.rD.z ), rdz4 = vdupq_n_f32( ray.rD.z );
+	const float32x4_t ox4 = vdupq_n_f32( ray.O.x ), oy4 = vdupq_n_f32( ray.O.y ), oz4 = vdupq_n_f32( ray.O.z );
+	const float32x4_t dx4 = vdupq_n_f32( ray.D.x ), dy4 = vdupq_n_f32( ray.D.y ), dz4 = vdupq_n_f32( ray.D.z );
+	// constants that turn the 2-bit lane indices in perm4 into a byte shuffle
+	const uint32x4_t mul4 = vdupq_n_u32( 0x04040404 ), add4 = vdupq_n_u32( 0x03020100 );
+#ifdef _DEBUG
+	uint32_t steps = 0;
+#endif
+	while (1)
+	{
+	#ifdef _DEBUG
+		steps++;
+	#endif
+		while (!(nodeIdx & LEAF_BIT))
+		{
+			const BVHNode* n = (BVHNode*)(bvh4Data + nodeIdx);
+			const void* child = &n->child4, * perm = &n->perm4;
+			const float32x4_t tx1 = vfmaq_f32( rx4, posX ? n->xmin4 : n->xmax4, rdx4 );
+			const float32x4_t ty1 = vfmaq_f32( ry4, posY ? n->ymin4 : n->ymax4, rdy4 );
+			const float32x4_t tz1 = vfmaq_f32( rz4, posZ ? n->zmin4 : n->zmax4, rdz4 );
+			const float32x4_t tx2 = vfmaq_f32( rx4, posX ? n->xmax4 : n->xmin4, rdx4 );
+			const float32x4_t ty2 = vfmaq_f32( ry4, posY ? n->ymax4 : n->ymin4, rdy4 );
+			const float32x4_t tz2 = vfmaq_f32( rz4, posZ ? n->zmax4 : n->zmin4, rdz4 );
+			const float32x4_t tmin = vmaxq_f32( vmaxq_f32( tx1, ty1 ), vmaxq_f32( tz1, zero4 ) );
+			const float32x4_t tmax = vminq_f32( vminq_f32( tx2, ty2 ), vminq_f32( tz2, t4 ) );
+			const uint32x4_t mask4 = vcleq_f32( tmin, tmax );
+			// child index at each sorted position
+			const uint32_t c3 = tinybvh_getlane_u( child, (tinybvh_getlane_u( perm, 3 ) >> signShift) & 3 );
+			const uint32_t c2 = tinybvh_getlane_u( child, (tinybvh_getlane_u( perm, 2 ) >> signShift) & 3 );
+			const uint32_t c1 = tinybvh_getlane_u( child, (tinybvh_getlane_u( perm, 1 ) >> signShift) & 3 );
+			const uint32_t c0 = tinybvh_getlane_u( child, (tinybvh_getlane_u( perm, 0 ) >> signShift) & 3 );
+			// byte shuffle that brings the lanes into sorted order
+			const uint32x4_t perm4 = vreinterpretq_u32_s32( n->perm4 );
+			const uint32x4_t order4 = vshrq_n_u32( vshlq_n_u32( perm4, 30 - signShift ), 30 );
+			const uint8x16_t shfl16 = vreinterpretq_u8_u32( vmlaq_u32( add4, order4, mul4 ) );
+			// sorted slab mask, 16 bits per position
+			const uint32x4_t sorted4 = vreinterpretq_u32_u8( vqtbl1q_u8( vreinterpretq_u8_u32( mask4 ), shfl16 ) );
+			const uint64_t m64 = vget_lane_u64( vreinterpret_u64_u16( vshrn_n_u32( sorted4, 16 ) ), 0 );
+			const float32x4_t tminSorted = vreinterpretq_f32_u8( vqtbl1q_u8( vreinterpretq_u8_f32( tmin ), shfl16 ) );
+			// continue with the nearest valid child and push the others, farthest first
+			if (NEON_HIT( 3 ))
+			{
+				if (NEON_HIT( 0 )) NEON_PUSH( c0, 0 );
+				if (NEON_HIT( 1 )) NEON_PUSH( c1, 1 );
+				if (NEON_HIT( 2 )) NEON_PUSH( c2, 2 );
+				nodeIdx = c3;
+			}
+			else if (NEON_HIT( 2 ))
+			{
+				if (NEON_HIT( 0 )) NEON_PUSH( c0, 0 );
+				if (NEON_HIT( 1 )) NEON_PUSH( c1, 1 );
+				nodeIdx = c2;
+			}
+			else if (NEON_HIT( 1 ))
+			{
+				if (NEON_HIT( 0 )) NEON_PUSH( c0, 0 );
+				nodeIdx = c1;
+			}
+			else if (NEON_HIT( 0 )) nodeIdx = c0;
+			else
+			{
+				// skip entries behind the current hit
+				do { if (!stackPtr) goto the_end; nodeIdx = nodeStack[--stackPtr]; } while (distStack[stackPtr] > tcur);
+			}
+		}
+		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
+		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
+		const float32x4_t hx4 = vfmsq_f32( vmulq_f32( dy4, leaf->e2z4 ), dz4, leaf->e2y4 );
+		const float32x4_t hy4 = vfmsq_f32( vmulq_f32( dz4, leaf->e2x4 ), dx4, leaf->e2z4 );
+		const float32x4_t hz4 = vfmsq_f32( vmulq_f32( dx4, leaf->e2y4 ), dy4, leaf->e2x4 );
+		const float32x4_t sx4 = vsubq_f32( ox4, leaf->v0x4 ), sy4 = vsubq_f32( oy4, leaf->v0y4 ), sz4 = vsubq_f32( oz4, leaf->v0z4 );
+		const float32x4_t det4 = vfmaq_f32( vfmaq_f32( vmulq_f32( leaf->e1y4, hy4 ), leaf->e1x4, hx4 ), leaf->e1z4, hz4 );
+		const float32x4_t qz4 = vfmsq_f32( vmulq_f32( sx4, leaf->e1y4 ), sy4, leaf->e1x4 );
+		const float32x4_t qx4 = vfmsq_f32( vmulq_f32( sy4, leaf->e1z4 ), sz4, leaf->e1y4 );
+		const float32x4_t qy4 = vfmsq_f32( vmulq_f32( sz4, leaf->e1x4 ), sx4, leaf->e1z4 );
+		const float32x4_t inv_det4 = vdivq_f32( one4, det4 );
+		const float32x4_t u4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( sy4, hy4 ), sx4, hx4 ), sz4, hz4 ), inv_det4 );
+		const float32x4_t v4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( dy4, qy4 ), dx4, qx4 ), dz4, qz4 ), inv_det4 );
+		const float32x4_t ta4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( leaf->e2y4, qy4 ), leaf->e2x4, qx4 ), leaf->e2z4, qz4 ), inv_det4 );
+		const uint32x4_t mask1 = vandq_u32( vcgeq_f32( u4, zero4 ), vcgeq_f32( v4, zero4 ) );
+		const uint32x4_t mask2 = vcleq_f32( vaddq_f32( u4, v4 ), one4 );
+		const uint32x4_t mask3 = vandq_u32( vcltq_f32( ta4, t4 ), vcgtq_f32( ta4, zero4 ) );
+		uint32x4_t combined = vandq_u32( vandq_u32( mask1, mask2 ), mask3 );
+		uint32_t imask = neon_movemask_popc( combined ) & 15;
+		// evaluate opacity map, if present (NEON version).
+		if (opmap) if (imask)
+		{
+			const float32x4_t fN4 = vdupq_n_f32( (float)opmapN );
+			const int32x4_t row4 = vcvtq_s32_f32( vmulq_f32( vaddq_f32( u4, v4 ), fN4 ) );
+			const int32x4_t dia4 = vcvtq_s32_f32( vmulq_f32( vsubq_f32( one4, u4 ), fN4 ) );
+			const int32x4_t v0 = vmulq_s32( row4, row4 );
+			const int32x4_t v1 = vcvtq_s32_f32( vmulq_f32( v4, fN4 ) );
+			const int32x4_t v2 = vsubq_s32( dia4, vsubq_s32( vdupq_n_s32( opmapN - 1 ), row4 ) );
+			uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
+			vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
+			// gather the opacity bits with scalar loads
+			for (int i = 0; i < 4; i++) if (imask & (1 << i))
+			{
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
+				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
+			}
+			// combine
+			combined = vandq_u32( combined, vld1q_u32( omask ) );
+			imask = neon_movemask_popc( combined ) & 15;
+		}
+		if (imask)
+		{
+			const float32x4_t dist4 = vbslq_f32( combined, ta4, inf4 );
+			const float t = vminvq_f32( dist4 );
+			const uint32_t lane = __bfind( neon_movemask_popc( vceqq_f32( dist4, vdupq_n_f32( t ) ) ) & 15 );
+			// update hit record
+			ray.hit.t = t, ray.hit.u = tinybvh_getlane_f( &u4, lane ), ray.hit.v = tinybvh_getlane_f( &v4, lane );
+		#if INST_IDX_BITS == 32
+			ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
+		#else
+			ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
+		#endif
+			t4 = vdupq_n_f32( t ), tcur = t;
+		}
+		// skip entries behind the current hit
+		do { if (!stackPtr) goto the_end; nodeIdx = nodeStack[--stackPtr]; } while (distStack[stackPtr] > tcur);
+	}
+the_end:
+#ifdef _DEBUG
+	return steps;
+#else
+	return 0;
+#endif
+}
+
+#undef NEON_PUSH
+#undef NEON_HIT
+#define NEON_HIT( l ) ((m64 >> (16 * l)) & 1)
+
+template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray& ray ) const
+{
+	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
+	int32_t stackPtr = 0;
+	uint32_t nodeIdx = 0;
+	const float32x4_t zero4 = vdupq_n_f32( 0 ), one4 = vdupq_n_f32( 1 ), t4 = vdupq_n_f32( ray.hit.t );
+	const float32x4_t rx4 = vdupq_n_f32( -ray.O.x * ray.rD.x ), rdx4 = vdupq_n_f32( ray.rD.x );
+	const float32x4_t ry4 = vdupq_n_f32( -ray.O.y * ray.rD.y ), rdy4 = vdupq_n_f32( ray.rD.y );
+	const float32x4_t rz4 = vdupq_n_f32( -ray.O.z * ray.rD.z ), rdz4 = vdupq_n_f32( ray.rD.z );
+	const float32x4_t ox4 = vdupq_n_f32( ray.O.x ), oy4 = vdupq_n_f32( ray.O.y ), oz4 = vdupq_n_f32( ray.O.z );
+	const float32x4_t dx4 = vdupq_n_f32( ray.D.x ), dy4 = vdupq_n_f32( ray.D.y ), dz4 = vdupq_n_f32( ray.D.z );
+	while (1)
+	{
+		while (!(nodeIdx & LEAF_BIT))
+		{
+			const BVHNode* n = (BVHNode*)(bvh4Data + nodeIdx);
+			const void* child = &n->child4;
+			const float32x4_t tx1 = vfmaq_f32( rx4, posX ? n->xmin4 : n->xmax4, rdx4 );
+			const float32x4_t ty1 = vfmaq_f32( ry4, posY ? n->ymin4 : n->ymax4, rdy4 );
+			const float32x4_t tz1 = vfmaq_f32( rz4, posZ ? n->zmin4 : n->zmax4, rdz4 );
+			const float32x4_t tx2 = vfmaq_f32( rx4, posX ? n->xmax4 : n->xmin4, rdx4 );
+			const float32x4_t ty2 = vfmaq_f32( ry4, posY ? n->ymax4 : n->ymin4, rdy4 );
+			const float32x4_t tz2 = vfmaq_f32( rz4, posZ ? n->zmax4 : n->zmin4, rdz4 );
+			const float32x4_t tmin = vmaxq_f32( vmaxq_f32( tx1, ty1 ), vmaxq_f32( tz1, zero4 ) );
+			const float32x4_t tmax = vminq_f32( vminq_f32( tx2, ty2 ), vminq_f32( tz2, t4 ) );
+			const uint32x4_t mask4 = vcleq_f32( tmin, tmax );
+			// slab mask, 16 bits per lane; the traversal order does not matter here
+			const uint64_t m64 = vget_lane_u64( vreinterpret_u64_u16( vshrn_n_u32( mask4, 16 ) ), 0 );
+			const uint32_t c0 = tinybvh_getlane_u( child, 0 ), c1 = tinybvh_getlane_u( child, 1 );
+			const uint32_t c2 = tinybvh_getlane_u( child, 2 ), c3 = tinybvh_getlane_u( child, 3 );
+			if (NEON_HIT( 0 ))
+			{
+				if (NEON_HIT( 3 )) nodeStack[stackPtr++] = c3;
+				if (NEON_HIT( 2 )) nodeStack[stackPtr++] = c2;
+				if (NEON_HIT( 1 )) nodeStack[stackPtr++] = c1;
+				nodeIdx = c0;
+			}
+			else if (NEON_HIT( 1 ))
+			{
+				if (NEON_HIT( 3 )) nodeStack[stackPtr++] = c3;
+				if (NEON_HIT( 2 )) nodeStack[stackPtr++] = c2;
+				nodeIdx = c1;
+			}
+			else if (NEON_HIT( 2 ))
+			{
+				if (NEON_HIT( 3 )) nodeStack[stackPtr++] = c3;
+				nodeIdx = c2;
+			}
+			else if (NEON_HIT( 3 )) nodeIdx = c3;
+			else
+			{
+				if (!stackPtr) return false;
+				nodeIdx = nodeStack[--stackPtr];
+			}
+		}
+		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
+		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
+		const float32x4_t hx4 = vfmsq_f32( vmulq_f32( dy4, leaf->e2z4 ), dz4, leaf->e2y4 );
+		const float32x4_t hy4 = vfmsq_f32( vmulq_f32( dz4, leaf->e2x4 ), dx4, leaf->e2z4 );
+		const float32x4_t hz4 = vfmsq_f32( vmulq_f32( dx4, leaf->e2y4 ), dy4, leaf->e2x4 );
+		const float32x4_t sx4 = vsubq_f32( ox4, leaf->v0x4 ), sy4 = vsubq_f32( oy4, leaf->v0y4 ), sz4 = vsubq_f32( oz4, leaf->v0z4 );
+		const float32x4_t det4 = vfmaq_f32( vfmaq_f32( vmulq_f32( leaf->e1y4, hy4 ), leaf->e1x4, hx4 ), leaf->e1z4, hz4 );
+		const float32x4_t qz4 = vfmsq_f32( vmulq_f32( sx4, leaf->e1y4 ), sy4, leaf->e1x4 );
+		const float32x4_t qx4 = vfmsq_f32( vmulq_f32( sy4, leaf->e1z4 ), sz4, leaf->e1y4 );
+		const float32x4_t qy4 = vfmsq_f32( vmulq_f32( sz4, leaf->e1x4 ), sx4, leaf->e1z4 );
+		const float32x4_t inv_det4 = vdivq_f32( one4, det4 );
+		const float32x4_t u4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( sy4, hy4 ), sx4, hx4 ), sz4, hz4 ), inv_det4 );
+		const float32x4_t v4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( dy4, qy4 ), dx4, qx4 ), dz4, qz4 ), inv_det4 );
+		const float32x4_t ta4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( leaf->e2y4, qy4 ), leaf->e2x4, qx4 ), leaf->e2z4, qz4 ), inv_det4 );
+		const uint32x4_t mask1 = vandq_u32( vcgeq_f32( u4, zero4 ), vcgeq_f32( v4, zero4 ) );
+		const uint32x4_t mask2 = vcleq_f32( vaddq_f32( u4, v4 ), one4 );
+		const uint32x4_t mask3 = vandq_u32( vcltq_f32( ta4, t4 ), vcgtq_f32( ta4, zero4 ) );
+		const uint32x4_t combined = vandq_u32( vandq_u32( mask1, mask2 ), mask3 );
+		const uint32_t imask = neon_movemask_popc( combined ) & 15;
+		if (imask)
+		{
+			if (!opmap) return true;
+			// evaluate opacity map, NEON version.
+			const float32x4_t fN4 = vdupq_n_f32( (float)opmapN );
+			const int32x4_t row4 = vcvtq_s32_f32( vmulq_f32( vaddq_f32( u4, v4 ), fN4 ) );
+			const int32x4_t dia4 = vcvtq_s32_f32( vmulq_f32( vsubq_f32( one4, u4 ), fN4 ) );
+			const int32x4_t v0 = vmulq_s32( row4, row4 );
+			const int32x4_t v1 = vcvtq_s32_f32( vmulq_f32( v4, fN4 ) );
+			const int32x4_t v2 = vsubq_s32( dia4, vsubq_s32( vdupq_n_s32( opmapN - 1 ), row4 ) );
+			uint32_t idx[4];
+			vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
+			// gather the opacity bits with scalar loads
+			for (int i = 0; i < 4; i++) if (imask & (1 << i))
+			{
+				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
+				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
+			}
+		}
+		// we continue.
+		if (!stackPtr) return false;
+		nodeIdx = nodeStack[--stackPtr];
+	}
+}
+
+#undef NEON_HIT
 
 #endif // BVH_USENEON
 
