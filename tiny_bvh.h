@@ -226,6 +226,9 @@ THE SOFTWARE.
 #include <cstdio>
 #include <cmath>
 #include <cstring>
+#ifdef _WIN32 // MinGW / clang-cl: no C11 aligned_alloc in the CRT, use _aligned_malloc
+#include <malloc.h> // for alloc/free
+#endif
 #endif
 #include <cstdint>
 #include <atomic> // for SBVH builds
@@ -299,55 +302,59 @@ WARNING( "NEON not enabled in compilation." )
 #define BVH_USENEON
 #include "arm_neon.h"
 #endif
+#else // 32-bit x86, PowerPC, RISC-V, ...: tinybvh has no SIMD path for these.
+#define TINYBVH_NO_SIMD
 #endif
 #endif // TINYBVH_NO_SIMD
 
 // aligned memory allocation
-// note: formally, size needs to be a multiple of 'alignment', see:
-// https://en.cppreference.com/w/c/memory/aligned_alloc.
-// EMSCRIPTEN enforces this.
-// Copy of the same construct in tinyocl, in a different namespace.
-namespace tinybvh {
-inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alignment - 1)) & ~(alignment - 1); }
-#ifndef _ALIGNED_ALLOC
-#ifdef _MSC_VER // Visual Studio / C11
+// an application can override the allocator by defining both
+// TINYBVH_ALIGNED_ALLOC(alignment,size) and TINYBVH_ALIGNED_FREE(ptr).
+#if defined(TINYBVH_ALIGNED_ALLOC) != defined(TINYBVH_ALIGNED_FREE)
+#error "Define both TINYBVH_ALIGNED_ALLOC and TINYBVH_ALIGNED_FREE, or neither."
+#endif
+#ifndef ALIGNED
+#ifdef _MSC_VER
 #define ALIGNED( x ) __declspec( align( x ) )
-#define _ALIGNED_ALLOC(alignment,size) _aligned_malloc( make_multiple_of( size, alignment ), alignment )
-#define _ALIGNED_FREE(ptr) _aligned_free( ptr )
-#else // EMSCRIPTEN / gcc / clang / Android
-#define ALIGNED( x ) __attribute__( ( aligned( x ) ) )
-#if defined(__EMSCRIPTEN__)
-// Emscripten strictly follows C11 aligned_alloc, which it always declares in <stdlib.h>.
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
-#define _ALIGNED_FREE(ptr) free( ptr )
-#elif !defined TINYBVH_NO_SIMD && (defined __x86_64__ || defined _M_X64)
-#include <xmmintrin.h>
-#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment )
-#define _ALIGNED_FREE(ptr) _mm_free( ptr )
-#elif defined(__ANDROID__)
-#include <malloc.h>
-#include <android/api-level.h>
-// Android API 28+ supports aligned_alloc, but older versions (like API 24) 
-// require memalign for aligned memory.
-#if defined(__ANDROID_API__) && (__ANDROID_API__ >= 28) // Modern Android (9.0+)
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
-#else // Legacy Android
-#define _ALIGNED_ALLOC(alignment,size) memalign( alignment, make_multiple_of( size, alignment ) )
-#endif
-#define _ALIGNED_FREE(ptr) free( ptr )
 #else
-// Everything else - Apple, aarch64, Linux, wasm without Emscripten, other Unices.
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
-#define _ALIGNED_FREE(ptr) free( ptr )
+#define ALIGNED( x ) __attribute__( ( aligned( x ) ) )
 #endif
 #endif
+#define TINYBVH_ALIGNED( x ) ALIGNED( x ) // prefixed alias; 'ALIGNED' may collide.
+namespace tinybvh {
+// round 'x' up to a multiple of 'alignment', which must be a power of two.
+inline size_t make_multiple_of( size_t x, size_t alignment )
+{
+	if (x > SIZE_MAX - (alignment - 1)) return 0; // would overflow
+	return (x + (alignment - 1)) & ~(alignment - 1);
+}
+inline void* malloc64( size_t size, void* = nullptr )
+{
+	if (size == 0) return nullptr;
+	size = make_multiple_of( size, 64 );
+	if (size == 0) return nullptr; // overflowed in make_multiple_of
+#ifdef TINYBVH_ALIGNED_ALLOC
+	return TINYBVH_ALIGNED_ALLOC( 64, size );
+#elif defined _WIN32 // MSVC / MinGW / clang-cl: the CRT provides _aligned_malloc.
+	return _aligned_malloc( size, 64 );
+#else // Linux, Apple, Android, Emscripten, other Unices; 32-bit and 64-bit.
+	// posix_memalign rather than C11 aligned_alloc: the latter isn't declared by
+	// glibc < 2.27 in strict C++ mode and is macOS 10.15+ / iOS 13+ only.
+	void* ptr = nullptr;
+	return posix_memalign( &ptr, 64, size ) == 0 ? ptr : nullptr;
 #endif
-inline void* malloc64( size_t size, void* = nullptr ) { return size == 0 ? 0 : _ALIGNED_ALLOC( 64, size ); }
-inline void free64( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
-// cleanup defines
-#undef _ALIGNED_ALLOC
-#undef _ALIGNED_FREE
-}; // namespace tiybvh
+}
+inline void free64( void* ptr, void* = nullptr )
+{
+#ifdef TINYBVH_ALIGNED_FREE
+	TINYBVH_ALIGNED_FREE( ptr );
+#elif defined _WIN32
+	_aligned_free( ptr );
+#else
+	free( ptr );
+#endif
+}
+}; // namespace tinybvh
 
 // Derived TLAS things; for convenience.
 #define INST_IDX_SHFT (32 - INST_IDX_BITS)
@@ -1809,15 +1816,7 @@ public:
 #include <intrin.h>			// for __lzcnt
 #endif
 #include <fstream>			// fstream
-
 #include <algorithm>		// for std::swap
-
-// We need quite a bit of type reinterpretation, so we'll
-// turn off the gcc warning here until the end of the file.
-#ifdef __GNUC__
-#pragma GCC diagnostic push
-// #pragma GCC diagnostic ignored "-Wstrict-aliasing"
-#endif
 
 // Some constexpr stuff to produce nice-looking branches in
 // *::Intersect with proper dead code elinimation.
