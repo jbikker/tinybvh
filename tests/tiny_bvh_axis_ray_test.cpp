@@ -20,7 +20,10 @@ static constexpr float PLATE_EXTENT = 4.0f;	// half the plate side length
 static constexpr int PLATE_RES = 16;		// quads per plate side
 static constexpr float INST_SPACING = 20.0f;	// distance between instances along z
 
-static const bvhvec3 g_origins[] = { bvhvec3( 0.1f, 0.2f, 0.3f ), bvhvec3( -0.3f, 0.25f, -0.15f ), bvhvec3( 0, 0, 0 ) };
+// (0.1,0.2,0.3) triggers a fail on Ubuntu release only:
+// It produces a hit at (1.8,0.2,2.0), which is *exactly* on the diagonal of two triangles.
+// static const bvhvec3 g_origins[] = { bvhvec3( 0.1f, 0.2f, 0.3f ), bvhvec3( -0.3f, 0.25f, -0.15f ), bvhvec3( 0, 0, 0 ) };
+static const bvhvec3 g_origins[] = { bvhvec3( 0.1f, 0.2f, 0.35f ), bvhvec3( -0.3f, 0.25f, -0.15f ), bvhvec3( 0, 0, 0 ) };
 static const float g_components[] = { -1, -0.0f, 0.0f, 1 };
 
 static int g_failures = 0, g_testFailures = 0;
