@@ -1224,13 +1224,7 @@ private:
 	float* SARs = 0;
 	void GatherSweepBounds( uint32_t axis );
 	static void SweepGatherTask( uint32_t axis, void* payload );
-#ifdef BVH_USESSE
-	static __m128 half4, two4, min1, mask3, binmul3;
-	static __m128i maxbin4;
-#endif
 #ifdef BVH_USEAVX
-	// static AVX data members
-	static __m256 max8, mask6, signFlip8;
 public:
 	// helper for AVX binning
 	void BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* binbox,
@@ -1996,13 +1990,11 @@ void BVHBase::CopyBasePropertiesFrom( const BVHBase& original )
 // BVH implementation
 // ----------------------------------------------------------------------------
 
-// static variable declarations
 #ifdef BVH_USESSE
-__m128 BVH::binmul3 = _mm_set1_ps( AVXBINS * 0.49999f );
-__m128i BVH::maxbin4 = _mm_set1_epi32( 7 );
-__m128 BVH::half4 = _mm_set1_ps( 0.5f );
-__m128 BVH::two4 = _mm_set1_ps( 2.0f ), BVH::min1 = _mm_set1_ps( -1 );
-__m128 BVH::mask3 = _mm_cmpeq_ps( _mm_setr_ps( 0, 0, 0, 1 ), _mm_setzero_ps() );
+// SIMD constants - Functions rather than mutable statics. Calls fold to a constant or a single broadcast.
+TINYBVH_FORCEINLINE __m128 bvhc_min1() { return _mm_set1_ps( -1.0f ); }
+TINYBVH_FORCEINLINE __m128 bvhc_binmul3() { return _mm_set1_ps( AVXBINS * 0.49999f ); }
+TINYBVH_FORCEINLINE __m128 bvhc_mask3() { return _mm_cmpeq_ps( _mm_setr_ps( 0, 0, 0, 1 ), _mm_setzero_ps() ); }
 // SIMD lane access
 #if defined _MSC_VER && !defined __clang__
 #define LANE(a,b) a.m128_f32[b]
@@ -2020,8 +2012,8 @@ TINYBVH_FORCEINLINE float halfArea( const __m128 a /* a contains extent of aabb 
 }
 #endif
 #ifdef BVH_USEAVX
-__m256 BVH::max8 = _mm256_set1_ps( -BVH_FAR ), BVH::mask6 = _mm256_set_m128( mask3, mask3 );
-__m256 BVH::signFlip8 = _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f );
+TINYBVH_FORCEINLINE __m256 bvhc_max8() { return _mm256_set1_ps( -BVH_FAR ); }
+TINYBVH_FORCEINLINE __m256 bvhc_signFlip8() { return _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f ); }
 #define FAST_COPY_256B(d,s,o) { __m256 v0 = s[o], v1 = s[o+1], v2 = s[o+2], v3 = s[o+3], v4 = s[o+4], v5 = s[o+5], v6 = s[o+6],\
 	v7 = s[o+7]; d[o] = v0, d[o+1] = v1, d[o+2] = v2, d[o+3] = v3, d[o+4] = v4, d[o+5] = v5, d[o+6] = v6, d[o+7] = v7; }
 #endif
@@ -7333,10 +7325,10 @@ void BVH::BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* bi
 	// A Fragment is 32 bytes and holds bmin/primIdx followed by bmax/clipped, so
 	// it can be read as a single 8-wide vector, or as two 4-wide bounds.
 	memset( count, 0, 3 * AVXBINS * 4 ); // exactly 96 bytes
-	for (uint32_t i = 0; i < 3 * AVXBINS; i++) binbox[i] = max8;
+	for (uint32_t i = 0; i < 3 * AVXBINS; i++) binbox[i] = bvhc_max8();
 	if (first >= last) return; // empty slice; 'last - 1' below would wrap.
 	uint32_t fi = primIdx[first];
-	__m256 r0, r1, r2, f = _mm256_xor_ps( tinybvh_load8( fragment + fi ), signFlip8 );
+	__m256 r0, r1, r2, f = _mm256_xor_ps( tinybvh_load8( fragment + fi ), bvhc_signFlip8() );
 	const __m128i zero4i = _mm_setzero_si128();
 	__m128i bc4 = _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_add_ps(
 		tinybvh_load4( &fragment[fi].bmax ), tinybvh_load4( &fragment[fi].bmin ) ), nmin4 ), rpd4 ) ), zero4i );
@@ -7351,7 +7343,7 @@ void BVH::BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* bi
 		const __m128 frmin = tinybvh_load4( &fragment[fid].bmin ), frmax = tinybvh_load4( &fragment[fid].bmax );
 		r0 = _mm256_max_ps( b0, f ), r1 = _mm256_max_ps( b1, f ), r2 = _mm256_max_ps( b2, f );
 		bc4 = _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_add_ps( frmax, frmin ), nmin4 ), rpd4 ) ), zero4i );
-		f = _mm256_xor_ps( tinybvh_load8( fragment + fid ), signFlip8 );
+		f = _mm256_xor_ps( tinybvh_load8( fragment + fid ), bvhc_signFlip8() );
 		count[i0]++, count[AVXBINS + i1]++, count[AVXBINS * 2 + i2]++;
 		binbox[i0] = r0, i0 = TINYBVH_LANE0( bc4 );
 		binbox[AVXBINS + i1] = r1, i1 = TINYBVH_LANE1( bc4 );
@@ -7411,9 +7403,9 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 			const __m128 nodeMin4 = tinybvh_load4( &bvhNode[nodeIdx].aabbMin );
 			const __m128 nodeMax4 = tinybvh_load4( &bvhNode[nodeIdx].aabbMax );
 			// find optimal object split
-			const __m128 d4 = _mm_blendv_ps( min1, _mm_sub_ps( nodeMax4, nodeMin4 ), mask3 );
+			const __m128 d4 = _mm_blendv_ps( bvhc_min1(), _mm_sub_ps( nodeMax4, nodeMin4 ), bvhc_mask3() );
 			const __m128 nmin4 = _mm_add_ps( nodeMin4, nodeMin4 );
-			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( binmul3, d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
+			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( bvhc_binmul3(), d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
 			if (threadedBuild && node.triCount > MT_BUILD_THRESHOLD)
@@ -7488,10 +7480,10 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 		#else
 			n = newNodePtr, newNodePtr += 2;
 		#endif
-			tinybvh_store8( &bvhNode[n], _mm256_xor_ps( bestLBox, signFlip8 ) );
+			tinybvh_store8( &bvhNode[n], _mm256_xor_ps( bestLBox, bvhc_signFlip8() ) );
 			bvhNode[n].leftFirst = node.leftFirst, bvhNode[n].triCount = leftCount;
 			node.leftFirst = n, node.triCount = 0;
-			tinybvh_store8( &bvhNode[n + 1], _mm256_xor_ps( bestRBox, signFlip8 ) );
+			tinybvh_store8( &bvhNode[n + 1], _mm256_xor_ps( bestRBox, bvhc_signFlip8() ) );
 			bvhNode[n + 1].leftFirst = i, bvhNode[n + 1].triCount = rightCount;
 			const bool spawnThreads = tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS && depth < MT_SPAWN_DEPTH && threadedBuild;
 			if (!spawnThreads) task[taskCount++] = n + 1, nodeIdx = n; else
@@ -10064,10 +10056,10 @@ bool BVH::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, cons
 		lbmin4 = _mm_min_ps( lbmin4, c4 ), lbmax4 = _mm_max_ps( lbmax4, c4 ),
 		rbmin4 = _mm_min_ps( rbmin4, c4 ), rbmax4 = _mm_max_ps( rbmax4, c4 );
 	if (orig.clipped) // clip against orig box
-		lbmin4 = _mm_max_ps( lbmin4, _mm_and_ps( tinybvh_load4( &orig.bmin ), mask3 ) ),
-		lbmax4 = _mm_min_ps( lbmax4, _mm_and_ps( tinybvh_load4( &orig.bmax ), mask3 ) ),
-		rbmin4 = _mm_max_ps( rbmin4, _mm_and_ps( tinybvh_load4( &orig.bmin ), mask3 ) ),
-		rbmax4 = _mm_min_ps( rbmax4, _mm_and_ps( tinybvh_load4( &orig.bmax ), mask3 ) );
+		lbmin4 = _mm_max_ps( lbmin4, _mm_and_ps( tinybvh_load4( &orig.bmin ), bvhc_mask3() ) ),
+		lbmax4 = _mm_min_ps( lbmax4, _mm_and_ps( tinybvh_load4( &orig.bmax ), bvhc_mask3() ) ),
+		rbmin4 = _mm_max_ps( rbmin4, _mm_and_ps( tinybvh_load4( &orig.bmin ), bvhc_mask3() ) ),
+		rbmax4 = _mm_min_ps( rbmax4, _mm_and_ps( tinybvh_load4( &orig.bmax ), bvhc_mask3() ) );
 	tinybvh_store4( &left.bmin, lbmin4 ), tinybvh_store4( &right.bmin, rbmin4 );
 	tinybvh_store4( &left.bmax, lbmax4 ), tinybvh_store4( &right.bmax, rbmax4 );
 	left.primIdx = right.primIdx = orig.primIdx;
@@ -10148,8 +10140,8 @@ bool BVH::ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhve
 		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 );
 	__m128 finalmin4, finalmax4;
 	if (orig.clipped) // clip against orig box
-		finalmin4 = _mm_max_ps( _mm_max_ps( t1min4, t2min4 ), _mm_and_ps( tinybvh_load4( &orig.bmin ), mask3 ) ),
-		finalmax4 = _mm_min_ps( _mm_min_ps( t1max4, t2max4 ), _mm_and_ps( tinybvh_load4( &orig.bmax ), mask3 ) );
+		finalmin4 = _mm_max_ps( _mm_max_ps( t1min4, t2min4 ), _mm_and_ps( tinybvh_load4( &orig.bmin ), bvhc_mask3() ) ),
+		finalmax4 = _mm_min_ps( _mm_min_ps( t1max4, t2max4 ), _mm_and_ps( tinybvh_load4( &orig.bmax ), bvhc_mask3() ) );
 	else
 		finalmin4 = _mm_max_ps( t1min4, t2min4 ),
 		finalmax4 = _mm_min_ps( t1max4, t2max4 );
