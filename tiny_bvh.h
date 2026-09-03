@@ -235,15 +235,6 @@ THE SOFTWARE.
 #include <cstdint>
 #include <atomic> // for SBVH builds
 #include <new> // for placement new, in BVHBase::ContextNew
-#include <vector>
-
-#ifndef TINYBVH_NO_BUILTIN_POOL
-// For the default threading implementation, we need a few additional headers.
-#include <condition_variable>
-#include <deque>
-#include <mutex>
-#include <thread>
-#endif
 
 // Platform-independent compile-time warnings.
 #define EMIT_COMPILER_WARNING_STRINGIFY0(x) #x
@@ -1811,6 +1802,13 @@ public:
 #endif
 #include <fstream>			// fstream
 #include <algorithm>		// for std::swap
+#if defined ENABLE_THREADED_BUILDS && !defined TINYBVH_NO_BUILTIN_POOL
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+#include <vector>
+#endif
 
 // Some constexpr stuff to produce nice-looking branches in
 // *::Intersect with proper dead code elinimation.
