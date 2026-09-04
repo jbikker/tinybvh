@@ -475,20 +475,21 @@ template <> int32_t impl::BVH_SoA<float, uint32_t>::Intersect( Ray& ray ) const
 	const float32x4_t Ox4 = vdupq_n_f32( ray.O.x ), rDx4 = vdupq_n_f32( ray.rD.x );
 	const float32x4_t Oy4 = vdupq_n_f32( ray.O.y ), rDy4 = vdupq_n_f32( ray.rD.y );
 	const float32x4_t Oz4 = vdupq_n_f32( ray.O.z ), rDz4 = vdupq_n_f32( ray.rD.z );
-	// const float32x4_t inf4 = vdupq_n_f32( BVH_FAR );
 	while (1)
 	{
 		cost += c_trav;
 		if (node->isLeaf())
 		{
-			for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
+			if (indexedEnabled && bvh.vertIdx != 0) for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
 			{
-				const uint32_t tidx = primIdx[node->firstTri + i], vertIdx = tidx * 3;
-				const bvhvec3 v0 = verts[vertIdx];
-				const bvhvec3 e1 = bvhvec3( verts[vertIdx + 1] ) - v0;
-				const bvhvec3 e2 = bvhvec3( verts[vertIdx + 2] ) - v0;
-				MOLLER_TRUMBORE_TEST( ray.hit.t, continue );
-				ray.hit.t = t, ray.hit.u = u, ray.hit.v = v, ray.hit.prim = tidx;
+				const uint32_t pi = primIdx[node->firstTri + i];
+				const uint32_t i0 = bvh.vertIdx[pi * 3], i1 = bvh.vertIdx[pi * 3 + 1], i2 = bvh.vertIdx[pi * 3 + 2];
+				IntersectTri( ray, pi, verts, i0, i1, i2 );
+			}
+			else for (uint32_t i = 0; i < node->triCount; i++, cost += c_int)
+			{
+				const uint32_t pi = primIdx[node->firstTri + i];
+				IntersectTri( ray, pi, verts, pi * 3, pi * 3 + 1, pi * 3 + 2 );
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
@@ -550,14 +551,16 @@ template <> bool impl::BVH_SoA<float, uint32_t>::IsOccluded( const Ray& ray ) co
 	{
 		if (node->isLeaf())
 		{
-			for (uint32_t i = 0; i < node->triCount; i++)
+			if (indexedEnabled && bvh.vertIdx != 0) for (uint32_t i = 0; i < node->triCount; i++)
 			{
-				const uint32_t tidx = primIdx[node->firstTri + i], vertIdx = tidx * 3;
-				const bvhvec3 v0 = verts[vertIdx];
-				const bvhvec3 e1 = bvhvec3( verts[vertIdx + 1] ) - v0;
-				const bvhvec3 e2 = bvhvec3( verts[vertIdx + 2] ) - v0;
-				MOLLER_TRUMBORE_TEST( ray.hit.t, continue );
-				return true;
+				const uint32_t pi = primIdx[node->firstTri + i], vi0 = pi * 3;
+				const uint32_t i0 = bvh.vertIdx[vi0], i1 = bvh.vertIdx[vi0 + 1], i2 = bvh.vertIdx[vi0 + 2];
+				if (TriOccludes( ray, verts, pi, i0, i1, i2 )) return true;
+			}
+			else for (uint32_t i = 0; i < node->triCount; i++)
+			{
+				const uint32_t pi = primIdx[node->firstTri + i], vi0 = pi * 3;
+				if (TriOccludes( ray, verts, pi, vi0, vi0 + 1, vi0 + 2 )) return true;
 			}
 			if (stackPtr == 0) break; else node = stack[--stackPtr];
 			continue;
