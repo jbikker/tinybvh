@@ -1870,8 +1870,8 @@ template <typename Float, typename Index> void BVH<Float, Index>::Save( const ch
 	s.write( (char*)primIdx, idxCount * sizeof( Index ) );
 }
 
-template <typename Float, typename Index> bool BVH<Float, Index>::Load( const char* f, const Vertex* v, const Index p ) { return Load( f, Slice{ v, p * 3, sizeof( Vertex ) } ); }
-template <typename Float, typename Index> bool BVH<Float, Index>::Load( const char* f, const Vertex* v, const uint32_t* i, const Index p ) { return Load( f, Slice{ v, p * 3, sizeof( Vertex ) }, i, p ); }
+template <typename Float, typename Index> bool BVH<Float, Index>::Load( const char* f, const Vertex* v, const Index p ) { return Load( f, Slice( v, p * 3, sizeof( Vertex ) ) ); }
+template <typename Float, typename Index> bool BVH<Float, Index>::Load( const char* f, const Vertex* v, const uint32_t* i, const Index p ) { return Load( f, Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <typename Float, typename Index> bool BVH<Float, Index>::Load( const char* fileName, const Slice& vertices, const uint32_t* indices, const Index primCount )
 {
 	// open file and check contents
@@ -1925,8 +1925,8 @@ template <typename Float, typename Index> bool BVH<Float, Index>::Load( const ch
 // BVH builder for triangle geometry.
 // This code uses no SIMD instructions. Faster code, using SSE/AVX, is available for x64 CPUs.
 template <typename Float, typename Index> void BVH<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice{ v, p * 3, sizeof( Vertex ) }, i, p ); }
-template <typename Float, typename Index> void BVH<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice{ v, p * 3, sizeof( Vertex ) } ); }
+template <typename Float, typename Index> void BVH<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
+template <typename Float, typename Index> void BVH<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
 template <typename Float, typename Index> void BVH<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
 {
 #ifdef SLICEDUMP
@@ -2068,7 +2068,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::Build( BLASIns
 	Build( instances, instCount, (BVHBase<Float, Index>**)blasses, bCount );
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::BuildQuick( const Vertex* v, const Index p ) { BuildQuick( Slice{ v, p * 3, sizeof( Vertex ) } ); }
+template <typename Float, typename Index> void BVH<Float, Index>::BuildQuick( const Vertex* v, const Index p ) { BuildQuick( Slice( v, p * 3, sizeof( Vertex ) ) ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildQuick( const Slice& vertices )
 {
 	// Basic single-function BVH builder, using mid-point splits.
@@ -2654,8 +2654,8 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildFullSweep
 
 // SBVH builder. This builder introduces spatial splits during construction,
 // improving tree quality at the expense of construction time.
-template <typename Float, typename Index> void BVH<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice{ v, p * 3, sizeof( Vertex ) } ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* i, const Index p ) { BuildHQ( Slice{ v, p * 3, sizeof( Vertex ) }, i, p ); }
+template <typename Float, typename Index> void BVH<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
+template <typename Float, typename Index> void BVH<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildHQ( const Slice& v ) { PrepareHQBuild( v, 0, 0 ); BuildHQ(); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { PrepareHQBuild( v, i, p ); BuildHQ(); }
 template <typename Float, typename Index> void BVH<Float, Index>::PrepareHQBuild( const Slice& vertices, const uint32_t* indices, const Index prims )
@@ -4606,9 +4606,9 @@ template <typename Float, typename Index> BVH_GPU<Float, Index>::~BVH_GPU()
 // forwarders
 template <typename Float, typename Index> void BVH_GPU<Float, Index>::Build( const bvhvec4* v, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
 template <typename Float, typename Index> void BVH_GPU<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
+template <typename Float, typename Index> void BVH_GPU<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
 template <typename Float, typename Index> void BVH_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
+template <typename Float, typename Index> void BVH_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
 template <typename Float, typename Index> void BVH_GPU<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 template <typename Float, typename Index> void BVH_GPU<Float, Index>::BuildHQ( const Slice& v ) { settings.useSpatialSplits = true; Build( v ); }
 
@@ -4809,10 +4809,10 @@ template <typename Float, typename Index> BVH_SoA<Float, Index>::~BVH_SoA()
 
 // forwarders
 template <typename Float, typename Index> void BVH_SoA<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <typename Float, typename Index> void BVH_SoA<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice{ v, p * 3, sizeof( Vertex ) }, i, p ); }
+template <typename Float, typename Index> void BVH_SoA<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <typename Float, typename Index> void BVH_SoA<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
 template <typename Float, typename Index> void BVH_SoA<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <typename Float, typename Index> void BVH_SoA<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* indices, const Index p ) { BuildHQ( Slice{ v, p * 3, sizeof( Vertex ) }, indices, p ); }
+template <typename Float, typename Index> void BVH_SoA<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* indices, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), indices, p ); }
 template <typename Float, typename Index> void BVH_SoA<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
 template <typename Float, typename Index> void BVH_SoA<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
@@ -4840,12 +4840,12 @@ template <typename Float, typename Index> void BVH_SoA<Float, Index>::Save( cons
 
 template <typename Float, typename Index> bool BVH_SoA<Float, Index>::Load( const char* fileName, const Vertex* vertices, const Index primCount )
 {
-	return Load( fileName, Slice{ vertices, primCount * 3, sizeof( Vertex ) } );
+	return Load( fileName, Slice( vertices, primCount * 3, sizeof( Vertex ) ) );
 }
 
 template <typename Float, typename Index> bool BVH_SoA<Float, Index>::Load( const char* fileName, const Vertex* vertices, const uint32_t* indices, const Index primCount )
 {
-	return Load( fileName, Slice{ vertices, primCount * 3, sizeof( Vertex ) }, indices, primCount );
+	return Load( fileName, Slice( vertices, primCount * 3, sizeof( Vertex ) ), indices, primCount );
 }
 
 template <typename Float, typename Index> bool BVH_SoA<Float, Index>::Load( const char* fileName, const Slice& vertices, const uint32_t* indices, const Index primCount )
@@ -4921,10 +4921,10 @@ template <int M, typename Float, typename Index> MBVH<M, Float, Index>::~MBVH()
 
 // forwarders
 template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice{ v, p * 3, sizeof( Vertex ) }, i, p ); }
+template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
 template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::BuildHQ( const Vertex* v, const uint32_t* indices, const Index p ) { BuildHQ( Slice{ v, p * 3, sizeof( Vertex ) }, indices, p ); }
+template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::BuildHQ( const Vertex* v, const uint32_t* indices, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), indices, p ); }
 template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
 template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
@@ -5243,10 +5243,10 @@ template <typename Float, typename Index> BVH4_GPU<Float, Index>::~BVH4_GPU()
 
 // forwarders
 template <typename Float, typename Index> void BVH4_GPU<Float, Index>::Build( const bvhvec4* v, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
-template <typename Float, typename Index> void BVH4_GPU<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
+template <typename Float, typename Index> void BVH4_GPU<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
 template <typename Float, typename Index> void BVH4_GPU<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
 template <typename Float, typename Index> void BVH4_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
-template <typename Float, typename Index> void BVH4_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
+template <typename Float, typename Index> void BVH4_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
 template <typename Float, typename Index> void BVH4_GPU<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
 template <typename Float, typename Index> void BVH4_GPU<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
@@ -5513,11 +5513,11 @@ template <typename Float, typename Index> BVH4_CPU<Float, Index>::~BVH4_CPU()
 }
 
 // forwarders
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice{ v, p * 3, sizeof( Vertex ) }, i, p ); }
+template <typename Float, typename Index> void BVH4_CPU<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <typename Float, typename Index> void BVH4_CPU<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
 template <typename Float, typename Index> void BVH4_CPU<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
 template <typename Float, typename Index> void BVH4_CPU<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* i, const Index p ) { BuildHQ( Slice{ v, p * 3, sizeof( Vertex ) }, i, p ); }
+template <typename Float, typename Index> void BVH4_CPU<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <typename Float, typename Index> void BVH4_CPU<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
 template <typename Float, typename Index> void BVH4_CPU<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
@@ -5698,10 +5698,10 @@ template <typename Float, typename Index> BVH8_CPU<Float, Index>::~BVH8_CPU()
 // forwarders
 template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
 template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Build( const Slice& vertices ) { Build( vertices, 0, 0 ); }
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice{ v, p * 3, sizeof( Vertex ) }, i, p ); }
+template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <typename Float, typename Index> void BVH8_CPU<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
 template <typename Float, typename Index> void BVH8_CPU<Float, Index>::BuildHQ( const Slice& vertices ) { BuildHQ( vertices, 0, 0 ); }
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* i, const Index p ) { BuildHQ( Slice{ v, p * 3, sizeof( Vertex ) }, i, p ); }
+template <typename Float, typename Index> void BVH8_CPU<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <typename Float, typename Index> void BVH8_CPU<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
 template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
@@ -5890,10 +5890,10 @@ template <typename Float, typename Index> BVH8_CWBVH<Float, Index>::~BVH8_CWBVH(
 // forwarders
 template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Build( const bvhvec4* v, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
 template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
+template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
 template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
 template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::BuildHQ( const Slice& vertices ) { BuildHQ( vertices, 0, 0 ); }
-template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice{ v, p * 3, sizeof( bvhvec4 ) }, i, p ); }
+template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
 template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
 template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
@@ -6321,16 +6321,16 @@ template <typename Float, typename Index> int32_t BVH8_CWBVH<Float, Index>::Inte
 // Generic definitions of the members that the platform headers specialize.
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Vertex* v, const Index p ) { BuildAVX( Slice{ v, p * 3, sizeof( Vertex ) }, 0, 0 ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Vertex* v, const uint32_t* i, const Index p ) { BuildAVX( Slice{ v, p * 3, sizeof( Vertex ) }, i, p ); }
+template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Vertex* v, const Index p ) { BuildAVX( Slice( v, p * 3, sizeof( Vertex ) ), 0, 0 ); }
+template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Vertex* v, const uint32_t* i, const Index p ) { BuildAVX( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Slice& v ) { BuildAVX( v, 0, 0 ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Slice&, const uint32_t*, const Index )
 {
 	BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX and single precision." );
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Vertex* v, const Index p ) { BuildNEON( Slice{ v, p * 3, sizeof( Vertex ) }, 0, 0 ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Vertex* v, const uint32_t* i, const Index p ) { BuildNEON( Slice{ v, p * 3, sizeof( Vertex ) }, i, p ); }
+template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Vertex* v, const Index p ) { BuildNEON( Slice( v, p * 3, sizeof( Vertex ) ), 0, 0 ); }
+template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Vertex* v, const uint32_t* i, const Index p ) { BuildNEON( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Slice& v ) { BuildNEON( v, 0, 0 ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Slice&, const uint32_t*, const Index )
 {
