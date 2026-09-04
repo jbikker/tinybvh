@@ -1006,7 +1006,8 @@ int main()
 	{
 		bvh8_cpu_opt = new BVH8_CPU();
 		bvh8_cpu_opt->bvh8.bvh.context = bvh8_cpu_opt->bvh8.context = optimized.context;
-		bvh8_cpu_opt->bvh8.bvh = optimized;
+		bvh8_cpu_opt->bvh8.bvh.ReferenceFrom( optimized );
+		bvh8_cpu_opt->bvh8.ownBVH = false; // 'optimized' keeps its tree
 		bvh8_cpu_opt->ConvertFrom( bvh8_cpu_opt->bvh8 );
 		PrepareTest();
 		printf( "- BVH8 (OPT)  - primary: " );

@@ -39,6 +39,7 @@ add_executable(tiny_bvh_renderer examples/tiny_bvh_renderer.cpp)
 add_executable(tiny_bvh_double_test tests/tiny_bvh_double_test.cpp)
 add_executable(tiny_bvh_tlas_state_test tests/tiny_bvh_tlas_state_test.cpp)
 add_executable(tiny_bvh_axis_ray_test tests/tiny_bvh_axis_ray_test.cpp)
+add_executable(tiny_bvh_simd_reference_test tests/tiny_bvh_simd_reference_test.cpp)
 
 # target_include_directories(tiny_bvh_speedtest PRIVATE ${CMAKE_CURRENT_LIST_DIR}/external/OpenCL/inc;external/madmann91;external/embree/include)
 target_include_directories(tiny_bvh_minimal PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -46,6 +47,7 @@ target_include_directories(tiny_bvh_renderer PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 target_include_directories(tiny_bvh_double_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 target_include_directories(tiny_bvh_tlas_state_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 target_include_directories(tiny_bvh_axis_ray_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_include_directories(tiny_bvh_simd_reference_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 
 if (NOT MSVC)
 	# Produce debug symbols and set optimization level
@@ -101,6 +103,9 @@ if (NOT MSVC)
 	target_compile_options(tiny_bvh_axis_ray_test PRIVATE ${common_cxx_flags})
 	target_link_options(tiny_bvh_axis_ray_test PRIVATE ${common_link_flags})
 
+	target_compile_options(tiny_bvh_simd_reference_test PRIVATE ${common_cxx_flags})
+	target_link_options(tiny_bvh_simd_reference_test PRIVATE ${common_link_flags})
+
 	# No openmp support in default compiler
 	# set(tiny_bvh_speedtest_cxx_flags ${common_cxx_flags})
 	# set(tiny_bvh_speedtest_link_flags ${common_link_flags})
@@ -147,3 +152,4 @@ add_test(NAME "examples/tiny_bvh_minimal" COMMAND tiny_bvh_minimal)
 add_test(NAME "tests/tiny_bvh_double_test" COMMAND tiny_bvh_double_test)
 add_test(NAME "tests/tiny_bvh_tlas_state_test" COMMAND tiny_bvh_tlas_state_test)
 add_test(NAME "tests/tiny_bvh_axis_ray_test" COMMAND tiny_bvh_axis_ray_test)
+add_test(NAME "tests/tiny_bvh_simd_reference_test" COMMAND tiny_bvh_simd_reference_test)

@@ -162,34 +162,26 @@ int main()
 		bvh.Build( verts, triCount ), TestFloat( "BVH4_GPU::Build", bvh );
 		bvh.BuildHQ( verts, triCount ), TestFloat( "BVH4_GPU::BuildHQ", bvh );
 	}
-#if defined BVH_USEAVX || defined BVH_USENEON
 	{
 		BVH_SoA bvh;
 		bvh.Build( verts, triCount ), TestFloat( "BVH_SoA::Build", bvh );
 		bvh.BuildHQ( verts, triCount ), TestFloat( "BVH_SoA::BuildHQ", bvh );
 	}
-#endif
-#if defined BVH_USESSE || defined BVH_USENEON
 	{
 		BVH4_CPU bvh;
 		bvh.Build( verts, triCount ), TestFloat( "BVH4_CPU::Build", bvh ), TestFloatTLAS( "TLAS over BVH4_CPU", &bvh );
 		bvh.BuildHQ( verts, triCount ), TestFloat( "BVH4_CPU::BuildHQ", bvh );
 	}
-#endif
-#if defined BVH_USEAVX && !defined BVH_USENEON
 	{
 		BVH8_CWBVH bvh;
 		bvh.Build( verts, triCount ), TestFloat( "BVH8_CWBVH::Build", bvh );
 		bvh.BuildHQ( verts, triCount ), TestFloat( "BVH8_CWBVH::BuildHQ", bvh );
 	}
-#endif
-#if defined BVH_USEAVX2 && !defined BVH_USENEON
 	{
 		BVH8_CPU bvh;
 		bvh.Build( verts, triCount ), TestFloat( "BVH8_CPU::Build", bvh ), TestFloatTLAS( "TLAS over BVH8_CPU", &bvh );
 		bvh.BuildHQ( verts, triCount ), TestFloat( "BVH8_CPU::BuildHQ", bvh );
 	}
-#endif
 
 	// Double precision
 	{
@@ -199,6 +191,10 @@ int main()
 		bvh.Build( dverts.data(), triCount );
 		TestRays<RayEx, bvhdbl3>( "BVH_Double::Build", bvh );
 		TestTLAS<BVH_Double, BLASInstanceEx, RayEx, bvhdbl3>( "TLAS over BVH_Double", &bvh );
+		bvh.BuildHQ( dverts.data(), triCount ), TestRays<RayEx, bvhdbl3>( "BVH_Double::BuildHQ", bvh );
+		// the wide layout instantiates for double precision too, with the scalar kernels.
+		impl::BVH4_CPU<double, uint64_t> bvh4;
+		bvh4.Build( dverts.data(), triCount ), TestRays<RayEx, bvhdbl3>( "BVH4_CPU<double>::Build", bvh4 );
 	}
 
 	if (g_failures) { printf( "%i axis-aligned ray test failures.\n", g_failures ); return 1; }
