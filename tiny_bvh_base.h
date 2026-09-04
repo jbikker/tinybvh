@@ -2895,7 +2895,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildHQTask( I
 					for (uint32_t i = 0; i < binCount - 1; i++)
 					{
 						const Float Cspatial = SplitCostSAH( rSAV, AL[i], NL[i], AR[i], NR[i] );
-						if (Cspatial < minSplitCost && NL[i] + NR[i] < budget && NL[i] * NR[i] > 0)
+						if (Cspatial < minSplitCost && NL[i] + NR[i] < budget && NL[i] > 0 && NR[i] > 0)
 						{
 							spatial = true, minSplitCost = splitCost = Cspatial, bestAxis = a, bestPos = i;
 							bestLMin = lBMin[i], bestLMax = lBMax[i], bestRMin = rBMin[i], bestRMax = rBMax[i];
