@@ -195,6 +195,24 @@ template <> bool impl::BVH<float, uint32_t>::ClipFrag( const Fragment& orig, Fra
 	return sa > 0;
 }
 
+// SSE box tests for BVH::EPOArea.
+namespace impl {
+inline bool tinybvh_aabbs_overlap( const BVH<float, uint32_t>::BVHNode& node1, const BVH<float, uint32_t>::BVHNode& node2 )
+{
+	const __m128 n1min4 = tinybvh_load4( &node1.aabbMin ), n1max4 = tinybvh_load4( &node1.aabbMax );
+	const __m128 n2min4 = tinybvh_load4( &node2.aabbMin ), n2max4 = tinybvh_load4( &node2.aabbMax );
+	return (_mm_movemask_ps( _mm_and_ps( _mm_cmple_ps( n1min4, n2max4 ), _mm_cmpge_ps( n1max4, n2min4 ) ) ) & 7) == 7;
+}
+} // namespace impl
+
+inline bool tinybvh_tri_inside_box( const bvhvec4& v0, const bvhvec4& v1, const bvhvec4& v2, const bvhvec3& bmin, const bvhvec3& bmax )
+{
+	const __m128 bmin4 = _mm_setr_ps( bmin.x, bmin.y, bmin.z, 0 ), bmax4 = _mm_setr_ps( bmax.x, bmax.y, bmax.z, 0 );
+	const __m128 v04 = tinybvh_load4( &v0 ), v14 = tinybvh_load4( &v1 ), v24 = tinybvh_load4( &v2 );
+	const __m128 vmin4 = _mm_min_ps( _mm_min_ps( v04, v14 ), v24 ), vmax4 = _mm_max_ps( _mm_max_ps( v04, v14 ), v24 );
+	return (_mm_movemask_ps( _mm_and_ps( _mm_cmpge_ps( vmin4, bmin4 ), _mm_cmple_ps( vmax4, bmax4 ) ) ) & 7) == 7;
+}
+
 #define SSE_HIT( s ) ((m >> s) & 1)
 #define SSE_PUSH( c, s ) { nodeStack[stackPtr] = c; distStack[stackPtr] = tminSorted[s]; stackPtr++; }
 

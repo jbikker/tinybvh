@@ -3234,6 +3234,53 @@ template <typename Node> inline bool tinybvh_aabbs_overlap( const Node& node1, c
 		bmax1.y >= bmin2.y && bmin1.z <= bmax2.z && bmax1.z >= bmin2.z;
 }
 
+template <typename Vertex, typename Vec3> inline bool tinybvh_tri_inside_box( const Vertex& v0, const Vertex& v1, const Vertex& v2, const Vec3& bmin, const Vec3& bmax )
+{
+	bool allin = v0.x >= bmin.x && v0.x <= bmax.x && v0.y >= bmin.y && v0.y <= bmax.y && v0.z >= bmin.z && v0.z <= bmax.z;
+	allin &= v1.x >= bmin.x && v1.x <= bmax.x && v1.y >= bmin.y && v1.y <= bmax.y && v1.z >= bmin.z && v1.z <= bmax.z;
+	allin &= v2.x >= bmin.x && v2.x <= bmax.x && v2.y >= bmin.y && v2.y <= bmax.y && v2.z >= bmin.z && v2.z <= bmax.z;
+	return allin;
+}
+
+// Area of the part of triangle v0, v1, v2 inside the box, by clipping against its six planes.
+template <typename Float, typename Vec3> Float tinybvh_clipped_tri_area( const Vec3& v0, const Vec3& v1, const Vec3& v2, const Vec3& bmin, const Vec3& bmax )
+{
+	uint32_t Nin = 3;
+	Vec3 vin[10] = { v0, v1, v2 }, vout[10], C;
+	for (uint32_t a = 0; a < 3; a++)
+	{
+		uint32_t Nout = 0;
+		const Float l = bmin[a], r = bmax[a];
+		for (uint32_t v = 0; v < Nin; v++)
+		{
+			Vec3 vert0 = vin[v], vert1 = vin[(v + 1) % Nin];
+			const bool v0in = vert0[a] >= l, v1in = vert1[a] >= l;
+			if (!(v0in || v1in)) continue; else if (v0in ^ v1in)
+				C = vert0 + (l - vert0[a]) / (vert1[a] - vert0[a]) * (vert1 - vert0),
+				C[a] = l /* accurate */, vout[Nout++] = C;
+			if (v1in) vout[Nout++] = vert1;
+		}
+		Nin = 0;
+		for (uint32_t v = 0; v < Nout; v++)
+		{
+			Vec3 vert0 = vout[v], vert1 = vout[(v + 1) % Nout];
+			const bool v0in = vert0[a] <= r, v1in = vert1[a] <= r;
+			if (!(v0in || v1in)) continue; else if (v0in ^ v1in)
+				C = vert0 + (r - vert0[a]) / (vert1[a] - vert0[a]) * (vert1 - vert0),
+				C[a] = r /* accurate */, vin[Nin++] = C;
+			if (v1in) vin[Nin++] = vert1;
+		}
+	}
+	if (Nin < 3) return 0;
+	// area of the remaining convex polygon
+	Float area = 0;
+	const Vec3 p0 = vin[0];
+	for (uint32_t j = 0; j < Nin - 2; j++) area += Float( 0.5 ) * tinybvh_length( tinybvh_cross( vin[j + 1] - p0, vin[j + 2] - p0 ) );
+	return area;
+}
+
+// Area of the primitives in the leafs below nodeIdx that lies inside the subtree's box.
+// tiny_bvh_x86_float.h overloads the two box tests with SSE versions for float.
 template <typename Float, typename Index> Float BVH<Float, Index>::EPOArea( const Index subtreeRoot, const Index nodeIdx ) const
 {
 	// abort if we reached the subtree
@@ -3245,65 +3292,15 @@ template <typename Float, typename Index> Float BVH<Float, Index>::EPOArea( cons
 	if (n.isLeaf())
 	{
 		const Vec3 bmin = subtree.aabbMin, bmax = subtree.aabbMax;
-	#ifdef BVH_USESSE
-		const __m128 bmin4 = _mm_setr_ps( bmin.x, bmin.y, bmin.z, 0 );
-		const __m128 bmax4 = _mm_setr_ps( bmax.x, bmax.y, bmax.z, 0 );
-	#endif
 		for (Index i = 0; i < n.triCount; i++)
 		{
-			// Early out: triangle fully inside the subtree AABB?
-			Index vidx = primIdx[n.leftFirst + i] * 3;
+			const Index vidx = primIdx[n.leftFirst + i] * 3;
 			Vertex v0, v1, v2;
 			if (vertIdx) v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
 			else v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
-		#ifdef BVH_USESSE
-			__m128 vmin4, vmax4;
-			vmin4 = _mm_min_ps( _mm_min_ps( tinybvh_load4( &v0 ), tinybvh_load4( &v1 ) ), tinybvh_load4( &v2 ) );
-			vmax4 = _mm_max_ps( _mm_max_ps( tinybvh_load4( &v0 ), tinybvh_load4( &v1 ) ), tinybvh_load4( &v2 ) );
-			const bool allin = (_mm_movemask_ps( _mm_and_ps( _mm_cmpge_ps( vmin4, bmin4 ), _mm_cmple_ps( vmax4, bmax4 ) ) ) & 7) == 7;
-		#else
-			bool allin = v0.x >= bmin.x && v0.x <= bmax.x && v0.y >= bmin.y && v0.y <= bmax.y && v0.z >= bmin.z && v0.z <= bmax.z;
-			allin &= v1.x >= bmin.x && v1.x <= bmax.x && v1.y >= bmin.y && v1.y <= bmax.y && v1.z >= bmin.z && v1.z <= bmax.z;
-			allin &= v2.x >= bmin.x && v2.x <= bmax.x && v2.y >= bmin.y && v2.y <= bmax.y && v2.z >= bmin.z && v2.z <= bmax.z;
-		#endif
-			if (allin)
-			{
-				area += 0.5f * tinybvh_length( tinybvh_cross( Vec3( v1 - v0 ), Vec3( v2 - v0 ) ) );
-				continue;
-			}
-			// Brute force: clip triangle against six planes of the AABB.
-			uint32_t Nin = 3;
-			Vec3 vin[10] = { v0, v1, v2 }, vout[10], C;
-			for (uint32_t a = 0; a < 3; a++)
-			{
-				uint32_t Nout = 0;
-				const Float l = bmin[a], r = bmax[a];
-				for (uint32_t v = 0; v < Nin; v++)
-				{
-					Vec3 vert0 = vin[v], vert1 = vin[(v + 1) % Nin];
-					const bool v0in = vert0[a] >= l, v1in = vert1[a] >= l;
-					if (!(v0in || v1in)) continue; else if (v0in ^ v1in)
-						C = vert0 + (l - vert0[a]) / (vert1[a] - vert0[a]) * (vert1 - vert0),
-						C[a] = l /* accurate */, vout[Nout++] = C;
-					if (v1in) vout[Nout++] = vert1;
-				}
-				Nin = 0;
-				for (uint32_t v = 0; v < Nout; v++)
-				{
-					Vec3 vert0 = vout[v], vert1 = vout[(v + 1) % Nout];
-					const bool v0in = vert0[a] <= r, v1in = vert1[a] <= r;
-					if (!(v0in || v1in)) continue; else if (v0in ^ v1in)
-						C = vert0 + (r - vert0[a]) / (vert1[a] - vert0[a]) * (vert1 - vert0),
-						C[a] = r /* accurate */, vin[Nin++] = C;
-					if (v1in) vin[Nin++] = vert1;
-				}
-			}
-			if (Nin < 3) continue;
-			// calculate area of remaining convex shape in vin
-			const uint32_t tris = Nin - 2;
-			Vec3 p0 = vin[0], p1, p2;
-			for (uint32_t j = 0; j < tris; j++) p1 = vin[j + 1], p2 = vin[j + 2],
-				area += 0.5f * tinybvh_length( tinybvh_cross( p1 - p0, p2 - p0 ) );
+			// Early out: triangle fully inside the subtree AABB?
+			if (tinybvh_tri_inside_box( v0, v1, v2, bmin, bmax )) area += Float( 0.5 ) * tinybvh_length( tinybvh_cross( Vec3( v1 - v0 ), Vec3( v2 - v0 ) ) );
+			else area += tinybvh_clipped_tri_area<Float>( Vec3( v0 ), Vec3( v1 ), Vec3( v2 ), bmin, bmax );
 		}
 		return area;
 	}
