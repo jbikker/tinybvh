@@ -598,6 +598,8 @@ TINYBVH_FORCEINLINE bvhvec4 tinybvh_max( const bvhvec4& a, const bvhvec4& b ) { 
 TINYBVH_FORCEINLINE float tinybvh_clamp( const float x, const float a, const float b ) { return x > a ? (x < b ? x : b) : a; /* NaN safe */ }
 TINYBVH_FORCEINLINE int32_t tinybvh_clamp( const int32_t x, const int32_t a, const int32_t b ) { return x > a ? (x < b ? x : b) : a; /* NaN safe */ }
 template <class T> inline static void tinybvh_swap( T& a, T& b ) { T t = a; a = b; b = t; }
+// Cast to an rvalue reference
+template <class T> TINYBVH_FORCEINLINE T&& tinybvh_move( T& a ) { return static_cast<T&&>( a ); }
 TINYBVH_FORCEINLINE float tinybvh_halfarea( const bvhvec3& v ) { return v.x < -BVH_FAR ? 0 : (v.x * v.y + v.y * v.z + v.z * v.x); } // for SAH calculations
 TINYBVH_FORCEINLINE uint32_t tinybvh_maxdim( const bvhvec3& v ) { uint32_t r = fabs( v.x ) > fabs( v.y ) ? 0 : 1; return fabs( v.z ) > fabs( v[r] ) ? 2 : r; }
 
@@ -1011,12 +1013,20 @@ public:
 		uint32_t clipped = 0;		// Fragment is the result of clipping if > 0.
 		void Extend( bvhvec3 p ) { bmin = tinybvh_min( p, bmin ); bmax = tinybvh_max( p, bmax ); }
 	};
-	// BVH flags, maintainted by tiny_bvh.
+	// BVH flags, maintained by tiny_bvh.
+protected:
 	bool rebuildable = true;		// rebuilds are safe only if a tree has not been converted.
 	bool refittable = true;			// refits are safe only if the tree has no spatial splits.
 	bool may_have_holes = false;	// threaded builds and MergeLeafs produce BVHs with unused nodes.
 	bool bvh_over_aabbs = false;	// a BVH over AABBs is useful for e.g. TLAS traversal.
 	bool bvh_over_indices = false;	// a BVH over indices cannot translate primitive index to vertex index.
+public:
+	// read-only queries on the flags.
+	bool isRebuildable() const { return rebuildable; }
+	bool isRefittable() const { return refittable; }
+	bool mayHaveHoles() const { return may_have_holes; }
+	bool isOverAABBs() const { return bvh_over_aabbs; }
+	bool isOverIndices() const { return bvh_over_indices; }
 	bool threadedBuild = true;		// will be disabled for small meshes.
 	// BVH construction flags and settings.
 	BVHBuildSettings settings;		// build settings: presplitting, full-sweep etc.
@@ -1038,7 +1048,8 @@ public:
 	uint32_t* opmap = 0;			// opacity micro maps; opmapN^2 bits per triangle.
 	bool hasOpacityMicroMaps() const { return opmapN > 0; }
 	void SetOpacityMicroMaps( uint32_t* mapData, uint32_t N ) { opmap = mapData, opmapN = N; }
-	// Custom memory allocation
+protected:
+	// allocation plumbing and flag propagation
 	void* AlignedAlloc( size_t size ) const;
 	void AlignedFree( void* ptr ) const;
 	// Single-object allocation - used for the atomic build counters.
@@ -1051,9 +1062,7 @@ public:
 	{
 		if (obj) obj->~T(), AlignedFree( obj ), obj = 0;
 	}
-	// Common methods
 	void CopyBasePropertiesFrom( const BVHBase& original );	// copy flags from one BVH to another
-protected:
 	~BVHBase() {}
 	TINYBVH_FORCEINLINE void IntersectTri( Ray& ray, const uint32_t idx, const bvhvec4slice& verts, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
 	TINYBVH_FORCEINLINE bool TriOccludes( const Ray& ray, const bvhvec4slice& verts, const uint32_t triIdx, const uint32_t i0, const uint32_t i1, const uint32_t i2 ) const;
@@ -1090,9 +1099,16 @@ public:
 	BVH( const BVH_Verbose& original ) { layout = LAYOUT_BVH; ConvertFrom( original ); }
 	BVH( const bvhvec4* vertices, const uint32_t primCount ) { layout = LAYOUT_BVH; Build( vertices, primCount ); }
 	BVH( const bvhvec4slice& vertices ) { layout = LAYOUT_BVH; Build( vertices ); }
+	BVH( const BVH& ) = delete; // owns its allocations, so it cannot be copied.
 	BVH( BVH&& ) noexcept;
-	BVH& operator=( const BVH& other ) = default;
+	BVH& operator=( BVH&& ) noexcept;
 	~BVH();
+	// point this at another's data without taking ownership of it
+	void ReferenceFrom( const BVH& other ) { *this = other; }
+	// give up the buffers without freeing them: another object has taken them over
+	void ReleaseOwnership();
+	// reset to a pristine empty object, freeing nothing, with 'ctx' installed
+	void DropReference( BVHContext ctx = {} );
 	void Save( const char* fileName );
 	bool Load( const char* fileName, const bvhvec4* vertices, const uint32_t primCount );
 	bool Load( const char* fileName, const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
@@ -1127,46 +1143,60 @@ public:
 	float SAHCost( const uint32_t nodeIdx = 0, uint32_t depth = 0 ) const;
 	float EPOCost( const uint32_t nodeIdx = 0, uint32_t depth = 0 ) const;
 	uint32_t CollectNodes( const uint32_t root, uint32_t* list, const uint32_t cap ) const;
-	static void MetricTask( const uint32_t task, void* payload );
 	void Refit( const uint32_t nodeIdx = 0 );
 	void Compact();
 	void Optimize( const uint32_t iterations = 25, bool extreme = false, bool stochastic = false );
-	int32_t NodeCount() const;
-	int32_t LeafCount() const;
-	int32_t PrimCount( const uint32_t nodeIdx = 0 ) const;
+	uint32_t NodeCount() const;
+	uint32_t LeafCount() const;
+	uint32_t PrimCount( const uint32_t nodeIdx = 0 ) const;
 	// BVH type identification
 	bool isTLAS() const { return instList != 0; }
 	bool isBLAS() const { return instList == 0; }
 	bool isIndexed() const { return vertIdx != 0; }
 	bool hasCustomGeom() const { return customIntersect != 0; }
-	// internal methods that need to be public
-	void Build( uint32_t nodeIdx = 0, uint32_t depth = 0 );
-	void BuildFullSweep( uint32_t nodeIdx = 0, uint32_t depth = 0 );
-	void BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* triIdxB );
-#ifdef BVH_USEAVX
-	void BuildAVXSubtree( uint32_t nodeIdx = 0, uint32_t depth = 0 );
-	void PrepareAVXBuildFragSlice( const uint32_t first, const uint32_t last, const uint32_t* indices,
-		const int8_t* vertData, const uint32_t stride4, void* frags, __m128* rootMin, __m128* rootMax );
-private:
-	void BuildAVXFinalize();
-#endif
 #ifdef BVH_USENEON
+	// public NEON build entry points, mirroring BuildAVX above.
 	void BuildNEON( const bvhvec4* vertices, const uint32_t primCount );
 	void BuildNEON( const bvhvec4slice& vertices );
 	void BuildNEON( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
 	void BuildNEON( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
+#endif
+private:
+	// Recursive build entry points, scheduled via the threading hooks. These used to
+	// be public, which made Build( nodeIdx, depth ) an overload of the public Build
+	// with every argument defaulted: BVH::Build() compiled and ran the recursive
+	// builder over an unprepared tree. The task trampolines are friends instead.
+	void Build( uint32_t nodeIdx = 0, uint32_t depth = 0 );
+	void BuildFullSweep( uint32_t nodeIdx = 0, uint32_t depth = 0 );
+	void BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* triIdxB );
+	static void MetricTask( const uint32_t task, void* payload );
+	friend void BVHBuildSubtree( void* payload );
+	friend void BVHBuildFullSweepSubtree( void* payload );
+	friend void BVHBuildHQSubtree( void* payload );
+#ifdef BVH_USEAVX
+	void BuildAVXSubtree( uint32_t nodeIdx = 0, uint32_t depth = 0 );
+	void PrepareAVXBuildFragSlice( const uint32_t first, const uint32_t last, const uint32_t* indices,
+		const int8_t* vertData, const uint32_t stride4, void* frags, __m128* rootMin, __m128* rootMax );
+	void BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* binbox,
+		uint32_t* count, const __m128& nmin4, const __m128& rpd4 );
+	void BuildAVXFinalize();
+	friend void BVHBuildAVXSubtree( void* payload );
+	friend void BuildAVXFragSlice( uint32_t i, void* payload );
+	friend void BVHBuildAVXBinSlice( uint32_t i, void* payload );
+#endif
+#ifdef BVH_USENEON
 	void PrepareNEONBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 	void BuildNEON();
-	// internal methods that need to be public: these are scheduled via the threading hooks.
 	void BuildNEONSubtree( uint32_t nodeIdx = 0, uint32_t depth = 0 );
 	void PrepareNEONBuildFragSlice( const uint32_t first, const uint32_t last, const uint32_t* indices,
 		const int8_t* vertData, const uint32_t stride4, void* frags, float32x4_t* rootMin, float32x4_t* rootMax );
 	void BuildNEONBinTask( const uint32_t first, const uint32_t last, float32x4x2_t* binbox,
 		uint32_t* count, const float32x4_t& nmin4, const float32x4_t& rpd4 );
-private:
 	void BuildNEONFinalize();
+	friend void BVHBuildNEONSubtree( void* payload );
+	friend void BuildNEONFragSlice( uint32_t i, void* payload );
+	friend void BVHBuildNEONBinSlice( uint32_t i, void* payload );
 #endif
-private:
 	void PrepareHQBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims );
 	void BuildHQ();
 	void PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
@@ -1224,12 +1254,7 @@ private:
 	float* SARs = 0;
 	void GatherSweepBounds( uint32_t axis );
 	static void SweepGatherTask( uint32_t axis, void* payload );
-#ifdef BVH_USEAVX
-public:
-	// helper for AVX binning
-	void BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* binbox,
-		uint32_t* count, const __m128& nmin4, const __m128& rpd4 );
-#endif
+	BVH& operator=( const BVH& ) = default;
 };
 
 #ifdef ENABLE_VOXEL_SUPPORT
@@ -1318,8 +1343,9 @@ public:
 		uint64_t primIdx;			// index of the original primitive
 	};
 	BVH_Double( BVHContext ctx = {} ) { layout = LAYOUT_BVH_DOUBLE; context = ctx; }
-	BVH_Double( BVH_Double&& );
-	BVH_Double& operator=( const BVH_Double& ) = default;
+	BVH_Double( const BVH_Double& ) = delete; // owns its allocations, so it cannot be copied
+	BVH_Double( BVH_Double&& ) noexcept;
+	BVH_Double& operator=( BVH_Double&& ) noexcept;
 	~BVH_Double();
 	void Build( const bvhdbl3* vertices, const uint64_t primCount );
 	void Build( const bvhdbl3slice& vertices );
@@ -1328,7 +1354,11 @@ public:
 	void Build( BLASInstanceEx* bvhs, const uint64_t instCount, BVH_Double** blasses, const uint64_t blasCount );
 	void Build( void (*customGetAABB)(const uint64_t, bvhdbl3&, bvhdbl3&, void*), const uint64_t primCount );
 	void PrepareBuild( const bvhdbl3slice& vertices, const uint32_t* indices, const uint64_t primCount );
+private:
+	// Recursive build entry point; private for the same reason as BVH::Build above.
 	void Build( uint64_t nodeIdx = 0, uint32_t depth = 0 );
+	friend void BVHDoubleBuildSubtree( void* payload );
+public:
 	double SAHCost( const uint64_t nodeIdx = 0 ) const;
 	int32_t Intersect( RayEx& ray ) const;
 	bool IsOccluded( const RayEx& ray ) const;
@@ -1360,6 +1390,8 @@ private:
 	// Atomic counter for threaded builds
 	std::atomic<uint64_t>* atomicNewNodePtr = 0;
 #endif
+private:
+	BVH_Double& operator=( const BVH_Double& ) = default;
 };
 
 #endif // DOUBLE_PRECISION_SUPPORT
@@ -1380,8 +1412,9 @@ public:
 	};
 	BVH_GPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH_GPU; context = ctx; }
 	BVH_GPU( const BVH& original ) { /* DEPRICATED */ ConvertFrom( original ); }
-	BVH_GPU( BVH_GPU&& );
-	BVH_GPU& operator=( const BVH_GPU& ) = default;
+	BVH_GPU( const BVH_GPU& ) = delete; // owns its allocations, so it cannot be copied
+	BVH_GPU( BVH_GPU&& ) noexcept;
+	BVH_GPU& operator=( BVH_GPU&& ) noexcept;
 	~BVH_GPU();
 	void Build( const bvhvec4* vertices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices );
@@ -1403,6 +1436,8 @@ public:
 	BVH bvh;						// BVH_GPU is created from BVH and uses its data.
 	bvhvec4slice orderedVerts = {};	// Vertex data ordered according to triIdx.
 	bool ownBVH = true;				// False when ConvertFrom receives an external bvh.
+private:
+	BVH_GPU& operator=( const BVH_GPU& ) = default;
 };
 
 #ifdef ENABLE_BVH_SOA
@@ -1420,8 +1455,9 @@ public:
 	};
 	BVH_SoA( BVHContext ctx = {} ) { layout = LAYOUT_BVH_SOA; context = ctx; }
 	BVH_SoA( const BVH& original ) { /* DEPRICATED */ layout = LAYOUT_BVH_SOA; ConvertFrom( original ); }
-	BVH_SoA( BVH_SoA&& );
-	BVH_SoA& operator=( const BVH_SoA& ) = default;
+	BVH_SoA( const BVH_SoA& ) = delete; // owns its allocations, so it cannot be copied
+	BVH_SoA( BVH_SoA&& ) noexcept;
+	BVH_SoA& operator=( BVH_SoA&& ) noexcept;
 	~BVH_SoA();
 	void Build( const bvhvec4* vertices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices );
@@ -1444,6 +1480,8 @@ public:
 	BVHNode* bvhNode = 0;			// BVH node in 'structure of arrays' format.
 	BVH bvh;						// BVH_SoA is created from BVH and uses its data.
 	bool ownBVH = true;				// False when ConvertFrom receives an external bvh.
+private:
+	BVH_SoA& operator=( const BVH_SoA& ) = default;
 };
 
 #endif
@@ -1465,8 +1503,9 @@ public:
 	};
 	BVH_Verbose( BVHContext ctx = {} ) { layout = LAYOUT_BVH_VERBOSE; context = ctx; }
 	BVH_Verbose( const BVH& original ) { /* DEPRECATED */ layout = LAYOUT_BVH_VERBOSE; ConvertFrom( original ); }
-	BVH_Verbose( BVH_Verbose&& );
-	BVH_Verbose& operator=( const BVH_Verbose& ) = default;
+	BVH_Verbose( const BVH_Verbose& ) = delete; // owns its allocations, so it cannot be copied
+	BVH_Verbose( BVH_Verbose&& ) noexcept;
+	BVH_Verbose& operator=( BVH_Verbose&& ) noexcept;
 	~BVH_Verbose();
 	void ConvertFrom( const BVH& original, bool compact = true );
 	float SAHCost( const uint32_t nodeIdx = 0 ) const;
@@ -1493,6 +1532,8 @@ public:
 	Fragment* fragment = 0;			// input primitive bounding boxes, double-precision.
 	uint32_t* primIdx = 0;			// primitive index array - pointer copied from original.
 	BVHNode* bvhNode = 0;			// BVH node with additional info, for BVH optimizer.
+private:
+	BVH_Verbose& operator=( const BVH_Verbose& ) = default;
 };
 
 template <int M> class MBVH : public BVHBase
@@ -1510,9 +1551,16 @@ public:
 	};
 	MBVH( BVHContext ctx = {} ) { layout = LAYOUT_MBVH; context = ctx; }
 	MBVH( const BVH& original ) { /* DEPRECATED */ layout = LAYOUT_MBVH; ConvertFrom( original ); }
-	MBVH( MBVH&& );
-	MBVH& operator=( const MBVH& ) = default;
+	MBVH( const MBVH& ) = delete; // owns its allocations, so it cannot be copied
+	MBVH( MBVH&& ) noexcept;
+	MBVH& operator=( MBVH&& ) noexcept;
 	~MBVH();
+	// point this at another's data without taking ownership of it
+	void ReferenceFrom( const MBVH& other ) { *this = other; }
+	// give up the buffers without freeing them
+	void ReleaseOwnership();
+	// reset to a pristine empty object, freeing nothing, with 'ctx' installed.
+	void DropReference( BVHContext ctx = {} );
 	void Build( const bvhvec4* vertices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices );
 	void Build( const bvhvec4* vertices, const uint32_t* indices, const uint32_t primCount );
@@ -1532,6 +1580,12 @@ public:
 	bool ownBVH = true;				// False when ConvertFrom receives an external bvh.
 	// collapse settings, consumed by ConvertFrom
 	uint32_t leafPrimLimit = 0;		// max prims the collapse may merge into one leaf; 0 disables merging
+	friend class BVH4_GPU;
+	friend class BVH4_CPU;
+	friend class BVH8_CPU;
+	friend class BVH8_CWBVH;
+private:
+	MBVH& operator=( const MBVH& ) = default;
 };
 
 class BVH4_GPU : public BVHBase
@@ -1558,8 +1612,9 @@ public:
 	};
 	BVH4_GPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH4_GPU; context = ctx; }
 	BVH4_GPU( const MBVH<4>& bvh4 ) { /* DEPRECATED */ layout = LAYOUT_BVH4_GPU; ConvertFrom( bvh4 ); }
-	BVH4_GPU( BVH4_GPU&& );
-	BVH4_GPU& operator=( const BVH4_GPU& ) = default;
+	BVH4_GPU( const BVH4_GPU& ) = delete; // owns its allocations, so it cannot be copied
+	BVH4_GPU( BVH4_GPU&& ) noexcept;
+	BVH4_GPU& operator=( BVH4_GPU&& ) noexcept;
 	~BVH4_GPU();
 	void Build( const bvhvec4* vertices, const uint32_t primCount );
 	void Build( const bvhvec4slice& vertices );
@@ -1580,6 +1635,8 @@ public:
 	uint32_t usedBlocks = 0;		// actually used storage.
 	MBVH<4> bvh4;					// BVH4_GPU is created from BVH4 and uses its data.
 	bool ownBVH4 = true;			// False when ConvertFrom receives an external bvh.
+private:
+	BVH4_GPU& operator=( const BVH4_GPU& ) = default;
 };
 
 class BVH4_CPU : public BVHBase
@@ -1597,8 +1654,9 @@ public:
 	};
 	struct CacheLine { SIMDVEC4 a, b, c, d; };
 	BVH4_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH4_CPU; context = ctx; c_int = 2; l_quads = true; }
-	BVH4_CPU( BVH4_CPU&& );
-	BVH4_CPU& operator=( const BVH4_CPU& ) = default;
+	BVH4_CPU( const BVH4_CPU& ) = delete; // owns its allocations, so it cannot be copied
+	BVH4_CPU( BVH4_CPU&& ) noexcept;
+	BVH4_CPU& operator=( BVH4_CPU&& ) noexcept;
 	~BVH4_CPU();
 	void Save( const char* fileName );
 	bool Load( const char* fileName, const uint32_t expectedTris );
@@ -1625,6 +1683,8 @@ public:
 	bool ownBVH4 = true;			// false when ConvertFrom receives an external bvh4.
 	uint32_t allocatedBlocks = 0;	// node data and triangles are stored in 16-byte blocks.
 	uint32_t usedBlocks = 0;		// the amount of data actually used.
+private:
+	BVH4_CPU& operator=( const BVH4_CPU& ) = default;
 };
 
 class BVH8_CWBVH : public BVHBase
@@ -1632,8 +1692,9 @@ class BVH8_CWBVH : public BVHBase
 public:
 	BVH8_CWBVH( BVHContext ctx = {} ) { layout = LAYOUT_CWBVH; context = ctx; }
 	BVH8_CWBVH( MBVH<8>& bvh8 ) { /* DEPRECATED */ layout = LAYOUT_CWBVH; ConvertFrom( bvh8 ); }
-	BVH8_CWBVH( BVH8_CWBVH&& );
-	BVH8_CWBVH& operator=( const BVH8_CWBVH& ) = default;
+	BVH8_CWBVH( const BVH8_CWBVH& ) = delete; // owns its allocations, so it cannot be copied
+	BVH8_CWBVH( BVH8_CWBVH&& ) noexcept;
+	BVH8_CWBVH& operator=( BVH8_CWBVH&& ) noexcept;
 	~BVH8_CWBVH();
 	void Save( const char* fileName );
 	bool Load( const char* fileName, const uint32_t expectedTris );
@@ -1659,6 +1720,8 @@ public:
 	bool ownBVH8 = true;			// false when ConvertFrom receives an external bvh8.
 	uint32_t usedTriBlocks = 0;		// 16-byte blocks actually used in bvh8Tris
 	uint32_t allocatedTris = 0;		// 16-byte blocks allocated for bvh8Tris
+private:
+	BVH8_CWBVH& operator=( const BVH8_CWBVH& ) = default;
 };
 
 // Storage for up to four triangles, in SoA layout, for BVH8_CPU.
@@ -1709,8 +1772,9 @@ public:
 	};
 	struct CacheLine { SIMDVEC8 a, b; };
 	BVH8_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH8_AVX2; context = ctx; c_int = 2; l_quads = true; }
-	BVH8_CPU( BVH8_CPU&& );
-	BVH8_CPU& operator=( const BVH8_CPU& ) = default;
+	BVH8_CPU( const BVH8_CPU& ) = delete; // owns its allocations, so it cannot be copied
+	BVH8_CPU( BVH8_CPU&& ) noexcept;
+	BVH8_CPU& operator=( BVH8_CPU&& ) noexcept;
 	~BVH8_CPU();
 	void Save( const char* fileName );
 	bool Load( const char* fileName, const uint32_t expectedTris );
@@ -1737,6 +1801,8 @@ public:
 	bool ownBVH8 = true;			// false when ConvertFrom receives an external bvh8.
 	uint32_t allocatedBlocks = 0;	// node data and triangles are stored in 16-byte blocks.
 	uint32_t usedBlocks = 0;		// the amount of data actually used.
+private:
+	BVH8_CPU& operator=( const BVH8_CPU& ) = default;
 };
 
 // BLASInstance: A TLAS is built over BLAS instances, where a single BLAS can be
@@ -2022,10 +2088,27 @@ BVH::BVH( BVH&& other ) noexcept
 {
 	// shallow copy of parameters, options, and pointers
 	*this = other;
-	// mark 'other' as deleted to avoid double-free
-	other.primIdx = 0;
-	other.bvhNode = 0;
-	other.fragment = 0;
+	// exactly one of the two may free the buffers from here on
+	other.ReleaseOwnership();
+}
+
+// move assignment: release what we hold, then take over 'other'.
+BVH& BVH::operator=( BVH&& other ) noexcept
+{
+	if (this != &other) this->~BVH(), new (this) BVH( tinybvh_move( other ) );
+	return *this;
+}
+
+void BVH::ReleaseOwnership()
+{
+	bvhNode = 0, primIdx = 0, fragment = 0;
+	allocatedNodes = usedNodes = triCount = idxCount = 0;
+}
+
+void BVH::DropReference( BVHContext ctx )
+{
+	// Deliberately no destructor call: the buffers are not ours to release.
+	new (this) BVH( ctx );
 }
 
 BVH::~BVH()
@@ -2281,7 +2364,7 @@ void BVH::BuildQuick( const bvhvec4slice& vertices )
 		root.aabbMin = tinybvh_min( root.aabbMin, fragment[i].bmin ),
 		root.aabbMax = tinybvh_max( root.aabbMax, fragment[i].bmax ), primIdx[i] = i;
 	// subdivide recursively
-	uint32_t task[512], taskCount = 0, nodeIdx = 0;
+	uint32_t task[TINYBVH_STACK_SIZE], taskCount = 0, nodeIdx = 0;
 	while (1)
 	{
 		while (1)
@@ -2394,7 +2477,7 @@ void BVH::PrepareBuild( const bvhvec4slice& vertices, const uint32_t* indices, c
 
 // Helper function to build a subtree via the thread pool
 struct BVHBuildSubtreeArgs { BVH* bvh; uint32_t node, depth; };
-static void BVHBuildSubtree( void* payload )
+void BVHBuildSubtree( void* payload )
 {
 	BVHBuildSubtreeArgs* a = (BVHBuildSubtreeArgs*)payload;
 	a->bvh->Build( a->node, a->depth );
@@ -2412,7 +2495,7 @@ void BVH::Build( uint32_t nodeIdx, uint32_t depth )
 	#endif
 	}
 	// subdivide root node recursively
-	uint32_t task[512], taskCount = 0;
+	uint32_t task[TINYBVH_STACK_SIZE], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-20f;
 	bvhvec3 bestLMin( 0 ), bestLMax( 0 ), bestRMin( 0 ), bestRMax( 0 );
@@ -2593,7 +2676,7 @@ static void RadixSort( uint32_t* input, uint32_t* output, uint32_t* keys, int le
 }
 
 // static helper function to build a subtree via the thread pool
-static void BVHBuildFullSweepSubtree( void* payload )
+void BVHBuildFullSweepSubtree( void* payload )
 {
 	BVHBuildSubtreeArgs* a = (BVHBuildSubtreeArgs*)payload;
 	a->bvh->BuildFullSweep( a->node, a->depth );
@@ -2677,7 +2760,7 @@ void BVH::BuildFullSweep( uint32_t nodeIdx, uint32_t depth )
 		tinybvh_parallel_for( context, 3, &BVH::SweepGatherTask, this );
 	}
 	// subdivide root node recursively
-	uint32_t task[512], taskCount = 0;
+	uint32_t task[TINYBVH_STACK_SIZE], taskCount = 0;
 	bvhvec3 minDim = (bvhNode->aabbMax - bvhNode->aabbMin) * 1e-20f;
 	const float cratio = c_int > 0 ? (c_trav / c_int) : 0;
 	while (1)
@@ -2928,7 +3011,7 @@ void BVH::BuildHQ()
 
 // Helper function to build a subtree via the thread pool
 struct BVHBuildHQArgs { BVH* bvh; uint32_t node, depth, sliceStart, sliceEnd; uint32_t* idxTmp; };
-static void BVHBuildHQSubtree( void* payload )
+void BVHBuildHQSubtree( void* payload )
 {
 	BVHBuildHQArgs* a = (BVHBuildHQArgs*)payload;
 	a->bvh->BuildHQTask( a->node, a->depth, a->sliceStart, a->sliceEnd, a->idxTmp );
@@ -2936,7 +3019,7 @@ static void BVHBuildHQSubtree( void* payload )
 void BVH::BuildHQTask( uint32_t nodeIdx, uint32_t depth, uint32_t sliceStart, uint32_t sliceEnd, uint32_t* idxTmp )
 {
 	// prepare subdivision
-	ALIGNED( 64 ) SubdivTask localTask[512];
+	ALIGNED( 64 ) SubdivTask localTask[TINYBVH_STACK_SIZE];
 	uint32_t localTasks = 0;
 	bvhvec3 bestLMin( 0 ), bestLMax( 0 ), bestRMin( 0 ), bestRMax( 0 );
 	BVHNode& root = bvhNode[0];
@@ -3242,7 +3325,7 @@ struct BVHMetricArgs
 	uint32_t primCount;
 };
 
-int32_t BVH::PrimCount( const uint32_t nodeIdx ) const
+uint32_t BVH::PrimCount( const uint32_t nodeIdx ) const
 {
 	// determine the total number of primitives / fragments in leaf nodes.
 	const BVHNode& n = bvhNode[nodeIdx];
@@ -4322,7 +4405,7 @@ void BVH::Intersect256Rays( Ray* packet ) const
 	}
 }
 
-int32_t BVH::NodeCount() const
+uint32_t BVH::NodeCount() const
 {
 	// Determine the number of nodes in the tree. Typically the result should
 	// be usedNodes - 1 (second node is always unused), but some builders may
@@ -4338,7 +4421,7 @@ int32_t BVH::NodeCount() const
 	return retVal;
 }
 
-int32_t BVH::LeafCount() const
+uint32_t BVH::LeafCount() const
 {
 	// Determine the number of nodes in the tree. Typically the result should
 	// be usedNodes - 1 (second node is always unused), but some builders may
@@ -4804,10 +4887,20 @@ bool VoxelSet::IsOccluded( const Ray& ray ) const
 // BVH_Verbose implementation
 // ----------------------------------------------------------------------------
 
-BVH_Verbose::BVH_Verbose( BVH_Verbose&& other )
+BVH_Verbose::BVH_Verbose( BVH_Verbose&& other ) noexcept
 {
 	*this = other;
-	other.bvhNode = 0;
+	// bvhNode is the only buffer we own; verts / fragment / primIdx are borrowed
+	// from the source BVH, so clearing them just stops 'other' referencing them.
+	other.bvhNode = 0, other.fragment = 0, other.primIdx = 0;
+	other.allocatedNodes = other.usedNodes = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+BVH_Verbose& BVH_Verbose::operator=( BVH_Verbose&& other ) noexcept
+{
+	if (this != &other) this->~BVH_Verbose(), new (this) BVH_Verbose( tinybvh_move( other ) );
+	return *this;
 }
 
 BVH_Verbose::~BVH_Verbose()
@@ -4818,7 +4911,7 @@ BVH_Verbose::~BVH_Verbose()
 void BVH_Verbose::ConvertFrom( const BVH& original, bool /* unused here */ )
 {
 	// allocate space
-	uint32_t spaceNeeded = original.triCount * (original.refittable ? 2 : 3);
+	uint32_t spaceNeeded = original.triCount * (original.isRefittable() ? 2 : 3);
 	CopyBasePropertiesFrom( original );
 	if (allocatedNodes < spaceNeeded)
 	{
@@ -5236,17 +5329,26 @@ void BVH_Verbose::MergeLeafs()
 // BVH_GPU implementation
 // ----------------------------------------------------------------------------
 
-BVH_GPU::BVH_GPU( BVH_GPU&& other )
+BVH_GPU::BVH_GPU( BVH_GPU&& other ) noexcept
 {
 	*this = other;
-	// mark 'other' as deleted to avoid double-free
+	// The embedded bvh must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh.ReleaseOwnership();
 	other.bvhNode = 0;
 	other.orderedVerts = bvhvec4slice( nullptr, 0, 0 );
 }
 
+// move assignment: release what we hold, then take over 'other'.
+BVH_GPU& BVH_GPU::operator=( BVH_GPU&& other ) noexcept
+{
+	if (this != &other) this->~BVH_GPU(), new (this) BVH_GPU( tinybvh_move( other ) );
+	return *this;
+}
+
 BVH_GPU::~BVH_GPU()
 {
-	if (!ownBVH) bvh = BVH(); // clear out pointers we don't own.
+	if (!ownBVH) bvh.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvhNode );
 	bvhNode = 0;
 	AlignedFree( (void*)orderedVerts.data ); // allocated by ConvertFrom; we own it.
@@ -5312,7 +5414,7 @@ void BVH_GPU::ConvertFrom( const BVH& original, bool compact )
 {
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
-	bvh = original;
+	bvh.ReferenceFrom( original );
 	const uint32_t sourceNodes = compact ? original.usedNodes : original.allocatedNodes;
 	const uint32_t spaceNeeded = (sourceNodes >> 1) + 1; // the +1 covers a leaf-only bvh
 	CopyBasePropertiesFrom( original );
@@ -5449,15 +5551,25 @@ int32_t BVH_GPU::Intersect( Ray& ray ) const
 // BVH_SoA implementation
 // ----------------------------------------------------------------------------
 
-BVH_SoA::BVH_SoA( BVH_SoA&& other )
+BVH_SoA::BVH_SoA( BVH_SoA&& other ) noexcept
 {
 	*this = other;
+	// The embedded bvh must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh.ReleaseOwnership();
 	other.bvhNode = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+BVH_SoA& BVH_SoA::operator=( BVH_SoA&& other ) noexcept
+{
+	if (this != &other) this->~BVH_SoA(), new (this) BVH_SoA( tinybvh_move( other ) );
+	return *this;
 }
 
 BVH_SoA::~BVH_SoA()
 {
-	if (!ownBVH) bvh = BVH(); // clear out pointers we don't own.
+	if (!ownBVH) bvh.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvhNode );
 }
 
@@ -5513,7 +5625,7 @@ void BVH_SoA::ConvertFrom( const BVH& original, bool compact )
 {
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
-	bvh = original;
+	bvh.ReferenceFrom( original );
 	// allocate space
 	const uint32_t spaceNeeded = compact ? bvh.usedNodes : bvh.allocatedNodes;
 	if (allocatedNodes < spaceNeeded)
@@ -5564,15 +5676,36 @@ void BVH_SoA::ConvertFrom( const BVH& original, bool compact )
 // Generic (templated) MBVH implementation
 // ----------------------------------------------------------------------------
 
-template<int M> MBVH<M>::MBVH( MBVH<M>&& other )
+template<int M> MBVH<M>::MBVH( MBVH<M>&& other ) noexcept
 {
 	*this = other;
-	other.mbvhNode = 0;
+	other.ReleaseOwnership();
+}
+
+// move assignment: release what we hold, then take over 'other'.
+template<int M> MBVH<M>& MBVH<M>::operator=( MBVH&& other ) noexcept
+{
+	if (this != &other) this->~MBVH(), new (this) MBVH<M>( tinybvh_move( other ) );
+	return *this;
+}
+
+template<int M> void MBVH<M>::ReleaseOwnership()
+{
+	mbvhNode = 0;
+	allocatedNodes = usedNodes = triCount = idxCount = 0;
+	bvh.ReleaseOwnership(); // cascade: the source BVH may be ours as well
+}
+
+template<int M> void MBVH<M>::DropReference( BVHContext ctx )
+{
+	// deliberately no destructor call: the buffers are not ours to release.
+	new (this) MBVH( ctx );
+	bvh.DropReference( ctx ); // the nested tree gets the same context
 }
 
 template<int M> MBVH<M>::~MBVH()
 {
-	if (!ownBVH) bvh = BVH(); // clear out pointers we don't own.
+	if (!ownBVH) bvh.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( mbvhNode );
 }
 
@@ -5671,7 +5804,7 @@ template<int M> void MBVH<M>::ConvertFrom( const BVH& original, bool compact )
 {
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
-	bvh = original;
+	bvh.ReferenceFrom( original );
 	// allocate space; the collapse emits at most one node per bvh2 node, and the
 	// 'root is a leaf' case below needs one extra.
 	const uint32_t N = original.usedNodes;
@@ -5810,7 +5943,7 @@ template<int M> void MBVH<M>::ConvertFrom( const BVH& original, bool compact )
 {
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
-	bvh = original;
+	bvh.ReferenceFrom( original );
 	// allocate space
 	uint32_t spaceNeeded = compact ? original.usedNodes : original.allocatedNodes;
 	constexpr bool M8 = M == 8;
@@ -5886,15 +6019,25 @@ template<int M> void MBVH<M>::ConvertFrom( const BVH& original, bool compact )
 // BVH4_GPU implementation
 // ----------------------------------------------------------------------------
 
-BVH4_GPU::BVH4_GPU( BVH4_GPU&& other )
+BVH4_GPU::BVH4_GPU( BVH4_GPU&& other ) noexcept
 {
 	*this = other;
+	// The embedded bvh4 must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh4.ReleaseOwnership();
 	other.bvh4Data = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+BVH4_GPU& BVH4_GPU::operator=( BVH4_GPU&& other ) noexcept
+{
+	if (this != &other) this->~BVH4_GPU(), new (this) BVH4_GPU( tinybvh_move( other ) );
+	return *this;
 }
 
 BVH4_GPU::~BVH4_GPU()
 {
-	if (!ownBVH4) bvh4 = MBVH<4>(); // clear out pointers we don't own.
+	if (!ownBVH4) bvh4.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvh4Data );
 }
 
@@ -5928,7 +6071,7 @@ void BVH4_GPU::ConvertFrom( const MBVH<4>& original, bool compact )
 {
 	// get a copy of the original bvh4
 	if (&original != &bvh4) ownBVH4 = false; // bvh isn't ours; don't delete in destructor.
-	bvh4 = original;
+	bvh4.ReferenceFrom( original );
 	// Convert a 4-wide BVH to a format suitable for GPU traversal. Layout:
 	// offs 0:   aabbMin (12 bytes), 4x quantized child xmin (4 bytes)
 	// offs 16:  aabbMax (12 bytes), 4x quantized child xmax (4 bytes)
@@ -6157,15 +6300,25 @@ int32_t BVH4_GPU::Intersect( Ray& ray ) const
 // BVH4_CPU implementation
 // ----------------------------------------------------------------------------
 
-BVH4_CPU::BVH4_CPU( BVH4_CPU&& other )
+BVH4_CPU::BVH4_CPU( BVH4_CPU&& other ) noexcept
 {
 	*this = other;
+	// The embedded bvh4 must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh4.ReleaseOwnership();
 	other.bvh4Data = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+BVH4_CPU& BVH4_CPU::operator=( BVH4_CPU&& other ) noexcept
+{
+	if (this != &other) this->~BVH4_CPU(), new (this) BVH4_CPU( tinybvh_move( other ) );
+	return *this;
 }
 
 BVH4_CPU::~BVH4_CPU()
 {
-	if (!ownBVH4) bvh4 = MBVH<4>(); // clear out pointers we don't own.
+	if (!ownBVH4) bvh4.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvh4Data );
 }
 
@@ -6218,7 +6371,7 @@ bool BVH4_CPU::Load( const char* fileName, const uint32_t expectedTris )
 	bvh4Data = (CacheLine*)AlignedAlloc( usedBlocks * 64 );
 	allocatedBlocks = usedBlocks;
 	s.read( (char*)bvh4Data, usedBlocks * 64 );
-	bvh4 = MBVH<4>();
+	bvh4.DropReference( context ); // holds raw file data: reset, don't free.
 	return true;
 }
 
@@ -6247,7 +6400,7 @@ void BVH4_CPU::ConvertFrom( MBVH<4>& original )
 	// Note: identical to BVH8_CPU version, just with fewer lanes.
 	// get a copy of the input bvh4
 	if (&original != &bvh4) ownBVH4 = false; // bvh isn't ours; don't delete in destructor.
-	bvh4 = original;
+	bvh4.ReferenceFrom( original );
 	// prepare input bvh4
 	uint32_t firstIdx = 0;
 	bvh4.bvh.CombineLeafs( 4, firstIdx, 0 );
@@ -6342,15 +6495,25 @@ void BVH4_CPU::ConvertFrom( MBVH<4>& original )
 // BVH8_CPU implementation
 // ----------------------------------------------------------------------------
 
-BVH8_CPU::BVH8_CPU( BVH8_CPU&& other )
+BVH8_CPU::BVH8_CPU( BVH8_CPU&& other ) noexcept
 {
 	*this = other;
+	// The embedded bvh8 must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh8.ReleaseOwnership();
 	other.bvh8Data = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+BVH8_CPU& BVH8_CPU::operator=( BVH8_CPU&& other ) noexcept
+{
+	if (this != &other) this->~BVH8_CPU(), new (this) BVH8_CPU( tinybvh_move( other ) );
+	return *this;
 }
 
 BVH8_CPU::~BVH8_CPU()
 {
-	if (!ownBVH8) bvh8 = MBVH<8>(); // clear out pointers we don't own.
+	if (!ownBVH8) bvh8.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvh8Data );
 }
 
@@ -6404,7 +6567,7 @@ bool BVH8_CPU::Load( const char* fileName, const uint32_t expectedTris )
 	bvh8Data = (CacheLine*)AlignedAlloc( usedBlocks * 64 );
 	allocatedBlocks = usedBlocks;
 	s.read( (char*)bvh8Data, usedBlocks * 64 );
-	bvh8 = MBVH<8>();
+	bvh8.DropReference( context ); // holds raw file data: reset, don't free.
 	return true;
 }
 
@@ -6429,7 +6592,7 @@ void BVH8_CPU::ConvertFrom( MBVH<8>& original )
 {
 	// get a copy of the input bvh8
 	if (&original != &bvh8) ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
-	bvh8 = original;
+	bvh8.ReferenceFrom( original );
 	// prepare input bvh8
 	uint32_t firstIdx = 0;
 	bvh8.bvh.CombineLeafs( 4, firstIdx, 0 );
@@ -6534,16 +6697,26 @@ void BVH8_CPU::ConvertFrom( MBVH<8>& original )
 // BVH8_CWBVH implementation
 // ----------------------------------------------------------------------------
 
-BVH8_CWBVH::BVH8_CWBVH( BVH8_CWBVH&& other )
+BVH8_CWBVH::BVH8_CWBVH( BVH8_CWBVH&& other ) noexcept
 {
 	*this = other;
+	// The embedded bvh8 must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh8.ReleaseOwnership();
 	other.bvh8Data = 0;
 	other.bvh8Tris = 0;
 }
 
+// move assignment: release what we hold, then take over 'other'.
+BVH8_CWBVH& BVH8_CWBVH::operator=( BVH8_CWBVH&& other ) noexcept
+{
+	if (this != &other) this->~BVH8_CWBVH(), new (this) BVH8_CWBVH( tinybvh_move( other ) );
+	return *this;
+}
+
 BVH8_CWBVH::~BVH8_CWBVH()
 {
-	if (!ownBVH8) bvh8 = MBVH<8>(); // clear out pointers we don't own.
+	if (!ownBVH8) bvh8.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvh8Data );
 	AlignedFree( bvh8Tris );
 }
@@ -6618,7 +6791,7 @@ bool BVH8_CWBVH::Load( const char* fileName, const uint32_t expectedTris )
 	allocatedBlocks = usedBlocks, allocatedTris = usedTriBlocks;
 	s.read( (char*)bvh8Data, usedBlocks * 16 );
 	s.read( (char*)bvh8Tris, usedTriBlocks * 16 );
-	bvh8 = MBVH<8>();
+	bvh8.DropReference( context ); // holds raw file data: reset, don't free.
 	return true;
 }
 
@@ -6636,7 +6809,7 @@ void BVH8_CWBVH::ConvertFrom( const MBVH<8>& original, bool compact )
 {
 	// get a copy of the original bvh8
 	if (&original != &bvh8) ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
-	bvh8 = original;
+	bvh8.ReferenceFrom( original );
 	BVH_FATAL_ERROR_IF( bvh8.mbvhNode[0].isLeaf(), "BVH8_CWBVH::ConvertFrom( .. ), converting a single-node bvh." );
 	CopyBasePropertiesFrom( bvh8 );
 	uint32_t nodeCap = tinybvh_max( 128u, bvh8.triCount >> 1 );
@@ -6657,7 +6830,7 @@ void BVH8_CWBVH::ConvertFrom( const MBVH<8>& original, bool compact )
 		bvh8Tris = (bvhvec4*)AlignedAlloc( triCap * 16 );
 		allocatedTris = triCap;
 	}
-	uint32_t stackCap = 512, stackPtr = 1;
+	uint32_t stackCap = TINYBVH_STACK_SIZE, stackPtr = 1;
 	uint32_t* stackNodeIdx = (uint32_t*)AlignedAlloc( stackCap * 4 );
 	uint32_t* stackNodeAddr = (uint32_t*)AlignedAlloc( stackCap * 4 );
 	stackNodeIdx[0] = 0, stackNodeAddr[0] = 0;
@@ -7218,7 +7391,7 @@ struct BuildAVXFragSliceArgs
 	SliceBounds* slice;
 	void* frags;
 };
-static void BuildAVXFragSlice( uint32_t i, void* payload )
+void BuildAVXFragSlice( uint32_t i, void* payload )
 {
 	BuildAVXFragSliceArgs* a = (BuildAVXFragSliceArgs*)payload;
 	const uint32_t first = a->sliceSize * i, last = i == (a->slices - 1) ? a->triCount : (first + a->sliceSize);
@@ -7357,7 +7530,7 @@ void BVH::BuildAVXBinTask( const uint32_t first, const uint32_t last, __m256* bi
 }
 
 // Helper function to build a subtree via the thread pool
-static void BVHBuildAVXSubtree( void* payload )
+void BVHBuildAVXSubtree( void* payload )
 {
 	BVHBuildSubtreeArgs* a = (BVHBuildSubtreeArgs*)payload;
 	a->bvh->BuildAVXSubtree( a->node, a->depth );
@@ -7371,7 +7544,7 @@ struct BVHBuildAVXBinSliceArgs
 	uint32_t* slicecount;				// base of slices x AVXCOUNTSTRIDE counts
 	__m128 nmin4, rpd4;
 };
-static void BVHBuildAVXBinSlice( uint32_t i, void* payload )
+void BVHBuildAVXBinSlice( uint32_t i, void* payload )
 {
 	BVHBuildAVXBinSliceArgs* a = (BVHBuildAVXBinSliceArgs*)payload;
 	const uint32_t first = a->leftFirst + a->sliceSize * i;
@@ -7390,7 +7563,7 @@ void BVH::BuildAVXSubtree( uint32_t nodeIdx, uint32_t depth )
 	__m256* binbox = slicebinbox[0];					// slot 0 doubles as the reduce target
 	uint32_t* count = slicecount[0];
 	// subdivide recursively
-	ALIGNED( 64 ) uint32_t task[512], taskCount = 0;
+	ALIGNED( 64 ) uint32_t task[TINYBVH_STACK_SIZE], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f;
 	while (1)
@@ -8498,7 +8671,7 @@ struct BuildNEONFragSliceArgs
 	NEONSliceBounds* slice;
 	void* frags;
 };
-static void BuildNEONFragSlice( uint32_t i, void* payload )
+void BuildNEONFragSlice( uint32_t i, void* payload )
 {
 	BuildNEONFragSliceArgs* a = (BuildNEONFragSliceArgs*)payload;
 	const uint32_t first = a->sliceSize * i, last = i == (a->slices - 1) ? a->triCount : (first + a->sliceSize);
@@ -8630,7 +8803,7 @@ void BVH::BuildNEONBinTask( const uint32_t first, const uint32_t last, float32x4
 }
 
 // Helper function to build a subtree via the thread pool
-static void BVHBuildNEONSubtree( void* payload )
+void BVHBuildNEONSubtree( void* payload )
 {
 	BVHBuildSubtreeArgs* a = (BVHBuildSubtreeArgs*)payload;
 	a->bvh->BuildNEONSubtree( a->node, a->depth );
@@ -8644,7 +8817,7 @@ struct BVHBuildNEONBinSliceArgs
 	uint32_t* slicecount;				// base of slices x NEONCOUNTSTRIDE counts
 	float32x4_t nmin4, rpd4;
 };
-static void BVHBuildNEONBinSlice( uint32_t i, void* payload )
+void BVHBuildNEONBinSlice( uint32_t i, void* payload )
 {
 	BVHBuildNEONBinSliceArgs* a = (BVHBuildNEONBinSliceArgs*)payload;
 	const uint32_t first = a->leftFirst + a->sliceSize * i;
@@ -8672,7 +8845,7 @@ void BVH::BuildNEONSubtree( uint32_t nodeIdx, uint32_t depth )
 	float32x4x2_t* binbox = slicebinbox[0];				// slot 0 doubles as the reduce target
 	uint32_t* count = slicecount[0];
 	// subdivide recursively
-	ALIGNED( 64 ) uint32_t task[512], taskCount = 0;
+	ALIGNED( 64 ) uint32_t task[TINYBVH_STACK_SIZE], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f;
 	while (1)
@@ -9244,12 +9417,21 @@ template <bool posX, bool posY, bool posZ> bool BVH4_CPU::IsOccluded( const Ray&
 
 #ifdef DOUBLE_PRECISION_SUPPORT
 
-BVH_Double::BVH_Double( BVH_Double&& other )
+BVH_Double::BVH_Double( BVH_Double&& other ) noexcept
 {
 	*this = other;
+	// exactly one of the two may free the buffers from here on
 	other.fragment = 0;
 	other.bvhNode = 0;
 	other.primIdx = 0;
+	other.allocatedNodes = other.usedNodes = other.triCount = other.idxCount = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+BVH_Double& BVH_Double::operator=( BVH_Double&& other ) noexcept
+{
+	if (this != &other) this->~BVH_Double(), new (this) BVH_Double( tinybvh_move( other ) );
+	return *this;
 }
 
 // Destructor
@@ -9392,7 +9574,7 @@ void BVH_Double::PrepareBuild( const bvhdbl3slice& vertices, const uint32_t* ind
 
 // Helper function to build a subtree via the thread pool
 struct BVHDoubleBuildSubtreeArgs { BVH_Double* bvh; uint64_t node; uint32_t depth; };
-static void BVHDoubleBuildSubtree( void* payload )
+void BVHDoubleBuildSubtree( void* payload )
 {
 	BVHDoubleBuildSubtreeArgs* a = (BVHDoubleBuildSubtreeArgs*)payload;
 	a->bvh->Build( a->node, a->depth );
@@ -9410,7 +9592,7 @@ void BVH_Double::Build( uint64_t nodeIdx, uint32_t depth )
 	#endif
 	}
 	// subdivide root node recursively
-	uint64_t task[512], taskCount = 0;
+	uint64_t task[TINYBVH_STACK_SIZE], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	bvhdbl3 minDim = (root.aabbMax - root.aabbMin) * 1e-40;
 	bvhdbl3 bestLMin( 0 ), bestLMax( 0 ), bestRMin( 0 ), bestRMax( 0 );
@@ -10238,7 +10420,7 @@ float BVH_Verbose::SAHCostUp( uint32_t nodeIdx ) const
 uint32_t BVH_Verbose::FindBestNewPosition( const uint32_t Lid, float& bestCost ) const
 {
 	struct Task { float ci; uint32_t node; };
-	static const int maxTasks = 512;
+	static const int maxTasks = TINYBVH_STACK_SIZE;
 	ALIGNED( 64 ) Task task[maxTasks];
 	const BVHNode& L = bvhNode[Lid];
 	const bvhvec3 Lmin = L.aabbMin, Lmax = L.aabbMax;
