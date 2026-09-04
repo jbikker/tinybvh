@@ -2497,8 +2497,9 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildFullSweep
 	#else
 		for (uint32_t a = 0; a < 3; a++) RadixSort( primIdx, sortedIdx[a], sortKey[a], (int)triCount );
 	#endif
-		// allocate space for right sweep
-		SARs = (Float*)AlignedAlloc( triCount * sizeof( Float ) );
+		// allocate space for right sweep. The buffer doubles as index scratch for the
+		// stable partition and is sized for the wider of the two types.
+		SARs = (Float*)AlignedAlloc( triCount * (sizeof( Index ) > sizeof( Float ) ? sizeof( Index ) : sizeof( Float )) );
 		// per-axis copies of the fragment bounds, in sorted order.
 		// cost: 3x24 bytes per fragment, plus 24 for the partition scratch.
 		for (int a = 0; a < 3; a++) sortedBnds[a] = (SweepBounds*)AlignedAlloc( triCount * sizeof( SweepBounds ) );
