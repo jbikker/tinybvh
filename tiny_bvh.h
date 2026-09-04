@@ -916,8 +916,9 @@ struct RayEx
 void tinybvh_builtin_spawn( void (*fn)(void* payload), const void* payload, uint32_t payload_size, void* userdata );
 void tinybvh_builtin_barrier( void* userdata );
 void tinybvh_builtin_parallel_for( uint32_t n, void (*fn)(uint32_t index, void* payload), void* payload, void* userdata );
-// tinybvh_shutdown_builtin_pool: Releases the process-wide build pool, joining its worker threads.
-// Optional; the pool is released automatically at exit, and re-created on the next build if needed.
+// tinybvh_shutdown_builtin_pool: Releases the calling thread's build pool, joining its worker threads. 
+// Optional; a thread's pool is released automatically when that thread exits. Call this explicitly if 
+// you need teardown to happen at a controlled point rather than in an exit-time destructor.
 void tinybvh_shutdown_builtin_pool();
 #define TINYBVH_DEFAULT_SPAWN tinybvh_builtin_spawn
 #define TINYBVH_DEFAULT_BARRIER tinybvh_builtin_barrier
@@ -10513,8 +10514,10 @@ void BVH_Verbose::MergeSubtree( const uint32_t nodeIdx, uint32_t* newIdx, uint32
 #endif
 #endif // PLATFORM_LINUX
 
-// Wicked job system, condensed / modified. https://github.com/turanszkij/WickedEngine
+// Wicked job system, condensed. https://github.com/turanszkij/WickedEngine
 // Removed: Thread priority, Dispatch, graceful shutdown; not needed in TinyBVH.
+// A task is a raw function pointer plus an inline payload copy: pool-agnostic, with
+// no per-task allocation.
 class JobSystem
 {
 public:
@@ -10529,17 +10532,17 @@ public:
 		res.threads.clear();
 		res.numThreads = 0;
 	}
-	struct JobGroup { std::atomic<uint32_t> counter{ 0 }; };
+	struct context { std::atomic<uint32_t> counter{ 0 }; } ctx;
 	static const uint32_t JOB_PAYLOAD_MAX = 64; // builder payloads are <= 32B, + spawn header
 	struct Job
 	{
 		void (*fn)(void*) = nullptr;
-		JobGroup* group = nullptr;	// the fan-out this job belongs to; sized as the old padding.
+		uint8_t padding[8]; // avoid VS warning.
 		alignas(16) uint8_t payload[JOB_PAYLOAD_MAX]; // inline copy; scheduling never allocates
-		TINYBVH_FORCEINLINE uint32_t execute()
+		TINYBVH_FORCEINLINE uint32_t execute( context& ctx )
 		{
 			fn( payload );
-			return group->counter.fetch_sub( 1 );
+			return ctx.counter.fetch_sub( 1 );
 		}
 	};
 	struct JobQueue
@@ -10564,34 +10567,30 @@ public:
 		std::condition_variable sleepingCondition, waitingCondition;
 		std::mutex sleepingMutex, waitingMutex;
 		std::atomic_bool alive{ true };
-		std::atomic<uint64_t> pushed{ 0 };
-		TINYBVH_FORCEINLINE void work( uint32_t startingQueue )
+		TINYBVH_FORCEINLINE void work( context& ctx, uint32_t startingQueue )
 		{
 			Job job;
 			for (uint32_t i = 0; i < numThreads; ++i) while (jobQueue[startingQueue++ % numThreads].pop_front( job ))
-				if (job.execute() == 1) { std::unique_lock<std::mutex> lock( waitingMutex ); waitingCondition.notify_all(); }
+				if (job.execute( ctx ) == 1) { std::unique_lock<std::mutex> lock( waitingMutex ); waitingCondition.notify_all(); }
 		}
 	} res;
 	void Initialize()
 	{
-		const uint32_t hw = (uint32_t)std::thread::hardware_concurrency();
-		res.numThreads = hw > 2 ? hw - 1 : 1;
+		res.numThreads = tinybvh_max( 1u, (uint32_t)std::thread::hardware_concurrency() );
 		res.jobQueue.reset( new JobQueue[res.numThreads] );
 		res.threads.reserve( res.numThreads );
+		context& c = ctx;
 		Resources& r = res;
 		for (uint32_t threadID = 0; threadID < res.numThreads; threadID++)
 		{
-			std::thread& worker = res.threads.emplace_back( [threadID, &r]
+			std::thread& worker = res.threads.emplace_back( [&c, threadID, &r]
 				{
-					uint64_t seen = r.pushed.load();
 					for (;;)
 					{
-						r.work( threadID );
+						r.work( c, threadID );
 						std::unique_lock<std::mutex> lock( r.sleepingMutex );
 						if (!r.alive.load()) break;
-						r.sleepingCondition.wait( lock, [&r, seen] { return !r.alive.load() || r.pushed.load() != seen; } );
-						if (!r.alive.load()) break;
-						seen = r.pushed.load();
+						r.sleepingCondition.wait( lock );
 					}
 				} );
 			auto handle = worker.native_handle();
@@ -10608,78 +10607,100 @@ public:
 		#endif
 		}
 	}
-	void Execute( JobGroup& group, void (*fn)(void*), const void* payload, uint32_t size )
+	void Execute( void (*fn)(void*), const void* payload, uint32_t size )
 	{
 		assert( size <= JOB_PAYLOAD_MAX );
-		group.counter.fetch_add( 1 );
+		ctx.counter.fetch_add( 1 );
 		Job job;
-		job.fn = fn, job.group = &group;
+		job.fn = fn;
 		memcpy( job.payload, payload, size );
 		res.jobQueue[res.nextQueue.fetch_add( 1 ) % res.numThreads].push_back( job );
-		{ std::scoped_lock lock( res.sleepingMutex ); res.pushed.fetch_add( 1 ); }
 		res.sleepingCondition.notify_one();
 	}
-	void Wait( JobGroup& group )
+	void Wait()
 	{
-		while (IsBusy( group ))
+		if (!IsBusy()) return;
+		res.sleepingCondition.notify_all(); // wake any sleeping threads
+		res.work( ctx, res.nextQueue.fetch_add( 1 ) % res.numThreads );
+		while (IsBusy())
 		{
-			res.sleepingCondition.notify_all(); // wake any sleeping threads
-			res.work( res.nextQueue.fetch_add( 1 ) % res.numThreads );
-			if (!IsBusy( group )) break;
 			std::unique_lock<std::mutex> lock( res.waitingMutex );
-			if (IsBusy( group ))
-				res.waitingCondition.wait( lock, [&group] { return group.counter.load( std::memory_order_relaxed ) == 0; } );
+			if (IsBusy()) res.waitingCondition.wait( lock, [this] { return !IsBusy(); } );
 		}
 	}
-	static bool IsBusy( const JobGroup& group ) { return group.counter.load( std::memory_order_relaxed ) > 0; }
+	bool IsBusy() { return ctx.counter.load( std::memory_order_relaxed ) > 0; }
 };
 
-static std::atomic<JobSystem*> tinybvh_poolPtr{ nullptr };
-static std::mutex tinybvh_poolMutex;
-static JobSystem& tinybvh_pool()
+// A build uses two job systems: 'subtree' for recursive fork/join (spawn/barrier)
+// and 'binning' for the AVX builder's scoped leaf fan-out (parallel_for). One pair
+// per host thread; 'binning' is created on demand (the scalar builders never bin).
+struct PoolPair
 {
-	JobSystem* p = tinybvh_poolPtr.load( std::memory_order_acquire );
-	if (p) return *p;
-	std::scoped_lock lock( tinybvh_poolMutex );
-	p = tinybvh_poolPtr.load( std::memory_order_relaxed );
-	if (!p) tinybvh_poolPtr.store( p = new JobSystem(), std::memory_order_release );
-	return *p;
-}
-void tinybvh_shutdown_builtin_pool()
-{
-	std::scoped_lock lock( tinybvh_poolMutex );
-	delete tinybvh_poolPtr.exchange( nullptr, std::memory_order_acq_rel ); // joins the workers
-}
-struct PoolAtExit { ~PoolAtExit() { tinybvh_shutdown_builtin_pool(); } };
-static PoolAtExit tinybvh_poolAtExit;
+	JobSystem subtree;
+	std::unique_ptr<JobSystem> binningJobs;
+	std::mutex binningMutex;
+	JobSystem& binning()
+	{
+		std::scoped_lock lock( binningMutex );
+		if (!binningJobs) binningJobs = std::make_unique<JobSystem>();
+		return *binningJobs;
+	}
+};
 
-static thread_local JobSystem::JobGroup* tinybvh_tl_group = nullptr;
-static JobSystem::JobGroup& tinybvh_build_group()
-{
-	static thread_local JobSystem::JobGroup hostGroup;	// used when we are the host
-	return tinybvh_tl_group ? *tinybvh_tl_group : hostGroup;
-}
+// One pair per host thread, owned by that thread and freed when that thread exits.
+static thread_local PoolPair* tinybvh_tl_pair = nullptr;
 
-struct BVHSpawnEnvelope { JobSystem::JobGroup* group; void (*fn)(void*); };
+// Holds the pair this thread owns. Releasing clears tinybvh_tl_pair as well, so a
+// later call can never be handed a pointer to an already-destroyed pool.
+struct PoolPairOwner
+{
+	PoolPair* pair = nullptr;
+	PoolPair* acquire() { if (!pair) pair = new PoolPair(); return pair; }
+	void release()
+	{
+		if (!pair) return; // this thread never owned a pool; nothing to do
+		PoolPair* p = pair;
+		pair = nullptr;
+		if (tinybvh_tl_pair == p) tinybvh_tl_pair = nullptr;
+		delete p; // joins the worker threads of both job systems
+	}
+	~PoolPairOwner() { release(); }
+};
+
+static PoolPairOwner& tinybvh_pool_owner()
+{
+	static thread_local PoolPairOwner owner;
+	return owner;
+}
+static PoolPair* tinybvh_pool_pair()
+{
+	if (!tinybvh_tl_pair) tinybvh_tl_pair = tinybvh_pool_owner().acquire();
+	return tinybvh_tl_pair;
+}
+void tinybvh_shutdown_builtin_pool() { tinybvh_pool_owner().release(); }
+
+// Spawned tasks run [pair][fn] ahead of the payload: the worker adopts 'pair' so its
+// nested spawns reuse this host's pools. Keeps the pool/TLS logic out of JobSystem.
+struct BVHSpawnEnvelope { PoolPair* pair; void (*fn)(void*); };
 static void tinybvh_spawn_task( void* blob )
 {
 	BVHSpawnEnvelope* e = (BVHSpawnEnvelope*)blob;
-	JobSystem::JobGroup* prev = tinybvh_tl_group;
-	tinybvh_tl_group = e->group;	// nested spawns and barriers join this build
+	tinybvh_tl_pair = e->pair;
 	e->fn( (uint8_t*)blob + sizeof( BVHSpawnEnvelope ) );
-	tinybvh_tl_group = prev;
 }
+// Default BVHContext hooks (declared in tiny_bvh.h); userdata is unused.
 void tinybvh_builtin_spawn( void (*fn)(void*), const void* payload, uint32_t payload_size, void* )
 {
-	JobSystem::JobGroup& group = tinybvh_build_group();
+	// pack [pair][fn][payload]; Execute copies it inline (the caller's frame may unwind).
+	PoolPair* pair = tinybvh_pool_pair();
 	alignas(16) uint8_t blob[JobSystem::JOB_PAYLOAD_MAX];
 	BVHSpawnEnvelope* e = (BVHSpawnEnvelope*)blob;
-	e->group = &group, e->fn = fn;
+	e->pair = pair, e->fn = fn;
 	memcpy( blob + sizeof( BVHSpawnEnvelope ), payload, payload_size );
-	tinybvh_pool().Execute( group, &tinybvh_spawn_task, blob, sizeof( BVHSpawnEnvelope ) + payload_size );
+	pair->subtree.Execute( &tinybvh_spawn_task, blob, sizeof( BVHSpawnEnvelope ) + payload_size );
 }
 
-void tinybvh_builtin_barrier( void* ) { tinybvh_pool().Wait( tinybvh_build_group() ); }
+void tinybvh_builtin_barrier( void* ) { tinybvh_pool_pair()->subtree.Wait(); }
 
 struct BVHParallelForArgs { void (*fn)(uint32_t, void*); uint32_t index; void* payload; };
 static void tinybvh_parallel_for_task( void* payload )
@@ -10690,14 +10711,13 @@ static void tinybvh_parallel_for_task( void* payload )
 void tinybvh_builtin_parallel_for( uint32_t n, void (*fn)(uint32_t, void*), void* payload, void* )
 {
 	if (n == 0) return;
-	JobSystem& jobs = tinybvh_pool();
-	JobSystem::JobGroup group;
+	JobSystem& jobs = tinybvh_pool_pair()->binning();
 	for (uint32_t i = 0; i < n; i++)
 	{
 		BVHParallelForArgs a = { fn, i, payload };
-		jobs.Execute( group, &tinybvh_parallel_for_task, &a, sizeof( a ) );
+		jobs.Execute( &tinybvh_parallel_for_task, &a, sizeof( a ) );
 	}
-	jobs.Wait( group );
+	jobs.Wait();
 }
 
 #endif
