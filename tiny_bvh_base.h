@@ -269,6 +269,8 @@ TINYBVH_FORCEINLINE bvhvec4 tinybvh_max( const bvhvec4& a, const bvhvec4& b ) { 
 TINYBVH_FORCEINLINE float tinybvh_clamp( const float x, const float a, const float b ) { return x > a ? (x < b ? x : b) : a; /* NaN safe */ }
 TINYBVH_FORCEINLINE int32_t tinybvh_clamp( const int32_t x, const int32_t a, const int32_t b ) { return x > a ? (x < b ? x : b) : a; /* NaN safe */ }
 template <class T> inline static void tinybvh_swap( T& a, T& b ) { T t = a; a = b; b = t; }
+// Cast to an rvalue reference
+template <class T> TINYBVH_FORCEINLINE T&& tinybvh_move( T& a ) { return static_cast<T&&>( a ); }
 TINYBVH_FORCEINLINE float tinybvh_halfarea( const bvhvec3& v ) { return v.x < -BVH_FAR ? 0 : (v.x * v.y + v.y * v.z + v.z * v.x); } // for SAH calculations
 TINYBVH_FORCEINLINE uint32_t tinybvh_maxdim( const bvhvec3& v ) { uint32_t r = fabs( v.x ) > fabs( v.y ) ? 0 : 1; return fabs( v.z ) > fabs( v[r] ) ? 2 : r; }
 TINYBVH_FORCEINLINE bool tinybvh_isfinite( double f )
@@ -678,6 +680,14 @@ template <typename Float, typename Index> class BVH8_CPU;
 template <typename Float, typename Index> class BLASInstance;
 template <typename Float, typename Index> struct BVHTri4Leaf;
 
+// Task trampolines of the SIMD builders in the platform headers; friends of BVH.
+void BVHBuildAVXSubtree( void* payload );
+void BuildAVXFragSlice( uint32_t i, void* payload );
+void BVHBuildAVXBinSlice( uint32_t i, void* payload );
+void BVHBuildNEONSubtree( void* payload );
+void BuildNEONFragSlice( uint32_t i, void* payload );
+void BVHBuildNEONBinSlice( uint32_t i, void* payload );
+
 // Set by the platform headers for the instantiations that have SIMD builders.
 template <typename Float, typename Index> struct BVHSIMDBuilders { static constexpr bool avx = false; };
 
@@ -706,12 +716,20 @@ public:
 		uint32_t clipped = 0;		// Fragment is the result of clipping if > 0.
 		void Extend( Vec3 p ) { bmin = tinybvh_min( p, bmin ); bmax = tinybvh_max( p, bmax ); }
 	};
-	// BVH flags, maintainted by tiny_bvh.
+	// BVH flags, maintained by tiny_bvh.
+protected:
 	bool rebuildable = true;		// rebuilds are safe only if a tree has not been converted.
 	bool refittable = true;			// refits are safe only if the tree has no spatial splits.
 	bool may_have_holes = false;	// threaded builds and MergeLeafs produce BVHs with unused nodes.
 	bool bvh_over_aabbs = false;	// a BVH over AABBs is useful for e.g. TLAS traversal.
 	bool bvh_over_indices = false;	// a BVH over indices cannot translate primitive index to vertex index.
+public:
+	// read-only queries on the flags.
+	bool isRebuildable() const { return rebuildable; }
+	bool isRefittable() const { return refittable; }
+	bool mayHaveHoles() const { return may_have_holes; }
+	bool isOverAABBs() const { return bvh_over_aabbs; }
+	bool isOverIndices() const { return bvh_over_indices; }
 	bool threadedBuild = true;		// will be disabled for small meshes.
 	// BVH construction flags and settings.
 	BVHBuildSettings settings;		// build settings: presplitting, full-sweep etc.
@@ -733,7 +751,10 @@ public:
 	uint32_t* opmap = 0;			// opacity micro maps; opmapN^2 bits per triangle.
 	bool hasOpacityMicroMaps() const { return opmapN > 0; }
 	void SetOpacityMicroMaps( uint32_t* mapData, uint32_t N ) { opmap = mapData, opmapN = N; }
-	// Custom memory allocation
+	// First word of a BVH cache file: version, scalar and index width, and layout.
+	uint32_t CacheHeader() const { return uint32_t( TINY_BVH_CACHE_VERSION + (sizeof( Float ) << 16) + (sizeof( Index ) << 20) + (layout << 24) ); }
+protected:
+	// allocation plumbing and flag propagation
 	void* AlignedAlloc( size_t size ) const;
 	void AlignedFree( void* ptr ) const;
 	// Single-object allocation - used for the atomic build counters.
@@ -746,11 +767,7 @@ public:
 	{
 		if (obj) obj->~T(), AlignedFree( obj ), obj = 0;
 	}
-	// Common methods
 	void CopyBasePropertiesFrom( const BVHBase& original );	// copy flags from one BVH to another
-	// First word of a BVH cache file: version, scalar and index width, and layout.
-	uint32_t CacheHeader() const { return uint32_t( TINY_BVH_CACHE_VERSION + (sizeof( Float ) << 16) + (sizeof( Index ) << 20) + (layout << 24) ); }
-protected:
 	~BVHBase() {}
 	TINYBVH_FORCEINLINE void IntersectTri( Ray& ray, const Index idx, const Slice& verts, const Index i0, const Index i1, const Index i2 ) const;
 	TINYBVH_FORCEINLINE bool TriOccludes( const Ray& ray, const Slice& verts, const Index triIdx, const Index i0, const Index i1, const Index i2 ) const;
@@ -769,11 +786,6 @@ public:
 	using typename Base::Ray;
 	using typename Base::BVH_Verbose;
 	using typename Base::BLASInstance;
-	using Base::rebuildable;
-	using Base::refittable;
-	using Base::may_have_holes;
-	using Base::bvh_over_aabbs;
-	using Base::bvh_over_indices;
 	using Base::threadedBuild;
 	using Base::settings;
 	using Base::c_trav;
@@ -791,12 +803,17 @@ public:
 	using Base::aabbMax;
 	using Base::opmapN;
 	using Base::opmap;
+protected:
+	using Base::rebuildable;
+	using Base::refittable;
+	using Base::may_have_holes;
+	using Base::bvh_over_aabbs;
+	using Base::bvh_over_indices;
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::ContextNew;
 	using Base::ContextDelete;
 	using Base::CopyBasePropertiesFrom;
-protected:
 	using Base::SA;
 	using Base::IntersectTri;
 	using Base::TriOccludes;
@@ -825,9 +842,16 @@ public:
 	BVH( const BVH_Verbose& original ) { layout = LAYOUT_BVH; ConvertFrom( original ); }
 	BVH( const Vertex* vertices, const Index primCount ) { layout = LAYOUT_BVH; Build( vertices, primCount ); }
 	BVH( const Slice& vertices ) { layout = LAYOUT_BVH; Build( vertices ); }
+	BVH( const BVH& ) = delete; // owns its allocations, so it cannot be copied.
 	BVH( BVH&& ) noexcept;
-	BVH& operator=( const BVH& other ) = default;
+	BVH& operator=( BVH&& ) noexcept;
 	~BVH();
+	// point this at another's data without taking ownership of it
+	void ReferenceFrom( const BVH& other ) { *this = other; }
+	// give up the buffers without freeing them: another object has taken them over
+	void ReleaseOwnership();
+	// reset to a pristine empty object, freeing nothing, with 'ctx' installed
+	void DropReference( BVHContext ctx = {} );
 	void Save( const char* fileName );
 	bool Load( const char* fileName, const Vertex* vertices, const Index primCount );
 	bool Load( const char* fileName, const Vertex* vertices, const uint32_t* indices, const Index primCount );
@@ -869,19 +893,22 @@ public:
 	Float SAHCost( const Index nodeIdx = 0, uint32_t depth = 0 ) const;
 	Float EPOCost( const Index nodeIdx = 0, uint32_t depth = 0 ) const;
 	Index CollectNodes( const Index root, Index* list, const Index cap ) const;
-	static void MetricTask( const uint32_t task, void* payload );
 	void Refit( const Index nodeIdx = 0 );
 	void Compact();
 	void Optimize( const uint32_t iterations = 25, bool extreme = false, bool stochastic = false );
-	int32_t NodeCount() const;
-	int32_t LeafCount() const;
-	int32_t PrimCount( const Index nodeIdx = 0 ) const;
+	Index NodeCount() const;
+	Index LeafCount() const;
+	Index PrimCount( const Index nodeIdx = 0 ) const;
 	// BVH type identification
 	bool isTLAS() const { return instList != 0; }
 	bool isBLAS() const { return instList == 0; }
 	bool isIndexed() const { return vertIdx != 0; }
 	bool hasCustomGeom() const { return customIntersect != 0; }
-	// internal methods that need to be public: these are scheduled via the threading hooks.
+private:
+	// Recursive build entry points, scheduled via the threading hooks. These used to
+	// be public, which made Build( nodeIdx, depth ) an overload of the public Build
+	// with every argument defaulted: BVH::Build() compiled and ran the recursive
+	// builder over an unprepared tree. The task trampolines are friends instead.
 	void Build( Index nodeIdx = 0, uint32_t depth = 0 );
 	void BuildFullSweep( Index nodeIdx = 0, uint32_t depth = 0 );
 	void BuildHQTask( Index nodeIdx, uint32_t depth, Index sliceStart, Index sliceEnd, Index* triIdxB );
@@ -890,7 +917,17 @@ public:
 		const int8_t* vertData, const uint32_t stride4, void* frags, Float* rootMin, Float* rootMax );
 	void BuildSIMDBinTask( const Index first, const Index last, void* binbox,
 		uint32_t* count, const Float* nmin4, const Float* rpd4 );
-private:
+	static void MetricTask( const uint32_t task, void* payload );
+	template <typename F, typename I> friend void BVHBuildSubtree( void* payload );
+	template <typename F, typename I> friend void BVHBuildFullSweepSubtree( void* payload );
+	template <typename F, typename I> friend void BVHBuildHQSubtree( void* payload );
+	friend void BVHBuildAVXSubtree( void* payload );
+	friend void BuildAVXFragSlice( uint32_t i, void* payload );
+	friend void BVHBuildAVXBinSlice( uint32_t i, void* payload );
+	friend void BVHBuildNEONSubtree( void* payload );
+	friend void BuildNEONFragSlice( uint32_t i, void* payload );
+	friend void BVHBuildNEONBinSlice( uint32_t i, void* payload );
+	BVH& operator=( const BVH& ) = default;
 	void PrepareSIMDBuild( const Slice& vertices, const uint32_t* indices, const Index primCount );
 	void BuildSIMDFinalize();
 	void PrepareHQBuild( const Slice& vertices, const uint32_t* indices, const Index prims );
@@ -961,8 +998,6 @@ public:
 	using typename Base::Ray;
 	using typename Base::BVH;
 	using typename Base::BLASInstance;
-	using Base::may_have_holes;
-	using Base::bvh_over_aabbs;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -974,9 +1009,13 @@ public:
 	using Base::idxCount;
 	using Base::aabbMin;
 	using Base::aabbMax;
+protected:
+	using Base::may_have_holes;
+	using Base::bvh_over_aabbs;
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
+public:
 	struct BVHNode
 	{
 		// Alternative 64-byte BVH node layout, which specifies the bounds of
@@ -990,8 +1029,9 @@ public:
 	};
 	BVH_GPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH_GPU; context = ctx; }
 	BVH_GPU( const BVH& original ) { /* DEPRICATED */ ConvertFrom( original ); }
-	BVH_GPU( BVH_GPU&& );
-	BVH_GPU& operator=( const BVH_GPU& ) = default;
+	BVH_GPU( const BVH_GPU& ) = delete; // owns its allocations, so it cannot be copied
+	BVH_GPU( BVH_GPU&& ) noexcept;
+	BVH_GPU& operator=( BVH_GPU&& ) noexcept;
 	~BVH_GPU();
 	void Build( const bvhvec4* vertices, const Index primCount );
 	void Build( const Slice& vertices );
@@ -1013,6 +1053,8 @@ public:
 	BVH bvh;						// BVH_GPU is created from BVH and uses its data.
 	Slice orderedVerts = {};		// Vertex data ordered according to triIdx.
 	bool ownBVH = true;				// False when ConvertFrom receives an external bvh.
+private:
+	BVH_GPU& operator=( const BVH_GPU& ) = default;
 };
 
 #ifdef ENABLE_BVH_SOA
@@ -1035,10 +1077,10 @@ public:
 	using Base::triCount;
 	using Base::aabbMin;
 	using Base::aabbMax;
+protected:
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
-protected:
 	using Base::IntersectTri;
 	using Base::TriOccludes;
 public:
@@ -1052,8 +1094,9 @@ public:
 	};
 	BVH_SoA( BVHContext ctx = {} ) { layout = LAYOUT_BVH_SOA; context = ctx; }
 	BVH_SoA( const BVH& original ) { /* DEPRICATED */ layout = LAYOUT_BVH_SOA; ConvertFrom( original ); }
-	BVH_SoA( BVH_SoA&& );
-	BVH_SoA& operator=( const BVH_SoA& ) = default;
+	BVH_SoA( const BVH_SoA& ) = delete; // owns its allocations, so it cannot be copied
+	BVH_SoA( BVH_SoA&& ) noexcept;
+	BVH_SoA& operator=( BVH_SoA&& ) noexcept;
 	~BVH_SoA();
 	void Build( const Vertex* vertices, const Index primCount );
 	void Build( const Slice& vertices );
@@ -1076,6 +1119,8 @@ public:
 	BVHNode* bvhNode = 0;			// BVH node in 'structure of arrays' format.
 	BVH bvh;						// BVH_SoA is created from BVH and uses its data.
 	bool ownBVH = true;				// False when ConvertFrom receives an external bvh.
+private:
+	BVH_SoA& operator=( const BVH_SoA& ) = default;
 };
 
 #endif
@@ -1088,9 +1133,6 @@ public:
 	using typename Base::Slice;
 	using typename Base::Fragment;
 	using typename Base::BVH;
-	using Base::refittable;
-	using Base::may_have_holes;
-	using Base::bvh_over_indices;
 	using Base::c_trav;
 	using Base::c_int;
 	using Base::context;
@@ -1101,10 +1143,13 @@ public:
 	using Base::idxCount;
 	using Base::aabbMin;
 	using Base::aabbMax;
+protected:
+	using Base::refittable;
+	using Base::may_have_holes;
+	using Base::bvh_over_indices;
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
-protected:
 	using Base::SA;
 public:
 	struct BVHNode
@@ -1121,8 +1166,9 @@ public:
 	};
 	BVH_Verbose( BVHContext ctx = {} ) { layout = LAYOUT_BVH_VERBOSE; context = ctx; }
 	BVH_Verbose( const BVH& original ) { /* DEPRECATED */ layout = LAYOUT_BVH_VERBOSE; ConvertFrom( original ); }
-	BVH_Verbose( BVH_Verbose&& );
-	BVH_Verbose& operator=( const BVH_Verbose& ) = default;
+	BVH_Verbose( const BVH_Verbose& ) = delete; // owns its allocations, so it cannot be copied
+	BVH_Verbose( BVH_Verbose&& ) noexcept;
+	BVH_Verbose& operator=( BVH_Verbose&& ) noexcept;
 	~BVH_Verbose();
 	void ConvertFrom( const BVH& original, bool compact = true );
 	Float SAHCost( const Index nodeIdx = 0 ) const;
@@ -1149,6 +1195,8 @@ public:
 	Fragment* fragment = 0;			// input primitive bounding boxes.
 	Index* primIdx = 0;				// primitive index array - pointer copied from original.
 	BVHNode* bvhNode = 0;			// BVH node with additional info, for BVH optimizer.
+private:
+	BVH_Verbose& operator=( const BVH_Verbose& ) = default;
 };
 
 template <int M, typename Float, typename Index> class MBVH : public BVHBase<Float, Index>
@@ -1160,7 +1208,6 @@ public:
 	using typename Base::Slice;
 	using typename Base::Ray;
 	using typename Base::BVH;
-	using Base::may_have_holes;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -1172,10 +1219,11 @@ public:
 	using Base::l_quads;
 	using Base::aabbMin;
 	using Base::aabbMax;
+protected:
+	using Base::may_have_holes;
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
-protected:
 	using Base::SA;
 public:
 	struct MBVHNode
@@ -1190,9 +1238,20 @@ public:
 	};
 	MBVH( BVHContext ctx = {} ) { layout = LAYOUT_MBVH; context = ctx; }
 	MBVH( const BVH& original ) { /* DEPRECATED */ layout = LAYOUT_MBVH; ConvertFrom( original ); }
-	MBVH( MBVH&& );
-	MBVH& operator=( const MBVH& ) = default;
+	MBVH( const MBVH& ) = delete; // owns its allocations, so it cannot be copied
+	MBVH( MBVH&& ) noexcept;
+	MBVH& operator=( MBVH&& ) noexcept;
 	~MBVH();
+	// point this at another's data without taking ownership of it
+	void ReferenceFrom( const MBVH& other ) { *this = other; }
+	// give up the buffers without freeing them
+	void ReleaseOwnership();
+	// reset to a pristine empty object, freeing nothing, with 'ctx' installed.
+	void DropReference( BVHContext ctx = {} );
+	template <typename, typename> friend class BVH4_GPU;
+	template <typename, typename> friend class BVH4_CPU;
+	template <typename, typename> friend class BVH8_CPU;
+	template <typename, typename> friend class BVH8_CWBVH;
 	void Build( const Vertex* vertices, const Index primCount );
 	void Build( const Slice& vertices );
 	void Build( const Vertex* vertices, const uint32_t* indices, const Index primCount );
@@ -1212,6 +1271,8 @@ public:
 	bool ownBVH = true;				// False when ConvertFrom receives an external bvh.
 	// collapse settings, consumed by ConvertFrom
 	Index leafPrimLimit = 0;		// max prims the collapse may merge into one leaf; 0 disables merging
+private:
+	MBVH& operator=( const MBVH& ) = default;
 };
 
 template <typename Float, typename Index> class BVH4_GPU : public BVHBase<Float, Index>
@@ -1232,10 +1293,10 @@ public:
 	using Base::triCount;
 	using Base::aabbMin;
 	using Base::aabbMax;
+protected:
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
-protected:
 	using Base::PrecomputeTriangle;
 public:
 	struct BVHNode // actual struct is unused; left here to show structure of data in bvh4Data.
@@ -1259,8 +1320,9 @@ public:
 	};
 	BVH4_GPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH4_GPU; context = ctx; }
 	BVH4_GPU( const MBVH<4, Float, Index>& bvh4 ) { /* DEPRECATED */ layout = LAYOUT_BVH4_GPU; ConvertFrom( bvh4 ); }
-	BVH4_GPU( BVH4_GPU&& );
-	BVH4_GPU& operator=( const BVH4_GPU& ) = default;
+	BVH4_GPU( const BVH4_GPU& ) = delete; // owns its allocations, so it cannot be copied
+	BVH4_GPU( BVH4_GPU&& ) noexcept;
+	BVH4_GPU& operator=( BVH4_GPU&& ) noexcept;
 	~BVH4_GPU();
 	void Build( const bvhvec4* vertices, const Index primCount );
 	void Build( const Slice& vertices );
@@ -1281,6 +1343,8 @@ public:
 	uint32_t usedBlocks = 0;		// actually used storage.
 	MBVH<4, Float, Index> bvh4;		// BVH4_GPU is created from BVH4 and uses its data.
 	bool ownBVH4 = true;			// False when ConvertFrom receives an external bvh.
+private:
+	BVH4_GPU& operator=( const BVH4_GPU& ) = default;
 };
 
 template <typename Float, typename Index> class BVH4_CPU : public BVHBase<Float, Index>
@@ -1305,9 +1369,11 @@ public:
 	using Base::l_quads;
 	using Base::aabbMin;
 	using Base::aabbMax;
+protected:
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
+public:
 	enum { EMPTY_BIT = 1 << 31, LEAF_BIT = 1 << 30 };
 	struct ALIGNED( 64 ) BVHNode
 	{
@@ -1321,8 +1387,9 @@ public:
 	};
 	struct ALIGNED( 64 ) CacheLine { uint8_t data[64]; };
 	BVH4_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH4_CPU; context = ctx; c_int = 2; l_quads = true; }
-	BVH4_CPU( BVH4_CPU&& );
-	BVH4_CPU& operator=( const BVH4_CPU& ) = default;
+	BVH4_CPU( const BVH4_CPU& ) = delete; // owns its allocations, so it cannot be copied
+	BVH4_CPU( BVH4_CPU&& ) noexcept;
+	BVH4_CPU& operator=( BVH4_CPU&& ) noexcept;
 	~BVH4_CPU();
 	void Save( const char* fileName );
 	bool Load( const char* fileName, const Index expectedTris );
@@ -1349,6 +1416,8 @@ public:
 	bool ownBVH4 = true;			// false when ConvertFrom receives an external bvh4.
 	uint32_t allocatedBlocks = 0;	// node data and triangles are stored in 64-byte blocks.
 	uint32_t usedBlocks = 0;		// the amount of data actually used.
+private:
+	BVH4_CPU& operator=( const BVH4_CPU& ) = default;
 };
 
 template <typename Float, typename Index> class BVH8_CWBVH : public BVHBase<Float, Index>
@@ -1368,16 +1437,17 @@ public:
 	using Base::idxCount;
 	using Base::aabbMin;
 	using Base::aabbMax;
+protected:
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
-protected:
 	using Base::PrecomputeTriangle;
 public:
 	BVH8_CWBVH( BVHContext ctx = {} ) { layout = LAYOUT_CWBVH; context = ctx; }
 	BVH8_CWBVH( MBVH<8, Float, Index>& bvh8 ) { /* DEPRECATED */ layout = LAYOUT_CWBVH; ConvertFrom( bvh8 ); }
-	BVH8_CWBVH( BVH8_CWBVH&& );
-	BVH8_CWBVH& operator=( const BVH8_CWBVH& ) = default;
+	BVH8_CWBVH( const BVH8_CWBVH& ) = delete; // owns its allocations, so it cannot be copied
+	BVH8_CWBVH( BVH8_CWBVH&& ) noexcept;
+	BVH8_CWBVH& operator=( BVH8_CWBVH&& ) noexcept;
 	~BVH8_CWBVH();
 	void Save( const char* fileName );
 	bool Load( const char* fileName, const Index expectedTris );
@@ -1403,6 +1473,8 @@ public:
 	bool ownBVH8 = true;			// false when ConvertFrom receives an external bvh8.
 	uint32_t usedTriBlocks = 0;		// 16-byte blocks actually used in bvh8Tris
 	uint32_t allocatedTris = 0;		// 16-byte blocks allocated for bvh8Tris
+private:
+	BVH8_CWBVH& operator=( const BVH8_CWBVH& ) = default;
 };
 
 template <typename Float, typename Index> struct ALIGNED( 64 ) BVHTri4Leaf
@@ -1477,9 +1549,11 @@ public:
 	using Base::l_quads;
 	using Base::aabbMin;
 	using Base::aabbMax;
+protected:
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
+public:
 	enum { EMPTY_BIT = 1 << 31, LEAF_BIT = 1 << 30 };
 	struct ALIGNED( 64 ) BVHNode
 	{
@@ -1501,8 +1575,9 @@ public:
 	};
 	struct ALIGNED( 64 ) CacheLine { uint8_t data[64]; };
 	BVH8_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH8_AVX2; context = ctx; c_int = 2; l_quads = true; }
-	BVH8_CPU( BVH8_CPU&& );
-	BVH8_CPU& operator=( const BVH8_CPU& ) = default;
+	BVH8_CPU( const BVH8_CPU& ) = delete; // owns its allocations, so it cannot be copied
+	BVH8_CPU( BVH8_CPU&& ) noexcept;
+	BVH8_CPU& operator=( BVH8_CPU&& ) noexcept;
 	~BVH8_CPU();
 	void Save( const char* fileName );
 	bool Load( const char* fileName, const Index expectedTris );
@@ -1529,6 +1604,8 @@ public:
 	bool ownBVH8 = true;			// false when ConvertFrom receives an external bvh8.
 	uint32_t allocatedBlocks = 0;	// node data and triangles are stored in 64-byte blocks.
 	uint32_t usedBlocks = 0;		// the amount of data actually used.
+private:
+	BVH8_CPU& operator=( const BVH8_CPU& ) = default;
 };
 
 // BLASInstance: A TLAS is built over BLAS instances, where a single BLAS can be
@@ -1842,10 +1919,27 @@ template <typename Float, typename Index> BVH<Float, Index>::BVH( BVH&& other ) 
 {
 	// shallow copy of parameters, options, and pointers
 	*this = other;
-	// mark 'other' as deleted to avoid double-free
-	other.primIdx = 0;
-	other.bvhNode = 0;
-	other.fragment = 0;
+	// exactly one of the two may free the buffers from here on
+	other.ReleaseOwnership();
+}
+
+// move assignment: release what we hold, then take over 'other'.
+template <typename Float, typename Index> BVH<Float, Index>& BVH<Float, Index>::operator=( BVH&& other ) noexcept
+{
+	if (this != &other) this->~BVH(), new (this) BVH( tinybvh_move( other ) );
+	return *this;
+}
+
+template <typename Float, typename Index> void BVH<Float, Index>::ReleaseOwnership()
+{
+	bvhNode = 0, primIdx = 0, fragment = 0;
+	allocatedNodes = usedNodes = triCount = idxCount = 0;
+}
+
+template <typename Float, typename Index> void BVH<Float, Index>::DropReference( BVHContext ctx )
+{
+	// Deliberately no destructor call: the buffers are not ours to release.
+	new (this) BVH( ctx );
 }
 
 template <typename Float, typename Index> BVH<Float, Index>::~BVH()
@@ -2105,7 +2199,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildQuick( co
 		root.aabbMin = tinybvh_min( root.aabbMin, fragment[i].bmin ),
 		root.aabbMax = tinybvh_max( root.aabbMax, fragment[i].bmax ), primIdx[i] = i;
 	// subdivide recursively
-	Index task[512], taskCount = 0, nodeIdx = 0;
+	Index task[TINYBVH_STACK_SIZE], taskCount = 0, nodeIdx = 0;
 	while (1)
 	{
 		while (1)
@@ -2219,7 +2313,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::PrepareBuild( 
 
 // Helper function to build a subtree via the thread pool
 template <typename Float, typename Index> struct BVHBuildSubtreeArgs { BVH<Float, Index>* bvh; Index node; uint32_t depth; };
-template <typename Float, typename Index> static void BVHBuildSubtree( void* payload )
+template <typename Float, typename Index> void BVHBuildSubtree( void* payload )
 {
 	BVHBuildSubtreeArgs<Float, Index>* a = (BVHBuildSubtreeArgs<Float, Index>*)payload;
 	a->bvh->Build( a->node, a->depth );
@@ -2237,7 +2331,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::Build( Index n
 	#endif
 	}
 	// subdivide root node recursively
-	Index task[512], taskCount = 0;
+	Index task[TINYBVH_STACK_SIZE], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	Vec3 minDim = (root.aabbMax - root.aabbMin) * 1e-20f;
 	Vec3 bestLMin( 0 ), bestLMax( 0 ), bestRMin( 0 ), bestRMax( 0 );
@@ -2420,7 +2514,7 @@ template <typename Index> static void RadixSort( Index* input, Index* output, co
 }
 
 // static helper function to build a subtree via the thread pool
-template <typename Float, typename Index> static void BVHBuildFullSweepSubtree( void* payload )
+template <typename Float, typename Index> void BVHBuildFullSweepSubtree( void* payload )
 {
 	BVHBuildSubtreeArgs<Float, Index>* a = (BVHBuildSubtreeArgs<Float, Index>*)payload;
 	a->bvh->BuildFullSweep( a->node, a->depth );
@@ -2507,7 +2601,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildFullSweep
 		tinybvh_parallel_for( context, 3, &BVH::SweepGatherTask, this );
 	}
 	// subdivide root node recursively
-	Index task[512], taskCount = 0;
+	Index task[TINYBVH_STACK_SIZE], taskCount = 0;
 	Vec3 minDim = (bvhNode->aabbMax - bvhNode->aabbMin) * 1e-20f;
 	const Float cratio = c_int > 0 ? (c_trav / c_int) : 0;
 	while (1)
@@ -2760,7 +2854,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildHQ()
 
 // Helper function to build a subtree via the thread pool
 template <typename Float, typename Index> struct BVHBuildHQArgs { BVH<Float, Index>* bvh; Index node; uint32_t depth; Index sliceStart, sliceEnd; Index* idxTmp; };
-template <typename Float, typename Index> static void BVHBuildHQSubtree( void* payload )
+template <typename Float, typename Index> void BVHBuildHQSubtree( void* payload )
 {
 	BVHBuildHQArgs<Float, Index>* a = (BVHBuildHQArgs<Float, Index>*)payload;
 	a->bvh->BuildHQTask( a->node, a->depth, a->sliceStart, a->sliceEnd, a->idxTmp );
@@ -2768,7 +2862,7 @@ template <typename Float, typename Index> static void BVHBuildHQSubtree( void* p
 template <typename Float, typename Index> void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, Index sliceStart, Index sliceEnd, Index* idxTmp )
 {
 	// prepare subdivision
-	ALIGNED( 64 ) SubdivTask localTask[512];
+	ALIGNED( 64 ) SubdivTask localTask[TINYBVH_STACK_SIZE];
 	uint32_t localTasks = 0;
 	Vec3 bestLMin( 0 ), bestLMax( 0 ), bestRMin( 0 ), bestRMax( 0 );
 	BVHNode& root = bvhNode[0];
@@ -3076,11 +3170,11 @@ template <typename Float, typename Index> struct BVHMetricArgs
 	Index primCount;
 };
 
-template <typename Float, typename Index> int32_t BVH<Float, Index>::PrimCount( const Index nodeIdx ) const
+template <typename Float, typename Index> Index BVH<Float, Index>::PrimCount( const Index nodeIdx ) const
 {
 	// determine the total number of primitives / fragments in leaf nodes.
 	const BVHNode& n = bvhNode[nodeIdx];
-	return n.isLeaf() ? (int32_t)n.triCount : (PrimCount( n.leftFirst ) + PrimCount( n.leftFirst + 1 ));
+	return n.isLeaf() ? n.triCount : (PrimCount( n.leftFirst ) + PrimCount( n.leftFirst + 1 ));
 }
 
 template <typename Float, typename Index> Index BVH<Float, Index>::CollectNodes( const Index root, Index* list, const Index cap ) const
@@ -4078,7 +4172,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::Intersect256Ra
 	}
 }
 
-template <typename Float, typename Index> int32_t BVH<Float, Index>::NodeCount() const
+template <typename Float, typename Index> Index BVH<Float, Index>::NodeCount() const
 {
 	// Determine the number of nodes in the tree. Typically the result should
 	// be usedNodes - 1 (second node is always unused), but some builders may
@@ -4091,10 +4185,10 @@ template <typename Float, typename Index> int32_t BVH<Float, Index>::NodeCount()
 		if (n.isLeaf()) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
 		else nodeIdx = n.leftFirst, stack[stackPtr++] = n.leftFirst + 1;
 	}
-	return (int32_t)retVal;
+	return retVal;
 }
 
-template <typename Float, typename Index> int32_t BVH<Float, Index>::LeafCount() const
+template <typename Float, typename Index> Index BVH<Float, Index>::LeafCount() const
 {
 	// Determine the number of nodes in the tree. Typically the result should
 	// be usedNodes - 1 (second node is always unused), but some builders may
@@ -4106,7 +4200,7 @@ template <typename Float, typename Index> int32_t BVH<Float, Index>::LeafCount()
 		if (n.isLeaf()) { retVal++; if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
 		else nodeIdx = n.leftFirst, stack[stackPtr++] = n.leftFirst + 1;
 	}
-	return (int32_t)retVal;
+	return retVal;
 }
 
 // Compact: Reduce the size of a BVH by removing any unused nodes.
@@ -4151,10 +4245,20 @@ template <typename Float, typename Index> void BVH<Float, Index>::Compact()
 // BVH_Verbose implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH_Verbose<Float, Index>::BVH_Verbose( BVH_Verbose&& other )
+template <typename Float, typename Index> BVH_Verbose<Float, Index>::BVH_Verbose( BVH_Verbose&& other ) noexcept
 {
 	*this = other;
-	other.bvhNode = 0;
+	// bvhNode is the only buffer we own; verts / fragment / primIdx are borrowed
+	// from the source BVH, so clearing them just stops 'other' referencing them.
+	other.bvhNode = 0, other.fragment = 0, other.primIdx = 0;
+	other.allocatedNodes = other.usedNodes = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+template <typename Float, typename Index> BVH_Verbose<Float, Index>& BVH_Verbose<Float, Index>::operator=( BVH_Verbose&& other ) noexcept
+{
+	if (this != &other) this->~BVH_Verbose(), new (this) BVH_Verbose( tinybvh_move( other ) );
+	return *this;
 }
 
 template <typename Float, typename Index> BVH_Verbose<Float, Index>::~BVH_Verbose()
@@ -4165,7 +4269,7 @@ template <typename Float, typename Index> BVH_Verbose<Float, Index>::~BVH_Verbos
 template <typename Float, typename Index> void BVH_Verbose<Float, Index>::ConvertFrom( const BVH& original, bool /* unused here */ )
 {
 	// allocate space
-	Index spaceNeeded = original.triCount * (original.refittable ? 2 : 3);
+	Index spaceNeeded = original.triCount * (original.isRefittable() ? 2 : 3);
 	CopyBasePropertiesFrom( original );
 	if (allocatedNodes < spaceNeeded)
 	{
@@ -4583,17 +4687,26 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::MergeL
 // BVH_GPU implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH_GPU<Float, Index>::BVH_GPU( BVH_GPU&& other )
+template <typename Float, typename Index> BVH_GPU<Float, Index>::BVH_GPU( BVH_GPU&& other ) noexcept
 {
 	*this = other;
-	// mark 'other' as deleted to avoid double-free
+	// The embedded bvh must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh.ReleaseOwnership();
 	other.bvhNode = 0;
 	other.orderedVerts = Slice( nullptr, 0, 0 );
 }
 
+// move assignment: release what we hold, then take over 'other'.
+template <typename Float, typename Index> BVH_GPU<Float, Index>& BVH_GPU<Float, Index>::operator=( BVH_GPU&& other ) noexcept
+{
+	if (this != &other) this->~BVH_GPU(), new (this) BVH_GPU( tinybvh_move( other ) );
+	return *this;
+}
+
 template <typename Float, typename Index> BVH_GPU<Float, Index>::~BVH_GPU()
 {
-	if (!ownBVH) bvh = BVH(); // clear out pointers we don't own.
+	if (!ownBVH) bvh.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvhNode );
 	bvhNode = 0;
 	AlignedFree( (void*)orderedVerts.data ); // allocated by ConvertFrom; we own it.
@@ -4659,7 +4772,7 @@ template <typename Float, typename Index> void BVH_GPU<Float, Index>::ConvertFro
 {
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
-	bvh = original;
+	bvh.ReferenceFrom( original );
 	const uint32_t sourceNodes = (uint32_t)(compact ? original.usedNodes : original.allocatedNodes);
 	const uint32_t spaceNeeded = (sourceNodes >> 1) + 1; // the +1 covers a leaf-only bvh
 	CopyBasePropertiesFrom( original );
@@ -4792,15 +4905,25 @@ template <typename Float, typename Index> int32_t BVH_GPU<Float, Index>::Interse
 // BVH_SoA implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH_SoA<Float, Index>::BVH_SoA( BVH_SoA&& other )
+template <typename Float, typename Index> BVH_SoA<Float, Index>::BVH_SoA( BVH_SoA&& other ) noexcept
 {
 	*this = other;
+	// The embedded bvh must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh.ReleaseOwnership();
 	other.bvhNode = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+template <typename Float, typename Index> BVH_SoA<Float, Index>& BVH_SoA<Float, Index>::operator=( BVH_SoA&& other ) noexcept
+{
+	if (this != &other) this->~BVH_SoA(), new (this) BVH_SoA( tinybvh_move( other ) );
+	return *this;
 }
 
 template <typename Float, typename Index> BVH_SoA<Float, Index>::~BVH_SoA()
 {
-	if (!ownBVH) bvh = BVH(); // clear out pointers we don't own.
+	if (!ownBVH) bvh.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvhNode );
 }
 
@@ -4856,7 +4979,7 @@ template <typename Float, typename Index> void BVH_SoA<Float, Index>::ConvertFro
 {
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
-	bvh = original;
+	bvh.ReferenceFrom( original );
 	// allocate space
 	const Index spaceNeeded = compact ? bvh.usedNodes : bvh.allocatedNodes;
 	if (allocatedNodes < spaceNeeded)
@@ -4904,15 +5027,36 @@ template <typename Float, typename Index> void BVH_SoA<Float, Index>::ConvertFro
 // Generic (templated) MBVH implementation
 // ----------------------------------------------------------------------------
 
-template <int M, typename Float, typename Index> MBVH<M, Float, Index>::MBVH( MBVH<M, Float, Index>&& other )
+template <int M, typename Float, typename Index> MBVH<M, Float, Index>::MBVH( MBVH<M, Float, Index>&& other ) noexcept
 {
 	*this = other;
-	other.mbvhNode = 0;
+	other.ReleaseOwnership();
+}
+
+// move assignment: release what we hold, then take over 'other'.
+template <int M, typename Float, typename Index> MBVH<M, Float, Index>& MBVH<M, Float, Index>::operator=( MBVH&& other ) noexcept
+{
+	if (this != &other) this->~MBVH(), new (this) MBVH( tinybvh_move( other ) );
+	return *this;
+}
+
+template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::ReleaseOwnership()
+{
+	mbvhNode = 0;
+	allocatedNodes = usedNodes = triCount = this->idxCount = 0;
+	bvh.ReleaseOwnership(); // cascade: the source BVH may be ours as well
+}
+
+template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::DropReference( BVHContext ctx )
+{
+	// deliberately no destructor call: the buffers are not ours to release.
+	new (this) MBVH( ctx );
+	bvh.DropReference( ctx ); // the nested tree gets the same context
 }
 
 template <int M, typename Float, typename Index> MBVH<M, Float, Index>::~MBVH()
 {
-	if (!ownBVH) bvh = BVH(); // clear out pointers we don't own.
+	if (!ownBVH) bvh.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( mbvhNode );
 }
 
@@ -5011,7 +5155,7 @@ template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Con
 {
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
-	bvh = original;
+	bvh.ReferenceFrom( original );
 	// allocate space; the collapse emits at most one node per bvh2 node, and the
 	// 'root is a leaf' case below needs one extra.
 	const Index N = original.usedNodes;
@@ -5150,7 +5294,7 @@ template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Con
 {
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
-	bvh = original;
+	bvh.ReferenceFrom( original );
 	// allocate space
 	Index spaceNeeded = compact ? original.usedNodes : original.allocatedNodes;
 	constexpr bool M8 = M == 8;
@@ -5226,15 +5370,25 @@ template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Con
 // BVH4_GPU implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH4_GPU<Float, Index>::BVH4_GPU( BVH4_GPU&& other )
+template <typename Float, typename Index> BVH4_GPU<Float, Index>::BVH4_GPU( BVH4_GPU&& other ) noexcept
 {
 	*this = other;
+	// The embedded bvh4 must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh4.ReleaseOwnership();
 	other.bvh4Data = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+template <typename Float, typename Index> BVH4_GPU<Float, Index>& BVH4_GPU<Float, Index>::operator=( BVH4_GPU&& other ) noexcept
+{
+	if (this != &other) this->~BVH4_GPU(), new (this) BVH4_GPU( tinybvh_move( other ) );
+	return *this;
 }
 
 template <typename Float, typename Index> BVH4_GPU<Float, Index>::~BVH4_GPU()
 {
-	if (!ownBVH4) bvh4 = MBVH<4, Float, Index>(); // clear out pointers we don't own.
+	if (!ownBVH4) bvh4.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvh4Data );
 }
 
@@ -5268,7 +5422,7 @@ template <typename Float, typename Index> void BVH4_GPU<Float, Index>::ConvertFr
 {
 	// get a copy of the original bvh4
 	if (&original != &bvh4) ownBVH4 = false; // bvh isn't ours; don't delete in destructor.
-	bvh4 = original;
+	bvh4.ReferenceFrom( original );
 	// Convert a 4-wide BVH to a format suitable for GPU traversal. Layout:
 	// offs 0:   aabbMin (12 bytes), 4x quantized child xmin (4 bytes)
 	// offs 16:  aabbMax (12 bytes), 4x quantized child xmax (4 bytes)
@@ -5497,15 +5651,25 @@ template <typename Float, typename Index> int32_t BVH4_GPU<Float, Index>::Inters
 // BVH4_CPU implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH4_CPU<Float, Index>::BVH4_CPU( BVH4_CPU&& other )
+template <typename Float, typename Index> BVH4_CPU<Float, Index>::BVH4_CPU( BVH4_CPU&& other ) noexcept
 {
 	*this = other;
+	// The embedded bvh4 must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh4.ReleaseOwnership();
 	other.bvh4Data = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+template <typename Float, typename Index> BVH4_CPU<Float, Index>& BVH4_CPU<Float, Index>::operator=( BVH4_CPU&& other ) noexcept
+{
+	if (this != &other) this->~BVH4_CPU(), new (this) BVH4_CPU( tinybvh_move( other ) );
+	return *this;
 }
 
 template <typename Float, typename Index> BVH4_CPU<Float, Index>::~BVH4_CPU()
 {
-	if (!ownBVH4) bvh4 = MBVH<4, Float, Index>(); // clear out pointers we don't own.
+	if (!ownBVH4) bvh4.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvh4Data );
 }
 
@@ -5557,7 +5721,7 @@ template <typename Float, typename Index> bool BVH4_CPU<Float, Index>::Load( con
 	bvh4Data = (CacheLine*)AlignedAlloc( usedBlocks * 64 );
 	allocatedBlocks = usedBlocks;
 	s.read( (char*)bvh4Data, usedBlocks * 64 );
-	bvh4 = MBVH<4, Float, Index>();
+	bvh4.DropReference( context ); // holds raw file data: reset, don't free.
 	return true;
 }
 
@@ -5586,7 +5750,7 @@ template <typename Float, typename Index> void BVH4_CPU<Float, Index>::ConvertFr
 	// Note: identical to BVH8_CPU version, just with fewer lanes.
 	// get a copy of the input bvh4
 	if (&original != &bvh4) ownBVH4 = false; // bvh isn't ours; don't delete in destructor.
-	bvh4 = original;
+	bvh4.ReferenceFrom( original );
 	// prepare input bvh4
 	Index firstIdx = 0;
 	bvh4.bvh.CombineLeafs( 4, firstIdx, 0 );
@@ -5680,15 +5844,25 @@ template <typename Float, typename Index> void BVH4_CPU<Float, Index>::ConvertFr
 // BVH8_CPU implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH8_CPU<Float, Index>::BVH8_CPU( BVH8_CPU&& other )
+template <typename Float, typename Index> BVH8_CPU<Float, Index>::BVH8_CPU( BVH8_CPU&& other ) noexcept
 {
 	*this = other;
+	// The embedded bvh8 must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh8.ReleaseOwnership();
 	other.bvh8Data = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+template <typename Float, typename Index> BVH8_CPU<Float, Index>& BVH8_CPU<Float, Index>::operator=( BVH8_CPU&& other ) noexcept
+{
+	if (this != &other) this->~BVH8_CPU(), new (this) BVH8_CPU( tinybvh_move( other ) );
+	return *this;
 }
 
 template <typename Float, typename Index> BVH8_CPU<Float, Index>::~BVH8_CPU()
 {
-	if (!ownBVH8) bvh8 = MBVH<8, Float, Index>(); // clear out pointers we don't own.
+	if (!ownBVH8) bvh8.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvh8Data );
 }
 
@@ -5741,7 +5915,7 @@ template <typename Float, typename Index> bool BVH8_CPU<Float, Index>::Load( con
 	bvh8Data = (CacheLine*)AlignedAlloc( usedBlocks * 64 );
 	allocatedBlocks = usedBlocks;
 	s.read( (char*)bvh8Data, usedBlocks * 64 );
-	bvh8 = MBVH<8, Float, Index>();
+	bvh8.DropReference( context ); // holds raw file data: reset, don't free.
 	return true;
 }
 
@@ -5766,7 +5940,7 @@ template <typename Float, typename Index> void BVH8_CPU<Float, Index>::ConvertFr
 {
 	// get a copy of the input bvh8
 	if (&original != &bvh8) ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
-	bvh8 = original;
+	bvh8.ReferenceFrom( original );
 	// prepare input bvh8
 	Index firstIdx = 0;
 	bvh8.bvh.CombineLeafs( 4, firstIdx, 0 );
@@ -5870,16 +6044,26 @@ template <typename Float, typename Index> void BVH8_CPU<Float, Index>::ConvertFr
 // BVH8_CWBVH implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH8_CWBVH<Float, Index>::BVH8_CWBVH( BVH8_CWBVH&& other )
+template <typename Float, typename Index> BVH8_CWBVH<Float, Index>::BVH8_CWBVH( BVH8_CWBVH&& other ) noexcept
 {
 	*this = other;
+	// The embedded bvh8 must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh8.ReleaseOwnership();
 	other.bvh8Data = 0;
 	other.bvh8Tris = 0;
 }
 
+// move assignment: release what we hold, then take over 'other'.
+template <typename Float, typename Index> BVH8_CWBVH<Float, Index>& BVH8_CWBVH<Float, Index>::operator=( BVH8_CWBVH&& other ) noexcept
+{
+	if (this != &other) this->~BVH8_CWBVH(), new (this) BVH8_CWBVH( tinybvh_move( other ) );
+	return *this;
+}
+
 template <typename Float, typename Index> BVH8_CWBVH<Float, Index>::~BVH8_CWBVH()
 {
-	if (!ownBVH8) bvh8 = MBVH<8, Float, Index>(); // clear out pointers we don't own.
+	if (!ownBVH8) bvh8.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvh8Data );
 	AlignedFree( bvh8Tris );
 }
@@ -5953,7 +6137,7 @@ template <typename Float, typename Index> bool BVH8_CWBVH<Float, Index>::Load( c
 	allocatedBlocks = usedBlocks, allocatedTris = usedTriBlocks;
 	s.read( (char*)bvh8Data, usedBlocks * 16 );
 	s.read( (char*)bvh8Tris, usedTriBlocks * 16 );
-	bvh8 = MBVH<8, Float, Index>();
+	bvh8.DropReference( context ); // holds raw file data: reset, don't free.
 	return true;
 }
 
@@ -5971,7 +6155,7 @@ template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Convert
 {
 	// get a copy of the original bvh8
 	if (&original != &bvh8) ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
-	bvh8 = original;
+	bvh8.ReferenceFrom( original );
 	BVH_FATAL_ERROR_IF( bvh8.mbvhNode[0].isLeaf(), "BVH8_CWBVH::ConvertFrom( .. ), converting a single-node bvh." );
 	CopyBasePropertiesFrom( bvh8 );
 	uint32_t nodeCap = tinybvh_max( 128u, bvh8.triCount >> 1 );
@@ -5992,7 +6176,7 @@ template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Convert
 		bvh8Tris = (bvhvec4*)AlignedAlloc( triCap * 16 );
 		allocatedTris = triCap;
 	}
-	uint32_t stackCap = 512, stackPtr = 1;
+	uint32_t stackCap = TINYBVH_STACK_SIZE, stackPtr = 1;
 	uint32_t* stackNodeIdx = (uint32_t*)AlignedAlloc( stackCap * 4 );
 	uint32_t* stackNodeAddr = (uint32_t*)AlignedAlloc( stackCap * 4 );
 	stackNodeIdx[0] = 0, stackNodeAddr[0] = 0;
@@ -6846,7 +7030,7 @@ template <typename Float, typename Index> Float BVH_Verbose<Float, Index>::SAHCo
 template <typename Float, typename Index> Index BVH_Verbose<Float, Index>::FindBestNewPosition( const Index Lid, Float& bestCost ) const
 {
 	struct Task { Float ci; Index node; };
-	static const int maxTasks = 512;
+	static const int maxTasks = TINYBVH_STACK_SIZE;
 	ALIGNED( 64 ) Task task[maxTasks];
 	const BVHNode& L = bvhNode[Lid];
 	const Vec3 Lmin = L.aabbMin, Lmax = L.aabbMax;

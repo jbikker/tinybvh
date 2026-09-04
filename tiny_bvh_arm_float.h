@@ -139,7 +139,7 @@ struct BuildNEONFragSliceArgs
 	NEONSliceBounds* slice;
 	void* frags;
 };
-static void BuildNEONFragSlice( uint32_t i, void* payload )
+void impl::BuildNEONFragSlice( uint32_t i, void* payload )
 {
 	BuildNEONFragSliceArgs* a = (BuildNEONFragSliceArgs*)payload;
 	const uint32_t first = a->sliceSize * i, last = i == (a->slices - 1) ? a->triCount : (first + a->sliceSize);
@@ -278,7 +278,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t fi
 }
 
 // Helper function to build a subtree via the thread pool
-static void BVHBuildNEONSubtree( void* payload )
+void impl::BVHBuildNEONSubtree( void* payload )
 {
 	impl::BVHBuildSubtreeArgs<float, uint32_t>* a = (impl::BVHBuildSubtreeArgs<float, uint32_t>*)payload;
 	a->bvh->BuildSIMDSubtree( a->node, a->depth );
@@ -292,7 +292,7 @@ struct BVHBuildNEONBinSliceArgs
 	uint32_t* slicecount;				// base of slices x NEONCOUNTSTRIDE counts
 	float32x4_t nmin4, rpd4;
 };
-static void BVHBuildNEONBinSlice( uint32_t i, void* payload )
+void impl::BVHBuildNEONBinSlice( uint32_t i, void* payload )
 {
 	BVHBuildNEONBinSliceArgs* a = (BVHBuildNEONBinSliceArgs*)payload;
 	const uint32_t first = a->leftFirst + a->sliceSize * i;
@@ -320,7 +320,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 	float32x4x2_t* binbox = slicebinbox[0];				// slot 0 doubles as the reduce target
 	uint32_t* count = slicecount[0];
 	// subdivide recursively
-	ALIGNED( 64 ) uint32_t task[512], taskCount = 0;
+	ALIGNED( 64 ) uint32_t task[TINYBVH_STACK_SIZE], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f;
 	while (1)
