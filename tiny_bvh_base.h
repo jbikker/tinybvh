@@ -46,11 +46,11 @@ inline void free64( void* ptr, void* = nullptr )
 // error handling
 #ifdef _WINDOWS_ // windows.h has been included
 #define BVH_FATAL_ERROR_IF(c,s) if (c) { char t[512]; snprintf( t, 512, \
-	"Fatal error in tiny_bvh.h, line %i:\n%s\n", __LINE__, s ); \
+	"Fatal error in %s, line %i:\n%s\n", __FILE__, __LINE__, s ); \
 	MessageBoxA( NULL, t, "Fatal error", MB_OK ); exit( 1 ); }
 #else
 #define BVH_FATAL_ERROR_IF(c,s) if (c) { fprintf( stderr, \
-	"Fatal error in tiny_bvh.h, line %i:\n%s\n", __LINE__, s ); exit( 1 ); }
+	"Fatal error in %s, line %i:\n%s\n", __FILE__, __LINE__, s ); exit( 1 ); }
 #endif
 #define BVH_FATAL_ERROR(s) BVH_FATAL_ERROR_IF(1,s)
 
@@ -448,7 +448,6 @@ struct bvhdblmat4
 inline bvhdbl3 tinybvh_transform_point( const bvhdbl3& v, const bvhdblmat4& T ) { return tinybvh_transform_point( v, T.cell ); }
 inline bvhdbl3 tinybvh_transform_vector( const bvhdbl3& v, const bvhdblmat4& T ) { return tinybvh_transform_vector( v, T.cell ); }
 
-
 #endif // DOUBLE_PRECISION_SUPPORT
 
 // ============================================================================
@@ -646,7 +645,6 @@ struct BVHBuildSettings
 	bool useSIMDifavailable = true;	// set to false to use the scalar reference builder.
 };
 
-
 enum BVHType : uint32_t
 {
 	// Every BVH class is derived from BVHBase, but we don't use virtual functions, for
@@ -655,7 +653,6 @@ enum BVHType : uint32_t
 	LAYOUT_UNDEFINED = 0,
 	LAYOUT_BVH = 1,
 	LAYOUT_BVH_VERBOSE,
-	LAYOUT_BVH_DOUBLE,
 	LAYOUT_BVH_GPU,
 	LAYOUT_MBVH,
 	LAYOUT_BVH4_CPU,
@@ -760,7 +757,6 @@ protected:
 	static void PrecomputeTriangle( const Slice& vert, const uint32_t ti0, const uint32_t ti1, const uint32_t ti2, void* dst );
 	static Float SA( const Vec3& aabbMin, const Vec3& aabbMax );
 };
-
 
 template <typename Float, typename Index> class BVH : public BVHBase<Float, Index>
 {
@@ -1291,6 +1287,8 @@ template <typename Float, typename Index> class BVH4_CPU : public BVHBase<Float,
 {
 public:
 	using Base = BVHBase<Float, Index>;
+	using Base::opmap;
+	using Base::opmapN;
 	using typename Base::Vec3;
 	using typename Base::Vertex;
 	using typename Base::Slice;
@@ -1421,6 +1419,32 @@ template <typename Float, typename Index> struct ALIGNED( 64 ) BVHTri4Leaf
 		e2x[slot] = e2.x, e2y[slot] = e2.y, e2z[slot] = e2.z;
 		primIdx[slot] = pidx;
 	}
+	// Scalar counterpart of the SIMD leaf tests: Moeller-Trumbore for triangle 'slot', with the
+	// opacity map applied. Returns true for a hit in (0, tmax) and sets t, u and v.
+	inline bool Intersect( const uint32_t slot, const Ray<Float, Index>& ray, const Float tmax, Float& t, Float& u, Float& v, const uint32_t* opmap, const uint32_t opmapN ) const
+	{
+		const Vec3 e1( e1x[slot], e1y[slot], e1z[slot] ), e2( e2x[slot], e2y[slot], e2z[slot] );
+		const Vec3 h = tinybvh_cross( ray.D, e2 );
+		const Float det = tinybvh_dot( e1, h );
+		if (det == 0) return false;
+		const Float f = 1 / det;
+		const Vec3 s = ray.O - Vec3( v0x[slot], v0y[slot], v0z[slot] );
+		u = f * tinybvh_dot( s, h );
+		const Vec3 q = tinybvh_cross( s, e1 );
+		v = f * tinybvh_dot( ray.D, q );
+		if (!(u >= 0 && v >= 0 && u + v <= 1)) return false;
+		t = f * tinybvh_dot( e2, q );
+		if (!(t > 0 && t < tmax)) return false;
+		if (opmap)
+		{
+			const Float fN = (Float)opmapN;
+			const int row = int( (u + v) * fN ), diag = int( (1 - u) * fN );
+			const int idx = (row * row) + int( v * fN ) + (diag - (opmapN - 1 - row));
+			const uint32_t* om = opmap + primIdx[slot] * ((opmapN * opmapN + 31) >> 5);
+			if (!(om[idx >> 5] & (1 << (idx & 31)))) return false;
+		}
+		return true;
+	}
 };
 
 // Storage for a single triangle, for BVH8_CPU.
@@ -1431,11 +1455,12 @@ template <typename Float, typename Index> struct BVHTri1Leaf
 	Index primIdx;				// total: 40 bytes
 };
 
-
 template <typename Float, typename Index> class BVH8_CPU : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
+	using Base::opmap;
+	using Base::opmapN;
 	using typename Base::Vec3;
 	using typename Base::Vertex;
 	using typename Base::Slice;
@@ -1704,7 +1729,6 @@ static uint32_t __popc( uint32_t x )
 #endif
 }
 
-
 // code compaction: Moeller-Trumbore ray/tri test.
 // Works for any precision: v0, e1 and e2 determine the vector type.
 #define MOLLER_TRUMBORE_TEST( tmax, exit ) \
@@ -1813,7 +1837,6 @@ template <typename Float, typename Index> void BVHBase<Float, Index>::CopyBasePr
 
 // BVH implementation
 // ----------------------------------------------------------------------------
-
 
 template <typename Float, typename Index> BVH<Float, Index>::BVH( BVH&& other ) noexcept
 {
@@ -3917,12 +3940,13 @@ template <typename Float, typename Index> void BVH<Float, Index>::Intersect256Ra
 	const Vec3 plane1 = tinybvh_normalize( tinybvh_cross( p3 - O, p3 - p1 ) ); // right plane
 	const Vec3 plane2 = tinybvh_normalize( tinybvh_cross( p1 - O, p1 - p0 ) ); // top plane
 	const Vec3 plane3 = tinybvh_normalize( tinybvh_cross( p2 - O, p2 - p3 ) ); // bottom plane
-	const int32_t sign0x = plane0.x < 0 ? 4 : 0, sign0y = plane0.y < 0 ? 5 : 1, sign0z = plane0.z < 0 ? 6 : 2;
-	const int32_t sign1x = plane1.x < 0 ? 4 : 0, sign1y = plane1.y < 0 ? 5 : 1, sign1z = plane1.z < 0 ? 6 : 2;
-	const int32_t sign2x = plane2.x < 0 ? 4 : 0, sign2y = plane2.y < 0 ? 5 : 1, sign2z = plane2.z < 0 ? 6 : 2;
-	const int32_t sign3x = plane3.x < 0 ? 4 : 0, sign3y = plane3.y < 0 ? 5 : 1, sign3z = plane3.z < 0 ? 6 : 2;
 	const Float d0 = tinybvh_dot( O, plane0 ), d1 = tinybvh_dot( O, plane1 );
 	const Float d2 = tinybvh_dot( O, plane2 ), d3 = tinybvh_dot( O, plane3 );
+	// The box corner with the smallest signed distance to a plane. The box lies outside if this corner does.
+	auto corner = []( const BVHNode* n, const Vec3& plane )
+	{
+		return Vec3( plane.x < 0 ? n->aabbMax.x : n->aabbMin.x, plane.y < 0 ? n->aabbMax.y : n->aabbMin.y, plane.z < 0 ? n->aabbMax.z : n->aabbMin.z );
+	};
 	// Traverse the tree with the packet
 	int32_t first = 0, last = 255; // first and last active ray in the packet
 	const BVHNode* node = &bvhNode[0];
@@ -3978,13 +4002,8 @@ template <typename Float, typename Index> void BVH<Float, Index>::Intersect256Ra
 				}
 				if (!earlyHit) // 2. Early-out test: if the node aabb is outside the four planes, we skip the node
 				{
-					const void* mm = left;
-					Vec3 c0( tinybvh_getlane_f( mm, sign0x ), tinybvh_getlane_f( mm, sign0y ), tinybvh_getlane_f( mm, sign0z ) );
-					Vec3 c1( tinybvh_getlane_f( mm, sign1x ), tinybvh_getlane_f( mm, sign1y ), tinybvh_getlane_f( mm, sign1z ) );
-					Vec3 c2( tinybvh_getlane_f( mm, sign2x ), tinybvh_getlane_f( mm, sign2y ), tinybvh_getlane_f( mm, sign2z ) );
-					Vec3 c3( tinybvh_getlane_f( mm, sign3x ), tinybvh_getlane_f( mm, sign3y ), tinybvh_getlane_f( mm, sign3z ) );
-					if (tinybvh_dot( c0, plane0 ) > d0 || tinybvh_dot( c1, plane1 ) > d1 ||
-						tinybvh_dot( c2, plane2 ) > d2 || tinybvh_dot( c3, plane3 ) > d3)
+					if (tinybvh_dot( corner( left, plane0 ), plane0 ) > d0 || tinybvh_dot( corner( left, plane1 ), plane1 ) > d1 ||
+						tinybvh_dot( corner( left, plane2 ), plane2 ) > d2 || tinybvh_dot( corner( left, plane3 ), plane3 ) > d3)
 						visitLeft = false;
 					else // 3. Last resort: update first and last, stay in node if first > last
 					{
@@ -4015,13 +4034,8 @@ template <typename Float, typename Index> void BVH<Float, Index>::Intersect256Ra
 				}
 				if (!earlyHit) // 2. Early-out test: if the node aabb is outside the four planes, we skip the node
 				{
-					const void* mm = right;
-					Vec3 c0( tinybvh_getlane_f( mm, sign0x ), tinybvh_getlane_f( mm, sign0y ), tinybvh_getlane_f( mm, sign0z ) );
-					Vec3 c1( tinybvh_getlane_f( mm, sign1x ), tinybvh_getlane_f( mm, sign1y ), tinybvh_getlane_f( mm, sign1z ) );
-					Vec3 c2( tinybvh_getlane_f( mm, sign2x ), tinybvh_getlane_f( mm, sign2y ), tinybvh_getlane_f( mm, sign2z ) );
-					Vec3 c3( tinybvh_getlane_f( mm, sign3x ), tinybvh_getlane_f( mm, sign3y ), tinybvh_getlane_f( mm, sign3z ) );
-					if (tinybvh_dot( c0, plane0 ) > d0 || tinybvh_dot( c1, plane1 ) > d1 ||
-						tinybvh_dot( c2, plane2 ) > d2 || tinybvh_dot( c3, plane3 ) > d3)
+					if (tinybvh_dot( corner( right, plane0 ), plane0 ) > d0 || tinybvh_dot( corner( right, plane1 ), plane1 ) > d1 ||
+						tinybvh_dot( corner( right, plane2 ), plane2 ) > d2 || tinybvh_dot( corner( right, plane3 ), plane3 ) > d3)
 						visitRight = false;
 					else // 3. Last resort: update first and last, stay in node if first > last
 					{
@@ -6132,60 +6146,33 @@ template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Convert
 #endif
 }
 
-// BVH4_CPU: select the kernel specialized for the ray octant. Shared by SSE and NEON.
 template <typename Float, typename Index> int32_t BVH4_CPU<Float, Index>::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
-	const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
-	if (!posX) goto negx;
-	if (posY) { if (posZ) return IntersectOctant<true, true, true>( ray ); else return IntersectOctant<true, true, false>( ray ); }
-	if (posZ) return IntersectOctant<true, false, true>( ray ); else return IntersectOctant<true, false, false>( ray );
-negx:
-	if (posY) { if (posZ) return IntersectOctant<false, true, true>( ray ); else return IntersectOctant<false, true, false>( ray ); }
-	if (posZ) return IntersectOctant<false, false, true>( ray ); else return IntersectOctant<false, false, false>( ray );
+	OCTANT_DISPATCH( IntersectOctant, ray )
 }
 
 template <typename Float, typename Index> bool BVH4_CPU<Float, Index>::IsOccluded( const Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
-	const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
-	if (!posX) goto negx;
-	if (posY) { if (posZ) return IsOccludedOctant<true, true, true>( ray ); else return IsOccludedOctant<true, true, false>( ray ); }
-	if (posZ) return IsOccludedOctant<true, false, true>( ray ); else return IsOccludedOctant<true, false, false>( ray );
-negx:
-	if (posY) { if (posZ) return IsOccludedOctant<false, true, true>( ray ); else return IsOccludedOctant<false, true, false>( ray ); }
-	if (posZ) return IsOccludedOctant<false, false, true>( ray ); else return IsOccludedOctant<false, false, false>( ray );
+	OCTANT_DISPATCH( IsOccludedOctant, ray )
 }
 
 template <typename Float, typename Index> int32_t BVH8_CPU<Float, Index>::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
-	const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
-	if (!posX) goto negx;
-	if (posY) { if (posZ) return IntersectOctant<true, true, true>( ray ); else return IntersectOctant<true, true, false>( ray ); }
-	if (posZ) return IntersectOctant<true, false, true>( ray ); else return IntersectOctant<true, false, false>( ray );
-negx:
-	if (posY) { if (posZ) return IntersectOctant<false, true, true>( ray ); else return IntersectOctant<false, true, false>( ray ); }
-	if (posZ) return IntersectOctant<false, false, true>( ray ); else return IntersectOctant<false, false, false>( ray );
+	OCTANT_DISPATCH( IntersectOctant, ray )
 }
 
 template <typename Float, typename Index> bool BVH8_CPU<Float, Index>::IsOccluded( const Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
-	const bool posX = ray.rD.x >= 0, posY = ray.rD.y >= 0, posZ = ray.rD.z >= 0;
-	if (!posX) goto negx;
-	if (posY) { if (posZ) return IsOccludedOctant<true, true, true>( ray ); else return IsOccludedOctant<true, true, false>( ray ); }
-	if (posZ) return IsOccludedOctant<true, false, true>( ray ); else return IsOccludedOctant<true, false, false>( ray );
-negx:
-	if (posY) { if (posZ) return IsOccludedOctant<false, true, true>( ray ); else return IsOccludedOctant<false, true, false>( ray ); }
-	if (posZ) return IsOccludedOctant<false, false, true>( ray ); else return IsOccludedOctant<false, false, false>( ray );
+	OCTANT_DISPATCH( IsOccludedOctant, ray )
 }
 
 // Intersect_CWBVH:
 // Intersect a compressed 8-wide BVH with a ray. For debugging only, not efficient.
-// Not technically limited to BVH_USEAVX, but __lzcnt and __popcnt will require
-// exotic compiler flags (in combination with __builtin_ia32_lzcnt_u32), so... Since
-// this is just here to test data before it goes to the GPU: MSVC-only for now.
+// This is here to test data before it goes to the GPU.
 #define STACK_POP() { ngroup = traversalStack[--stackPtr]; }
 #define STACK_PUSH() { traversalStack[stackPtr++] = ngroup; }
 TINYBVH_FORCEINLINE uint32_t extract_byte( const uint32_t i, const uint32_t n ) { return (i >> (n * 8)) & 0xFF; }
@@ -6354,37 +6341,207 @@ template <typename Float, typename Index> void BVH<Float, Index>::Intersect256Ra
 	BVH_FATAL_ERROR( "BVH::Intersect256RaysSSE requires AVX and single precision." );
 }
 
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU<Float, Index>::IntersectOctant( Ray& ) const
+// Scalar reference for the BVH4_CPU and BVH8_CPU kernels in tiny_bvh_x86_float.h and
+// tiny_bvh_arm_float.h: the same node order and stack handling, without intrinsics. Also
+// serves the instantiations that have no SIMD kernel. W is the node width; the perm entries
+// hold log2(W) bits per sorted position.
+#define WIDE_SLAB_TEST( i, tfar ) \
+	const Float tx1 = (posX ? n->xmin[i] : n->xmax[i]) * ray.rD.x - rx, tx2 = (posX ? n->xmax[i] : n->xmin[i]) * ray.rD.x - rx; \
+	const Float ty1 = (posY ? n->ymin[i] : n->ymax[i]) * ray.rD.y - ry, ty2 = (posY ? n->ymax[i] : n->ymin[i]) * ray.rD.y - ry; \
+	const Float tz1 = (posZ ? n->zmin[i] : n->zmax[i]) * ray.rD.z - rz, tz2 = (posZ ? n->zmax[i] : n->zmin[i]) * ray.rD.z - rz; \
+	const Float tmin = tinybvh_max( tinybvh_max( tx1, ty1 ), tinybvh_max( tz1, Float( 0 ) ) ); \
+	const Float tmax = tinybvh_min( tinybvh_min( tx2, ty2 ), tinybvh_min( tz2, tfar ) );
+
+template <typename Layout, int W, bool posX, bool posY, bool posZ, typename Float, typename Index>
+int32_t tinybvh_wide_intersect( const typename Layout::CacheLine* data, Ray<Float, Index>& ray, const uint32_t* opmap, const uint32_t opmapN )
 {
-	BVH_FATAL_ERROR( "BVH4_CPU::Intersect requires SSE or NEON and single precision." );
+	using Node = typename Layout::BVHNode;
+	using Leaf = typename Layout::BVHTri4Leaf;
+	static_assert( sizeof( Node::child ) == W * sizeof( uint32_t ), "node width mismatch" );
+	constexpr int signShift = (W == 4 ? 2 : 3) * ((posX ? 1 : 0) + (posY ? 2 : 0) + (posZ ? 4 : 0));
+	uint32_t nodeStack[TINYBVH_STACK_SIZE * (W / 2) + W /* wide trees push more nodes per step */];
+	Float distStack[TINYBVH_STACK_SIZE * (W / 2) + W];
+	int32_t stackPtr = 0;
+	uint32_t nodeIdx = 0, steps = 0;
+	Float tcur = ray.hit.t;
+	const Float rx = ray.O.x * ray.rD.x, ry = ray.O.y * ray.rD.y, rz = ray.O.z * ray.rD.z;
+	while (1)
+	{
+		while (!(nodeIdx & Layout::LEAF_BIT))
+		{
+			steps++;
+			const Node* n = (const Node*)(data + nodeIdx);
+			Float tmins[W], tmaxs[W];
+			for (int i = 0; i < W; i++) { WIDE_SLAB_TEST( i, tcur ); tmins[i] = tmin, tmaxs[i] = tmax; }
+			// perm lists the lanes sorted for this octant, farthest first; continue with the
+			// nearest valid child and push the others, farthest first.
+			uint32_t next = W;
+			for (int s = 0; s < W; s++)
+			{
+				const uint32_t lane = (n->perm[s] >> signShift) & (W - 1);
+				if (tmins[lane] > tmaxs[lane]) continue;
+				if (next != W) nodeStack[stackPtr] = n->child[next], distStack[stackPtr++] = tmins[next];
+				next = lane;
+			}
+			if (next != W) { nodeIdx = n->child[next]; continue; }
+			// skip entries behind the current hit
+			do { if (!stackPtr) return (int32_t)steps; nodeIdx = nodeStack[--stackPtr]; } while (distStack[stackPtr] > tcur);
+		}
+		const Leaf* leaf = (const Leaf*)(data + (nodeIdx & 0x1fffffff));
+		for (uint32_t i = 0; i < 4; i++)
+		{
+			Float t, u, v;
+			if (!leaf->Intersect( i, ray, tcur, t, u, v, opmap, opmapN )) continue;
+			ray.hit.t = tcur = t, ray.hit.u = u, ray.hit.v = v;
+			ray.SetHitPrim( leaf->primIdx[i] );
+		}
+		do { if (!stackPtr) return (int32_t)steps; nodeIdx = nodeStack[--stackPtr]; } while (distStack[stackPtr] > tcur);
+	}
 }
 
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> bool BVH4_CPU<Float, Index>::IsOccludedOctant( const Ray& ) const
+template <typename Layout, int W, bool posX, bool posY, bool posZ, typename Float, typename Index>
+bool tinybvh_wide_occluded( const typename Layout::CacheLine* data, const Ray<Float, Index>& ray, const uint32_t* opmap, const uint32_t opmapN )
 {
-	BVH_FATAL_ERROR( "BVH4_CPU::IsOccluded requires SSE or NEON and single precision." );
+	using Node = typename Layout::BVHNode;
+	using Leaf = typename Layout::BVHTri4Leaf;
+	uint32_t nodeStack[TINYBVH_STACK_SIZE * (W / 2) + W /* wide trees push more nodes per step */];
+	int32_t stackPtr = 0;
+	uint32_t nodeIdx = 0;
+	const Float rx = ray.O.x * ray.rD.x, ry = ray.O.y * ray.rD.y, rz = ray.O.z * ray.rD.z;
+	while (1)
+	{
+		while (!(nodeIdx & Layout::LEAF_BIT))
+		{
+			const Node* n = (const Node*)(data + nodeIdx);
+			// the children can be visited in any order
+			uint32_t next = W;
+			for (uint32_t i = 0; i < W; i++)
+			{
+				WIDE_SLAB_TEST( i, ray.hit.t );
+				if (tmin > tmax) continue;
+				if (next != W) nodeStack[stackPtr++] = n->child[next];
+				next = i;
+			}
+			if (next != W) { nodeIdx = n->child[next]; continue; }
+			if (!stackPtr) return false;
+			nodeIdx = nodeStack[--stackPtr];
+		}
+		const Leaf* leaf = (const Leaf*)(data + (nodeIdx & 0x1fffffff));
+		for (uint32_t i = 0; i < 4; i++)
+		{
+			Float t, u, v;
+			if (leaf->Intersect( i, ray, ray.hit.t, t, u, v, opmap, opmapN )) return true;
+		}
+		if (!stackPtr) return false;
+		nodeIdx = nodeStack[--stackPtr];
+	}
 }
 
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU<Float, Index>::IntersectOctant( Ray& ) const
+#undef WIDE_SLAB_TEST
+
+template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU<Float, Index>::IntersectOctant( Ray& ray ) const
 {
-	BVH_FATAL_ERROR( "BVH8_CPU::Intersect requires AVX2 and single precision." );
+	return tinybvh_wide_intersect<BVH4_CPU, 4, posX, posY, posZ>( bvh4Data, ray, opmap, opmapN );
 }
 
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> bool BVH8_CPU<Float, Index>::IsOccludedOctant( const Ray& ) const
+template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> bool BVH4_CPU<Float, Index>::IsOccludedOctant( const Ray& ray ) const
 {
-	BVH_FATAL_ERROR( "BVH8_CPU::IsOccluded requires AVX2 and single precision." );
+	return tinybvh_wide_occluded<BVH4_CPU, 4, posX, posY, posZ>( bvh4Data, ray, opmap, opmapN );
+}
+
+template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU<Float, Index>::IntersectOctant( Ray& ray ) const
+{
+	return tinybvh_wide_intersect<BVH8_CPU, 8, posX, posY, posZ>( bvh8Data, ray, opmap, opmapN );
+}
+
+template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> bool BVH8_CPU<Float, Index>::IsOccludedOctant( const Ray& ray ) const
+{
+	return tinybvh_wide_occluded<BVH8_CPU, 8, posX, posY, posZ>( bvh8Data, ray, opmap, opmapN );
 }
 
 #ifdef ENABLE_BVH_SOA
 
-template <typename Float, typename Index> int32_t BVH_SoA<Float, Index>::Intersect( Ray& ) const
+// Scalar reference for the BVH_SoA kernels in the platform headers.
+#define BVH_SOA_SLAB_TESTS \
+	const Float* x = node->xxxx, * y = node->yyyy, * z = node->zzzz; \
+	const Float tx1a = (x[0] - ray.O.x) * ray.rD.x, tx2a = (x[1] - ray.O.x) * ray.rD.x; \
+	const Float ty1a = (y[0] - ray.O.y) * ray.rD.y, ty2a = (y[1] - ray.O.y) * ray.rD.y; \
+	const Float tz1a = (z[0] - ray.O.z) * ray.rD.z, tz2a = (z[1] - ray.O.z) * ray.rD.z; \
+	const Float tx1b = (x[2] - ray.O.x) * ray.rD.x, tx2b = (x[3] - ray.O.x) * ray.rD.x; \
+	const Float ty1b = (y[2] - ray.O.y) * ray.rD.y, ty2b = (y[3] - ray.O.y) * ray.rD.y; \
+	const Float tz1b = (z[2] - ray.O.z) * ray.rD.z, tz2b = (z[3] - ray.O.z) * ray.rD.z; \
+	const Float tmina = tinybvh_max( tinybvh_max( tinybvh_min( tx1a, tx2a ), tinybvh_min( ty1a, ty2a ) ), tinybvh_max( tinybvh_min( tz1a, tz2a ), Float( 0 ) ) ); \
+	const Float tmaxa = tinybvh_min( tinybvh_min( tinybvh_max( tx1a, tx2a ), tinybvh_max( ty1a, ty2a ) ), tinybvh_min( tinybvh_max( tz1a, tz2a ), ray.hit.t ) ); \
+	const Float tminb = tinybvh_max( tinybvh_max( tinybvh_min( tx1b, tx2b ), tinybvh_min( ty1b, ty2b ) ), tinybvh_max( tinybvh_min( tz1b, tz2b ), Float( 0 ) ) ); \
+	const Float tmaxb = tinybvh_min( tinybvh_min( tinybvh_max( tx1b, tx2b ), tinybvh_max( ty1b, ty2b ) ), tinybvh_min( tinybvh_max( tz1b, tz2b ), ray.hit.t ) ); \
+	Index lidx = node->left, ridx = node->right; \
+	Float dist1 = tmaxa >= tmina ? tmina : bvh_far<Float>, dist2 = tmaxb >= tminb ? tminb : bvh_far<Float>; \
+	if (dist1 > dist2) { tinybvh_swap( dist1, dist2 ); tinybvh_swap( lidx, ridx ); } \
+	if (dist1 == bvh_far<Float>) { if (stackPtr == 0) break; else node = stack[--stackPtr]; } \
+	else { node = bvhNode + lidx; if (dist2 != bvh_far<Float>) stack[stackPtr++] = bvhNode + ridx; }
+
+template <typename Float, typename Index> int32_t BVH_SoA<Float, Index>::Intersect( Ray& ray ) const
 {
-	BVH_FATAL_ERROR( "BVH_SoA::Intersect requires AVX or NEON and single precision." );
+	VALIDATE_RAY( ray );
+	BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
+	const Slice& verts = bvh.verts;
+	const Index* primIdx = bvh.primIdx;
+	uint32_t stackPtr = 0;
+	Float cost = 0;
+	while (1)
+	{
+		cost += c_trav;
+		if (node->isLeaf())
+		{
+			if (indexedEnabled && bvh.vertIdx != 0) for (Index i = 0; i < node->triCount; i++, cost += c_int)
+			{
+				const Index pi = primIdx[node->firstTri + i];
+				const uint32_t i0 = bvh.vertIdx[pi * 3], i1 = bvh.vertIdx[pi * 3 + 1], i2 = bvh.vertIdx[pi * 3 + 2];
+				IntersectTri( ray, pi, verts, i0, i1, i2 );
+			}
+			else for (Index i = 0; i < node->triCount; i++, cost += c_int)
+			{
+				const Index pi = primIdx[node->firstTri + i];
+				IntersectTri( ray, pi, verts, pi * 3, pi * 3 + 1, pi * 3 + 2 );
+			}
+			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			continue;
+		}
+		BVH_SOA_SLAB_TESTS;
+	}
+	return (int32_t)cost;
 }
 
-template <typename Float, typename Index> bool BVH_SoA<Float, Index>::IsOccluded( const Ray& ) const
+template <typename Float, typename Index> bool BVH_SoA<Float, Index>::IsOccluded( const Ray& ray ) const
 {
-	BVH_FATAL_ERROR( "BVH_SoA::IsOccluded requires AVX or NEON and single precision." );
+	BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
+	const Slice& verts = bvh.verts;
+	const Index* primIdx = bvh.primIdx;
+	uint32_t stackPtr = 0;
+	while (1)
+	{
+		if (node->isLeaf())
+		{
+			if (indexedEnabled && bvh.vertIdx != 0) for (Index i = 0; i < node->triCount; i++)
+			{
+				const Index pi = primIdx[node->firstTri + i], vi0 = pi * 3;
+				const uint32_t i0 = bvh.vertIdx[vi0], i1 = bvh.vertIdx[vi0 + 1], i2 = bvh.vertIdx[vi0 + 2];
+				if (TriOccludes( ray, verts, pi, i0, i1, i2 )) return true;
+			}
+			else for (Index i = 0; i < node->triCount; i++)
+			{
+				const Index pi = primIdx[node->firstTri + i], vi0 = pi * 3;
+				if (TriOccludes( ray, verts, pi, vi0, vi0 + 1, vi0 + 2 )) return true;
+			}
+			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			continue;
+		}
+		BVH_SOA_SLAB_TESTS;
+	}
+	return false;
 }
+
+#undef BVH_SOA_SLAB_TESTS
 
 #endif
 
@@ -7410,6 +7567,5 @@ void tinybvh_builtin_parallel_for( uint32_t n, void (*fn)(uint32_t, void*), void
 #endif
 
 } // namespace tinybvh
-
 
 #endif // TINYBVH_IMPLEMENTATION

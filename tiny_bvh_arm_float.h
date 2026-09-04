@@ -19,11 +19,6 @@ TINYBVH_FORCEINLINE void tinybvh_store4i( void* p, const int32x4_t v ) { memcpy(
 TINYBVH_FORCEINLINE float32x4x2_t tinybvh_load8( const void* p ) { float32x4x2_t r; memcpy( &r, p, 32 ); return r; }
 TINYBVH_FORCEINLINE void tinybvh_store8( void* p, const float32x4x2_t v ) { memcpy( p, &v, 32 ); }
 #endif
-TINYBVH_FORCEINLINE float32x4_t SIMD_SETVEC( float w, float z, float y, float x )
-{
-	ALIGNED( 64 ) float data[4] = { x, y, z, w };
-	return vld1q_f32( data );
-}
 TINYBVH_FORCEINLINE float32x4_t SIMD_SETRVEC( float x, float y, float z, float w )
 {
 	ALIGNED( 64 ) float data[4] = { x, y, z, w };
@@ -33,11 +28,6 @@ TINYBVH_FORCEINLINE uint32x4_t SIMD_SETRVECU( uint32_t x, uint32_t y, uint32_t z
 {
 	ALIGNED( 64 ) uint32_t data[4] = { x, y, z, w };
 	return vld1q_u32( data );
-}
-TINYBVH_FORCEINLINE int32x4_t SIMD_SETRVECS( int32_t x, int32_t y, int32_t z, int32_t w )
-{
-	ALIGNED( 64 ) int32_t data[4] = { x, y, z, w };
-	return vld1q_s32( data );
 }
 
 // Specializations provided by this header.
@@ -877,7 +867,6 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<float
 }
 
 #undef NEON_HIT
-
 
 } // namespace tinybvh
 

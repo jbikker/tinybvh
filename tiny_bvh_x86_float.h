@@ -504,17 +504,10 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<float
 
 TINYBVH_FORCEINLINE __m256 bvhc_max8() { return _mm256_set1_ps( -BVH_FAR ); }
 TINYBVH_FORCEINLINE __m256 bvhc_signFlip8() { return _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f ); }
-#define FAST_COPY_256B(d,s,o) { __m256 v0 = s[o], v1 = s[o+1], v2 = s[o+2], v3 = s[o+3], v4 = s[o+4], v5 = s[o+5], v6 = s[o+6],\
-	v7 = s[o+7]; d[o] = v0, d[o+1] = v1, d[o+2] = v2, d[o+3] = v3, d[o+4] = v4, d[o+5] = v5, d[o+6] = v6, d[o+7] = v7; }
 
 // Fast threaded AVX binned-SAH-builder.
 // This code produces BVHs nearly identical to reference, but much faster.
 // The code relies on the availability of AVX instructions. AVX2 is not needed.
-#if defined _MSC_VER && !defined __clang__
-#define LANE8(a,b) a.m256_f32[b]
-#else
-#define LANE8(a,b) a[b]
-#endif
 TINYBVH_FORCEINLINE float halfArea( const __m256& a /* a contains aabb itself, with min.xyz negated */ )
 {
 #ifndef _MSC_VER

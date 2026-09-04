@@ -55,7 +55,7 @@ TinyBVH also supports construction of a _Top-Level Acceleration Structure_ (TLAS
 A more complete overview of TinyBVH functionality can be found in the [Basic Use Manual](https://jacco.ompf2.com/2025/01/24/tinybvh-manual-basic-use) and the [Advanced Topics Manual](https://jacco.ompf2.com/2025/01/25/tinybvh-manual-advanced).
 
 # How To Use
-The library ````tiny_bvh.h```` is designed to be easy to use. Please have a look at [````tiny_bvh_minimal.cpp````](https://github.com/jbikker/tinybvh/blob/dev/examples/tiny_bvh_minimal.cpp) for an example. A Visual Studio 'solution' (.sln/.vcxproj) is included, as well as a CMake file. That being said: Most examples consists of only a single source file, which can be compiled with clang or g++, e.g.:
+The library consists of ````tiny_bvh.h```` and the ````tiny_bvh_*.h```` headers next to it; keep them together and include only ````tiny_bvh.h````. It is designed to be easy to use. Please have a look at [````tiny_bvh_minimal.cpp````](https://github.com/jbikker/tinybvh/blob/dev/examples/tiny_bvh_minimal.cpp) for an example. A Visual Studio 'solution' (.sln/.vcxproj) is included, as well as a CMake file. That being said: Most examples consists of only a single source file, which can be compiled with clang or g++, e.g.:
 
 ````g++ examples/tiny_bvh_minimal.cpp````
 
