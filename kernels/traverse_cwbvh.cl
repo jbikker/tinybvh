@@ -573,6 +573,10 @@ void kernel batch_cwbvh_any( global const float4* cwbvhNodes, global const float
 #endif
 	float tmax = 1e30f;
 	float4 hit = 0;
+#ifdef SIMD_AABBTEST
+	if (isoccluded_cwbvh( cwbvhNodes, cwbvhTris, O4, D4, rD4, tmax )) hit.w = 1;
+#else
 	if (isoccluded_cwbvh( cwbvhNodes, cwbvhTris, O4.xyz, D4.xyz, rD4.xyz, tmax )) hit.w = 1;
+#endif
 	rayData[threadId].hit = hit;
 }
