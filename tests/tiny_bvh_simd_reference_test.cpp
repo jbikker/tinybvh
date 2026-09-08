@@ -10,7 +10,7 @@
 // own comparison.
 
 #define TINYBVH_IMPLEMENTATION
-#define USE_DEPRECATED_LAYOUT // enables BVH_SoA
+// #define USE_DEPRECATED_LAYOUT // enables BVH_SoA
 #include "tiny_bvh.h"
 #include <cstdio>
 #include <vector>
@@ -23,7 +23,9 @@ using BVHBaseS = impl::BVHBase<float, uint64_t>;
 using BLASInstanceS = impl::BLASInstance<float, uint64_t>;
 using BVH4_CPUS = impl::BVH4_CPU<float, uint64_t>;
 using BVH8_CPUS = impl::BVH8_CPU<float, uint64_t>;
-// using BVH_SoAS = impl::BVH_SoA<float, uint64_t>;
+#ifdef USE_DEPRECATED_LAYOUT
+using BVH_SoAS = impl::BVH_SoA<float, uint64_t>;
+#endif
 
 static constexpr float SCENE_SIZE = 10.0f;		// triangles and ray origins live in [0, SCENE_SIZE]^3
 static constexpr float T_TOLERANCE = 2e-5f;		// FMA versus separate multiply and add
@@ -247,8 +249,10 @@ int main()
 	CompareLayouts<BVH8_CPU, BVH8_CPUS>( "BVH8_CPU, indexed grid", grid );
 	CompareLayouts<BVH8_CPU, BVH8_CPUS>( "BVH8_CPU, opacity maps", mapped );
 	CompareTLAS<BVH8_CPU, BVH8_CPUS>( "TLAS over BVH8_CPU", soup );
-	// CompareLayouts<BVH_SoA, BVH_SoAS>( "BVH_SoA, soup", soup );
-	// CompareLayouts<BVH_SoA, BVH_SoAS>( "BVH_SoA, indexed grid", grid );
+#ifdef USE_DEPRECATED_LAYOUT
+	CompareLayouts<BVH_SoA, BVH_SoAS>( "BVH_SoA, soup", soup );
+	CompareLayouts<BVH_SoA, BVH_SoAS>( "BVH_SoA, indexed grid", grid );
+#endif
 
 	// builders and packets
 	CompareBuilders( soup );
