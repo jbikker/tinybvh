@@ -252,6 +252,7 @@ TINYBVH_FORCEINLINE float tinybvh_fma( const float a, const float b, const float
 	#endif
 		return a * b + c;
 }
+TINYBVH_FORCEINLINE float tinybvh_round( const float x ) { return roundf( x ); }
 TINYBVH_FORCEINLINE float tinybvh_min( const float a, const float b ) { return a < b ? a : b; }
 TINYBVH_FORCEINLINE float tinybvh_max( const float a, const float b ) { return a > b ? a : b; }
 TINYBVH_FORCEINLINE double tinybvh_min( const double a, const double b ) { return a < b ? a : b; }
@@ -288,6 +289,7 @@ TINYBVH_FORCEINLINE bool tinybvh_isnan( double f )
 TINYBVH_FORCEINLINE double tinybvh_sqrf( const double x ) { return x * x; }
 TINYBVH_FORCEINLINE double tinybvh_fma( const double a, const double b, const double c ) { return a * b + c; }
 TINYBVH_FORCEINLINE double tinybvh_clamp( const double x, const double a, const double b ) { return x > a ? (x < b ? x : b) : a; /* NaN safe */ }
+TINYBVH_FORCEINLINE double tinybvh_round( const double x ) { return round( x ); }
 
 // Operator overloads.
 // Only a minimal set is provided.
@@ -2491,11 +2493,20 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildFullSweep
 		if (triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
 			threadedBuild = true, atomicNewNodePtr = this->template ContextNew<std::atomic<Index>>( newNodePtr );
 	#endif
-		// create 32-bit integer sorting keys from fragment centroids
+		// create 32-bit integer sorting keys from fragment centroids, normalized to the root box.
 		uint32_t* sortKey[3];
 		for (int a = 0; a < 3; a++) sortKey[a] = (uint32_t*)(bvhNode + 2) + a * triCount;
-		for (Index i = 0; i < triCount; i++)
-			for (int a = 0; a < 3; a++) sortKey[a][i] = FloatToKey( fragment[i].bmin[a] + fragment[i].bmax[a] );
+		Float keyScale[3], keyBias[3];
+		for (int a = 0; a < 3; a++)
+		{
+			const Float ext = (bvhNode->aabbMax[a] - bvhNode->aabbMin[a]) * 2;
+			keyBias[a] = bvhNode->aabbMin[a] * 2, keyScale[a] = ext > 0 ? (Float)0xffffffffu / ext : 0;
+		}
+		for (Index i = 0; i < triCount; i++) for (int a = 0; a < 3; a++)
+		{
+			const Float t = (fragment[i].bmin[a] + fragment[i].bmax[a] - keyBias[a]) * keyScale[a];
+			sortKey[a][i] = (uint32_t)tinybvh_clamp( t, (Float)0, (Float)0xffffffffu );
+		}
 		// allocate data for O(N) stable partition
 		flag = (uint8_t*)AlignedAlloc( triCount );
 		for (int a = 0; a < 3; a++) sortedIdx[a] = (Index*)AlignedAlloc( triCount * sizeof( Index ) );
@@ -3409,8 +3420,8 @@ template <typename Float, typename Index> Float BVH<Float, Index>::GetNodeSize( 
 	float nodeSize;
 	std::memcpy( &nodeSize, &exponentBits, sizeof( nodeSize ) );
 	// transform back into global space
-	nodeSize *= globalSize;
-	return nodeSize > 0 ? nodeSize : extent * 0.5f;
+	const Float scaled = (Float)nodeSize * globalSize;
+	return scaled > 0 ? scaled : extent * (Float)0.5;
 }
 
 template <typename Float, typename Index> Index BVH<Float, Index>::Presplit()
@@ -3454,7 +3465,7 @@ template <typename Float, typename Index> Index BVH<Float, Index>::Presplit()
 		if (nodeSize > extent[splitAxis] * 0.9999f) nodeSize *= 0.5f;
 		// snap mid position to nearest split plane
 		const Float midPos = (f.bmin[splitAxis] + f.bmax[splitAxis]) * 0.5f;
-		const Float index = roundf( (midPos - root.aabbMin[splitAxis]) / nodeSize );
+		const Float index = tinybvh_round( (midPos - root.aabbMin[splitAxis]) / nodeSize );
 		Float splitPos = root.aabbMin[splitAxis] + index * nodeSize;
 		if (!(splitPos > f.bmin[splitAxis] && splitPos < f.bmax[splitAxis])) splitPos = midPos;
 		if (!SplitFrag( fragment[i], part1, part2, splitAxis, splitPos )) { splits[i] = 1; continue; }
