@@ -105,78 +105,11 @@ THE SOFTWARE.
 
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
-#define TINY_BVH_VERSION_MINOR	8
-#define TINY_BVH_VERSION_SUB	2
+#define TINY_BVH_VERSION_MINOR	9
+#define TINY_BVH_VERSION_SUB	0
 
 // Cached BVH file version - increases only when file layout changes.
-#define TINY_BVH_CACHE_VERSION	183
-
-// Run-time checks / debugging.
-// #define PARANOID // checks out-of-bound access of slices
-// #define SLICEDUMP // dumps the slice used for building to a file - debug feature.
-
-// Binned BVH building: bin count.
-#ifndef BVHBINS
-#define BVHBINS 8
-#endif
-#ifndef HQBVHBINS
-#define HQBVHBINS 8
-#define MAXHQBINS 128
-#endif
-#define AVXBINS 8 // must stay at 8.
-
-// Stack size for all CPU-side traversal functions.
-#ifndef TINYBVH_STACK_SIZE
-#define TINYBVH_STACK_SIZE 128
-#endif
-
-// TLAS setting
-// Note: Except when INST_IDX_BITS is set to 32, the instance index is encoded in
-// the top bits of the prim idx field.
-// Max number of instances in TLAS: 2 ^ INST_IDX_BITS
-// Max number of primitives per BLAS: 2 ^ (32 - INST_IDX_BITS)
-#ifndef INST_IDX_BITS
-#define INST_IDX_BITS 32 // Use 4..~12 to use prim field bits for instance id, or set to 32 to store index in separate field.
-#endif
-
-// SAH BVH building: Heuristic parameters
-// CPU traversal: C_INT = 1, C_TRAV = 1 seems optimal.
-// These are defaults, which initialize the public members c_int and c_trav in
-// BVHBase (and thus each BVH instance).
-#ifndef C_INT
-#define C_INT	1
-#endif
-#ifndef C_TRAV
-#define C_TRAV	1
-#endif
-#ifndef W_EPO
-#define W_EPO	0.71f
-#endif
-
-// SBVH: "Unsplitting"
-#define SBVH_UNSPLITTING
-#define RDH_MAX_WEIGHT 0.8f
-
-// Triangle intersection: "Watertight"
-// #define WATERTIGHT_TRITEST
-
-// 'Infinity' values
-#define BVH_FAR	1e30f		// actual valid ieee range: 3.40282347E+38
-#define BVH_RCP_FAR	0x1p100f	// reciprocal of a zero direction component; see tinybvh_safercp
-#define BVH_DBL_FAR 1e300	// actual valid ieee range: 1.797693134862315E+308
-#define BVH_DBL_RCP_FAR 0x1p1000	// double precision counterpart of BVH_RCP_FAR
-
-// Threaded builds: spawn subtree tasks down to this depth (up to 2^N tasks).
-#ifndef MT_SPAWN_DEPTH
-#define MT_SPAWN_DEPTH 9
-#endif
-// Threaded builds: only spawn a task if the larger child has at least this many primitives.
-#ifndef MT_SPAWN_MIN_PRIMS
-#define MT_SPAWN_MIN_PRIMS 5000
-#endif
-#ifndef MT_BUILD_THRESHOLD
-#define MT_BUILD_THRESHOLD 50000 // single-threaded builds below this triangle count
-#endif
+#define TINY_BVH_CACHE_VERSION	190
 
 // Features
 #ifndef NO_DOUBLE_PRECISION_SUPPORT
@@ -197,13 +130,70 @@ THE SOFTWARE.
 // #define TINYBVH_USE_CUSTOM_VECTOR_TYPES
 // #define TINYBVH_NO_SIMD
 
-// C++ features
-#if __cplusplus >= 202002L
-#define ISLIKELY [[likely]]
-#define ISUNLIKELY [[unlikely]]
-#else
-#define ISLIKELY
-#define ISUNLIKELY
+// Run-time checks / debugging.
+// #define PARANOID // checks out-of-bound access of slices
+// #define SLICEDUMP // dumps the slice used for building to a file - debug feature.
+
+// Binned BVH building: bin count.
+#ifndef BVHBINS
+#define BVHBINS 8
+#endif
+#ifndef HQBVHBINS
+#define HQBVHBINS 8 // default; gets copied to hqbvhbins, which can be modified.
+#define MAXHQBINS 128 // max value for hqbvhbins.
+#endif
+
+// Stack size for all CPU-side traversal functions.
+#ifndef TINYBVH_STACK_SIZE
+#define TINYBVH_STACK_SIZE 128
+#endif
+
+// TLAS setting
+// Note: Except when INST_IDX_BITS is set to 32, the instance index is encoded in
+// the top bits of the prim idx field.
+// Max number of instances in TLAS: 2 ^ INST_IDX_BITS
+// Max number of primitives per BLAS: 2 ^ (32 - INST_IDX_BITS)
+#ifndef INST_IDX_BITS
+#define INST_IDX_BITS 10 // Use 4..~12 to use prim field bits for instance id, or set to 32 to store index in separate field.
+#endif
+
+// SAH BVH building: Heuristic parameters
+// CPU traversal: C_INT = 1, C_TRAV = 1 seems optimal.
+// These are defaults, which initialize the public members c_int and c_trav in
+// BVHBase (and thus each BVH instance).
+#ifndef C_INT
+#define C_INT	1 // triangle intersection cost
+#endif
+#ifndef C_TRAV
+#define C_TRAV	1 // traversal step cost
+#endif
+#ifndef W_EPO
+#define W_EPO	0.71f // weight of 'end point overlap' in EPO calculation.
+#endif
+
+// SBVH: "Unsplitting"
+#define SBVH_UNSPLITTING
+#define RDH_MAX_WEIGHT 0.8f
+
+// Triangle intersection: "Watertight", at a small additional cost.
+// #define WATERTIGHT_TRITEST
+
+// 'Infinity' values
+#define BVH_FAR	1e30f				// actual valid ieee range: 3.40282347E+38
+#define BVH_RCP_FAR	0x1p100f		// reciprocal of a zero direction component; see tinybvh_safercp
+#define BVH_DBL_FAR 1e300			// actual valid ieee range: 1.797693134862315E+308
+#define BVH_DBL_RCP_FAR 0x1p1000	// double precision counterpart of BVH_RCP_FAR
+
+// Threaded builds: spawn subtree tasks down to this depth (up to 2^N tasks).
+#ifndef MT_SPAWN_DEPTH
+#define MT_SPAWN_DEPTH 9
+#endif
+// Threaded builds: only spawn a task if the larger child has at least this many primitives.
+#ifndef MT_SPAWN_MIN_PRIMS
+#define MT_SPAWN_MIN_PRIMS 5000
+#endif
+#ifndef MT_BUILD_THRESHOLD
+#define MT_BUILD_THRESHOLD 50000 // single-threaded builds below this triangle count
 #endif
 
 // Experimental / WIP features
@@ -212,6 +202,7 @@ THE SOFTWARE.
 #define CWBVH_COMPRESSED_TRIS
 // BVH4 triangle format
 // #define BVH4_GPU_COMPRESSED_TRIS
+// Optimization statistics for CWBVH construction
 // #define CWBVH_REPORT_FULLNESS
 
 // ============================================================================
@@ -228,17 +219,27 @@ THE SOFTWARE.
 #include <string.h> // for memset
 #include <stdlib.h> // for exit(1)
 #else // Emscripten / gcc / clang
-#include <cstdlib>
-#include <cstdio>
-#include <cmath>
+#ifndef _MSC_VER
+#include <cmath> // not needed for MSVC
+#endif
 #include <cstring>
 #ifdef _WIN32 // MinGW / clang-cl: no C11 aligned_alloc in the CRT, use _aligned_malloc
 #include <malloc.h> // for alloc/free
 #endif
 #endif
-#include <cstdint>
 #include <atomic> // for SBVH builds
 #include <new> // for placement new, in BVHBase::ContextNew
+
+// Branch prediction.
+#ifdef TINYBVH_IMPLEMENTATION
+#if __cplusplus >= 202002L
+#define ISLIKELY [[likely]]
+#define ISUNLIKELY [[unlikely]]
+#else
+#define ISLIKELY
+#define ISUNLIKELY
+#endif
+#endif
 
 // Platform-independent compile-time warnings.
 #define EMIT_COMPILER_WARNING_STRINGIFY0(x) #x
