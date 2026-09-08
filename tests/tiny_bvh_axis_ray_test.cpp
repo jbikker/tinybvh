@@ -8,7 +8,7 @@
 // degrees, which produces negative zeros in the instance frame.
 
 #define TINYBVH_IMPLEMENTATION
-#define USE_DEPRECATED_LAYOUT // enables BVH_SoA
+// #define USE_DEPRECATED_LAYOUT // enables BVH_SoA
 #include "tiny_bvh.h"
 #include <cstdio>
 #include <vector>
@@ -163,9 +163,11 @@ int main()
 		bvh.BuildHQ( verts, triCount ), TestFloat( "BVH4_GPU::BuildHQ", bvh );
 	}
 	{
+	#ifdef USE_DEPRECATED_LAYOUT
 		BVH_SoA bvh;
 		bvh.Build( verts, triCount ), TestFloat( "BVH_SoA::Build", bvh );
 		bvh.BuildHQ( verts, triCount ), TestFloat( "BVH_SoA::BuildHQ", bvh );
+	#endif
 	}
 	{
 		BVH4_CPU bvh;
