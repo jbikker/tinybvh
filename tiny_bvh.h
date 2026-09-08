@@ -320,7 +320,7 @@ WARNING( "NEON not enabled in compilation." )
 #endif
 #define TINYBVH_ALIGNED( x ) ALIGNED( x ) // prefixed alias; 'ALIGNED' may collide.
 
-// Derived TLAS things; for convenience.
+// Derived TLAS values; for convenience.
 #define INST_IDX_SHFT (32 - INST_IDX_BITS)
 #if INST_IDX_BITS == 32
 #define PRIM_IDX_MASK 0xffffffff // instance index stored separately.

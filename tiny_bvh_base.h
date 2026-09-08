@@ -8,18 +8,11 @@
 #ifndef TINY_BVH_BASE_H_
 #define TINY_BVH_BASE_H_
 
+// Cache-line aligned memory allocation.
 namespace tinybvh {
-// round 'x' up to a multiple of 'alignment', which must be a power of two.
-inline size_t make_multiple_of( size_t x, size_t alignment )
-{
-	if (x > SIZE_MAX - (alignment - 1)) return 0; // would overflow
-	return (x + (alignment - 1)) & ~(alignment - 1);
-}
 inline void* malloc64( size_t size, void* = nullptr )
 {
-	if (size == 0) return nullptr;
-	size = make_multiple_of( size, 64 );
-	if (size == 0) return nullptr; // overflowed in make_multiple_of
+	if (size == 0) return nullptr; else size = (size + 63) & ~63;
 #ifdef TINYBVH_ALIGNED_ALLOC
 	return TINYBVH_ALIGNED_ALLOC( 64, size );
 #elif defined _WIN32 // MSVC / MinGW / clang-cl: the CRT provides _aligned_malloc.
@@ -40,8 +33,7 @@ inline void free64( void* ptr, void* = nullptr )
 #else
 	free( ptr );
 #endif
-}
-}; // namespace tinybvh
+} }; // namespace tinybvh
 
 // error handling
 #ifdef _WINDOWS_ // windows.h has been included
@@ -61,8 +53,7 @@ namespace tinybvh {
 
 #ifdef _MSC_VER
 // Suppress a warning caused by the union of x,y,.. and cell[..] in vectors.
-// We need this union to address vector components either by name or by index.
-// The warning is re-enabled right after the definition of the data types.
+// The warning is re-enabled right after the definition of the vector data types.
 #pragma warning ( push )
 #pragma warning ( disable: 4201 /* nameless struct / union */ )
 #endif
@@ -183,7 +174,7 @@ struct bvhvec4slice
 	uint32_t count, stride;
 };
 
-// type punning helpers
+// Type punning helpers
 template <typename D, typename S> TINYBVH_FORCEINLINE D tinybvh_bitcast( const S& s )
 {
 	D d; memcpy( &d, &s, sizeof( D ) ); return d;
@@ -210,9 +201,6 @@ TINYBVH_FORCEINLINE void tinybvh_setlane_u( void* v, const size_t lane, const ui
 }
 
 // Math operations.
-// Note: Since this header file is expected to be included in a source file
-// of a separate project, the static keyword doesn't provide sufficient
-// isolation; hence the tinybvh_ prefix.
 TINYBVH_FORCEINLINE bool tinybvh_isfinite( float f )
 {
 	uint32_t i;
@@ -291,10 +279,9 @@ TINYBVH_FORCEINLINE double tinybvh_fma( const double a, const double b, const do
 TINYBVH_FORCEINLINE double tinybvh_clamp( const double x, const double a, const double b ) { return x > a ? (x < b ? x : b) : a; /* NaN safe */ }
 TINYBVH_FORCEINLINE double tinybvh_round( const double x ) { return round( x ); }
 
-// Operator overloads.
-// Only a minimal set is provided.
 #ifndef TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
+// Operator overloads - only a minimal set is provided.
 TINYBVH_FORCEINLINE bvhvec2 operator-( const bvhvec2& a ) { return bvhvec2( -a.x, -a.y ); }
 TINYBVH_FORCEINLINE bvhvec3 operator-( const bvhvec3& a ) { return bvhvec3( -a.x, -a.y, -a.z ); }
 TINYBVH_FORCEINLINE bvhvec4 operator-( const bvhvec4& a ) { return bvhvec4( -a.x, -a.y, -a.z, -a.w ); }
@@ -325,7 +312,7 @@ TINYBVH_FORCEINLINE void operator*=( bvhvec3& a, const float b ) { a.x *= b; a.y
 
 #endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
-// Vector math: cross and dot.
+// Vector math: common operations.
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_cross( const bvhvec3& a, const bvhvec3& b )
 {
 	return bvhvec3( a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x );
@@ -333,8 +320,6 @@ TINYBVH_FORCEINLINE bvhvec3 tinybvh_cross( const bvhvec3& a, const bvhvec3& b )
 TINYBVH_FORCEINLINE float tinybvh_dot( const bvhvec2& a, const bvhvec2& b ) { return a.x * b.x + a.y * b.y; }
 TINYBVH_FORCEINLINE float tinybvh_dot( const bvhvec3& a, const bvhvec3& b ) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 TINYBVH_FORCEINLINE float tinybvh_dot( const bvhvec4& a, const bvhvec4& b ) { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; }
-
-// Vector math: common operations.
 TINYBVH_FORCEINLINE float tinybvh_length( const bvhvec3& a ) { return sqrtf( a.x * a.x + a.y * a.y + a.z * a.z ); }
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_normalize( const bvhvec3& a )
 {
@@ -359,10 +344,10 @@ inline bvhvec3 tinybvh_transform_vector( const bvhvec3& v, const bvhmat4& T )
 }
 
 #ifdef DOUBLE_PRECISION_SUPPORT
-// Double-precision math
 
 #ifndef TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
+// Double-precision math.
 struct bvhdbl3
 {
 	bvhdbl3() = default;
@@ -377,7 +362,7 @@ struct bvhdbl3
 #endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
 #ifdef _MSC_VER
-#pragma warning ( pop )
+#pragma warning ( pop ) // re-enable 4201, "nameless struct in union".
 #endif
 
 TINYBVH_FORCEINLINE bvhdbl3 tinybvh_min( const bvhdbl3& a, const bvhdbl3& b ) { return bvhdbl3( tinybvh_min( a.x, b.x ), tinybvh_min( a.y, b.y ), tinybvh_min( a.z, b.z ) ); }
@@ -430,15 +415,12 @@ inline bvhdbl3 tinybvh_transform_vector( const bvhdbl3& v, const double* T )
 	return bvhdbl3( T[0] * v.x + T[1] * v.y + T[2] * v.z, T[4] * v.x +
 		T[5] * v.y + T[6] * v.z, T[8] * v.x + T[9] * v.y + T[10] * v.z );
 }
-
 TINYBVH_FORCEINLINE bvhdbl3 tinybvh_cross( const bvhdbl3& a, const bvhdbl3& b )
 {
 	return bvhdbl3( a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x );
 }
 TINYBVH_FORCEINLINE double tinybvh_dot( const bvhdbl3& a, const bvhdbl3& b ) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-
 TINYBVH_FORCEINLINE double tinybvh_halfarea( const bvhdbl3& v ) { return v.x < -BVH_DBL_FAR ? 0 : (v.x * v.y + v.y * v.z + v.z * v.x); } // for SAH calculations
-
 TINYBVH_FORCEINLINE uint32_t tinybvh_maxdim( const bvhdbl3& v ) { uint32_t r = fabs( v.x ) > fabs( v.y ) ? 0 : 1; return fabs( v.z ) > fabs( v[r] ) ? 2 : r; }
 
 // Double-precision 4x4 matrix, the counterpart of bvhmat4 for BLASInstanceEx.
@@ -510,12 +492,11 @@ template <typename Index> struct IntersectionInst<Index, true> { };
 #endif
 template <typename Float, typename Index> struct Intersection : IntersectionInst<Index>
 {
-	// An intersection result is designed to fit in no more than
-	// four 32-bit values. This allows efficient storage of a result in
-	// GPU code. The obvious missing result is an instance id; consider
+	// An intersection result is designed to fit in 16 bytes / four 32-bit values. 
+	// Beyond t, u, v, and prim, the obvious missing result is an instance id; consider
 	// squeezing this in the 'prim' field in some way.
-	// Using this data and the original triangle data, all other info for
-	// shading (such as normal, texture color etc.) can be reconstructed.
+	// Using this data and the original triangle data, all other info for shading (such 
+	// as normal, texture color etc.) can be reconstructed.
 	Float t, u, v;	// distance along ray & barycentric coordinates of the intersection
 	Index prim;		// primitive index
 	// 64 byte of custom data - For the typical case, where Intersection is
@@ -540,9 +521,8 @@ template <typename Float, typename Index> struct Intersection : IntersectionInst
 
 template <typename Float, typename Index> struct ALIGNED( 64 ) Ray
 {
-	// Basic ray class. Note: For single blas traversal it is expected
-	// that Ray::rD is properly initialized. For tlas/blas traversal this
-	// field is typically updated for each blas.
+	// Basic ray class. Note: For single blas traversal it is expected that Ray::rD is 
+	// properly initialized. For tlas/blas traversal this is typically updated for each blas.
 	using Vec3 = typename bvh_traits<Float>::vec3;
 	Ray() = default;
 	Ray( Vec3 origin, Vec3 direction, Float t = bvh_far<Float>, uint32_t rayMask = RAY_MASK_INTERSECT_ALL )
@@ -1574,13 +1554,13 @@ public:
 	struct DDAState
 	{
 		uint32_t X, Y, Z;		// 12 bytes
-		float dummy1 = 0;		// 16 bytes
-		bvhvec3 tmax;
-		float dummy2 = 0;		// 32 bytes in total
+		float dummy1 = 0;		// 4 bytes
+		bvhvec3 tmax;			// 12 bytes
+		float dummy2 = 0;		// 4 bytes; 32 bytes in total
 	};
 	VoxelSet();
 	~VoxelSet();
-	VoxelSet( const VoxelSet& ) = delete;		// owns raw allocations; copying would alias them
+	VoxelSet( const VoxelSet& ) = delete; // owns raw allocations; copying would alias them
 	VoxelSet& operator=( const VoxelSet& ) = delete;
 	void Set( const uint32_t x, const uint32_t y, const uint32_t z, const uint32_t v );
 	void UpdateTopGrid();
@@ -3083,9 +3063,9 @@ template <typename Float, typename Index> struct BVHMetricArgs
 	const Index* node;		// node indices to score
 	Index nodeCount;
 	uint32_t tasks;
-	double* epo;				// [tasks] EPO accumulators, or 0 to skip
-	double* sah;				// [tasks] SAH accumulators, or 0 to skip
-	double* area;				// [tasks] primitive area accumulators, or 0 to skip
+	double* epo;			// [tasks] EPO accumulators, or 0 to skip
+	double* sah;			// [tasks] SAH accumulators, or 0 to skip
+	double* area;			// [tasks] primitive area accumulators, or 0 to skip
 	Index primCount;
 };
 
@@ -4935,8 +4915,6 @@ template <int M, typename Float, typename Index> Float MBVH<M, Float, Index>::SA
 	return nodeIdx == 0 ? (cost / sa) : cost;
 }
 
-#if 1
-
 // Collapse a BVH2 into an M-wide BVH. Based on "Efficient Incoherent Ray Traversal on GPUs 
 // Through Compressed Wide BVHs", Ylitie et al. 2017, section 4.2.
 static constexpr float c_leaf = C_INT * 0.8f;
@@ -5075,86 +5053,6 @@ template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Con
 	AlignedFree( subCount ), AlignedFree( srcNode ), AlignedFree( flag );
 	this->may_have_holes = false; // the collapse produces a continuous list of nodes.
 }
-
-#else
-
-// Old collapse method, left in for reference.
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::ConvertFrom( const BVH& original, bool compact )
-{
-	// get a copy of the original bvh
-	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
-	bvh.ReferenceFrom( original );
-	// allocate space
-	Index spaceNeeded = compact ? original.usedNodes : original.allocatedNodes;
-	constexpr bool M8 = M == 8;
-	if (M8) spaceNeeded += original.usedNodes >> 1; // cwbvh / SplitLeafs
-	if (allocatedNodes < spaceNeeded)
-	{
-		AlignedFree( mbvhNode );
-		mbvhNode = (MBVHNode*)AlignedAlloc( spaceNeeded * sizeof( MBVHNode ) );
-		allocatedNodes = spaceNeeded;
-	}
-	memset( mbvhNode, 0, sizeof( MBVHNode ) * spaceNeeded );
-	CopyBasePropertiesFrom( original );
-	// create an mbvh node for each bvh2 node
-	for (Index i = 0; i < original.usedNodes; i++) if (i != 1)
-	{
-		typename BVH::BVHNode& orig = original.bvhNode[i];
-		MBVHNode& node = this->mbvhNode[i];
-		node.aabbMin = orig.aabbMin, node.aabbMax = orig.aabbMax;
-		if (orig.isLeaf()) node.triCount = orig.triCount, node.firstTri = orig.leftFirst;
-		else node.child[0] = orig.leftFirst, node.child[1] = orig.leftFirst + 1, node.childCount = 2;
-	}
-	// collapse
-	Index stack[TINYBVH_STACK_SIZE], stackPtr = 0, nodeIdx = 0; // i.e., root node
-	while (1)
-	{
-		MBVHNode& node = this->mbvhNode[nodeIdx];
-		while (node.childCount < M)
-		{
-			int32_t bestChild = -1;
-			Float bestChildSA = 0;
-			for (Index i = 0; i < node.childCount; i++)
-			{
-				// see if we can adopt child i
-				const MBVHNode& child = this->mbvhNode[node.child[i]];
-				if (!child.isLeaf() && node.childCount - 1 + child.childCount <= M)
-				{
-					const Float childSA = SA( child.aabbMin, child.aabbMax );
-					if (childSA > bestChildSA) bestChild = i, bestChildSA = childSA;
-				}
-			}
-			if (bestChild == -1) break; // could not adopt
-			const MBVHNode& child = this->mbvhNode[node.child[bestChild]];
-			node.child[bestChild] = child.child[0];
-			for (Index i = 1; i < child.childCount; i++)
-				node.child[node.childCount++] = child.child[i];
-		}
-		// we're done with the node; proceed with the children.
-		for (Index i = 0; i < node.childCount; i++)
-		{
-			const Index childIdx = node.child[i];
-			const MBVHNode& child = this->mbvhNode[childIdx];
-			if (!child.isLeaf()) stack[stackPtr++] = childIdx;
-		}
-		if (stackPtr == 0) break;
-		nodeIdx = stack[--stackPtr];
-	}
-	// special case where root is leaf: add extra level - cwbvh needs this.
-	MBVHNode& root = this->mbvhNode[0];
-	if (root.isLeaf())
-	{
-		mbvhNode[1] = root;
-		root.childCount = 1;
-		root.child[0] = 1;
-		root.triCount = 0;
-	}
-	// finalize
-	usedNodes = original.usedNodes;
-	this->may_have_holes = true;
-}
-
-#endif
 
 // BVH4_GPU implementation
 // ----------------------------------------------------------------------------
