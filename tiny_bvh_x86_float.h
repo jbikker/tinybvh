@@ -66,6 +66,8 @@ namespace tinybvh {
 
 #ifdef BVH_USESSE
 
+#define AVXBINS 8 // must stay at 8.
+
 // SIMD constants - Functions rather than mutable statics. Calls fold to a constant or a single broadcast.
 TINYBVH_FORCEINLINE __m128 bvhc_min1() { return _mm_set1_ps( -1.0f ); }
 TINYBVH_FORCEINLINE __m128 bvhc_binmul3() { return _mm_set1_ps( AVXBINS * 0.49999f ); }
