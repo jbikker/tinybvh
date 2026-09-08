@@ -413,10 +413,8 @@ public:
 			tinybvh::BVH* dynamicBVH = 0;
 		#if defined BVH_USEAVX2
 			tinybvh::BVH8_CPU* rigidBVH;
-		#elif defined BVH_USESSE
-			tinybvh::BVH4_CPU* rigidBVH;
 		#else
-			tinybvh::BVH_SoA* rigidBVH;
+			tinybvh::BVH4_CPU* rigidBVH;
 		#endif
 			tinybvh::BVH_GPU* dynamicGPU;
 			tinybvh::BVH_GPU* rigidGPU;
@@ -2020,10 +2018,8 @@ void Node::Update( const ts_mat4& T )
 				{
 				#if defined BVH_USEAVX2
 					mesh->blas.rigidBVH = new tinybvh::BVH8_CPU();
-				#elif defined BVH_USESSE
-					mesh->blas.rigidBVH = new tinybvh::BVH4_CPU();
 				#else
-					mesh->blas.rigidBVH = new tinybvh::BVH_SoA();
+					mesh->blas.rigidBVH = new tinybvh::BVH4_CPU();
 				#endif
 					if (mesh->omaps) mesh->blas.rigidBVH->SetOpacityMicroMaps( mesh->omaps, mesh->omapN );
 				}
