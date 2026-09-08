@@ -1207,7 +1207,6 @@ public:
 	using typename Base::Vec3;
 	using typename Base::Slice;
 	using typename Base::Ray;
-	using typename Base::BVH;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -1216,8 +1215,6 @@ public:
 	using Base::allocatedNodes;
 	using Base::usedNodes;
 	using Base::triCount;
-	using Base::aabbMin;
-	using Base::aabbMax;
 protected:
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
@@ -1282,7 +1279,6 @@ public:
 	using typename Base::Vertex;
 	using typename Base::Slice;
 	using typename Base::Ray;
-	using typename Base::BVH;
 	using typename Base::BVHTri4Leaf;
 	using Base::settings;
 	using Base::c_trav;
@@ -1292,8 +1288,6 @@ public:
 	using Base::usedNodes;
 	using Base::triCount;
 	using Base::l_quads;
-	using Base::aabbMin;
-	using Base::aabbMax;
 protected:
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
@@ -1352,7 +1346,6 @@ public:
 	using typename Base::Vec3;
 	using typename Base::Slice;
 	using typename Base::Ray;
-	using typename Base::BVH;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -1360,8 +1353,6 @@ public:
 	using Base::layout;
 	using Base::triCount;
 	using Base::idxCount;
-	using Base::aabbMin;
-	using Base::aabbMax;
 protected:
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
@@ -1462,7 +1453,6 @@ public:
 	using typename Base::Vertex;
 	using typename Base::Slice;
 	using typename Base::Ray;
-	using typename Base::BVH;
 	using typename Base::BVHTri4Leaf;
 	using Base::settings;
 	using Base::c_trav;
@@ -1472,8 +1462,6 @@ public:
 	using Base::usedNodes;
 	using Base::triCount;
 	using Base::l_quads;
-	using Base::aabbMin;
-	using Base::aabbMax;
 protected:
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
@@ -1861,7 +1849,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::ReleaseOwnersh
 template <typename Float, typename Index> void BVH<Float, Index>::DropReference( BVHContext ctx )
 {
 	// Deliberately no destructor call: the buffers are not ours to release.
-	new (this) BVH( ctx );
+	new (this) BVH( ctx ); // 'placement new': Call constructor on existing data (here: this).
 }
 
 template <typename Float, typename Index> BVH<Float, Index>::~BVH()
@@ -4851,7 +4839,7 @@ template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Rel
 template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::DropReference( BVHContext ctx )
 {
 	// deliberately no destructor call: the buffers are not ours to release.
-	new (this) MBVH( ctx );
+	new (this) MBVH( ctx ); // 'placement new': call constructor on this.
 	bvh.DropReference( ctx ); // the nested tree gets the same context
 }
 
