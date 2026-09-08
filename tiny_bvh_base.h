@@ -467,7 +467,7 @@ template <> struct bvh_traits<float>
 	using vertex = bvhvec4;		// vertex storage: 16 bytes per vertex, w unused
 	using slice = bvhvec4slice;
 	using mat4 = bvhmat4;
-	static constexpr bool wide_layouts = true;	// BVH4_CPU, BVH8_CPU and BVH_SoA exist for this scalar type.
+	static constexpr bool wide_layouts = true;	// BVH4_CPU, and BVH8_CPU exist for this scalar type.
 };
 #ifdef DOUBLE_PRECISION_SUPPORT
 template <> struct bvh_traits<double>
@@ -661,7 +661,6 @@ enum BVHType : uint32_t
 	LAYOUT_CWBVH,
 	LAYOUT_BVH8_AVX2,
 	LAYOUT_VOXELSET,
-	LAYOUT_BVH_SOA
 };
 
 namespace impl {
@@ -670,7 +669,6 @@ template <typename Float, typename Index> class BVHBase;
 template <typename Float, typename Index> class BVH;
 template <typename Float, typename Index> class BVH_Verbose;
 template <typename Float, typename Index> class BVH_GPU;
-template <typename Float, typename Index> class BVH_SoA;
 template <int M, typename Float, typename Index> class MBVH;
 template <typename Float, typename Index> class BVH4_GPU;
 template <typename Float, typename Index> class BVH4_CPU;
@@ -821,9 +819,6 @@ public:
 	template <typename, typename> friend class BVH4_CPU;
 	template <typename, typename> friend class BVH8_CPU;
 	template <typename, typename> friend class BVH8_CWBVH;
-#ifdef ENABLE_BVH_SOA
-	template <typename, typename> friend class BVH_SoA;
-#endif
 	template <int, typename, typename> friend class MBVH;
 	struct SubdivTask { Index node, sliceStart, sliceEnd; uint32_t depth; };
 	struct BVHNode
@@ -884,8 +879,6 @@ public:
 	bool IntersectSphere( const Vec3& pos, const Float r ) const;
 	void Intersect256Rays( Ray* first ) const;
 	void Intersect256RaysSSE( Ray* packet ) const; // requires BVH_USEAVX
-	bool IsOccludedTLAS( const Ray& ray ) const;
-	int32_t IntersectTLAS( Ray& ray ) const;
 	void ConvertFrom( const BVH_Verbose& original, bool compact = true );
 	void SplitLeafs( const Index maxPrims );
 	void CombineLeafs( const Index nodeIdx = 0 );
@@ -1056,74 +1049,6 @@ private:
 	BVH_GPU& operator=( const BVH_GPU& ) = default;
 };
 
-#ifdef ENABLE_BVH_SOA
-
-template <typename Float, typename Index> class BVH_SoA : public BVHBase<Float, Index>
-{
-public:
-	using Base = BVHBase<Float, Index>;
-	using typename Base::Vertex;
-	using typename Base::Slice;
-	using typename Base::Ray;
-	using typename Base::BVH;
-	using Base::settings;
-	using Base::c_trav;
-	using Base::c_int;
-	using Base::context;
-	using Base::layout;
-	using Base::allocatedNodes;
-	using Base::usedNodes;
-	using Base::triCount;
-	using Base::aabbMin;
-	using Base::aabbMax;
-protected:
-	using Base::AlignedAlloc;
-	using Base::AlignedFree;
-	using Base::CopyBasePropertiesFrom;
-	using Base::IntersectTri;
-	using Base::TriOccludes;
-public:
-	struct BVHNode
-	{
-		// Second alternative 64-byte BVH node layout, same as BVHAilaLaine but
-		// with child AABBs stored in SoA order: { left.min, left.max, right.min, right.max }.
-		Float xxxx[4], yyyy[4], zzzz[4];
-		Index left, right, triCount, firstTri; // total: 64 bytes
-		bool isLeaf() const { return triCount > 0; }
-	};
-	BVH_SoA( BVHContext ctx = {} ) { layout = LAYOUT_BVH_SOA; context = ctx; }
-	BVH_SoA( const BVH& original ) { /* DEPRICATED */ layout = LAYOUT_BVH_SOA; ConvertFrom( original ); }
-	BVH_SoA( const BVH_SoA& ) = delete; // owns its allocations, so it cannot be copied
-	BVH_SoA( BVH_SoA&& ) noexcept;
-	BVH_SoA& operator=( BVH_SoA&& ) noexcept;
-	~BVH_SoA();
-	void Build( const Vertex* vertices, const Index primCount );
-	void Build( const Slice& vertices );
-	void Build( const Vertex* vertices, const uint32_t* indices, const Index primCount );
-	void Build( const Slice& vertices, const uint32_t* indices, const Index primCount );
-	void BuildHQ( const Vertex* vertices, const Index primCount );
-	void BuildHQ( const Slice& vertices );
-	void BuildHQ( const Vertex* vertices, const uint32_t* indices, const Index primCount );
-	void BuildHQ( const Slice& vertices, const uint32_t* indices, const Index primCount );
-	void Optimize( const uint32_t iterations = 25, bool extreme = false );
-	Float SAHCost( const Index nodeIdx = 0 ) { return bvh.SAHCost( nodeIdx ); }
-	void Save( const char* fileName );
-	bool Load( const char* fileName, const Vertex* vertices, const Index primCount );
-	bool Load( const char* fileName, const Vertex* vertices, const uint32_t* indices, const Index primCount );
-	bool Load( const char* fileName, const Slice& vertices, const uint32_t* indices = 0, const Index primCount = 0 );
-	void ConvertFrom( const BVH& original, bool compact = true );
-	int32_t Intersect( Ray& ray ) const;
-	bool IsOccluded( const Ray& ray ) const;
-	// BVH data
-	BVHNode* bvhNode = 0;			// BVH node in 'structure of arrays' format.
-	BVH bvh;						// BVH_SoA is created from BVH and uses its data.
-	bool ownBVH = true;				// False when ConvertFrom receives an external bvh.
-private:
-	BVH_SoA& operator=( const BVH_SoA& ) = default;
-};
-
-#endif
-
 template <typename Float, typename Index> class BVH_Verbose : public BVHBase<Float, Index>
 {
 public:
@@ -1172,7 +1097,6 @@ public:
 	void ConvertFrom( const BVH& original, bool compact = true );
 	Float SAHCost( const Index nodeIdx = 0 ) const;
 	int32_t NodeCount() const;
-	int32_t PrimCount( const Index nodeIdx = 0 ) const;
 	void Refit( const Index nodeIdx = 0, bool skipLeafs = false );
 	void CheckFit( const Index nodeIdx = 0, bool skipLeafs = false );
 	void Compact();
@@ -1636,9 +1560,6 @@ using BVHBase = impl::BVHBase<float, uint32_t>;
 using BVH = impl::BVH<float, uint32_t>;
 using BVH_Verbose = impl::BVH_Verbose<float, uint32_t>;
 using BVH_GPU = impl::BVH_GPU<float, uint32_t>;
-#ifdef ENABLE_BVH_SOA
-using BVH_SoA = impl::BVH_SoA<float, uint32_t>;
-#endif
 template <int M> using MBVH = impl::MBVH<M, float, uint32_t>;
 using BVH4_GPU = impl::BVH4_GPU<float, uint32_t>;
 using BVH4_CPU = impl::BVH4_CPU<float, uint32_t>;
@@ -3858,9 +3779,6 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 				{
 					if (blas->layout == LAYOUT_BVH4_CPU) cost += ((BVH4_CPU<Float, Index>*)blas)->Intersect( tmpRay );
 					else if (blas->layout == LAYOUT_BVH8_AVX2) cost += ((BVH8_CPU<Float, Index>*)blas)->Intersect( tmpRay );
-				#ifdef ENABLE_BVH_SOA
-					else if (blas->layout == LAYOUT_BVH_SOA) cost += ((BVH_SoA<Float, Index>*)blas)->Intersect( tmpRay );
-				#endif
 					else assert( !"unsupported BLAS layout" );
 				}
 				else assert( !"unsupported BLAS layout" );
@@ -3979,9 +3897,6 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 				{
 					if (blas->layout == LAYOUT_BVH4_CPU) occluded = ((BVH4_CPU<Float, Index>*)blas)->IsOccluded( tmpRay );
 					else if (blas->layout == LAYOUT_BVH8_AVX2) occluded = ((BVH8_CPU<Float, Index>*)blas)->IsOccluded( tmpRay );
-				#ifdef ENABLE_BVH_SOA
-					else if (blas->layout == LAYOUT_BVH_SOA) occluded = ((BVH_SoA<Float, Index>*)blas)->IsOccluded( tmpRay );
-				#endif
 					else assert( !"unsupported BLAS layout" );
 				}
 				else assert( !"unsupported BLAS layout" );
@@ -4898,130 +4813,6 @@ template <typename Float, typename Index> int32_t BVH_GPU<Float, Index>::Interse
 	}
 	return (int32_t)cost; // cast to not break interface.
 }
-
-#ifdef ENABLE_BVH_SOA
-
-// BVH_SoA implementation
-// ----------------------------------------------------------------------------
-
-template <typename Float, typename Index> BVH_SoA<Float, Index>::BVH_SoA( BVH_SoA&& other ) noexcept
-{
-	*this = other;
-	// The embedded bvh must let go too: owned or not, this object now refers to
-	// the same buffers, and only one of the two may release them.
-	other.bvh.ReleaseOwnership();
-	other.bvhNode = 0;
-}
-
-// move assignment: release what we hold, then take over 'other'.
-template <typename Float, typename Index> BVH_SoA<Float, Index>& BVH_SoA<Float, Index>::operator=( BVH_SoA&& other ) noexcept
-{
-	if (this != &other) this->~BVH_SoA(), new (this) BVH_SoA( tinybvh_move( other ) );
-	return *this;
-}
-
-template <typename Float, typename Index> BVH_SoA<Float, Index>::~BVH_SoA()
-{
-	if (!ownBVH) bvh.ReleaseOwnership(); // clear out pointers we don't own.
-	AlignedFree( bvhNode );
-}
-
-// forwarders
-template <typename Float, typename Index> void BVH_SoA<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <typename Float, typename Index> void BVH_SoA<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-template <typename Float, typename Index> void BVH_SoA<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH_SoA<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <typename Float, typename Index> void BVH_SoA<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* indices, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), indices, p ); }
-template <typename Float, typename Index> void BVH_SoA<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH_SoA<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
-
-template <typename Float, typename Index> void BVH_SoA<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
-{
-	// propagate settings for this layout to the underlying layout
-	bvh.context = context, bvh.settings = settings;
-	bvh.c_int = c_int, bvh.c_trav = c_trav;
-	// build underlying layout
-	bvh.Build( vertices, indices, prims );
-	// convert to BVH_SoA layout
-	ConvertFrom( bvh, false );
-}
-
-template <typename Float, typename Index> void BVH_SoA<Float, Index>::Optimize( const uint32_t iterations, bool extreme )
-{
-	bvh.Optimize( iterations, extreme );
-	ConvertFrom( bvh, false );
-}
-
-template <typename Float, typename Index> void BVH_SoA<Float, Index>::Save( const char* fileName )
-{
-	bvh.Save( fileName );
-}
-
-template <typename Float, typename Index> bool BVH_SoA<Float, Index>::Load( const char* fileName, const Vertex* vertices, const Index primCount )
-{
-	return Load( fileName, Slice( vertices, primCount * 3, sizeof( Vertex ) ) );
-}
-
-template <typename Float, typename Index> bool BVH_SoA<Float, Index>::Load( const char* fileName, const Vertex* vertices, const uint32_t* indices, const Index primCount )
-{
-	return Load( fileName, Slice( vertices, primCount * 3, sizeof( Vertex ) ), indices, primCount );
-}
-
-template <typename Float, typename Index> bool BVH_SoA<Float, Index>::Load( const char* fileName, const Slice& vertices, const uint32_t* indices, const Index primCount )
-{
-	if (!bvh.Load( fileName, vertices, indices, primCount )) return false;
-	ConvertFrom( bvh, false );
-	return true;
-}
-
-template <typename Float, typename Index> void BVH_SoA<Float, Index>::ConvertFrom( const BVH& original, bool compact )
-{
-	// get a copy of the original bvh
-	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
-	bvh.ReferenceFrom( original );
-	// allocate space
-	const Index spaceNeeded = compact ? bvh.usedNodes : bvh.allocatedNodes;
-	if (allocatedNodes < spaceNeeded)
-	{
-		AlignedFree( bvhNode );
-		bvhNode = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * spaceNeeded );
-		allocatedNodes = spaceNeeded;
-	}
-	memset( bvhNode, 0, sizeof( BVHNode ) * spaceNeeded );
-	CopyBasePropertiesFrom( bvh );
-	// recursively convert nodes
-	Index newAlt2Node = 0, nodeIdx = 0, stack[TINYBVH_STACK_SIZE], stackPtr = 0;
-	while (1)
-	{
-		const typename BVH::BVHNode& node = bvh.bvhNode[nodeIdx];
-		const Index idx = newAlt2Node++;
-		if (node.isLeaf())
-		{
-			bvhNode[idx].triCount = node.triCount;
-			bvhNode[idx].firstTri = node.leftFirst;
-			if (!stackPtr) break;
-			nodeIdx = stack[--stackPtr];
-			Index newNodeParent = stack[--stackPtr];
-			bvhNode[newNodeParent].right = newAlt2Node;
-		}
-		else
-		{
-			const typename BVH::BVHNode& left = bvh.bvhNode[node.leftFirst];
-			const typename BVH::BVHNode& right = bvh.bvhNode[node.leftFirst + 1];
-			Float* xx = bvhNode[idx].xxxx, * yy = bvhNode[idx].yyyy, * zz = bvhNode[idx].zzzz;
-			xx[0] = left.aabbMin.x, xx[1] = left.aabbMax.x, xx[2] = right.aabbMin.x, xx[3] = right.aabbMax.x;
-			yy[0] = left.aabbMin.y, yy[1] = left.aabbMax.y, yy[2] = right.aabbMin.y, yy[3] = right.aabbMax.y;
-			zz[0] = left.aabbMin.z, zz[1] = left.aabbMax.z, zz[2] = right.aabbMin.z, zz[3] = right.aabbMax.z;
-			bvhNode[idx].left = newAlt2Node; // right will be filled when popped
-			stack[stackPtr++] = idx;
-			stack[stackPtr++] = node.leftFirst + 1;
-			nodeIdx = node.leftFirst;
-		}
-	}
-	usedNodes = newAlt2Node;
-}
-
-#endif
 
 // Generic (templated) MBVH implementation
 // ----------------------------------------------------------------------------
@@ -6522,6 +6313,31 @@ template <typename Float, typename Index> void BVH<Float, Index>::Intersect256Ra
 	BVH_FATAL_ERROR( "BVH::Intersect256RaysSSE requires AVX and single precision." );
 }
 
+// Internals of the SIMD builders. These are called only from the BuildAVX / BuildNEON
+// specializations in the platform headers, so the generic versions are unreachable; they
+// exist so that the explicit instantiations below have a definition for every member.
+template <typename Float, typename Index> void BVH<Float, Index>::PrepareSIMDBuild( const Slice&, const uint32_t*, const Index )
+{
+	BVH_FATAL_ERROR( "BVH::PrepareSIMDBuild requires AVX or NEON and single precision." );
+}
+template <typename Float, typename Index> void BVH<Float, Index>::PrepareSIMDBuildFragSlice( const Index, const Index, const uint32_t*, const int8_t*, const uint32_t, void*, Float*, Float* )
+{
+	BVH_FATAL_ERROR( "BVH::PrepareSIMDBuildFragSlice requires AVX or NEON and single precision." );
+}
+template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMDBinTask( const Index, const Index, void*, uint32_t*, const Float*, const Float* )
+{
+	BVH_FATAL_ERROR( "BVH::BuildSIMDBinTask requires AVX or NEON and single precision." );
+}
+template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMDSubtree( Index, uint32_t )
+{
+	BVH_FATAL_ERROR( "BVH::BuildSIMDSubtree requires AVX or NEON and single precision." );
+}
+template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMDFinalize()
+{
+	BVH_FATAL_ERROR( "BVH::BuildSIMDFinalize requires AVX or NEON and single precision." );
+}
+
+
 // Scalar reference for the BVH4_CPU and BVH8_CPU kernels in tiny_bvh_x86_float.h and
 // tiny_bvh_arm_float.h: the same node order and stack handling, without intrinsics. Also
 // serves the instantiations that have no SIMD kernel. W is the node width; the perm entries
@@ -6639,92 +6455,6 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 {
 	return tinybvh_wide_occluded<BVH8_CPU, 8, posX, posY, posZ>( bvh8Data, ray, opmap, opmapN );
 }
-
-#ifdef ENABLE_BVH_SOA
-
-// Scalar reference for the BVH_SoA kernels in the platform headers.
-#define BVH_SOA_SLAB_TESTS \
-	const Float* x = node->xxxx, * y = node->yyyy, * z = node->zzzz; \
-	const Float tx1a = (x[0] - ray.O.x) * ray.rD.x, tx2a = (x[1] - ray.O.x) * ray.rD.x; \
-	const Float ty1a = (y[0] - ray.O.y) * ray.rD.y, ty2a = (y[1] - ray.O.y) * ray.rD.y; \
-	const Float tz1a = (z[0] - ray.O.z) * ray.rD.z, tz2a = (z[1] - ray.O.z) * ray.rD.z; \
-	const Float tx1b = (x[2] - ray.O.x) * ray.rD.x, tx2b = (x[3] - ray.O.x) * ray.rD.x; \
-	const Float ty1b = (y[2] - ray.O.y) * ray.rD.y, ty2b = (y[3] - ray.O.y) * ray.rD.y; \
-	const Float tz1b = (z[2] - ray.O.z) * ray.rD.z, tz2b = (z[3] - ray.O.z) * ray.rD.z; \
-	const Float tmina = tinybvh_max( tinybvh_max( tinybvh_min( tx1a, tx2a ), tinybvh_min( ty1a, ty2a ) ), tinybvh_max( tinybvh_min( tz1a, tz2a ), Float( 0 ) ) ); \
-	const Float tmaxa = tinybvh_min( tinybvh_min( tinybvh_max( tx1a, tx2a ), tinybvh_max( ty1a, ty2a ) ), tinybvh_min( tinybvh_max( tz1a, tz2a ), ray.hit.t ) ); \
-	const Float tminb = tinybvh_max( tinybvh_max( tinybvh_min( tx1b, tx2b ), tinybvh_min( ty1b, ty2b ) ), tinybvh_max( tinybvh_min( tz1b, tz2b ), Float( 0 ) ) ); \
-	const Float tmaxb = tinybvh_min( tinybvh_min( tinybvh_max( tx1b, tx2b ), tinybvh_max( ty1b, ty2b ) ), tinybvh_min( tinybvh_max( tz1b, tz2b ), ray.hit.t ) ); \
-	Index lidx = node->left, ridx = node->right; \
-	Float dist1 = tmaxa >= tmina ? tmina : bvh_far<Float>, dist2 = tmaxb >= tminb ? tminb : bvh_far<Float>; \
-	if (dist1 > dist2) { tinybvh_swap( dist1, dist2 ); tinybvh_swap( lidx, ridx ); } \
-	if (dist1 == bvh_far<Float>) { if (stackPtr == 0) break; else node = stack[--stackPtr]; } \
-	else { node = bvhNode + lidx; if (dist2 != bvh_far<Float>) stack[stackPtr++] = bvhNode + ridx; }
-
-template <typename Float, typename Index> int32_t BVH_SoA<Float, Index>::Intersect( Ray& ray ) const
-{
-	VALIDATE_RAY( ray );
-	BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
-	const Slice& verts = bvh.verts;
-	const Index* primIdx = bvh.primIdx;
-	uint32_t stackPtr = 0;
-	Float cost = 0;
-	while (1)
-	{
-		cost += c_trav;
-		if (node->isLeaf())
-		{
-			if (indexedEnabled && bvh.vertIdx != 0) for (Index i = 0; i < node->triCount; i++, cost += c_int)
-			{
-				const Index pi = primIdx[node->firstTri + i];
-				const uint32_t i0 = bvh.vertIdx[pi * 3], i1 = bvh.vertIdx[pi * 3 + 1], i2 = bvh.vertIdx[pi * 3 + 2];
-				IntersectTri( ray, pi, verts, i0, i1, i2 );
-			}
-			else for (Index i = 0; i < node->triCount; i++, cost += c_int)
-			{
-				const Index pi = primIdx[node->firstTri + i];
-				IntersectTri( ray, pi, verts, pi * 3, pi * 3 + 1, pi * 3 + 2 );
-			}
-			if (stackPtr == 0) break; else node = stack[--stackPtr];
-			continue;
-		}
-		BVH_SOA_SLAB_TESTS;
-	}
-	return (int32_t)cost;
-}
-
-template <typename Float, typename Index> bool BVH_SoA<Float, Index>::IsOccluded( const Ray& ray ) const
-{
-	BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
-	const Slice& verts = bvh.verts;
-	const Index* primIdx = bvh.primIdx;
-	uint32_t stackPtr = 0;
-	while (1)
-	{
-		if (node->isLeaf())
-		{
-			if (indexedEnabled && bvh.vertIdx != 0) for (Index i = 0; i < node->triCount; i++)
-			{
-				const Index pi = primIdx[node->firstTri + i], vi0 = pi * 3;
-				const uint32_t i0 = bvh.vertIdx[vi0], i1 = bvh.vertIdx[vi0 + 1], i2 = bvh.vertIdx[vi0 + 2];
-				if (TriOccludes( ray, verts, pi, i0, i1, i2 )) return true;
-			}
-			else for (Index i = 0; i < node->triCount; i++)
-			{
-				const Index pi = primIdx[node->firstTri + i], vi0 = pi * 3;
-				if (TriOccludes( ray, verts, pi, vi0, vi0 + 1, vi0 + 2 )) return true;
-			}
-			if (stackPtr == 0) break; else node = stack[--stackPtr];
-			continue;
-		}
-		BVH_SOA_SLAB_TESTS;
-	}
-	return false;
-}
-
-#undef BVH_SOA_SLAB_TESTS
-
-#endif
 
 // ============================================================================
 //
