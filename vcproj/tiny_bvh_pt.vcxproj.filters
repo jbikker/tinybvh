@@ -1,35 +1,32 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="..\examples\tiny_bvh_foliage.cpp" />
-    <ClCompile Include="..\examples\tiny_bvh_gltf_lib.cpp" />
+    <ClCompile Include="..\examples\tiny_bvh_pt.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\tiny_scene.h" />
     <ClInclude Include="..\tiny_bvh.h">
-      <Filter>tiny</Filter>
-    </ClInclude>
-    <ClInclude Include="..\tiny_scene.h">
-      <Filter>tiny</Filter>
+      <Filter>tinybvh</Filter>
     </ClInclude>
     <ClInclude Include="..\tiny_bvh_arm_double.h">
-      <Filter>tiny</Filter>
+      <Filter>tinybvh</Filter>
     </ClInclude>
     <ClInclude Include="..\tiny_bvh_arm_float.h">
-      <Filter>tiny</Filter>
+      <Filter>tinybvh</Filter>
     </ClInclude>
     <ClInclude Include="..\tiny_bvh_base.h">
-      <Filter>tiny</Filter>
+      <Filter>tinybvh</Filter>
     </ClInclude>
     <ClInclude Include="..\tiny_bvh_x86_double.h">
-      <Filter>tiny</Filter>
+      <Filter>tinybvh</Filter>
     </ClInclude>
     <ClInclude Include="..\tiny_bvh_x86_float.h">
-      <Filter>tiny</Filter>
+      <Filter>tinybvh</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <Filter Include="tiny">
-      <UniqueIdentifier>{39030eb7-d203-48ad-a65a-d5e47a2d8845}</UniqueIdentifier>
+    <Filter Include="tinybvh">
+      <UniqueIdentifier>{1695f036-12b9-4032-af32-fff65b50f61f}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

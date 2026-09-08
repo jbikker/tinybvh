@@ -4,8 +4,25 @@
     <ClCompile Include="..\examples\tiny_bvh_gpu_hair.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\tiny_bvh.h" />
     <ClInclude Include="..\tiny_ocl.h" />
+    <ClInclude Include="..\tiny_bvh.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_double.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_float.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_base.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_double.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_float.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\kernels\tools.cl">
@@ -21,6 +38,9 @@
   <ItemGroup>
     <Filter Include="kernels">
       <UniqueIdentifier>{7009844d-0e0c-43b4-80fe-b7d92a884d8e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tinybvh">
+      <UniqueIdentifier>{0d64805a-b3b9-481d-b341-2dfb633c8945}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

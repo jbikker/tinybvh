@@ -11,6 +11,21 @@
     <ClInclude Include="..\tiny_scene.h">
       <Filter>tiny</Filter>
     </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_double.h">
+      <Filter>tiny</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_float.h">
+      <Filter>tiny</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_base.h">
+      <Filter>tiny</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_double.h">
+      <Filter>tiny</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_float.h">
+      <Filter>tiny</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="tiny">

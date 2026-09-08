@@ -4,6 +4,28 @@
     <ClCompile Include="..\examples\tiny_bvh_custom.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\tiny_bvh.h" />
+    <Filter Include="tinybvh">
+      <UniqueIdentifier>{2a589f79-d83a-48ae-9555-74518f5b95be}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\tiny_bvh.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_double.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_float.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_base.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_double.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_float.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

@@ -4,12 +4,32 @@
     <ClCompile Include="..\examples\tiny_bvh_gpu.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\tiny_bvh.h" />
     <ClInclude Include="..\tiny_ocl.h" />
+    <ClInclude Include="..\tiny_bvh.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_double.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_float.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_base.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_double.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_float.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="opencl">
       <UniqueIdentifier>{e18e9430-6d1f-4f79-9194-4ee7ce6ce26d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tinybvh">
+      <UniqueIdentifier>{ec2165af-b253-4318-aa5f-8e1bd31afc7e}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
