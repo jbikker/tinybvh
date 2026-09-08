@@ -6306,48 +6306,25 @@ template <typename Float, typename Index> int32_t BVH8_CWBVH<Float, Index>::Inte
 template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Vertex* v, const Index p ) { BuildAVX( Slice( v, p * 3, sizeof( Vertex ) ), 0, 0 ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Vertex* v, const uint32_t* i, const Index p ) { BuildAVX( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Slice& v ) { BuildAVX( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Slice&, const uint32_t*, const Index )
-{
-	BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX and single precision." );
-}
-
 template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Vertex* v, const Index p ) { BuildNEON( Slice( v, p * 3, sizeof( Vertex ) ), 0, 0 ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Vertex* v, const uint32_t* i, const Index p ) { BuildNEON( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Slice& v ) { BuildNEON( v, 0, 0 ); }
+template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Slice&, const uint32_t*, const Index )
+{ BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX and single precision." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Slice&, const uint32_t*, const Index )
-{
-	BVH_FATAL_ERROR( "BVH::BuildNEON requires NEON and single precision." );
-}
-
+{ BVH_FATAL_ERROR( "BVH::BuildNEON requires NEON and single precision." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::Intersect256RaysSSE( Ray* ) const
-{
-	BVH_FATAL_ERROR( "BVH::Intersect256RaysSSE requires AVX and single precision." );
-}
-
-// Internals of the SIMD builders. These are called only from the BuildAVX / BuildNEON
-// specializations in the platform headers, so the generic versions are unreachable; they
-// exist so that the explicit instantiations below have a definition for every member.
+{ BVH_FATAL_ERROR( "BVH::Intersect256RaysSSE requires AVX and single precision." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::PrepareSIMDBuild( const Slice&, const uint32_t*, const Index )
-{
-	BVH_FATAL_ERROR( "BVH::PrepareSIMDBuild requires AVX or NEON and single precision." );
-}
+{ BVH_FATAL_ERROR( "BVH::PrepareSIMDBuild requires AVX or NEON and single precision." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::PrepareSIMDBuildFragSlice( const Index, const Index, const uint32_t*, const int8_t*, const uint32_t, void*, Float*, Float* )
-{
-	BVH_FATAL_ERROR( "BVH::PrepareSIMDBuildFragSlice requires AVX or NEON and single precision." );
-}
+{ BVH_FATAL_ERROR( "BVH::PrepareSIMDBuildFragSlice requires AVX or NEON and single precision." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMDBinTask( const Index, const Index, void*, uint32_t*, const Float*, const Float* )
-{
-	BVH_FATAL_ERROR( "BVH::BuildSIMDBinTask requires AVX or NEON and single precision." );
-}
+{ BVH_FATAL_ERROR( "BVH::BuildSIMDBinTask requires AVX or NEON and single precision." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMDSubtree( Index, uint32_t )
-{
-	BVH_FATAL_ERROR( "BVH::BuildSIMDSubtree requires AVX or NEON and single precision." );
-}
+{ BVH_FATAL_ERROR( "BVH::BuildSIMDSubtree requires AVX or NEON and single precision." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMDFinalize()
-{
-	BVH_FATAL_ERROR( "BVH::BuildSIMDFinalize requires AVX or NEON and single precision." );
-}
-
+{ BVH_FATAL_ERROR( "BVH::BuildSIMDFinalize requires AVX or NEON and single precision." ); }
 
 // Scalar reference for the BVH4_CPU and BVH8_CPU kernels in tiny_bvh_x86_float.h and
 // tiny_bvh_arm_float.h: the same node order and stack handling, without intrinsics. Also
@@ -6451,17 +6428,14 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 {
 	return tinybvh_wide_intersect<BVH4_CPU, 4, posX, posY, posZ>( bvh4Data, ray, opmap, opmapN );
 }
-
 template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> bool BVH4_CPU<Float, Index>::IsOccludedOctant( const Ray& ray ) const
 {
 	return tinybvh_wide_occluded<BVH4_CPU, 4, posX, posY, posZ>( bvh4Data, ray, opmap, opmapN );
 }
-
 template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU<Float, Index>::IntersectOctant( Ray& ray ) const
 {
 	return tinybvh_wide_intersect<BVH8_CPU, 8, posX, posY, posZ>( bvh8Data, ray, opmap, opmapN );
 }
-
 template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> bool BVH8_CPU<Float, Index>::IsOccludedOctant( const Ray& ray ) const
 {
 	return tinybvh_wide_occluded<BVH8_CPU, 8, posX, posY, posZ>( bvh8Data, ray, opmap, opmapN );
@@ -6646,6 +6620,7 @@ template <typename Float, typename Index> void BVHBase<Float, Index>::Precompute
 	memcpy( dst, T, 12 * 4 );
 }
 
+// Intersect: check overlap between a node AABB and the specified box.
 template <typename Float, typename Index> bool BVH<Float, Index>::BVHNode::Intersect( const Vec3& bmin, const Vec3& bmax ) const
 {
 	return bmin.x < aabbMax.x && bmax.x > aabbMin.x &&
@@ -6855,14 +6830,9 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::MergeS
 // ----------------------------------------------------------------------------
 
 template <typename F, typename I> int32_t VoxelSet::Intersect( impl::Ray<F, I>& ) const
-{
-	BVH_FATAL_ERROR( "VoxelSet::Intersect, a VoxelSet can only be traversed with a single precision ray." );
-}
-
+{ BVH_FATAL_ERROR( "VoxelSet::Intersect, a VoxelSet can only be traversed with a single precision ray." ); }
 template <typename F, typename I> bool VoxelSet::IsOccluded( const impl::Ray<F, I>& ) const
-{
-	BVH_FATAL_ERROR( "VoxelSet::IsOccluded, a VoxelSet can only be traversed with a single precision ray." );
-}
+{ BVH_FATAL_ERROR( "VoxelSet::IsOccluded, a VoxelSet can only be traversed with a single precision ray." ); }
 
 VoxelSet::VoxelSet()
 {
