@@ -210,7 +210,7 @@ static void CompareBuilders( const Scene& s )
 #if defined BVH_USEAVX && !defined BVH_USENEON
 // The SSE packet traversal against the scalar packet traversal. A packet is a 16x16 block
 // of rays from one origin through a square on a plane; the corner rays bound the frustum.
-static void ComparePackets( const Scene& s )
+/* static void ComparePackets( const Scene& s )
 {
 	BVH bvh;
 	Build( bvh, s );
@@ -232,7 +232,7 @@ static void ComparePackets( const Scene& s )
 	}
 	if (g_testFailures) printf( "FAIL: Intersect256RaysSSE, %i failing checks.\n", g_testFailures );
 	g_testFailures = 0;
-}
+} */
 #endif
 
 int main()
