@@ -87,6 +87,8 @@ TINYBVH_FORCEINLINE float32x4x2_t veorq_f32x2( const float32x4x2_t& a, const flo
 	return float32x4x2_t{ vreinterpretq_f32_u32( r0 ), vreinterpretq_f32_u32( r1 ) };
 }
 
+#define AVXBINS 8 // must stay at 8.
+
 // Constants for the NEON builder.
 static const float32x4_t neon_min1 = vdupq_n_f32( -1.0f );
 static const float32x4_t neon_zero4 = vdupq_n_f32( 0.0f );
