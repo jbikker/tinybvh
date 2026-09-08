@@ -20,6 +20,11 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\tiny_bvh.h" />
+    <ClInclude Include="..\tiny_bvh_arm_double.h" />
+    <ClInclude Include="..\tiny_bvh_arm_float.h" />
+    <ClInclude Include="..\tiny_bvh_base.h" />
+    <ClInclude Include="..\tiny_bvh_x86_double.h" />
+    <ClInclude Include="..\tiny_bvh_x86_float.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\examples\tiny_bvh_minimal.cpp" />
@@ -141,7 +146,7 @@
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <FloatingPointModel>Fast</FloatingPointModel>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalIncludeDirectories>..;../external/</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
