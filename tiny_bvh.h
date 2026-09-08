@@ -194,9 +194,6 @@ THE SOFTWARE.
 #ifndef NO_VOXEL_SUPPORT
 #define ENABLE_VOXEL_SUPPORT
 #endif
-#ifdef USE_DEPRECATED_LAYOUT
-#define ENABLE_BVH_SOA 
-#endif
 // #define TINYBVH_USE_CUSTOM_VECTOR_TYPES
 // #define TINYBVH_NO_SIMD
 
@@ -352,9 +349,6 @@ template class impl::BVHBase<float, uint32_t>;
 template class impl::BVH<float, uint32_t>;
 template class impl::BVH_Verbose<float, uint32_t>;
 template class impl::BVH_GPU<float, uint32_t>;
-#ifdef ENABLE_BVH_SOA
-template class impl::BVH_SoA<float, uint32_t>;
-#endif
 template class impl::MBVH<4, float, uint32_t>;
 template class impl::MBVH<8, float, uint32_t>;
 template class impl::BVH4_GPU<float, uint32_t>;
