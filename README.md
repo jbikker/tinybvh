@@ -39,6 +39,7 @@ A constructed BVH can be used to intersect a ray with geometry, using ````BVH::I
 Apart from the default BVH layout (simply named ````BVH````), several other layouts are available, which all serve one or more specific purposes. You can create a BVH in the desired layout by instantiating the appropriate class. The available layouts are:
 * ````BVH```` : A compact format that stores the AABB for a node, along with child pointers and leaf information in a cross-platform-friendly way. The 32-byte size allows for cache-line alignment.
 * ````BVH_Double```` : Double-precision version of ````BVH````.
+* ````BVH4_Double```` : Double-precision version of ````BVH4_CPU````, with AVX2 and NEON traversal kernels.
 * ````MBVH<M>```` : In this (templated) format, each node stores _M_ child pointers, reducing the depth of the tree. This improves performance for divergent rays. Based on the [2008 paper](https://graphics.stanford.edu/~boulos/papers/multi_rt08.pdf) by Ingo Wald et al.
 * ````BVH4_CPU```` : SSE/NEON-optimized wide BVH traversal (["WiVe"](https://web.cs.ucdavis.edu/~hamann/FuetterlingLojewskiPfreundtHamannEbertHPG2017PaperFinal06222017.pdf)). The fastest option for CPUs that do not support AVX.
 * ````BVH8_CPU```` : AVX2-optimized wide BVH traversal (["WiVe"](https://web.cs.ucdavis.edu/~hamann/FuetterlingLojewskiPfreundtHamannEbertHPG2017PaperFinal06222017.pdf)). This is the fastest option on CPU.
