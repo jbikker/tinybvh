@@ -191,6 +191,10 @@ TINYBVH_FORCEINLINE void tinybvh_setlane_f( void* v, const size_t lane, const fl
 {
 	memcpy( (char*)v + lane * 4, &f, 4 );
 }
+TINYBVH_FORCEINLINE double tinybvh_getlane_d( const void* v, const size_t lane )
+{
+	double d; memcpy( &d, (const char*)v + lane * 8, 8 ); return d;
+}
 TINYBVH_FORCEINLINE uint32_t tinybvh_getlane_u( const void* v, const size_t lane )
 {
 	uint32_t u; memcpy( &u, (const char*)v + lane * 4, 4 ); return u;
@@ -451,7 +455,7 @@ template <> struct bvh_traits<float>
 	using vertex = bvhvec4;		// vertex storage: 16 bytes per vertex, w unused
 	using slice = bvhvec4slice;
 	using mat4 = bvhmat4;
-	static constexpr bool wide_layouts = true;	// BVH4_CPU, and BVH8_CPU exist for this scalar type.
+	static constexpr bool wide_layouts = true;	// BVH4_CPU and BVH8_CPU can be attached to a TLAS.
 };
 #ifdef DOUBLE_PRECISION_SUPPORT
 template <> struct bvh_traits<double>
@@ -460,7 +464,7 @@ template <> struct bvh_traits<double>
 	using vertex = bvhdbl3;		// vertex storage: 24 bytes per vertex
 	using slice = bvhdbl3slice;
 	using mat4 = bvhdblmat4;
-	static constexpr bool wide_layouts = false;
+	static constexpr bool wide_layouts = true;
 };
 #endif
 
@@ -1276,8 +1280,8 @@ public:
 	enum { EMPTY_BIT = 1 << 31, LEAF_BIT = 1 << 30 };
 	struct ALIGNED( 64 ) BVHNode
 	{
-		// 4-way BVH node, optimized for CPU rendering. The SSE and NEON kernels load the
-		// bounds of the four children as vectors; the layout is 128 bytes for float.
+		// 4-way BVH node, optimized for CPU rendering. The SIMD kernels load the bounds of
+		// the four children as vectors; the layout is 128 bytes for float, 256 for double.
 		Float xmin[4], xmax[4];
 		Float ymin[4], ymax[4];
 		Float zmin[4], zmax[4];
@@ -1379,7 +1383,7 @@ template <typename Float, typename Index> struct ALIGNED( 64 ) BVHTri4Leaf
 	Float v0x[4], v0y[4], v0z[4];
 	Float e1x[4], e1y[4], e1z[4];
 	Float e2x[4], e2y[4], e2z[4];
-	Index primIdx[4];			// total: 160 bytes for float, padded to 3 full cachelines.
+	Index primIdx[4];			// total: 160 bytes for float (padded to 192), 320 bytes for double.
 	inline void SetData( const Vec3& v0, const Vec3& e1, const Vec3& e2, const Index pidx, const uint32_t slot )
 	{
 		v0x[slot] = v0.x, v0y[slot] = v0.y, v0z[slot] = v0.z;
@@ -1543,6 +1547,7 @@ using IntersectionEx = impl::Intersection<double, uint64_t>;
 using RayEx = impl::Ray<double, uint64_t>;
 using BVHBaseEx = impl::BVHBase<double, uint64_t>;
 using BVH_Double = impl::BVH<double, uint64_t>;
+using BVH4_Double = impl::BVH4_CPU<double, uint64_t>;
 using BLASInstanceEx = impl::BLASInstance<double, uint64_t>;
 #endif
 
