@@ -43,7 +43,6 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const ui
 template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t first, const uint32_t last, void* binbox, uint32_t* count, const float* nmin4, const float* rpd4 );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize();
-template <> void impl::BVH<float, uint32_t>::Intersect256RaysSSE( Ray* packet ) const;
 #endif
 #ifdef BVH_USEAVX2
 template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;

@@ -361,6 +361,8 @@ template class impl::BLASInstance<float, uint32_t>;
 template class impl::BVHBase<double, uint64_t>;
 template class impl::BVH<double, uint64_t>;
 template class impl::BVH_Verbose<double, uint64_t>;
+template class impl::MBVH<4, double, uint64_t>;
+template class impl::BVH4_CPU<double, uint64_t>;
 template class impl::BLASInstance<double, uint64_t>;
 #endif
 

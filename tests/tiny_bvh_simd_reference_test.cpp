@@ -2,8 +2,9 @@
 //
 // This file instantiates SIMD and scalar BVH implementations side by side and
 // compares them against each other. The scalar side uses the fact that the
-// platform headers specialize BVH<float, uint32_t> but not BVH<float, uint64_t>,
-// which therefore falls back to the scalar code.
+// platform headers specialize the <float, uint32_t> and <double, uint64_t>
+// instantiations but not <float, uint64_t> and <double, uint32_t>, which
+// therefore fall back to the scalar code.
 //
 // The trees are built with the reference builder on both sides, so that the
 // comparison is between kernels and not builders. The builders also have their
@@ -13,6 +14,7 @@
 // #define USE_DEPRECATED_LAYOUT // enables BVH_SoA
 #include "tiny_bvh.h"
 #include <cstdio>
+#include <type_traits>
 #include <vector>
 
 using namespace tinybvh;
@@ -26,6 +28,9 @@ using BVH8_CPUS = impl::BVH8_CPU<float, uint64_t>;
 #ifdef USE_DEPRECATED_LAYOUT
 using BVH_SoAS = impl::BVH_SoA<float, uint64_t>;
 #endif
+#ifdef DOUBLE_PRECISION_SUPPORT
+using BVH4_CPUDS = impl::BVH4_CPU<double, uint32_t>;
+#endif
 
 static constexpr float SCENE_SIZE = 10.0f;		// triangles and ray origins live in [0, SCENE_SIZE]^3
 static constexpr float T_TOLERANCE = 2e-5f;		// FMA versus separate multiply and add
@@ -38,6 +43,7 @@ static int g_failures = 0, g_testFailures = 0;
 struct Scene
 {
 	std::vector<bvhvec4> verts;		// three vertices per triangle, or the shared vertices of the grid
+	std::vector<bvhdbl3> dverts;	// the same vertices in double precision
 	std::vector<uint32_t> indices;	// empty for a triangle soup
 	std::vector<uint32_t> opmap;	// opacity micro maps, opmapN^2 bits per triangle
 	uint32_t triCount = 0, opmapN = 0;
@@ -53,6 +59,7 @@ static Scene MakeSoup( const uint32_t count, uint32_t seed )
 		const bvhvec3 c( tinybvh_rndfloat( seed ) * SCENE_SIZE, tinybvh_rndfloat( seed ) * SCENE_SIZE, tinybvh_rndfloat( seed ) * SCENE_SIZE );
 		for (int k = 0; k < 3; k++) s.verts.push_back( bvhvec4( c + tinybvh_rndvec3( seed ) * 0.5f, 0 ) );
 	}
+	for (const bvhvec4& v : s.verts) s.dverts.push_back( bvhdbl3( v ) );
 	return s;
 }
 
@@ -69,6 +76,7 @@ static Scene MakeGrid( const int res, uint32_t seed )
 		for (uint32_t t : tris) s.indices.push_back( t );
 	}
 	s.triCount = res * res * 2;
+	for (const bvhvec4& v : s.verts) s.dverts.push_back( bvhdbl3( v ) );
 	return s;
 }
 
@@ -83,22 +91,24 @@ static void AddOpacityMaps( Scene& s, const uint32_t N, uint32_t seed )
 template <class Acc> static void Build( Acc& acc, const Scene& s )
 {
 	acc.settings.useSIMDifavailable = false; // the reference builder gives both sides the same tree
-	if (s.indices.empty()) acc.Build( s.verts.data(), s.triCount );
-	else acc.Build( s.verts.data(), s.indices.data(), s.triCount );
+	const auto* verts = [&]() { if constexpr (std::is_same_v<typename Acc::Vertex, bvhvec4>) return s.verts.data(); else return s.dverts.data(); }();
+	if (s.indices.empty()) acc.Build( verts, s.triCount );
+	else acc.Build( verts, s.indices.data(), s.triCount );
 	if (s.opmapN) acc.SetOpacityMicroMaps( (uint32_t*)s.opmap.data(), s.opmapN );
 }
 
-static void Fail( const char* name, const char* what, const int ray, const float ta, const float tb, const uint64_t pa, const uint64_t pb )
+static void Fail( const char* name, const char* what, const int ray, const double ta, const double tb, const uint64_t pa, const uint64_t pb )
 {
 	g_failures++;
 	if (g_testFailures++ == 0)
 		printf( "FAIL: %s, %s, ray %i: SIMD t=%.7g prim=%llu, scalar t=%.7g prim=%llu\n", name, what, ray, ta, (unsigned long long)pa, tb, (unsigned long long)pb );
 }
 
-static bool SameHit( const float ta, const float tb, const uint64_t pa, const uint64_t pb )
+static bool SameHit( const double ta, const double tb, const uint64_t pa, const uint64_t pb )
 {
-	// same distance, or the same primitive with a rounding difference in t.
-	if (fabsf( ta - tb ) > T_TOLERANCE) return false;
+	// same distance, or the same primitive with a rounding difference in t. A miss is
+	// BVH_FAR or BVH_DBL_FAR, depending on the precision; neither is below BVH_FAR.
+	if (fabs( ta - tb ) > T_TOLERANCE) return false;
 	return pa == pb || (ta < BVH_FAR && tb < BVH_FAR);
 }
 
@@ -120,7 +130,7 @@ static void CompareRays( const char* name, const AccA& a, const AccB& b, const i
 		RayB rb( O, D );
 		a.Intersect( ra ), b.Intersect( rb );
 		if (!SameHit( ra.hit.t, rb.hit.t, ra.hit.prim, rb.hit.prim )) Fail( name, "Intersect", i, ra.hit.t, rb.hit.t, ra.hit.prim, rb.hit.prim );
-		else if (ra.hit.t < BVH_FAR && (fabsf( ra.hit.u - rb.hit.u ) > 1e-4f || fabsf( ra.hit.v - rb.hit.v ) > 1e-4f) && ra.hit.prim == rb.hit.prim)
+		else if (ra.hit.t < BVH_FAR && (fabs( ra.hit.u - rb.hit.u ) > 1e-4 || fabs( ra.hit.v - rb.hit.v ) > 1e-4) && ra.hit.prim == rb.hit.prim)
 			Fail( name, "Intersect barycentrics", i, ra.hit.u, rb.hit.u, ra.hit.prim, rb.hit.prim );
 		const RayA sa( O, D );
 		const RayB sb( O, D );
@@ -141,7 +151,7 @@ template <class AccA, class AccB> static void CompareLayouts( const char* name, 
 	AccA a;
 	AccB b;
 	Build( a, s ), Build( b, s );
-	CompareRays<Ray, RayS>( name, a, b );
+	CompareRays<typename AccA::Ray, typename AccB::Ray>( name, a, b );
 }
 
 // Instances: identity plus 90 degree rotations about each axis, spaced along z, as in the
@@ -164,18 +174,22 @@ template <class Inst> static void SetTransform( Inst& inst, int i )
 
 template <class AccA, class AccB> static void CompareTLAS( const char* name, const Scene& s )
 {
+	using BaseA = typename AccA::Base;
+	using BaseB = typename AccB::Base;
+	using InstA = typename BaseA::BLASInstance;
+	using InstB = typename BaseB::BLASInstance;
 	AccA a;
 	AccB b;
 	Build( a, s ), Build( b, s );
-	BLASInstance instA[INSTANCES];
-	BLASInstanceS instB[INSTANCES];
-	for (int i = 0; i < INSTANCES; i++) instA[i] = BLASInstance( 0 ), instB[i] = BLASInstanceS( 0 ), SetTransform( instA[i], i ), SetTransform( instB[i], i );
-	BVHBase* blasA = &a;
-	BVHBaseS* blasB = &b;
-	BVH tlasA;
-	BVHS tlasB;
+	InstA instA[INSTANCES];
+	InstB instB[INSTANCES];
+	for (int i = 0; i < INSTANCES; i++) instA[i] = InstA( 0 ), instB[i] = InstB( 0 ), SetTransform( instA[i], i ), SetTransform( instB[i], i );
+	BaseA* blasA = &a;
+	BaseB* blasB = &b;
+	typename BaseA::BVH tlasA;
+	typename BaseB::BVH tlasB;
 	tlasA.Build( instA, INSTANCES, &blasA, 1 ), tlasB.Build( instB, INSTANCES, &blasB, 1 );
-	CompareRays<Ray, RayS>( name, tlasA, tlasB, INSTANCES );
+	CompareRays<typename BaseA::Ray, typename BaseB::Ray>( name, tlasA, tlasB, INSTANCES );
 }
 
 // The SIMD builders against the reference builder: different trees, same closest hits.
@@ -252,6 +266,12 @@ int main()
 #ifdef USE_DEPRECATED_LAYOUT
 	CompareLayouts<BVH_SoA, BVH_SoAS>( "BVH_SoA, soup", soup );
 	CompareLayouts<BVH_SoA, BVH_SoAS>( "BVH_SoA, indexed grid", grid );
+#endif
+#ifdef DOUBLE_PRECISION_SUPPORT
+	CompareLayouts<BVH4_Double, BVH4_CPUDS>( "BVH4_Double, soup", soup );
+	CompareLayouts<BVH4_Double, BVH4_CPUDS>( "BVH4_Double, indexed grid", grid );
+	CompareLayouts<BVH4_Double, BVH4_CPUDS>( "BVH4_Double, opacity maps", mapped );
+	CompareTLAS<BVH4_Double, BVH4_CPUDS>( "TLAS over BVH4_Double", soup );
 #endif
 
 	// builders and packets

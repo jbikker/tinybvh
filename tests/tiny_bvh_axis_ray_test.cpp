@@ -194,9 +194,11 @@ int main()
 		TestRays<RayEx, bvhdbl3>( "BVH_Double::Build", bvh );
 		TestTLAS<BVH_Double, BLASInstanceEx, RayEx, bvhdbl3>( "TLAS over BVH_Double", &bvh );
 		bvh.BuildHQ( dverts.data(), triCount ), TestRays<RayEx, bvhdbl3>( "BVH_Double::BuildHQ", bvh );
-		// the wide layout instantiates for double precision too, with the scalar kernels.
-		impl::BVH4_CPU<double, uint64_t> bvh4;
-		bvh4.Build( dverts.data(), triCount ), TestRays<RayEx, bvhdbl3>( "BVH4_CPU<double>::Build", bvh4 );
+		BVH4_Double bvh4;
+		bvh4.Build( dverts.data(), triCount ), TestRays<RayEx, bvhdbl3>( "BVH4_Double::Build", bvh4 );
+		BVHBaseEx* blas4 = &bvh4;
+		TestTLAS<BVH_Double, BLASInstanceEx, RayEx, bvhdbl3>( "TLAS over BVH4_Double", blas4 );
+		bvh4.BuildHQ( dverts.data(), triCount ), TestRays<RayEx, bvhdbl3>( "BVH4_Double::BuildHQ", bvh4 );
 	}
 
 	if (g_failures) { printf( "%i axis-aligned ray test failures.\n", g_failures ); return 1; }
