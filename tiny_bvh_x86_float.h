@@ -36,8 +36,7 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<fl
 template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
 #endif
 #ifdef BVH_USEAVX
-template <> struct impl::BVHSIMDBuilders<float, uint32_t> { static constexpr bool avx = true; };
-template <> void impl::BVH<float, uint32_t>::BuildAVX( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
+template <> struct impl::BVHSIMDBuilders<float, uint32_t> { static constexpr bool available = true; };
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const uint32_t first, const uint32_t last, const uint32_t* indices, const int8_t* vertData, const uint32_t stride4, void* frags, float* rootMin, float* rootMax );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t first, const uint32_t last, void* binbox, uint32_t* count, const float* nmin4, const float* rpd4 );
@@ -549,13 +548,6 @@ TINYBVH_FORCEINLINE float halfArea( const __m256& a /* a contains aabb itself, w
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
-
-template <> void impl::BVH<float, uint32_t>::BuildAVX( const bvhvec4slice& v, const uint32_t* i, const uint32_t p )
-{
-	PrepareSIMDBuild( v, i, p );
-	BuildSIMDSubtree( 0u, 0u );
-	BuildSIMDFinalize();
-}
 
 // bin one slice of a node's fragment range; scheduled via the parallel_for hook.
 static constexpr uint32_t AVXCOUNTSTRIDE = 32; // 32 * 4 bytes = 128 bytes.

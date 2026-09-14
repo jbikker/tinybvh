@@ -671,8 +671,8 @@ void BVHBuildNEONSubtree( void* payload );
 void BuildNEONFragSlice( uint32_t i, void* payload );
 void BVHBuildNEONBinSlice( uint32_t i, void* payload );
 
-// Set by the platform headers for the instantiations that have SIMD builders.
-template <typename Float, typename Index> struct BVHSIMDBuilders { static constexpr bool avx = false; };
+// Set by the platform headers for the instantiations that have a SIMD builder.
+template <typename Float, typename Index> struct BVHSIMDBuilders { static constexpr bool available = false; };
 
 template <typename Float, typename Index> class BVHBase
 {
@@ -850,8 +850,13 @@ public:
 	void BuildHQ( const Slice& vertices );
 	void BuildHQ( const Vertex* vertices, const uint32_t* indices, const Index primCount );
 	void BuildHQ( const Slice& vertices, const uint32_t* indices, const Index primCount );
-	// SIMD builders. These exist for BVH<float, uint32_t> on the matching platform
-	// (tiny_bvh_x86_float.h, tiny_bvh_arm_float.h); other instantiations raise an error.
+	// SIMD builder. Uses AVX or NEON, whichever the platform headers provide for this
+	// instantiation. BVHSIMDBuilders<Float, Index>::available tells whether there is one.
+	void BuildSIMD( const Vertex* vertices, const Index primCount );
+	void BuildSIMD( const Slice& vertices );
+	void BuildSIMD( const Vertex* vertices, const uint32_t* indices, const Index primCount );
+	void BuildSIMD( const Slice& vertices, const uint32_t* indices, const Index primCount );
+	// BuildAVX and BuildNEON: ISA-specific names of BuildSIMD, kept for existing code.
 	void BuildAVX( const Vertex* vertices, const Index primCount );
 	void BuildAVX( const Slice& vertices );
 	void BuildAVX( const Vertex* vertices, const uint32_t* indices, const Index primCount );
@@ -1940,13 +1945,13 @@ template <typename Float, typename Index> void BVH<Float, Index>::Build( const S
 		PrepareBuild( vertices, indices, prims );
 		BuildFullSweep();
 	}
-	else if (BVHSIMDBuilders<Float, Index>::avx && settings.useSIMDifavailable) // No preference: use fast AVX builder
+	else if (BVHSIMDBuilders<Float, Index>::available && settings.useSIMDifavailable) // No preference: use fast SIMD builder
 	{
-		BuildAVX( vertices, indices, prims );
+		BuildSIMD( vertices, indices, prims );
 	}
 	else
 	{
-		PrepareBuild( vertices, indices, prims ); // No preference, no AVX: use reference builder.
+		PrepareBuild( vertices, indices, prims ); // No preference, no SIMD: use reference builder.
 		Build();
 	}
 	if (settings.postOptimize) Optimize( settings.optimizeIterations );
@@ -6194,28 +6199,53 @@ template <typename Float, typename Index> int32_t BVH8_CWBVH<Float, Index>::Inte
 // Generic definitions of the members that the platform headers specialize.
 // ----------------------------------------------------------------------------
 
+template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMD( const Vertex* v, const Index p ) { BuildSIMD( Slice( v, p * 3, sizeof( Vertex ) ), 0, 0 ); }
+template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMD( const Vertex* v, const uint32_t* i, const Index p ) { BuildSIMD( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
+template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMD( const Slice& v ) { BuildSIMD( v, 0, 0 ); }
+template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMD( const Slice& v, const uint32_t* i, const Index p )
+{
+	// The three steps below are specialized in the platform headers for the
+	// instantiations that have a SIMD builder; the generic versions trap.
+	PrepareSIMDBuild( v, i, p );
+	BuildSIMDSubtree( 0u, 0u );
+	BuildSIMDFinalize();
+}
 template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Vertex* v, const Index p ) { BuildAVX( Slice( v, p * 3, sizeof( Vertex ) ), 0, 0 ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Vertex* v, const uint32_t* i, const Index p ) { BuildAVX( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Slice& v ) { BuildAVX( v, 0, 0 ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Vertex* v, const Index p ) { BuildNEON( Slice( v, p * 3, sizeof( Vertex ) ), 0, 0 ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Vertex* v, const uint32_t* i, const Index p ) { BuildNEON( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Slice& v ) { BuildNEON( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Slice&, const uint32_t*, const Index )
-{ BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX and single precision." ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Slice&, const uint32_t*, const Index )
-{ BVH_FATAL_ERROR( "BVH::BuildNEON requires NEON and single precision." ); }
+template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Slice& v, const uint32_t* i, const Index p )
+{
+#ifdef BVH_USEAVX
+	BuildSIMD( v, i, p );
+#else
+	(void)v, (void)i, (void)p;
+	BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX and single precision." );
+#endif
+}
+template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Slice& v, const uint32_t* i, const Index p )
+{
+#ifdef BVH_USENEON
+	BuildSIMD( v, i, p );
+#else
+	(void)v, (void)i, (void)p;
+	BVH_FATAL_ERROR( "BVH::BuildNEON requires NEON and single precision." );
+#endif
+}
 template <typename Float, typename Index> void BVH<Float, Index>::Intersect256RaysSSE( Ray* ) const
 { BVH_FATAL_ERROR( "BVH::Intersect256RaysSSE requires AVX and single precision." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::PrepareSIMDBuild( const Slice&, const uint32_t*, const Index )
-{ BVH_FATAL_ERROR( "BVH::PrepareSIMDBuild requires AVX or NEON and single precision." ); }
+{ BVH_FATAL_ERROR( "BVH::PrepareSIMDBuild requires a SIMD builder; see BVHSIMDBuilders." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::PrepareSIMDBuildFragSlice( const Index, const Index, const uint32_t*, const int8_t*, const uint32_t, void*, Float*, Float* )
-{ BVH_FATAL_ERROR( "BVH::PrepareSIMDBuildFragSlice requires AVX or NEON and single precision." ); }
+{ BVH_FATAL_ERROR( "BVH::PrepareSIMDBuildFragSlice requires a SIMD builder; see BVHSIMDBuilders." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMDBinTask( const Index, const Index, void*, uint32_t*, const Float*, const Float* )
-{ BVH_FATAL_ERROR( "BVH::BuildSIMDBinTask requires AVX or NEON and single precision." ); }
+{ BVH_FATAL_ERROR( "BVH::BuildSIMDBinTask requires a SIMD builder; see BVHSIMDBuilders." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMDSubtree( Index, uint32_t )
-{ BVH_FATAL_ERROR( "BVH::BuildSIMDSubtree requires AVX or NEON and single precision." ); }
+{ BVH_FATAL_ERROR( "BVH::BuildSIMDSubtree requires a SIMD builder; see BVHSIMDBuilders." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMDFinalize()
-{ BVH_FATAL_ERROR( "BVH::BuildSIMDFinalize requires AVX or NEON and single precision." ); }
+{ BVH_FATAL_ERROR( "BVH::BuildSIMDFinalize requires a SIMD builder; see BVHSIMDBuilders." ); }
 
 // Scalar reference for the BVH4_CPU and BVH8_CPU kernels in tiny_bvh_x86_float.h and
 // tiny_bvh_arm_float.h: the same node order and stack handling, without intrinsics. Also

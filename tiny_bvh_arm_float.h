@@ -31,7 +31,7 @@ TINYBVH_FORCEINLINE uint32x4_t SIMD_SETRVECU( uint32_t x, uint32_t y, uint32_t z
 }
 
 // Specializations provided by this header.
-template <> void impl::BVH<float, uint32_t>::BuildNEON( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
+template <> struct impl::BVHSIMDBuilders<float, uint32_t> { static constexpr bool available = true; };
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const uint32_t first, const uint32_t last, const uint32_t* indices, const int8_t* vertData, const uint32_t stride4, void* frags, float* rootMin, float* rootMax );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t first, const uint32_t last, void* binbox, uint32_t* count, const float* nmin4, const float* rpd4 );
@@ -118,13 +118,6 @@ TINYBVH_FORCEINLINE int32x4_t neon_binIdx( const float32x4_t& fmin, const float3
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
-
-template <> void impl::BVH<float, uint32_t>::BuildNEON( const bvhvec4slice& v, const uint32_t* i, const uint32_t p )
-{
-	PrepareSIMDBuild( v, i, p );
-	BuildSIMDSubtree( 0u, 0u );
-	BuildSIMDFinalize();
-}
 
 // Fragment setup, optionally sliced over the thread pool.
 static constexpr uint32_t NEONCOUNTSTRIDE = 32; // 32 * 4 bytes = 128 bytes.
