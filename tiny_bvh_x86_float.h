@@ -964,7 +964,6 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 	__m256 t8 = _mm256_set1_ps( ray.hit.t );
 	int32_t stackPtr = 0;
 	uint32_t nodeIdx = 0;
-	constexpr int signShift = (posX ? 3 : 0) + (posY ? 6 : 0) + (posZ ? 12 : 0);
 	const __m256 rx8 = _mm256_set1_ps( ray.O.x * ray.rD.x ), rdx8 = _mm256_set1_ps( ray.rD.x );
 	const __m256 ry8 = _mm256_set1_ps( ray.O.y * ray.rD.y ), rdy8 = _mm256_set1_ps( ray.rD.y );
 	const __m256 rz8 = _mm256_set1_ps( ray.O.z * ray.rD.z ), rdz8 = _mm256_set1_ps( ray.rD.z );
@@ -995,36 +994,82 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 			const __m256 mask8 = _mm256_cmp_ps( tmin, tmax, _CMP_LE_OQ );
 			const uint32_t mask = _mm256_movemask_ps( mask8 );
 			const uint32_t validNodes = __popc( mask );
+			// Start the fill for every intersected child now, before the branch below
+			// resolves and the sort picks one. Incoherent rays otherwise stall on the
+			// child they descend into and again on each child they pop later. All four
+			// lines are issued: nodes sit at arbitrary 64-byte multiples, so the
+			// adjacent-line prefetcher cannot be relied on to fill in the gaps.
+			for (uint32_t m = mask; m; m &= m - 1)
+			{
+			#if defined _MSC_VER && !defined __clang__
+				unsigned long lane;
+				_BitScanForward( &lane, m );
+			#else
+				const uint32_t lane = __builtin_ctz( m );
+			#endif
+				const char* p = (const char*)(bvh8Data + (n->child[lane] & 0x1fffffff));
+				_mm_prefetch( p, _MM_HINT_T0 ), _mm_prefetch( p + 64, _MM_HINT_T0 );
+				_mm_prefetch( p + 128, _MM_HINT_T0 ), _mm_prefetch( p + 192, _MM_HINT_T0 );
+			}
 			if (validNodes == 1)
 			{
 				const uint32_t lane = __bfind( mask );
 				nodeIdx = n->child[lane];
 			}
+			else if (validNodes == 2)
+			{
+				// The highest and lowest set bits identify the two children independently.
+				// This avoids both the sorting network and dependent bit scans.
+				const uint32_t lane0 = __bfind( mask );
+			#if defined _MSC_VER && !defined __clang__
+				unsigned long lane1;
+				_BitScanForward( &lane1, mask );
+			#else
+				const uint32_t lane1 = __builtin_ctz( mask );
+			#endif
+				const float dist0 = _mm_cvtss_f32( _mm256_castps256_ps128( _mm256_permutevar8x32_ps( tmin, _mm256_set1_epi32( lane0 ) ) ) );
+				const float dist1 = _mm_cvtss_f32( _mm256_castps256_ps128( _mm256_permutevar8x32_ps( tmin, _mm256_set1_epi32( lane1 ) ) ) );
+				const bool first = dist0 < dist1;
+				nodeIdx = n->child[first ? lane0 : lane1];
+				nodeStack[stackPtr] = n->child[first ? lane1 : lane0];
+				distStack[stackPtr++] = first ? dist1 : dist0;
+			}
 			else if (validNodes > 0)
 			{
-				const __m256i index = _mm256_srli_epi32( _mm256_load_si256( (const __m256i*)n->perm ), signShift );
-				const uint32_t m = _mm256_movemask_ps( _mm256_permutevar8x32_ps( mask8, index ) );
-				const __m256i c8 = _mm256_permutevar8x32_epi32( _mm256_load_si256( (const __m256i*)n->child ), index );
-				nodeIdx = (uint32_t)_mm_cvtsi128_si32( _mm256_castsi256_si128(
-					_mm256_permutevar8x32_epi32( c8, _mm256_set1_epi32( (int32_t)__bfind( m ) ) ) ) );
-				// start the fill for the child we are about to descend into; the LUT
-				// load, two permutes and two stores below hide the L1/L2 latency.
-				_mm_prefetch( (const char*)(bvh8Data + (nodeIdx & 0x1fffffff)), _MM_HINT_T0 );
-				const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - m] );
-				const __m256 dist8 = _mm256_permutevar8x32_ps( _mm256_permutevar8x32_ps( tmin, index ), cpi );
-				const __m256i child8 = _mm256_permutevar8x32_epi32( c8, cpi );
-				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), child8 );
-				_mm256_storeu_ps( distStack + stackPtr, dist8 );
+				// Sort by entry distance to visit nearby children first. The distances
+				// are nonnegative, so integer keys preserve their order. Only the keys
+				// lose three low bits to the lane index; stack distances stay exact.
+				// Nonintersecting lanes sort last with the largest signed integer key.
+				__m256i d = _mm256_or_si256( _mm256_and_si256( _mm256_castps_si256( tmin ), _mm256_set1_epi32( -8 ) ), lane8 );
+				d = _mm256_blendv_epi8( _mm256_set1_epi32( 0x7fffffff ), d, _mm256_castps_si256( mask8 ) );
+#define TINYBVH_SORT8( shuffle, blend ) { const __m256i other = shuffle; \
+					d = _mm256_blend_epi32( _mm256_min_epi32( d, other ), _mm256_max_epi32( d, other ), blend ); }
+				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 2, 3, 0, 1 ) ), 0x66 );
+				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 1, 0, 3, 2 ) ), 0x3c );
+				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 2, 3, 0, 1 ) ), 0x5a );
+				// The lower half is ascending and the upper half descending. Fetch
+				// their minimum now so the descent can start during the remaining merge.
+				const __m128i otherMin = _mm_shuffle_epi32( _mm256_extracti128_si256( d, 1 ), _MM_SHUFFLE( 3, 3, 3, 3 ) );
+				const uint32_t nearest = _mm_cvtsi128_si32( _mm_min_epi32( _mm256_castsi256_si128( d ), otherMin ) ) & 7;
+				nodeIdx = n->child[nearest];
+				TINYBVH_SORT8( _mm256_permute2x128_si256( d, d, 1 ), 0xf0 );
+				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 1, 0, 3, 2 ) ), 0xcc );
+				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 2, 3, 0, 1 ) ), 0xaa );
+#undef TINYBVH_SORT8
+				// Reverse to put the closest child at the top of the stack.
+				const __m256i order = _mm256_permutevar8x32_epi32( d, _mm256_sub_epi32( _mm256_set1_epi32( validNodes - 1 ), lane8 ) );
+				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), _mm256_permutevar8x32_epi32( _mm256_load_si256( (const __m256i*)n->child ), order ) );
+				_mm256_storeu_ps( distStack + stackPtr, _mm256_permutevar8x32_ps( tmin, order ) );
 				stackPtr += validNodes - 1;
-			#ifdef _DEBUG
-				BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_STACK_SIZE * 4 - 8, "BVH8_CPU::Intersect, traversal stack overflow." );
-			#endif
 			}
 			else
 			{
 				if (!stackPtr) ISUNLIKELY goto the_end;
 				nodeIdx = nodeStack[--stackPtr];
 			}
+		#ifdef _DEBUG
+			BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_STACK_SIZE * 4 - 8, "BVH8_CPU::Intersect, traversal stack overflow." );
+		#endif
 		}
 		if (stackPtr) ISLIKELY
 		{
