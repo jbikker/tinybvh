@@ -1,4 +1,4 @@
-// tiny_bvh_base.h: platform-neutral part of TinyBVH. Do not include this file
+﻿// tiny_bvh_base.h: platform-neutral part of TinyBVH. Do not include this file
 // directly; include tiny_bvh.h, which selects the platform headers.
 
 #ifndef TINY_BVH_H_
@@ -856,15 +856,6 @@ public:
 	void BuildSIMD( const Slice& vertices );
 	void BuildSIMD( const Vertex* vertices, const uint32_t* indices, const Index primCount );
 	void BuildSIMD( const Slice& vertices, const uint32_t* indices, const Index primCount );
-	// BuildAVX and BuildNEON: ISA-specific names of BuildSIMD, kept for existing code.
-	void BuildAVX( const Vertex* vertices, const Index primCount );
-	void BuildAVX( const Slice& vertices );
-	void BuildAVX( const Vertex* vertices, const uint32_t* indices, const Index primCount );
-	void BuildAVX( const Slice& vertices, const uint32_t* indices, const Index primCount );
-	void BuildNEON( const Vertex* vertices, const Index primCount );
-	void BuildNEON( const Slice& vertices );
-	void BuildNEON( const Vertex* vertices, const uint32_t* indices, const Index primCount );
-	void BuildNEON( const Slice& vertices, const uint32_t* indices, const Index primCount );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	bool IntersectSphere( const Vec3& pos, const Float r ) const;
@@ -2053,7 +2044,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::Build( BLASIns
 	}
 	// start build
 	newNodePtr = 2;
-	Build(); // or BuildAVX, for large TLAS.
+	Build(); // or BuildSIMD, for large TLAS.
 }
 
 // TLAS over BLASses of the same layout. BVH derives from BVHBase without offset, which makes the cast of the array safe.
@@ -6209,30 +6200,6 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMD( con
 	PrepareSIMDBuild( v, i, p );
 	BuildSIMDSubtree( 0u, 0u );
 	BuildSIMDFinalize();
-}
-template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Vertex* v, const Index p ) { BuildAVX( Slice( v, p * 3, sizeof( Vertex ) ), 0, 0 ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Vertex* v, const uint32_t* i, const Index p ) { BuildAVX( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Slice& v ) { BuildAVX( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Vertex* v, const Index p ) { BuildNEON( Slice( v, p * 3, sizeof( Vertex ) ), 0, 0 ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Vertex* v, const uint32_t* i, const Index p ) { BuildNEON( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Slice& v ) { BuildNEON( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildAVX( const Slice& v, const uint32_t* i, const Index p )
-{
-#ifdef BVH_USEAVX
-	BuildSIMD( v, i, p );
-#else
-	(void)v, (void)i, (void)p;
-	BVH_FATAL_ERROR( "BVH::BuildAVX requires AVX and single precision." );
-#endif
-}
-template <typename Float, typename Index> void BVH<Float, Index>::BuildNEON( const Slice& v, const uint32_t* i, const Index p )
-{
-#ifdef BVH_USENEON
-	BuildSIMD( v, i, p );
-#else
-	(void)v, (void)i, (void)p;
-	BVH_FATAL_ERROR( "BVH::BuildNEON requires NEON and single precision." );
-#endif
 }
 template <typename Float, typename Index> void BVH<Float, Index>::Intersect256RaysSSE( Ray* ) const
 { BVH_FATAL_ERROR( "BVH::Intersect256RaysSSE requires AVX and single precision." ); }

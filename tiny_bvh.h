@@ -280,7 +280,7 @@ WARNING( "SSE4.2 not enabled in compilation." )
 WARNING( "AVX not enabled in compilation." )
 #define TINYBVH_NO_SIMD
 #else
-#define BVH_USEAVX		// required for BuildAVX and others
+#define BVH_USEAVX		// required for BuildSIMD
 #define BVH_USESSE
 #endif
 #if !defined __AVX2__ || (!defined __FMA__ && !defined _MSC_VER)
