@@ -261,9 +261,6 @@ __FILE__ "(" EMIT_COMPILER_WARNING_STRINGIFY1(__LINE__) "): " type ": "
 WARNING( "SSE4.2 not enabled in compilation." )
 #else
 #define BVH_USESSE
-#ifndef __SSE4_2__
-#define __SSE4_2__		// msvc doesn't set the SSE flag
-#endif
 #endif
 #if !defined __AVX__
 WARNING( "AVX not enabled in compilation." )
