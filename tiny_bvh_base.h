@@ -1638,19 +1638,6 @@ private:
 #include <vector>
 #endif
 
-// Some constexpr stuff to produce nice-looking branches in
-// *::Intersect with proper dead code elinimation.
-#ifdef ENABLE_INDEXED_GEOMETRY
-static constexpr bool indexedEnabled = true;
-#else
-static constexpr bool indexedEnabled = false;
-#endif
-#ifdef ENABLE_CUSTOM_GEOMETRY
-static constexpr bool customEnabled = true;
-#else
-static constexpr bool customEnabled = false;
-#endif
-
 #ifdef TINYBVH_USE_MESSAGEBOX
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -1740,9 +1727,13 @@ static uint32_t __popc( uint32_t x )
 	if (!(t >= 0 && t <= tmax)) exit;
 
 // code compaction: fetching triangle vertices, with or without indices.
-#define GET_PRIM_INDICES_I0_I1_I2( bvh, idx ) if (indexedEnabled && bvh.vertIdx != 0) \
+#ifdef ENABLE_INDEXED_GEOMETRY
+#define GET_PRIM_INDICES_I0_I1_I2( bvh, idx ) if (bvh.vertIdx != 0) \
 	i0 = bvh.vertIdx[idx * 3], i1 = bvh.vertIdx[idx * 3 + 1], i2 = bvh.vertIdx[idx * 3 + 2]; \
 	else i0 = idx * 3, i1 = idx * 3 + 1, i2 = idx * 3 + 2;
+#else
+#define GET_PRIM_INDICES_I0_I1_I2( bvh, idx ) i0 = idx * 3, i1 = idx * 3 + 1, i2 = idx * 3 + 2;
+#endif
 
 // ray validation: throw an error if the input ray contains nans.
 #define VALIDATE_RAY(r) { const auto test = (r).D.x + (r).D.y + (r).D.z + (r).hit.t + (r).O.x \
@@ -3703,6 +3694,16 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 	const Float rox = ray.O.x * ray.rD.x;
 	const Float roy = ray.O.y * ray.rD.y;
 	const Float roz = ray.O.z * ray.rD.z;
+#ifdef ENABLE_INDEXED_GEOMETRY
+	static constexpr bool indexedEnabled = true;
+#else
+	static constexpr bool indexedEnabled = false;
+#endif
+#ifdef ENABLE_CUSTOM_GEOMETRY
+	static constexpr bool customEnabled = true;
+#else
+	static constexpr bool customEnabled = false;
+#endif
 	while (1)
 	{
 		cost += c_trav;
@@ -3826,6 +3827,16 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 	const Float rox = ray.O.x * ray.rD.x;
 	const Float roy = ray.O.y * ray.rD.y;
 	const Float roz = ray.O.z * ray.rD.z;
+#ifdef ENABLE_INDEXED_GEOMETRY
+	static constexpr bool indexedEnabled = true;
+#else
+	static constexpr bool indexedEnabled = false;
+#endif
+#ifdef ENABLE_CUSTOM_GEOMETRY
+	static constexpr bool customEnabled = true;
+#else
+	static constexpr bool customEnabled = false;
+#endif
 	while (1)
 	{
 		if (node->isLeaf()) ISUNLIKELY
@@ -5526,9 +5537,10 @@ template <typename Float, typename Index> void BVH4_CPU<Float, Index>::ConvertFr
 				newNode->child[cidx] = newBlockPtr + LEAF_BIT;
 				BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + newBlockPtr);
 				newBlockPtr += sizeof( BVHTri4Leaf ) / 64;
-				for (uint32_t i0, i1, i2, l = 0; l < 4; l++)
+				for (uint32_t l = 0; l < 4; l++)
 				{
 					const Index primIdx = bvh4.bvh.primIdx[child.firstTri + tinybvh_min( (Index)l, child.triCount - 1 )];
+					Index i0, i1, i2;
 					GET_PRIM_INDICES_I0_I1_I2( bvh4.bvh, primIdx );
 					const Vertex v0 = bvh4.bvh.verts[i0], e1 = bvh4.bvh.verts[i1] - v0, e2 = bvh4.bvh.verts[i2] - v0;
 					leaf->SetData( v0, e1, e2, primIdx, l );
@@ -5723,9 +5735,10 @@ template <typename Float, typename Index> void BVH8_CPU<Float, Index>::ConvertFr
 				newNode->child[cidx] = newBlockPtr + LEAF_BIT;
 				BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + newBlockPtr);
 				newBlockPtr += sizeof( BVHTri4Leaf ) / 64;
-				for (uint32_t i0, i1, i2, l = 0; l < 4; l++)
+				for (uint32_t l = 0; l < 4; l++)
 				{
 					const Index primIdx = bvh8.bvh.primIdx[child.firstTri + tinybvh_min( (Index)l, child.triCount - 1 )];
+					Index i0, i1, i2;
 					GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, primIdx );
 					const Vertex v0 = bvh8.bvh.verts[i0], e1 = bvh8.bvh.verts[i1] - v0, e2 = bvh8.bvh.verts[i2] - v0;
 					leaf->SetData( v0, e1, e2, primIdx, l );
