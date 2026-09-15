@@ -197,18 +197,11 @@ static void CompareBuilders( const Scene& s )
 {
 	BVH reference;
 	Build( reference, s );
-#if defined BVH_USEAVX && !defined BVH_USENEON
+#if defined BVH_USEAVX || defined BVH_USENEON
 	{
-		BVH avx;
-		avx.BuildAVX( s.verts.data(), s.triCount );
-		CompareRays<Ray, Ray>( "BuildAVX versus reference builder", avx, reference );
-	}
-#endif
-#ifdef BVH_USENEON
-	{
-		BVH neon;
-		neon.BuildNEON( s.verts.data(), s.triCount );
-		CompareRays<Ray, Ray>( "BuildNEON versus reference builder", neon, reference );
+		BVH simd;
+		simd.BuildSIMD( s.verts.data(), s.triCount );
+		CompareRays<Ray, Ray>( "BuildSIMD versus reference builder", simd, reference );
 	}
 #endif
 	// The SBVH builder clips fragments with SSE code on x86 and scalar code elsewhere.
