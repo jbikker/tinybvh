@@ -143,11 +143,8 @@ int main()
 		bvh.settings.useFullSweep = true;
 		bvh.Build( verts, triCount ), TestFloat( "BVH::Build, full sweep", bvh );
 		bvh.settings.useFullSweep = false;
-	#if defined BVH_USEAVX && !defined BVH_USENEON
-		bvh.BuildAVX( verts, triCount ), TestFloat( "BVH::BuildAVX", bvh );
-	#endif
-	#ifdef BVH_USENEON
-		bvh.BuildNEON( verts, triCount ), TestFloat( "BVH::BuildNEON", bvh );
+	#if defined BVH_USEAVX || defined BVH_USENEON
+		bvh.BuildSIMD( verts, triCount ), TestFloat( "BVH::BuildSIMD", bvh );
 	#endif
 	}
 
