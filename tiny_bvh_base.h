@@ -35,15 +35,14 @@ inline void free64( void* ptr, void* = nullptr )
 #endif
 } }; // namespace tinybvh
 
-// error handling
-#ifdef _WINDOWS_ // windows.h has been included
-#define BVH_FATAL_ERROR_IF(c,s) if (c) { char t[512]; snprintf( t, 512, \
-	"Fatal error in %s, line %i:\n%s\n", __FILE__, __LINE__, s ); \
-	MessageBoxA( NULL, t, "Fatal error", MB_OK ); exit( 1 ); }
-#else
-#define BVH_FATAL_ERROR_IF(c,s) if (c) { fprintf( stderr, \
-	"Fatal error in %s, line %i:\n%s\n", __FILE__, __LINE__, s ); exit( 1 ); }
-#endif
+// Fatal errors go through tinybvh_fatal_error, which never returns.
+namespace tinybvh {
+typedef void (*FatalErrorHandler)( const char* message );
+// tinybvh_set_fatal_error_handler: install a reporter.
+void tinybvh_set_fatal_error_handler( FatalErrorHandler handler );
+[[noreturn]] void tinybvh_fatal_error( const char* file, const int line, const char* message );
+} // namespace tinybvh
+#define BVH_FATAL_ERROR_IF(c,s) if (c) { tinybvh::tinybvh_fatal_error( __FILE__, __LINE__, s ); }
 #define BVH_FATAL_ERROR(s) BVH_FATAL_ERROR_IF(1,s)
 
 namespace tinybvh {
@@ -1652,7 +1651,33 @@ static constexpr bool customEnabled = true;
 static constexpr bool customEnabled = false;
 #endif
 
+#ifdef TINYBVH_USE_MESSAGEBOX
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include "windows.h"
+#endif
+
 namespace tinybvh {
+
+static FatalErrorHandler fatalErrorHandler = nullptr;
+void tinybvh_set_fatal_error_handler( FatalErrorHandler handler ) { fatalErrorHandler = handler; }
+void tinybvh_fatal_error( const char* file, const int line, const char* message )
+{
+	char t[512];
+	snprintf( t, 512, "Fatal error in %s, line %i:\n%s\n", file, line, message );
+	// A handler is free to throw or to terminate; if it returns, we still exit.
+	if (fatalErrorHandler) fatalErrorHandler( t );
+#ifdef TINYBVH_USE_MESSAGEBOX
+	else MessageBoxA( NULL, t, "Fatal error", MB_OK );
+#else
+	else fputs( t, stderr );
+#endif
+	exit( 1 );
+}
 
 TINYBVH_FORCEINLINE uint32_t __bfind( uint32_t x ) // https://github.com/mackron/refcode/blob/master/lzcnt.c
 {
@@ -7129,16 +7154,20 @@ bool VoxelSet::IsOccluded( const Ray& ray ) const
 #if defined ENABLE_THREADED_BUILDS && !defined TINYBVH_NO_BUILTIN_POOL
 
 #if defined _WIN32 && defined _MSC_VER
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include "windows.h"
 #endif // _WIN32 + _MSC_VER
-#ifdef PLATFORM_LINUX
+#if defined __linux__ || defined __FreeBSD__ // for naming the worker threads
 #include <pthread.h>
-#ifdef __FREEBSD__
+#ifdef __FreeBSD__
 #include <pthread_np.h>
 #endif
-#endif // PLATFORM_LINUX
+#endif // __linux__ || __FreeBSD__
 
 // Wicked job system, condensed / modified. https://github.com/turanszkij/WickedEngine
 // Removed: Thread priority, Dispatch, graceful shutdown; not needed in TinyBVH.
@@ -7227,11 +7256,17 @@ public:
 			// windows-specific thread setup
 			SetThreadPriority( handle, 0 /* THREAD_PRIORITY_NORMAL */ );
 			SetThreadDescription( handle, L"tinybvh::build" );
-		#elif defined PLATFORM_LINUX
-			// linux-specific thread setup
+		#elif defined __linux__
+			// linux-specific thread setup; the name is capped at 15 chars plus a zero,
+			// and pthread_setname_np fails outright if it does not fit, so bound the id.
 			char thread_name[16];
-			snprintf( thread_name, sizeof( thread_name ), "tinybvh_%u", threadID );
+			snprintf( thread_name, sizeof( thread_name ), "tinybvh_%u", threadID % 10000000u );
 			pthread_setname_np( handle, thread_name );
+		#elif defined __FreeBSD__
+			// freebsd names threads through a differently spelled function.
+			char thread_name[16];
+			snprintf( thread_name, sizeof( thread_name ), "tinybvh_%u", threadID % 10000000u );
+			pthread_set_name_np( handle, thread_name );
 		#endif
 		}
 	}
