@@ -1622,6 +1622,8 @@ private:
 // ============================================================================
 
 #ifdef TINYBVH_IMPLEMENTATION
+#ifndef TINY_BVH_BASE_H_IMPL
+#define TINY_BVH_BASE_H_IMPL
 
 #include <assert.h>			// for assert
 #ifdef _MSC_VER
@@ -7329,4 +7331,5 @@ void tinybvh_builtin_parallel_for( uint32_t n, void (*fn)(uint32_t, void*), void
 
 } // namespace tinybvh
 
+#endif // TINY_BVH_BASE_H_IMPL
 #endif // TINYBVH_IMPLEMENTATION

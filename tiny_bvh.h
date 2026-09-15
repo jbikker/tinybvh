@@ -230,17 +230,6 @@ THE SOFTWARE.
 #include <atomic> // for SBVH builds
 #include <new> // for placement new, in BVHBase::ContextNew
 
-// Branch prediction.
-#ifdef TINYBVH_IMPLEMENTATION
-#if __cplusplus >= 202002L
-#define ISLIKELY [[likely]]
-#define ISUNLIKELY [[unlikely]]
-#else
-#define ISLIKELY
-#define ISUNLIKELY
-#endif
-#endif
-
 // Platform-independent compile-time warnings.
 #define EMIT_COMPILER_WARNING_STRINGIFY0(x) #x
 #define EMIT_COMPILER_WARNING_STRINGIFY1(x) EMIT_COMPILER_WARNING_STRINGIFY0(x)
@@ -330,6 +319,18 @@ WARNING( "NEON not enabled in compilation." )
 
 #endif // TINY_BVH_H_
 
+// Branch prediction. Sits outside the include guard: a TU may include the
+// interface first and define TINYBVH_IMPLEMENTATION only for a later include.
+#if defined TINYBVH_IMPLEMENTATION && !defined ISLIKELY
+#if __cplusplus >= 202002L
+#define ISLIKELY [[likely]]
+#define ISUNLIKELY [[unlikely]]
+#else
+#define ISLIKELY
+#define ISUNLIKELY
+#endif
+#endif
+
 #include "tiny_bvh_base.h"
 #if defined BVH_USESSE
 #include "tiny_bvh_x86_float.h"
@@ -340,6 +341,11 @@ WARNING( "NEON not enabled in compilation." )
 #endif
 
 #ifdef TINYBVH_IMPLEMENTATION
+
+// The implementation is emitted once per translation unit, so that a TU that
+// includes tiny_bvh.h more than once still compiles.
+#ifndef TINY_BVH_H_IMPL
+#define TINY_BVH_H_IMPL
 
 // Explicit instantiations of the templated layouts. Application code only sees
 // the declarations in the interface part of the headers; the definitions are
@@ -368,4 +374,5 @@ template class impl::BLASInstance<double, uint64_t>;
 
 } // namespace tinybvh
 
+#endif // TINY_BVH_H_IMPL
 #endif // TINYBVH_IMPLEMENTATION

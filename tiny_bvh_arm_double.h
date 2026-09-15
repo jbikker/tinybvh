@@ -29,6 +29,8 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<doubl
 // ============================================================================
 
 #if defined TINYBVH_IMPLEMENTATION && defined DOUBLE_PRECISION_SUPPORT
+#ifndef TINY_BVH_ARM_DOUBLE_H_IMPL
+#define TINY_BVH_ARM_DOUBLE_H_IMPL
 
 namespace tinybvh {
 
@@ -328,4 +330,5 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<doubl
 
 } // namespace tinybvh
 
+#endif // TINY_BVH_ARM_DOUBLE_H_IMPL
 #endif // TINYBVH_IMPLEMENTATION && DOUBLE_PRECISION_SUPPORT

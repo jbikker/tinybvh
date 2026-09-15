@@ -59,6 +59,8 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH8_CPU<float
 // ============================================================================
 
 #ifdef TINYBVH_IMPLEMENTATION
+#ifndef TINY_BVH_X86_FLOAT_H_IMPL
+#define TINY_BVH_X86_FLOAT_H_IMPL
 
 namespace tinybvh {
 
@@ -1281,4 +1283,5 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH8_CPU<float
 
 } // namespace tinybvh
 
+#endif // TINY_BVH_X86_FLOAT_H_IMPL
 #endif // TINYBVH_IMPLEMENTATION
