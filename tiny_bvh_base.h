@@ -216,6 +216,10 @@ TINYBVH_FORCEINLINE bool tinybvh_isnan( float f )
 	memcpy( &i, &f, sizeof( i ) );
 	return (i & 0x7F800000) == 0x7F800000 && (i & 0x007FFFFF) != 0; // ieee-754
 }
+#ifdef _MSC_VER
+#pragma warning ( push )
+#pragma warning ( disable: 4723 /* possible divide by zero */ )
+#endif
 TINYBVH_FORCEINLINE float tinybvh_safercp( const float x )
 {
 	const float r = 1 / x;
@@ -228,6 +232,9 @@ TINYBVH_FORCEINLINE double tinybvh_safercp( const double x )
 	if (!(fabs( r ) <= BVH_DBL_RCP_FAR)) return copysign( BVH_DBL_RCP_FAR, x );
 	return r;
 }
+#ifdef _MSC_VER
+#pragma warning ( pop )
+#endif
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_safercp( const bvhvec3 a ) { return bvhvec3( tinybvh_safercp( a.x ), tinybvh_safercp( a.y ), tinybvh_safercp( a.z ) ); }
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_rcp( const bvhvec3 a ) { return tinybvh_safercp( a ); /* bvhvec3( 1.0f / a.x, 1.0f / a.y, 1.0f / a.z ); */ }
 TINYBVH_FORCEINLINE float tinybvh_sqrf( const float x ) { return x * x; }
