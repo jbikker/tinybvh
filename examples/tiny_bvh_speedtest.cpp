@@ -596,7 +596,7 @@ int main()
 	// measure single-core bvh construction time - AVX builder
 	printf( "- fast AVX builder:  " );
 	t.reset();
-	for (int pass = 0; pass < 3; pass++) mybvh->BuildAVX( triangles, verts / 3 );
+	for (int pass = 0; pass < 3; pass++) mybvh->BuildSIMD( triangles, verts / 3 );
 	buildTime = t.elapsed() / 3.0f;
 	TestRays( mybvh, smallBatch, Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
@@ -624,7 +624,7 @@ int main()
 	// measure single-core bvh construction time - NEON builder
 	printf( "- fast NEON builder:  " );
 	t.reset();
-	for (int pass = 0; pass < 3; pass++) mybvh->BuildNEON( triangles, verts / 3 );
+	for (int pass = 0; pass < 3; pass++) mybvh->BuildSIMD( triangles, verts / 3 );
 	buildTime = t.elapsed() / 3.0f;
 	TestRays( mybvh, smallBatch, Nsmall, 3, &avgCost );
 	printf( "%7.2fms for %7i triangles ", buildTime * 1000.0f, verts / 3 );
