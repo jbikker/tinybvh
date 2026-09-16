@@ -154,7 +154,7 @@ THE SOFTWARE.
 // Max number of instances in TLAS: 2 ^ INST_IDX_BITS
 // Max number of primitives per BLAS: 2 ^ (32 - INST_IDX_BITS)
 #ifndef INST_IDX_BITS
-#define INST_IDX_BITS 10 // Use 4..~12 to use prim field bits for instance id, or set to 32 to store index in separate field.
+#define INST_IDX_BITS 32 // Use 4..~12 to use prim field bits for instance id, or set to 32 to store index in separate field.
 #endif
 
 // SAH BVH building: Heuristic parameters
