@@ -141,6 +141,7 @@
     <ClInclude Include="..\tiny_bvh_x86_double.h" />
     <ClInclude Include="..\tiny_bvh_x86_float.h" />
     <ClInclude Include="..\tiny_ocl.h" />
+    <ClInclude Include="..\tiny_scene.h" />
     <ClInclude Include="game.h" />
     <ClInclude Include="template\common.h" />
     <ClInclude Include="template\opengl.h" />

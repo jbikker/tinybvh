@@ -59,6 +59,9 @@
     <ClInclude Include="..\tiny_bvh_x86_float.h">
       <Filter>tiny</Filter>
     </ClInclude>
+    <ClInclude Include="..\tiny_scene.h">
+      <Filter>tiny</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="README.md">
