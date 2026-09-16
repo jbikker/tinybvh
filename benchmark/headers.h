@@ -1,5 +1,6 @@
 #pragma once
 
+#define INST_IDX_BITS 4
 #include "tiny_bvh.h"
 
 // Settings
