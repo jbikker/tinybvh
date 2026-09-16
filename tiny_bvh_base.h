@@ -1379,6 +1379,11 @@ private:
 	BVH8_CWBVH& operator=( const BVH8_CWBVH& ) = default;
 };
 
+#ifdef _MSC_VER
+// For float/uint32_t BVHs, BVHTri4Leaf is padded. This is as intended.
+#pragma warning ( push )
+#pragma warning ( disable: 4324 /* structure was padded due to alignment specifier */ )
+#endif
 template <typename Float, typename Index> struct ALIGNED( 64 ) BVHTri4Leaf
 {
 	using Vec3 = typename bvh_traits<Float>::vec3;
@@ -1420,6 +1425,9 @@ template <typename Float, typename Index> struct ALIGNED( 64 ) BVHTri4Leaf
 		return true;
 	}
 };
+#ifdef _MSC_VER
+#pragma warning ( pop )
+#endif
 
 // Storage for a single triangle, for BVH8_CPU.
 template <typename Float, typename Index> struct BVHTri1Leaf
