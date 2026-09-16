@@ -1,9 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="..\examples\tiny_bvh_double_test.cpp" />
-  </ItemGroup>
-  <ItemGroup>
     <Filter Include="tinybvh">
       <UniqueIdentifier>{cca77fe4-472b-40ae-9f4a-2a187ed17146}</UniqueIdentifier>
     </Filter>
@@ -27,5 +24,8 @@
     <ClInclude Include="..\tiny_bvh_x86_float.h">
       <Filter>tinybvh</Filter>
     </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\tests\tiny_bvh_double_test.cpp" />
   </ItemGroup>
 </Project>

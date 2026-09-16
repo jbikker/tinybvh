@@ -27,7 +27,7 @@
     <ClInclude Include="..\tiny_bvh_x86_float.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\examples\tiny_bvh_double_test.cpp" />
+    <ClCompile Include="..\tests\tiny_bvh_double_test.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
