@@ -6,7 +6,7 @@ namespace tinybvh
 enum BuildFlags : int {
 	NO_FLAGS = 0,
 	INDEXED = 1,
-	AVXBUILD = 2,
+	SIMDBUILD = 2,
 	FULLSWEEP = 4,
 	LBVH = 8,
 	PRESPLIT = 16,

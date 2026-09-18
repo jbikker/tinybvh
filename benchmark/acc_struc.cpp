@@ -34,7 +34,7 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		if (flags & BuildFlags::FULLSWEEP) bvh->settings.useFullSweep = true;
 		// if (flags & BuildFlags::LBVH) bvh->settings.useLBVH = true;
 		if (flags & BuildFlags::PRESPLIT) bvh->settings.usePresplitting = true;
-		if (flags & BuildFlags::AVXBUILD) bvh->settings.useSIMDifavailable = true;
+		if (flags & BuildFlags::SIMDBUILD) bvh->settings.useSIMDifavailable = true;
 		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
 	}
 	// fix flags for Embree / Madmann91
@@ -112,7 +112,7 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 	while (f != BuildFlags::NO_FLAGS)
 	{
 		if (first) strncat( desc, " (", 100 ); else { strncat( desc, " + ", 100 ); strncat( flagShrt, "+", 32 ); }
-		if (f & BuildFlags::AVXBUILD) { strncat( desc, "AVX builder", 100 ); strncat( flagShrt, "A", 32 ); f -= BuildFlags::AVXBUILD; }
+		if (f & BuildFlags::SIMDBUILD) { strncat( desc, "SIMD builder", 100 ); strncat( flagShrt, "A", 32 ); f -= BuildFlags::SIMDBUILD; }
 		else if (f & BuildFlags::INDEXED) { strncat( desc, "indexed", 100 ); strncat( flagShrt, "I", 32 ); f -= BuildFlags::INDEXED; }
 		else if (f & BuildFlags::FULLSWEEP) { strncat( desc, "full-sweep", 100 ); strncat( flagShrt, "F", 32 ); f -= BuildFlags::FULLSWEEP; }
 		else if (f & BuildFlags::LBVH) { strncat( desc, "LBVH", 100 ); strncat( flagShrt, "L", 32 ); f -= BuildFlags::LBVH; }
@@ -150,7 +150,7 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	if (bvh)
 	{
 		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
-		if (flags & BuildFlags::AVXBUILD) bvh->settings.useSIMDifavailable = true;
+		if (flags & BuildFlags::SIMDBUILD) bvh->settings.useSIMDifavailable = true;
 		if (flags & BuildFlags::PRESPLIT) bvh->settings.usePresplitting = true;
 		if (flags & BuildFlags::FULLSWEEP) bvh->settings.useFullSweep = true;
 		if (flags & BuildFlags::OPTIMIZE) bvh->settings.postOptimize = true, bvh->settings.optimizeIterations = 100;
