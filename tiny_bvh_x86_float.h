@@ -987,11 +987,8 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 			const __m256 mask8 = _mm256_cmp_ps( tmin, tmax, _CMP_LE_OQ );
 			const uint32_t mask = _mm256_movemask_ps( mask8 );
 			const uint32_t validNodes = __popc( mask );
-			// Start the fill for every intersected child now, before the branch below
-			// resolves and the sort picks one. Incoherent rays otherwise stall on the
-			// child they descend into and again on each child they pop later. All four
-			// lines are issued: nodes sit at arbitrary 64-byte multiples, so the
-			// adjacent-line prefetcher cannot be relied on to fill in the gaps.
+		#ifdef BVH8_USE_PREFETCHING
+			// prefetch child data. only incoherent rays benefit.
 			for (uint32_t m = mask; m; m &= m - 1)
 			{
 			#if defined _MSC_VER && !defined __clang__
@@ -1004,11 +1001,13 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 				_mm_prefetch( p, _MM_HINT_T0 ), _mm_prefetch( p + 64, _MM_HINT_T0 );
 				_mm_prefetch( p + 128, _MM_HINT_T0 ), _mm_prefetch( p + 192, _MM_HINT_T0 );
 			}
+		#endif
 			if (validNodes == 1)
 			{
 				const uint32_t lane = __bfind( mask );
 				nodeIdx = n->child[lane];
 			}
+		#ifdef BVH8_2VALIDNODES
 			else if (validNodes == 2)
 			{
 				// The highest and lowest set bits identify the two children independently.
@@ -1027,15 +1026,29 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 				nodeStack[stackPtr] = n->child[first ? lane1 : lane0];
 				distStack[stackPtr++] = first ? dist1 : dist0;
 			}
+		#endif
 			else if (validNodes > 0)
 			{
-				// Sort by entry distance to visit nearby children first. The distances
-				// are nonnegative, so integer keys preserve their order. Only the keys
-				// lose three low bits to the lane index; stack distances stay exact.
-				// Nonintersecting lanes sort last with the largest signed integer key.
+			#ifndef BVH8_SORTING_NETWORK
+				constexpr int signShift = (posX ? 2 : 0) + (posY ? 4 : 0) + (posZ ? 8 : 0);
+				const __m256i index = _mm256_srli_epi32( _mm256_load_si256( (const __m256i*)n->perm ), signShift );
+				const uint32_t m = _mm256_movemask_ps( _mm256_permutevar8x32_ps( mask8, index ) );
+				const __m256i c8 = _mm256_permutevar8x32_epi32( _mm256_load_si256( (const __m256i*)n->child ), index );
+				nodeIdx = (uint32_t)_mm_cvtsi128_si32( _mm256_castsi256_si128(
+					_mm256_permutevar8x32_epi32( c8, _mm256_set1_epi32( (int32_t)__bfind( m ) ) ) ) );
+				// start the fill for the child we are about to descend into; the LUT
+				// load, two permutes and two stores below hide the L1/L2 latency.
+				_mm_prefetch( (const char*)(bvh8Data + (nodeIdx & 0x1fffffff)), _MM_HINT_T0 );
+				const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - m] );
+				const __m256 dist8 = _mm256_permutevar8x32_ps( _mm256_permutevar8x32_ps( tmin, index ), cpi );
+				const __m256i child8 = _mm256_permutevar8x32_epi32( c8, cpi );
+				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), child8 );
+				_mm256_storeu_ps( distStack + stackPtr, dist8 );
+			#else
+				// use a sorting network to sort by entry distance.
 				__m256i d = _mm256_or_si256( _mm256_and_si256( _mm256_castps_si256( tmin ), _mm256_set1_epi32( -8 ) ), lane8 );
 				d = _mm256_blendv_epi8( _mm256_set1_epi32( 0x7fffffff ), d, _mm256_castps_si256( mask8 ) );
-#define TINYBVH_SORT8( shuffle, blend ) { const __m256i other = shuffle; \
+				#define TINYBVH_SORT8( shuffle, blend ) { const __m256i other = shuffle; \
 					d = _mm256_blend_epi32( _mm256_min_epi32( d, other ), _mm256_max_epi32( d, other ), blend ); }
 				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 2, 3, 0, 1 ) ), 0x66 );
 				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 1, 0, 3, 2 ) ), 0x3c );
@@ -1048,11 +1061,11 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 				TINYBVH_SORT8( _mm256_permute2x128_si256( d, d, 1 ), 0xf0 );
 				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 1, 0, 3, 2 ) ), 0xcc );
 				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 2, 3, 0, 1 ) ), 0xaa );
-#undef TINYBVH_SORT8
 				// Reverse to put the closest child at the top of the stack.
 				const __m256i order = _mm256_permutevar8x32_epi32( d, _mm256_sub_epi32( _mm256_set1_epi32( validNodes - 1 ), lane8 ) );
 				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), _mm256_permutevar8x32_epi32( _mm256_load_si256( (const __m256i*)n->child ), order ) );
 				_mm256_storeu_ps( distStack + stackPtr, _mm256_permutevar8x32_ps( tmin, order ) );
+			#endif
 				stackPtr += validNodes - 1;
 			}
 			else
@@ -1064,16 +1077,15 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 			BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_STACK_SIZE * 4 - 8, "BVH8_CPU::Intersect, traversal stack overflow." );
 		#endif
 		}
+	#ifdef BVH8_USE_PREFETCHING
 		if (stackPtr) ISLIKELY
 		{
-			// An interior node is 256 bytes: x planes, y planes, z planes, child8+perm8 -
-			// all four cachelines are read by the node test. A leaf is 192 bytes (3 lines).
-			// Nodes sit at arbitrary 64-byte multiples (leafs are 3 blocks, nodes 4), so the
-			// adjacent-line prefetcher cannot be relied on to fill in the gaps: issue all four.
+			// prefetch the next node - only divergent rays benefit.
 			const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
 			_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
 			_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
 		}
+	#endif
 		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
 		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, _mm_load_ps( leaf->e2z ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
