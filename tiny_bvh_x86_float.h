@@ -949,6 +949,8 @@ ALIGNED( 64 ) static const uint32_t idxLUT256[256][8] = {
 	{ 0,1,0,0,0,0,0,0 }, { 1,0,0,0,0,0,0,0 }, { 0,0,0,0,0,0,0,0 }, { 0,0,0,0,0,0,0,0 }
 };
 
+#if 0
+
 template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 4 /* wide trees push more nodes per step */ + 8];
@@ -957,6 +959,7 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 	__m256 t8 = _mm256_set1_ps( ray.hit.t );
 	int32_t stackPtr = 0;
 	uint32_t nodeIdx = 0;
+	constexpr int signShift = (posX ? 3 : 0) + (posY ? 6 : 0) + (posZ ? 12 : 0);
 	const __m256 rx8 = _mm256_set1_ps( ray.O.x * ray.rD.x ), rdx8 = _mm256_set1_ps( ray.rD.x );
 	const __m256 ry8 = _mm256_set1_ps( ray.O.y * ray.rD.y ), rdy8 = _mm256_set1_ps( ray.rD.y );
 	const __m256 rz8 = _mm256_set1_ps( ray.O.z * ray.rD.z ), rdz8 = _mm256_set1_ps( ray.rD.z );
@@ -987,50 +990,13 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 			const __m256 mask8 = _mm256_cmp_ps( tmin, tmax, _CMP_LE_OQ );
 			const uint32_t mask = _mm256_movemask_ps( mask8 );
 			const uint32_t validNodes = __popc( mask );
-		#ifdef BVH8_USE_PREFETCHING
-			// prefetch child data. only incoherent rays benefit.
-			for (uint32_t m = mask; m; m &= m - 1)
-			{
-			#if defined _MSC_VER && !defined __clang__
-				unsigned long lane;
-				_BitScanForward( &lane, m );
-			#else
-				const uint32_t lane = __builtin_ctz( m );
-			#endif
-				const char* p = (const char*)(bvh8Data + (n->child[lane] & 0x1fffffff));
-				_mm_prefetch( p, _MM_HINT_T0 ), _mm_prefetch( p + 64, _MM_HINT_T0 );
-				_mm_prefetch( p + 128, _MM_HINT_T0 ), _mm_prefetch( p + 192, _MM_HINT_T0 );
-			}
-		#endif
 			if (validNodes == 1)
 			{
 				const uint32_t lane = __bfind( mask );
 				nodeIdx = n->child[lane];
 			}
-		#ifdef BVH8_2VALIDNODES
-			else if (validNodes == 2)
-			{
-				// The highest and lowest set bits identify the two children independently.
-				// This avoids both the sorting network and dependent bit scans.
-				const uint32_t lane0 = __bfind( mask );
-			#if defined _MSC_VER && !defined __clang__
-				unsigned long lane1;
-				_BitScanForward( &lane1, mask );
-			#else
-				const uint32_t lane1 = __builtin_ctz( mask );
-			#endif
-				const float dist0 = _mm_cvtss_f32( _mm256_castps256_ps128( _mm256_permutevar8x32_ps( tmin, _mm256_set1_epi32( lane0 ) ) ) );
-				const float dist1 = _mm_cvtss_f32( _mm256_castps256_ps128( _mm256_permutevar8x32_ps( tmin, _mm256_set1_epi32( lane1 ) ) ) );
-				const bool first = dist0 < dist1;
-				nodeIdx = n->child[first ? lane0 : lane1];
-				nodeStack[stackPtr] = n->child[first ? lane1 : lane0];
-				distStack[stackPtr++] = first ? dist1 : dist0;
-			}
-		#endif
 			else if (validNodes > 0)
 			{
-			#ifndef BVH8_SORTING_NETWORK
-				constexpr int signShift = (posX ? 2 : 0) + (posY ? 4 : 0) + (posZ ? 8 : 0);
 				const __m256i index = _mm256_srli_epi32( _mm256_load_si256( (const __m256i*)n->perm ), signShift );
 				const uint32_t m = _mm256_movemask_ps( _mm256_permutevar8x32_ps( mask8, index ) );
 				const __m256i c8 = _mm256_permutevar8x32_epi32( _mm256_load_si256( (const __m256i*)n->child ), index );
@@ -1044,48 +1010,27 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 				const __m256i child8 = _mm256_permutevar8x32_epi32( c8, cpi );
 				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), child8 );
 				_mm256_storeu_ps( distStack + stackPtr, dist8 );
-			#else
-				// use a sorting network to sort by entry distance.
-				__m256i d = _mm256_or_si256( _mm256_and_si256( _mm256_castps_si256( tmin ), _mm256_set1_epi32( -8 ) ), lane8 );
-				d = _mm256_blendv_epi8( _mm256_set1_epi32( 0x7fffffff ), d, _mm256_castps_si256( mask8 ) );
-				#define TINYBVH_SORT8( shuffle, blend ) { const __m256i other = shuffle; \
-					d = _mm256_blend_epi32( _mm256_min_epi32( d, other ), _mm256_max_epi32( d, other ), blend ); }
-				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 2, 3, 0, 1 ) ), 0x66 );
-				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 1, 0, 3, 2 ) ), 0x3c );
-				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 2, 3, 0, 1 ) ), 0x5a );
-				// The lower half is ascending and the upper half descending. Fetch
-				// their minimum now so the descent can start during the remaining merge.
-				const __m128i otherMin = _mm_shuffle_epi32( _mm256_extracti128_si256( d, 1 ), _MM_SHUFFLE( 3, 3, 3, 3 ) );
-				const uint32_t nearest = _mm_cvtsi128_si32( _mm_min_epi32( _mm256_castsi256_si128( d ), otherMin ) ) & 7;
-				nodeIdx = n->child[nearest];
-				TINYBVH_SORT8( _mm256_permute2x128_si256( d, d, 1 ), 0xf0 );
-				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 1, 0, 3, 2 ) ), 0xcc );
-				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 2, 3, 0, 1 ) ), 0xaa );
-				// Reverse to put the closest child at the top of the stack.
-				const __m256i order = _mm256_permutevar8x32_epi32( d, _mm256_sub_epi32( _mm256_set1_epi32( validNodes - 1 ), lane8 ) );
-				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), _mm256_permutevar8x32_epi32( _mm256_load_si256( (const __m256i*)n->child ), order ) );
-				_mm256_storeu_ps( distStack + stackPtr, _mm256_permutevar8x32_ps( tmin, order ) );
-			#endif
 				stackPtr += validNodes - 1;
+			#ifdef _DEBUG
+				BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_STACK_SIZE * 4 - 8, "BVH8_CPU::Intersect, traversal stack overflow." );
+			#endif
 			}
 			else
 			{
 				if (!stackPtr) ISUNLIKELY goto the_end;
 				nodeIdx = nodeStack[--stackPtr];
 			}
-		#ifdef _DEBUG
-			BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_STACK_SIZE * 4 - 8, "BVH8_CPU::Intersect, traversal stack overflow." );
-		#endif
 		}
-	#ifdef BVH8_USE_PREFETCHING
 		if (stackPtr) ISLIKELY
 		{
-			// prefetch the next node - only divergent rays benefit.
+			// An interior node is 256 bytes: x planes, y planes, z planes, child8+perm8 -
+			// all four cachelines are read by the node test. A leaf is 192 bytes (3 lines).
+			// Nodes sit at arbitrary 64-byte multiples (leafs are 3 blocks, nodes 4), so the
+			// adjacent-line prefetcher cannot be relied on to fill in the gaps: issue all four.
 			const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
 			_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
 			_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
 		}
-	#endif
 		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
 		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, _mm_load_ps( leaf->e2z ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
@@ -1177,6 +1122,254 @@ the_end:
 	return 0;
 #endif
 }
+
+#else
+
+template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
+{
+	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 4 /* wide trees push more nodes per step */ + 8];
+	ALIGNED( 64 ) float distStack[TINYBVH_STACK_SIZE * 4 + 8];
+	const __m256 zero8 = _mm256_setzero_ps();
+	__m256 t8 = _mm256_set1_ps( ray.hit.t );
+	int32_t stackPtr = 0;
+	uint32_t nodeIdx = 0;
+	const __m256 rx8 = _mm256_set1_ps( ray.O.x * ray.rD.x ), rdx8 = _mm256_set1_ps( ray.rD.x );
+	const __m256 ry8 = _mm256_set1_ps( ray.O.y * ray.rD.y ), rdy8 = _mm256_set1_ps( ray.rD.y );
+	const __m256 rz8 = _mm256_set1_ps( ray.O.z * ray.rD.z ), rdz8 = _mm256_set1_ps( ray.rD.z );
+	const __m256i lane8 = _mm256_setr_epi32( 0, 1, 2, 3, 4, 5, 6, 7 );
+#ifdef BVH8_SORTING_NETWORK
+	const __m256i sentinel8 = _mm256_setr_epi32( (int32_t)0x80000000, (int32_t)0x80000001,
+		(int32_t)0x80000002, (int32_t)0x80000003, (int32_t)0x80000004, (int32_t)0x80000005,
+		(int32_t)0x80000006, (int32_t)0x80000007 );
+#endif
+	const __m128 ox4 = _mm_set1_ps( ray.O.x ), oy4 = _mm_set1_ps( ray.O.y ), oz4 = _mm_set1_ps( ray.O.z );
+	const __m128 dx4 = _mm_set1_ps( ray.D.x ), dy4 = _mm_set1_ps( ray.D.y ), dz4 = _mm_set1_ps( ray.D.z );
+	const __m128 one4 = _mm_set1_ps( 1 ), inf4 = _mm_set1_ps( 1e34f );
+#ifdef _DEBUG
+	// sorry, not even this can be tolerated in this function. Only in debug.
+	uint32_t steps = 0;
+#endif
+	while (1)
+	{
+		while (!(nodeIdx & LEAF_BIT)) ISLIKELY
+		{
+		#ifdef _DEBUG
+			steps++;
+		#endif
+			const BVHNode* n = (BVHNode*)(bvh8Data + nodeIdx);
+			const __m256 tx1 = _mm256_fmsub_ps( _mm256_load_ps( posX ? n->xmin : n->xmax ), rdx8, rx8 );
+			const __m256 ty1 = _mm256_fmsub_ps( _mm256_load_ps( posY ? n->ymin : n->ymax ), rdy8, ry8 );
+			const __m256 tz1 = _mm256_fmsub_ps( _mm256_load_ps( posZ ? n->zmin : n->zmax ), rdz8, rz8 );
+			const __m256 tx2 = _mm256_fmsub_ps( _mm256_load_ps( posX ? n->xmax : n->xmin ), rdx8, rx8 );
+			const __m256 ty2 = _mm256_fmsub_ps( _mm256_load_ps( posY ? n->ymax : n->ymin ), rdy8, ry8 );
+			const __m256 tz2 = _mm256_fmsub_ps( _mm256_load_ps( posZ ? n->zmax : n->zmin ), rdz8, rz8 );
+			const __m256 tmin = _mm256_max_ps( _mm256_max_ps( tx1, ty1 ), _mm256_max_ps( tz1, zero8 ) );
+			const __m256 tmax = _mm256_min_ps( _mm256_min_ps( tx2, ty2 ), _mm256_min_ps( tz2, t8 ) );
+			const __m256 mask8 = _mm256_cmp_ps( tmin, tmax, _CMP_LE_OQ );
+			const uint32_t mask = _mm256_movemask_ps( mask8 );
+			const uint32_t validNodes = __popc( mask );
+		#ifdef BVH8_USE_PREFETCHING
+			// prefetch child data. only incoherent rays benefit.
+			for (uint32_t m = mask; m; m &= m - 1)
+			{
+			#if defined _MSC_VER && !defined __clang__
+				unsigned long lane;
+				_BitScanForward( &lane, m );
+			#else
+				const uint32_t lane = __builtin_ctz( m );
+			#endif
+				const char* p = (const char*)(bvh8Data + (n->child[lane] & 0x1fffffff));
+				_mm_prefetch( p, _MM_HINT_T0 ), _mm_prefetch( p + 64, _MM_HINT_T0 );
+				_mm_prefetch( p + 128, _MM_HINT_T0 ), _mm_prefetch( p + 192, _MM_HINT_T0 );
+			}
+		#endif
+			if (validNodes == 1)
+			{
+				const uint32_t lane = __bfind( mask );
+				nodeIdx = n->child[lane];
+			}
+		#ifdef BVH8_2VALIDNODES
+			else if (validNodes == 2)
+			{
+				// The highest and lowest set bits identify the two children independently.
+				// This avoids both the sorting network and dependent bit scans.
+				const uint32_t lane0 = __bfind( mask );
+			#if defined _MSC_VER && !defined __clang__
+				unsigned long lane1;
+				_BitScanForward( &lane1, mask );
+			#else
+				const uint32_t lane1 = __builtin_ctz( mask );
+			#endif
+				const float dist0 = _mm_cvtss_f32( _mm256_castps256_ps128( _mm256_permutevar8x32_ps( tmin, _mm256_set1_epi32( lane0 ) ) ) );
+				const float dist1 = _mm_cvtss_f32( _mm256_castps256_ps128( _mm256_permutevar8x32_ps( tmin, _mm256_set1_epi32( lane1 ) ) ) );
+				const bool first = dist0 < dist1;
+				nodeIdx = n->child[first ? lane0 : lane1];
+				nodeStack[stackPtr] = n->child[first ? lane1 : lane0];
+				distStack[stackPtr++] = first ? dist1 : dist0;
+			}
+		#endif
+			else if (validNodes > 0)
+			{
+			#ifndef BVH8_SORTING_NETWORK
+				constexpr int signShift = (posX ? 3 : 0) + (posY ? 6 : 0) + (posZ ? 12 : 0);
+				const __m256i index = _mm256_srli_epi32( _mm256_load_si256( (const __m256i*)n->perm ), signShift );
+				const uint32_t m = _mm256_movemask_ps( _mm256_permutevar8x32_ps( mask8, index ) );
+				const __m256i c8 = _mm256_permutevar8x32_epi32( _mm256_load_si256( (const __m256i*)n->child ), index );
+				nodeIdx = (uint32_t)_mm_cvtsi128_si32( _mm256_castsi256_si128(
+					_mm256_permutevar8x32_epi32( c8, _mm256_set1_epi32( (int32_t)__bfind( m ) ) ) ) );
+				// start the fill for the child we are about to descend into; the LUT
+				// load, two permutes and two stores below hide the L1/L2 latency.
+				_mm_prefetch( (const char*)(bvh8Data + (nodeIdx & 0x1fffffff)), _MM_HINT_T0 );
+				const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - m] );
+				const __m256 dist8 = _mm256_permutevar8x32_ps( _mm256_permutevar8x32_ps( tmin, index ), cpi );
+				const __m256i child8 = _mm256_permutevar8x32_epi32( c8, cpi );
+				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), child8 );
+				_mm256_storeu_ps( distStack + stackPtr, dist8 );
+			#else
+				// use a sorting network to sort by entry distance.
+				__m256i d = _mm256_or_si256( _mm256_and_si256( _mm256_castps_si256( tmin ), _mm256_set1_epi32( -8 ) ), lane8 );
+				d = _mm256_blendv_epi8( _mm256_set1_epi32( 0x7fffffff ), d, _mm256_castps_si256( mask8 ) );
+				#define TINYBVH_SORT8( shuffle, blend ) { const __m256i other = shuffle; \
+					d = _mm256_blend_epi32( _mm256_min_epi32( d, other ), _mm256_max_epi32( d, other ), blend ); }
+				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 2, 3, 0, 1 ) ), 0x66 );
+				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 1, 0, 3, 2 ) ), 0x3c );
+				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 2, 3, 0, 1 ) ), 0x5a );
+				// The lower half is ascending and the upper half descending. Fetch
+				// their minimum now so the descent can start during the remaining merge.
+				const __m128i otherMin = _mm_shuffle_epi32( _mm256_extracti128_si256( d, 1 ), _MM_SHUFFLE( 3, 3, 3, 3 ) );
+				const uint32_t nearest = _mm_cvtsi128_si32( _mm_min_epi32( _mm256_castsi256_si128( d ), otherMin ) ) & 7;
+				nodeIdx = n->child[nearest];
+				TINYBVH_SORT8( _mm256_permute2x128_si256( d, d, 1 ), 0xf0 );
+				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 1, 0, 3, 2 ) ), 0xcc );
+				TINYBVH_SORT8( _mm256_shuffle_epi32( d, _MM_SHUFFLE( 2, 3, 0, 1 ) ), 0xaa );
+				// Reverse to put the closest child at the top of the stack.
+				const __m256i order = _mm256_permutevar8x32_epi32( d, _mm256_sub_epi32( _mm256_set1_epi32( validNodes - 1 ), lane8 ) );
+				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), _mm256_permutevar8x32_epi32( _mm256_load_si256( (const __m256i*)n->child ), order ) );
+				_mm256_storeu_ps( distStack + stackPtr, _mm256_permutevar8x32_ps( tmin, order ) );
+			#endif
+				stackPtr += validNodes - 1;
+			}
+			else
+			{
+				if (!stackPtr) ISUNLIKELY goto the_end;
+				nodeIdx = nodeStack[--stackPtr];
+			}
+		#ifdef _DEBUG
+			BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_STACK_SIZE * 4 - 8, "BVH8_CPU::Intersect, traversal stack overflow." );
+		#endif
+		}
+	#ifdef BVH8_USE_PREFETCHING
+		if (stackPtr) ISLIKELY
+		{
+			// prefetch the next node - only divergent rays benefit.
+			const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
+			_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
+			_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
+		}
+	#endif
+		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
+		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
+		const __m128 hx4 = _mm_fmsub_ps( dy4, _mm_load_ps( leaf->e2z ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
+		const __m128 hy4 = _mm_fmsub_ps( dz4, _mm_load_ps( leaf->e2x ), _mm_mul_ps( dx4, _mm_load_ps( leaf->e2z ) ) );
+		const __m128 hz4 = _mm_fmsub_ps( dx4, _mm_load_ps( leaf->e2y ), _mm_mul_ps( dy4, _mm_load_ps( leaf->e2x ) ) );
+		const __m128 sx4 = _mm_sub_ps( ox4, _mm_load_ps( leaf->v0x ) ), sy4 = _mm_sub_ps( oy4, _mm_load_ps( leaf->v0y ) );
+		const __m128 sz4 = _mm_sub_ps( oz4, _mm_load_ps( leaf->v0z ) );
+		const __m128 det4 = _mm_fmadd_ps( _mm_load_ps( leaf->e1z ), hz4, _mm_fmadd_ps( _mm_load_ps( leaf->e1x ), hx4, _mm_mul_ps( _mm_load_ps( leaf->e1y ), hy4 ) ) );
+		const __m128 qz4 = _mm_fmsub_ps( sx4, _mm_load_ps( leaf->e1y ), _mm_mul_ps( sy4, _mm_load_ps( leaf->e1x ) ) );
+		const __m128 qx4 = _mm_fmsub_ps( sy4, _mm_load_ps( leaf->e1z ), _mm_mul_ps( sz4, _mm_load_ps( leaf->e1y ) ) );
+		const __m128 qy4 = _mm_fmsub_ps( sz4, _mm_load_ps( leaf->e1x ), _mm_mul_ps( sx4, _mm_load_ps( leaf->e1z ) ) );
+		// Reject on the unnormalised barycentrics: fold the sign of the determinant
+		// into them and compare against |det|, so the division is only needed once a
+		// hit survives. u, v and t come out bit-identical, since dividing by det and
+		// dividing by |det| after flipping the sign differ only by an exact negation.
+		const __m128 signMask4 = _mm_set1_ps( -0.0f );
+		const __m128 detSign4 = _mm_and_ps( det4, signMask4 );
+		const __m128 absDet4 = _mm_andnot_ps( signMask4, det4 );
+		const __m128 U4 = _mm_xor_ps( _mm_fmadd_ps( sz4, hz4, _mm_fmadd_ps( sx4, hx4, _mm_mul_ps( sy4, hy4 ) ) ), detSign4 );
+		const __m128 V4 = _mm_xor_ps( _mm_fmadd_ps( dz4, qz4, _mm_fmadd_ps( dx4, qx4, _mm_mul_ps( dy4, qy4 ) ) ), detSign4 );
+		const __m128 T4 = _mm_xor_ps( _mm_fmadd_ps( _mm_load_ps( leaf->e2z ), qz4, _mm_fmadd_ps( _mm_load_ps( leaf->e2x ), qx4, _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), detSign4 );
+		const __m128 mask1 = _mm_cmpge_ps( U4, _mm_setzero_ps() ), mask2 = _mm_cmpge_ps( V4, _mm_setzero_ps() );
+		const __m128 mask3 = _mm_cmple_ps( _mm_add_ps( U4, V4 ), absDet4 );
+		const __m128 mask4 = _mm_cmpgt_ps( T4, _mm_setzero_ps() );
+		const __m128 mask5 = _mm_cmplt_ps( T4, _mm_mul_ps( _mm256_castps256_ps128( t8 ), absDet4 ) );
+		__m128 combined = _mm_and_ps( _mm_and_ps( _mm_and_ps( mask1, mask2 ), _mm_and_ps( mask3, mask4 ) ), mask5 );
+		uint32_t imask = _mm_movemask_ps( combined );
+		if (imask)
+		{
+			const __m128 inv_det4 = _mm_div_ps( one4, absDet4 );
+			const __m128 u4 = _mm_mul_ps( U4, inv_det4 );
+			const __m128 v4 = _mm_mul_ps( V4, inv_det4 );
+			const __m128 ta4 = _mm_mul_ps( T4, inv_det4 );
+			// evaluate opacity map, if present (SSE version).
+			if (opmap) ISUNLIKELY
+			{
+				const __m128 fN4 = _mm_set1_ps( (float)opmapN );
+				const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
+				const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
+				const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+				const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
+				const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
+				uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
+				tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+				// proceed with scalar code for gather operation - TODO: better approach?
+				for (int i = 0; i < 4; i++) if (imask & (1 << i))
+				{
+					uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
+					if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
+				}
+				// combine
+				combined = _mm_and_ps( combined, tinybvh_load4( omask ) );
+				imask = _mm_movemask_ps( combined );
+			}
+			if (imask)
+			{
+				// compute broadcasted horizontal minimum of dist4
+				const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
+				const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
+				const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+				const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
+				// update hit record.
+				const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
+				const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
+				ray.hit.t = t;
+				ray.hit.u = _mm_cvtss_f32( _mm_permutevar_ps( u4, lane4 ) );
+				ray.hit.v = _mm_cvtss_f32( _mm_permutevar_ps( v4, lane4 ) );
+			#if INST_IDX_BITS == 32
+				ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
+			#else
+				ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
+			#endif
+				t8 = _mm256_set1_ps( t );
+				// compress stack
+				int32_t outStackPtr = 0;
+				for (int32_t i = 0; i < stackPtr; i += 8)
+				{
+					const int32_t numItems = tinybvh_min( 8, stackPtr - i );
+					const __m256i valid8 = _mm256_cmpgt_epi32( _mm256_set1_epi32( numItems ), lane8 );
+					__m256i node8 = _mm256_maskload_epi32( (const int32_t*)(nodeStack + i), valid8 );
+					__m256 dist8 = _mm256_maskload_ps( distStack + i, valid8 );
+					const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) ) & ((1u << numItems) - 1);
+					const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
+					dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
+					_mm256_storeu_ps( distStack + outStackPtr, dist8 );
+					_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
+					outStackPtr += __popc( mask );
+				}
+				stackPtr = outStackPtr;
+			}
+		}
+		if (!stackPtr) ISUNLIKELY break;
+		nodeIdx = nodeStack[--stackPtr];
+	}
+the_end:
+#ifdef _DEBUG
+	return steps;
+#else
+	return 0;
+#endif
+}
+
+#endif
 
 template <> template <bool posX, bool posY, bool posZ> bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const
 {
