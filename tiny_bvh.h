@@ -99,6 +99,7 @@ THE SOFTWARE.
 // Thierry Cantenot: user-defined alloc & free
 // David Peicho: slices & Rust bindings, API advice
 // .. and other contributors: see GitHub page.
+// WiveC implementation based on work by Markus Gnauck / nodebleed.
 
 #ifndef TINY_BVH_H_
 #define TINY_BVH_H_
