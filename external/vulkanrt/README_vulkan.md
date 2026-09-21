@@ -15,25 +15,69 @@ backends are cycled one per frame so they see the same clocks.
 | `shaders/tiny4.comp` | `tiny4.hlsl` |
 | `shaders/tiny8.comp` | `tiny8.hlsl` |
 | `shaders/tinyrq.comp` | `tinyrq.hlsl` |
-| `compile_shaders.bat`, `build.bat` | (new) |
+| `compile_shaders.bat`, `build.bat` | (new) Windows command-line build |
+| `program_vk.sln`, `.vcxproj`, `.vcxproj.filters`, `.vcxproj.user` | (new) VS2022 project |
+| `Makefile`, `compile_shaders.sh` | (new) Linux build |
 
-Drop `program_vk.cpp` where `program.cpp` lives, so `../../tiny_bvh.h`,
+Drop the whole folder where `program.cpp` lives, so `../../tiny_bvh.h`,
 `../../testdata/cryteksponza.bin` and `raysets/view3rays.bin` still resolve.
-Put `shaders/` next to the executable (or one or two levels up — the loader
-searches `shaders/`, `../shaders/`, `../../shaders/`).
+`shaders/` stays a subfolder of the project directory; the loader searches
+`shaders/`, `../shaders/`, `../../shaders/`.
 
 ## Build
 
-Needs the LunarG Vulkan SDK. From a Developer Command Prompt:
+Needs the LunarG Vulkan SDK, whose installer sets `VULKAN_SDK`.
+
+**Visual Studio 2022:** open `program_vk.sln`, pick `Release|x64`, build, run.
+x64 only, `v143`, C++20, `/arch:AVX2`. The shaders are `CustomBuild` items that
+compile in place to `shaders/*.spv` and rebuild when you edit them (or when you
+edit `common.glsl`, via `AdditionalInputs`), so shader errors land in the Error
+List with file and line. `Clean` deletes the `.spv` files too.
+
+Two project details that matter rather than being boilerplate:
+
+- The working directory must stay `$(ProjectDir)`, which is both the default and
+  what `.vcxproj.user` sets explicitly. All three runtime paths depend on it.
+  Running `bin\Release\program_vk.exe` from Explorer will not find the scene;
+  launch from the IDE, or `cd` to the project folder first.
+- A `CheckVulkanSDK` target fails the build with a readable message if
+  `VULKAN_SDK` is unset or `glslangValidator.exe` is missing, instead of letting
+  it surface as a confusing include error. Visual Studio only sees environment
+  variables that existed when it started, so restart the IDE if you installed
+  the SDK while it was open.
+
+Debug builds are fine but slow to start: `BuildHQ` plus `Optimize` on Sponza is
+minutes of unoptimized tinybvh. Benchmark in Release.
+
+**Windows command line:** from a Developer Command Prompt:
 
 ```
-compile_shaders.bat
 build.bat
 ```
 
-`build.bat` calls `compile_shaders.bat` for you. Shaders are SPIR-V loaded at
-runtime rather than baked into `.fxh` headers, so a shader edit only needs
-`compile_shaders.bat`, no relink.
+which calls `compile_shaders.bat` first. Shaders are SPIR-V loaded at runtime
+rather than baked into `.fxh` headers, so a shader-only edit needs just
+`compile_shaders.bat` — no relink.
+
+**Linux:**
+
+```
+make          # shaders + binary
+make run      # ... and run it from this directory, which the paths need
+```
+
+Dependencies, beyond a driver with `VK_KHR_ray_tracing_pipeline`:
+
+```
+sudo apt install libvulkan-dev libxcb1-dev glslang-tools     # Debian/Ubuntu
+sudo dnf install vulkan-loader-devel libxcb-devel glslang    # Fedora
+sudo pacman -S vulkan-headers libxcb glslang                 # Arch
+```
+
+The LunarG SDK works instead of the distro packages. `-mavx2 -mfma` is applied
+only on x86_64, so the same Makefile builds on aarch64 and lets tinybvh take its
+NEON path. Editing `shaders/common.glsl` rebuilds all seven shaders;
+`compile_shaders.sh` does the shaders alone.
 
 ## Backends
 
@@ -50,6 +94,32 @@ raytracing tier 1.0 was in the D3D12 version. `VK_KHR_ray_query` stands in for
 tier 1.1: without it the program cycles one backend fewer instead of failing.
 The `ENABLE_*` defines at the top control *printing* only — every backend still
 runs, so the per-slot timing stays aligned.
+
+## Platforms
+
+One source file, two windowing backends behind `#if defined(_WIN32)`:
+
+|  | Windows | Linux |
+| --- | --- | --- |
+| surface | `VK_KHR_win32_surface` | `VK_KHR_xcb_surface` |
+| window | Win32 + `WndProc` | XCB |
+| link | `vulkan-1.lib`, `user32` | `-lvulkan -lxcb -pthread` |
+
+XCB rather than Xlib on purpose: `X.h` turns ordinary words into macros
+(`None`, `Below`, `Complex`, `Success`), and `tiny_bvh_base.h` already contains
+one of them, so including `Xlib.h` ahead of tinybvh would need a pile of
+`#undef`s. Everything XCB exposes is `xcb_`-prefixed. Wayland-only sessions go
+through XWayland, which is normally present.
+
+The event handlers now only set `windowClosed` / `windowResized` and the shared
+main loop acts on them. That is not just for portability: it takes `Resize()`
+out of the Win32 `WndProc`, where it previously ran re-entrantly from inside
+`DispatchMessage`, so the swapchain is now only ever rebuilt between frames.
+
+Everything Windows-specific is reached through six one-line shims
+(`AlignedAlloc64`, `AlignedFree64`, `SleepMs`, `GetCwd`, `ShowFatal`,
+`QuitProcess`) plus the three window functions, so the ~950 lines of Vulkan in
+between are genuinely shared rather than forked.
 
 ## What changed, and why
 
@@ -77,9 +147,16 @@ runs, so the per-slot timing stays aligned.
   `BARRIER_BETWEEN_DISPATCHES` to serialize them.
 - **Pre-splitting** has been dropped, as requested. `dxrVerts`/`dxrTriCount` are
   gone; the BLAS is built from `verts` directly.
-- **Ray set fallback.** If `raysets/view3rays.bin` is missing the program prints a
-  warning and generates a synthetic pinhole camera ray set rather than crashing
-  in `fread`. Those numbers are not comparable to a recorded run.
+- **Ray set is the viewpoint.** There is no camera in either version: the whole
+  viewpoint is whatever `raysets/view3rays.bin` recorded, read verbatim. A
+  missing file is therefore fatal, with a message naming the working directory,
+  since that is nearly always the cause. `ALLOW_SYNTHETIC_RAYS` turns on an
+  invented pinhole camera instead, but its viewpoint is unrelated to the
+  recorded one, so the image will not match the D3D12 output and the timings are
+  not comparable. Leave it off unless you just want the program to start.
+  The loader now also rejects a truncated or wrong-resolution ray set, which
+  would otherwise leave zeroed rays whose infinite reciprocals traverse as
+  garbage.
 - **`CWBVH_COMPRESSED_TRIS`** is now a hard `#error` rather than a silent
   mismatch: `tiny8.comp` hard-codes a 4x`vec4` triangle stride (as `tiny8.hlsl`
   did), so if the define ever gets switched off in `tiny_bvh.h` the shader would
