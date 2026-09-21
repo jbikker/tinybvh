@@ -1,4 +1,4 @@
-// tiny_bvh_x86_float.h: SSE / AVX / AVX2 specializations for the single
+﻿// tiny_bvh_x86_float.h: SSE / AVX / AVX2 specializations for the single
 // precision layouts. Included by tiny_bvh.h; do not include directly.
 
 #ifndef TINY_BVH_H_
@@ -46,6 +46,10 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize();
 #ifdef BVH_USEAVX2
 template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
 template <> template <bool posX, bool posY, bool posZ> bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
+template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IntersectPacketOctant( RayPacket8& packet ) const;
+template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IntersectPacketsOctant( RayPacket8* packets, const uint32_t packetCount ) const;
+template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IsOccludedPacketOctant( RayPacket8& packet ) const;
+template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IsOccludedPacketsOctant( RayPacket8* packets, const uint32_t packetCount ) const;
 #endif
 
 } // namespace tinybvh
@@ -1481,6 +1485,641 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH8_CPU<float
 		nodeIdx = nodeStack[--stackPtr];
 	}
 }
+
+// Packet traversal, AVX2. See RayPacket8 in tiny_bvh_base.h.
+
+static_assert( TINYBVH_MAX_PACKETS <= 32, "TINYBVH_MAX_PACKETS must fit in a 32-bit mask." );
+
+// broadcasted horizontal minimum and maximum of eight floats
+static TINYBVH_FORCEINLINE __m256 tinybvh_hmin8( const __m256 a )
+{
+	__m256 x = _mm256_min_ps( a, _mm256_permute_ps( a, _MM_SHUFFLE( 2, 3, 0, 1 ) ) );
+	x = _mm256_min_ps( x, _mm256_permute_ps( x, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+	return _mm256_min_ps( x, _mm256_permute2f128_ps( x, x, 1 ) );
+}
+static TINYBVH_FORCEINLINE __m256 tinybvh_hmax8( const __m256 a )
+{
+	__m256 x = _mm256_max_ps( a, _mm256_permute_ps( a, _MM_SHUFFLE( 2, 3, 0, 1 ) ) );
+	x = _mm256_max_ps( x, _mm256_permute_ps( x, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+	return _mm256_max_ps( x, _mm256_permute2f128_ps( x, x, 1 ) );
+}
+
+// eight lanes of an 8-bit mask, as a float blend mask
+static TINYBVH_FORCEINLINE __m256 tinybvh_lanemask8( const uint32_t m )
+{
+	const __m256i bits = _mm256_setr_epi32( 1, 2, 4, 8, 16, 32, 64, 128 );
+	const __m256i b = _mm256_and_si256( _mm256_set1_epi32( (int32_t)m ), bits );
+	return _mm256_castsi256_ps( _mm256_cmpeq_epi32( b, bits ) );
+}
+
+// we didn't explicitly store a prim count: count unique prim ids.
+static TINYBVH_FORCEINLINE uint32_t tinybvh_leaftris( const uint32_t* primIdx )
+{
+	uint32_t n = 4;
+	while (n > 1 && primIdx[n - 1] == primIdx[n - 2]) n--;
+	return n;
+}
+
+// interval ray slab test against the eight child boxes of one node
+#define TINYBVH_INTERVAL_SLAB_TEST \
+	const __m256 bx1 = _mm256_load_ps( posX ? n->xmin : n->xmax ); \
+	const __m256 by1 = _mm256_load_ps( posY ? n->ymin : n->ymax ); \
+	const __m256 bz1 = _mm256_load_ps( posZ ? n->zmin : n->zmax ); \
+	const __m256 bx2 = _mm256_load_ps( posX ? n->xmax : n->xmin ); \
+	const __m256 by2 = _mm256_load_ps( posY ? n->ymax : n->ymin ); \
+	const __m256 bz2 = _mm256_load_ps( posZ ? n->zmax : n->zmin ); \
+	const __m256 tx1 = _mm256_min_ps( _mm256_fmsub_ps( bx1, rdxMin, rxMax ), _mm256_fmsub_ps( bx1, rdxMax, rxMax ) ); \
+	const __m256 ty1 = _mm256_min_ps( _mm256_fmsub_ps( by1, rdyMin, ryMax ), _mm256_fmsub_ps( by1, rdyMax, ryMax ) ); \
+	const __m256 tz1 = _mm256_min_ps( _mm256_fmsub_ps( bz1, rdzMin, rzMax ), _mm256_fmsub_ps( bz1, rdzMax, rzMax ) ); \
+	const __m256 tx2 = _mm256_max_ps( _mm256_fmsub_ps( bx2, rdxMin, rxMin ), _mm256_fmsub_ps( bx2, rdxMax, rxMin ) ); \
+	const __m256 ty2 = _mm256_max_ps( _mm256_fmsub_ps( by2, rdyMin, ryMin ), _mm256_fmsub_ps( by2, rdyMax, ryMin ) ); \
+	const __m256 tz2 = _mm256_max_ps( _mm256_fmsub_ps( bz2, rdzMin, rzMin ), _mm256_fmsub_ps( bz2, rdzMax, rzMin ) ); \
+	const __m256 itmin = _mm256_max_ps( _mm256_max_ps( tx1, ty1 ), _mm256_max_ps( tz1, zero8 ) ); \
+	const __m256 itmax = _mm256_min_ps( _mm256_min_ps( tx2, ty2 ), _mm256_min_ps( tz2, far8 ) ); \
+	const __m256 mask8 = _mm256_cmp_ps( itmin, itmax, _CMP_LE_OQ ); \
+	const uint32_t mask = _mm256_movemask_ps( mask8 );
+
+// push every child the interval ray hits, in perm order - farthest first.
+#define TINYBVH_PACKET_PUSH \
+	constexpr int signShift = 3 * ((posX ? 1 : 0) + (posY ? 2 : 0) + (posZ ? 4 : 0)); \
+	const __m256i index = _mm256_srli_epi32( _mm256_load_si256( (const __m256i*)n->perm ), signShift ); \
+	const uint32_t m = _mm256_movemask_ps( _mm256_permutevar8x32_ps( mask8, index ) ); \
+	const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - m] ); \
+	const __m256i c8 = _mm256_permutevar8x32_epi32( _mm256_load_si256( (const __m256i*)n->child ), index ); \
+	const __m256i i8 = _mm256_permutevar8x32_epi32( _mm256_add_epi32( _mm256_set1_epi32( (int32_t)(nodeIdx << 3) ), lane8 ), index ); \
+	_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), _mm256_permutevar8x32_epi32( c8, cpi ) ); \
+	_mm256_storeu_si256( (__m256i*)(infoStack + stackPtr), _mm256_permutevar8x32_epi32( i8, cpi ) );
+
+// The same, compacted but unsorted: for occlusion any hit will do, so there is
+// nothing to order by and perm goes unread.
+#define TINYBVH_PACKET_PUSH_ANY \
+	const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] ); \
+	const __m256i c8 = _mm256_permutevar8x32_epi32( _mm256_load_si256( (const __m256i*)n->child ), cpi ); \
+	const __m256i i8 = _mm256_permutevar8x32_epi32( _mm256_add_epi32( _mm256_set1_epi32( (int32_t)(nodeIdx << 3) ), lane8 ), cpi ); \
+	_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), c8 ); \
+	_mm256_storeu_si256( (__m256i*)(infoStack + stackPtr), i8 );
+
+// Recover the box of the child recorded in 'info'..
+#define TINYBVH_PACKET_BOX( info ) \
+	const BVHNode* p = (const BVHNode*)(bvh8Data + ((info) >> 3)); \
+	const __m256i sel8 = _mm256_set1_epi32( (int32_t)((info) & 7) ); \
+	const __m256 px1 = _mm256_permutevar8x32_ps( _mm256_load_ps( posX ? p->xmin : p->xmax ), sel8 ); \
+	const __m256 py1 = _mm256_permutevar8x32_ps( _mm256_load_ps( posY ? p->ymin : p->ymax ), sel8 ); \
+	const __m256 pz1 = _mm256_permutevar8x32_ps( _mm256_load_ps( posZ ? p->zmin : p->zmax ), sel8 ); \
+	const __m256 px2 = _mm256_permutevar8x32_ps( _mm256_load_ps( posX ? p->xmax : p->xmin ), sel8 ); \
+	const __m256 py2 = _mm256_permutevar8x32_ps( _mm256_load_ps( posY ? p->ymax : p->ymin ), sel8 ); \
+	const __m256 pz2 = _mm256_permutevar8x32_ps( _mm256_load_ps( posZ ? p->zmax : p->zmin ), sel8 );
+
+// ..and test the actual rays of one packet against it.
+#define TINYBVH_PACKET_BOX_TEST( rdx, rdy, rdz, rx, ry, rz, tfar ) \
+	_mm256_movemask_ps( _mm256_cmp_ps( \
+		_mm256_max_ps( _mm256_max_ps( _mm256_fmsub_ps( px1, rdx, rx ), _mm256_fmsub_ps( py1, rdy, ry ) ), \
+			_mm256_max_ps( _mm256_fmsub_ps( pz1, rdz, rz ), zero8 ) ), \
+		_mm256_min_ps( _mm256_min_ps( _mm256_fmsub_ps( px2, rdx, rx ), _mm256_fmsub_ps( py2, rdy, ry ) ), \
+			_mm256_min_ps( _mm256_fmsub_ps( pz2, rdz, rz ), tfar ) ), _CMP_LE_OQ ) )
+
+// Moeller-Trumbore for eight rays and one triangle. Mirrors the operation order
+// of the four-triangle SSE version in the single ray kernel, so that the two
+// produce identical hit records.
+#define TINYBVH_PACKET_TRI_COMMON( i ) \
+	const __m256 v0x8 = _mm256_broadcast_ss( leaf->v0x + (i) ); \
+	const __m256 v0y8 = _mm256_broadcast_ss( leaf->v0y + (i) ); \
+	const __m256 v0z8 = _mm256_broadcast_ss( leaf->v0z + (i) ); \
+	const __m256 e1x8 = _mm256_broadcast_ss( leaf->e1x + (i) ); \
+	const __m256 e1y8 = _mm256_broadcast_ss( leaf->e1y + (i) ); \
+	const __m256 e1z8 = _mm256_broadcast_ss( leaf->e1z + (i) ); \
+	const __m256 e2x8 = _mm256_broadcast_ss( leaf->e2x + (i) ); \
+	const __m256 e2y8 = _mm256_broadcast_ss( leaf->e2y + (i) ); \
+	const __m256 e2z8 = _mm256_broadcast_ss( leaf->e2z + (i) ); \
+	const __m256 hx8 = _mm256_fmsub_ps( dy8, e2z8, _mm256_mul_ps( dz8, e2y8 ) ); \
+	const __m256 hy8 = _mm256_fmsub_ps( dz8, e2x8, _mm256_mul_ps( dx8, e2z8 ) ); \
+	const __m256 hz8 = _mm256_fmsub_ps( dx8, e2y8, _mm256_mul_ps( dy8, e2x8 ) ); \
+	const __m256 sx8 = _mm256_sub_ps( ox8, v0x8 ); \
+	const __m256 sy8 = _mm256_sub_ps( oy8, v0y8 ); \
+	const __m256 sz8 = _mm256_sub_ps( oz8, v0z8 ); \
+	const __m256 det8 = _mm256_fmadd_ps( e1z8, hz8, _mm256_fmadd_ps( e1x8, hx8, _mm256_mul_ps( e1y8, hy8 ) ) ); \
+	const __m256 qz8 = _mm256_fmsub_ps( sx8, e1y8, _mm256_mul_ps( sy8, e1x8 ) ); \
+	const __m256 qx8 = _mm256_fmsub_ps( sy8, e1z8, _mm256_mul_ps( sz8, e1y8 ) ); \
+	const __m256 qy8 = _mm256_fmsub_ps( sz8, e1x8, _mm256_mul_ps( sx8, e1z8 ) ); \
+	const __m256 nu8 = _mm256_fmadd_ps( sz8, hz8, _mm256_fmadd_ps( sx8, hx8, _mm256_mul_ps( sy8, hy8 ) ) ); \
+	const __m256 nv8 = _mm256_fmadd_ps( dz8, qz8, _mm256_fmadd_ps( dx8, qx8, _mm256_mul_ps( dy8, qy8 ) ) ); \
+	const __m256 nt8 = _mm256_fmadd_ps( e2z8, qz8, _mm256_fmadd_ps( e2x8, qx8, _mm256_mul_ps( e2y8, qy8 ) ) );
+
+#define TINYBVH_PACKET_TRI( i ) \
+	TINYBVH_PACKET_TRI_COMMON( i ) \
+	const __m256 invDet8 = _mm256_div_ps( one8, det8 ); \
+	const __m256 bu8 = _mm256_mul_ps( nu8, invDet8 ); \
+	const __m256 bv8 = _mm256_mul_ps( nv8, invDet8 ); \
+	const __m256 bt8 = _mm256_mul_ps( nt8, invDet8 ); \
+	const __m256 hit8 = _mm256_and_ps( \
+		_mm256_and_ps( _mm256_cmp_ps( bu8, zero8, _CMP_GE_OQ ), _mm256_cmp_ps( bv8, zero8, _CMP_GE_OQ ) ), \
+		_mm256_and_ps( _mm256_cmp_ps( _mm256_add_ps( bu8, bv8 ), one8, _CMP_LE_OQ ), \
+		_mm256_and_ps( _mm256_cmp_ps( bt8, zero8, _CMP_GT_OQ ), _mm256_cmp_ps( bt8, tcur8, _CMP_LT_OQ ) ) ) );
+
+// The occlusion variant drops the reciprocal: with no u, v or t to report, the
+// comparisons can be made determinant-scaled with the sign folded in, exactly
+// as the single ray occlusion kernel does it. A retired lane carries tcur = -1,
+// and tcur * adet is then non-positive while ta must be positive, so the
+// sentinel survives the rewrite.
+#define TINYBVH_PACKET_TRI_ANY( i ) \
+	TINYBVH_PACKET_TRI_COMMON( i ) \
+	const __m256 dsign8 = _mm256_and_ps( det8, sign8 ), adet8 = _mm256_andnot_ps( sign8, det8 ); \
+	const __m256 bu8 = _mm256_xor_ps( nu8, dsign8 ), bv8 = _mm256_xor_ps( nv8, dsign8 ); \
+	const __m256 ta8 = _mm256_xor_ps( nt8, dsign8 ); \
+	const __m256 hit8 = _mm256_and_ps( \
+		_mm256_and_ps( _mm256_cmp_ps( bu8, zero8, _CMP_GE_OQ ), _mm256_cmp_ps( bv8, zero8, _CMP_GE_OQ ) ), \
+		_mm256_and_ps( _mm256_cmp_ps( _mm256_add_ps( bu8, bv8 ), adet8, _CMP_LE_OQ ), \
+		_mm256_and_ps( _mm256_cmp_ps( ta8, zero8, _CMP_GT_OQ ), \
+			_mm256_cmp_ps( ta8, _mm256_mul_ps( tcur8, adet8 ), _CMP_LT_OQ ) ) ) );
+
+// Packet traversal of a BVH8_CPU, for a single 8-ray packet.
+template <> template <bool posX, bool posY, bool posZ>
+int32_t impl::BVH8_CPU<float, uint32_t>::IntersectPacketOctant( RayPacket8& packet ) const
+{
+	// an opacity map needs a per-lane gather in the leaf; not worth vectorizing.
+	if (opmap) ISUNLIKELY return IntersectPacketPerRay<posX, posY, posZ>( packet );
+	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_PACKET_STACK_SIZE];
+	ALIGNED( 64 ) uint32_t infoStack[TINYBVH_PACKET_STACK_SIZE]; // parent index << 3 | lane
+	int32_t stackPtr = 0;
+	uint32_t nodeIdx = 0;
+	const __m256 zero8 = _mm256_setzero_ps(), one8 = _mm256_set1_ps( 1.0f );
+	const __m256i lane8 = _mm256_setr_epi32( 0, 1, 2, 3, 4, 5, 6, 7 );
+	const __m256i instIdx8 = _mm256_set1_epi32( (int32_t)packet.instIdx );
+	// the rays themselves; these drive the deferred box test and the leaf test.
+	const __m256 ox8 = _mm256_load_ps( packet.ox ), oy8 = _mm256_load_ps( packet.oy ), oz8 = _mm256_load_ps( packet.oz );
+	const __m256 dx8 = _mm256_load_ps( packet.dx ), dy8 = _mm256_load_ps( packet.dy ), dz8 = _mm256_load_ps( packet.dz );
+	const __m256 rdx8 = _mm256_load_ps( packet.rdx ), rdy8 = _mm256_load_ps( packet.rdy ), rdz8 = _mm256_load_ps( packet.rdz );
+	const __m256 rx8 = _mm256_mul_ps( ox8, rdx8 ), ry8 = _mm256_mul_ps( oy8, rdy8 ), rz8 = _mm256_mul_ps( oz8, rdz8 );
+	__m256 tcur8 = _mm256_load_ps( packet.t ), u8 = _mm256_load_ps( packet.u ), v8 = _mm256_load_ps( packet.v );
+	__m256i prim8 = _mm256_load_si256( (const __m256i*)packet.prim );
+	__m256i inst8 = _mm256_load_si256( (const __m256i*)packet.inst );
+	// the interval ray. Exact reciprocals throughout: rD comes from
+	// tinybvh_safercp, so a zero direction component yields a finite but huge
+	// value of the correct sign, which keeps the rD interval sign-consistent.
+	const __m256 rdxMin = tinybvh_hmin8( rdx8 ), rdxMax = tinybvh_hmax8( rdx8 );
+	const __m256 rdyMin = tinybvh_hmin8( rdy8 ), rdyMax = tinybvh_hmax8( rdy8 );
+	const __m256 rdzMin = tinybvh_hmin8( rdz8 ), rdzMax = tinybvh_hmax8( rdz8 );
+	const __m256 rxMin = tinybvh_hmin8( rx8 ), rxMax = tinybvh_hmax8( rx8 );
+	const __m256 ryMin = tinybvh_hmin8( ry8 ), ryMax = tinybvh_hmax8( ry8 );
+	const __m256 rzMin = tinybvh_hmin8( rz8 ), rzMax = tinybvh_hmax8( rz8 );
+	__m256 far8 = tinybvh_hmax8( tcur8 ); // the interval ray reaches as far as its farthest ray
+	int32_t steps = 0;
+	while (1)
+	{
+		if (!(nodeIdx & LEAF_BIT)) ISLIKELY
+		{
+			steps++;
+			const BVHNode* n = (const BVHNode*)(bvh8Data + nodeIdx);
+			TINYBVH_INTERVAL_SLAB_TEST
+			if (mask)
+			{
+				TINYBVH_PACKET_PUSH
+				stackPtr += __popc( mask );
+				BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_PACKET_STACK_SIZE - 8,
+					"BVH8_CPU::IntersectPacket, traversal stack overflow." );
+			}
+		}
+		else
+		{
+			// intersect all eight rays with each triangle of the quad leaf.
+			const BVHTri4Leaf* leaf = (const BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
+			const uint32_t triCount = tinybvh_leaftris( leaf->primIdx );
+			bool anyHit = false;
+			for (uint32_t i = 0; i < triCount; i++)
+			{
+				TINYBVH_PACKET_TRI( i )
+				if (!_mm256_movemask_ps( hit8 )) continue;
+				tcur8 = _mm256_blendv_ps( tcur8, bt8, hit8 );
+				u8 = _mm256_blendv_ps( u8, bu8, hit8 ), v8 = _mm256_blendv_ps( v8, bv8, hit8 );
+				prim8 = _mm256_castps_si256( _mm256_blendv_ps( _mm256_castsi256_ps( prim8 ),
+					_mm256_castsi256_ps( _mm256_set1_epi32( (int32_t)leaf->primIdx[i] ) ), hit8 ) );
+				// record the instance per lane, so a TLAS leaf can merge the result.
+				inst8 = _mm256_castps_si256( _mm256_blendv_ps( _mm256_castsi256_ps( inst8 ),
+					_mm256_castsi256_ps( instIdx8 ), hit8 ) );
+				anyHit = true;
+			}
+			// the interval ray shortens when the farthest of its rays shortened.
+			if (anyHit) far8 = tinybvh_hmax8( tcur8 );
+		}
+		// pop entries until an actual ray of the packet hits one. No distances are
+		// pushed: this test culls against the live per-lane t, which is stronger
+		// than a conservative packet-wide distance, so the single ray kernel's
+		// stack compression has no counterpart here.
+		while (1)
+		{
+			if (!stackPtr) ISUNLIKELY goto the_end;
+			const uint32_t info = infoStack[--stackPtr];
+			TINYBVH_PACKET_BOX( info )
+			if (TINYBVH_PACKET_BOX_TEST( rdx8, rdy8, rdz8, rx8, ry8, rz8, tcur8 ))
+			{
+				nodeIdx = nodeStack[stackPtr];
+				break;
+			}
+		}
+	}
+the_end:
+	_mm256_store_ps( packet.t, tcur8 );
+	_mm256_store_ps( packet.u, u8 ), _mm256_store_ps( packet.v, v8 );
+	_mm256_store_si256( (__m256i*)packet.prim, prim8 );
+	_mm256_store_si256( (__m256i*)packet.inst, inst8 );
+	return steps;
+}
+
+// The same traversal for up to TINYBVH_MAX_PACKETS packets sharing an octant.
+// One interval ray bounds all of them, so the node test is amortized over
+// 8 * packetCount rays. What has to be paid for that is the deferred test: a
+// popped entry is discarded only once every packet has failed it.
+// Two things keep that affordable. For an interior node we stop at the first
+// packet that enters - one hit is enough to justify the descent - and remember
+// which packet that was, so the children pushed there start their round robin
+// at a packet likely to enter them too; this is rend.c's first-packet index.
+// For a leaf there is no reason to stop early: the scan continues and yields
+// the exact set of packets that enter the leaf box, and the triangle loop then
+// skips the rest. A packet that misses the box cannot hit a triangle inside it,
+// so this is free accuracy, and it removes the term that dominates the
+// multi-packet leaf cost - triCount * packetCount 8-ray tests, most of them for
+// packets nowhere near the leaf.
+// Carrying the entering set through interior nodes as well would narrow the
+// scan all the way down, but it costs a full scan at every interior pop where
+// the first-packet index stops at the first hit, and under the coherence a
+// packet bundle is built for, the set barely shrinks in the upper tree - which
+// is where most pops happen.
+// The leaf scan is a deviation from the paper, which stops at the first hit
+// everywhere and then hands every packet to intersectLeaf - "if a valid
+// intersection exists the remaining packets will be assumed to hit the node as
+// well", with the cost of a wrong prediction acknowledged there. Testing the
+// rest against the leaf box instead removes that cost, and is safe for the same
+// reason the single ray kernel is: a leaf box contains the part of each of its
+// triangles that this leaf is responsible for, spatial splits included.
+template <> template <bool posX, bool posY, bool posZ>
+int32_t impl::BVH8_CPU<float, uint32_t>::IntersectPacketsOctant( RayPacket8* packet, const uint32_t packetCount ) const
+{
+	if (opmap) ISUNLIKELY
+	{
+		int32_t steps = 0;
+		for (uint32_t i = 0; i < packetCount; i++) steps += IntersectPacketPerRay<posX, posY, posZ>( packet[i] );
+		return steps;
+	}
+	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_PACKET_STACK_SIZE];
+	ALIGNED( 64 ) uint32_t infoStack[TINYBVH_PACKET_STACK_SIZE]; // parent index << 3 | lane
+	ALIGNED( 64 ) uint32_t fpiStack[TINYBVH_PACKET_STACK_SIZE]; // packet to test first on pop
+	ALIGNED( 64 ) __m256 rx8[TINYBVH_MAX_PACKETS], ry8[TINYBVH_MAX_PACKETS], rz8[TINYBVH_MAX_PACKETS];
+	int32_t stackPtr = 0;
+	uint32_t nodeIdx = 0, fpi = 0, active = (1u << packetCount) - 1;
+	const __m256 zero8 = _mm256_setzero_ps(), one8 = _mm256_set1_ps( 1.0f );
+	const __m256i lane8 = _mm256_setr_epi32( 0, 1, 2, 3, 4, 5, 6, 7 );
+	// packet 0 first, so that the fold below starts from a written element.
+	rx8[0] = _mm256_mul_ps( _mm256_load_ps( packet[0].ox ), _mm256_load_ps( packet[0].rdx ) );
+	ry8[0] = _mm256_mul_ps( _mm256_load_ps( packet[0].oy ), _mm256_load_ps( packet[0].rdy ) );
+	rz8[0] = _mm256_mul_ps( _mm256_load_ps( packet[0].oz ), _mm256_load_ps( packet[0].rdz ) );
+	for (uint32_t i = 1; i < packetCount; i++)
+		rx8[i] = _mm256_mul_ps( _mm256_load_ps( packet[i].ox ), _mm256_load_ps( packet[i].rdx ) ),
+		ry8[i] = _mm256_mul_ps( _mm256_load_ps( packet[i].oy ), _mm256_load_ps( packet[i].rdy ) ),
+		rz8[i] = _mm256_mul_ps( _mm256_load_ps( packet[i].oz ), _mm256_load_ps( packet[i].rdz ) );
+	// fold the interval ray over all packets; one horizontal reduction at the end.
+	__m256 rdxMin = _mm256_load_ps( packet[0].rdx ), rdxMax = rdxMin;
+	__m256 rdyMin = _mm256_load_ps( packet[0].rdy ), rdyMax = rdyMin;
+	__m256 rdzMin = _mm256_load_ps( packet[0].rdz ), rdzMax = rdzMin;
+	__m256 rxMin = rx8[0], rxMax = rx8[0], ryMin = ry8[0], ryMax = ry8[0], rzMin = rz8[0], rzMax = rz8[0];
+	__m256 tmax8 = _mm256_load_ps( packet[0].t );
+	for (uint32_t i = 1; i < packetCount; i++)
+	{
+		const __m256 rdx = _mm256_load_ps( packet[i].rdx ), rdy = _mm256_load_ps( packet[i].rdy ), rdz = _mm256_load_ps( packet[i].rdz );
+		rdxMin = _mm256_min_ps( rdxMin, rdx ), rdxMax = _mm256_max_ps( rdxMax, rdx );
+		rdyMin = _mm256_min_ps( rdyMin, rdy ), rdyMax = _mm256_max_ps( rdyMax, rdy );
+		rdzMin = _mm256_min_ps( rdzMin, rdz ), rdzMax = _mm256_max_ps( rdzMax, rdz );
+		rxMin = _mm256_min_ps( rxMin, rx8[i] ), rxMax = _mm256_max_ps( rxMax, rx8[i] );
+		ryMin = _mm256_min_ps( ryMin, ry8[i] ), ryMax = _mm256_max_ps( ryMax, ry8[i] );
+		rzMin = _mm256_min_ps( rzMin, rz8[i] ), rzMax = _mm256_max_ps( rzMax, rz8[i] );
+		tmax8 = _mm256_max_ps( tmax8, _mm256_load_ps( packet[i].t ) );
+	}
+	rdxMin = tinybvh_hmin8( rdxMin ), rdxMax = tinybvh_hmax8( rdxMax );
+	rdyMin = tinybvh_hmin8( rdyMin ), rdyMax = tinybvh_hmax8( rdyMax );
+	rdzMin = tinybvh_hmin8( rdzMin ), rdzMax = tinybvh_hmax8( rdzMax );
+	rxMin = tinybvh_hmin8( rxMin ), rxMax = tinybvh_hmax8( rxMax );
+	ryMin = tinybvh_hmin8( ryMin ), ryMax = tinybvh_hmax8( ryMax );
+	rzMin = tinybvh_hmin8( rzMin ), rzMax = tinybvh_hmax8( rzMax );
+	__m256 far8 = tinybvh_hmax8( tmax8 );
+	int32_t steps = 0;
+	while (1)
+	{
+		if (!(nodeIdx & LEAF_BIT)) ISLIKELY
+		{
+			steps++;
+			const BVHNode* n = (const BVHNode*)(bvh8Data + nodeIdx);
+			TINYBVH_INTERVAL_SLAB_TEST
+			if (mask)
+			{
+				TINYBVH_PACKET_PUSH
+				// fpi is the same for every child pushed here, so a broadcast will do.
+				_mm256_storeu_si256( (__m256i*)(fpiStack + stackPtr), _mm256_set1_epi32( (int32_t)fpi ) );
+				stackPtr += __popc( mask );
+				BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_PACKET_STACK_SIZE - 8,
+					"BVH8_CPU::IntersectPackets, traversal stack overflow." );
+			}
+		}
+		else
+		{
+			// 'active' holds the packets that entered this leaf's box; the rest
+			// cannot hit its triangles and are skipped entirely.
+			const BVHTri4Leaf* leaf = (const BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
+			const uint32_t triCount = tinybvh_leaftris( leaf->primIdx );
+			bool anyHit = false;
+			for (uint32_t a = active; a; a &= a - 1)
+			{
+				const uint32_t j = __bscan( a );
+				const __m256i instIdx8 = _mm256_set1_epi32( (int32_t)packet[j].instIdx );
+				const __m256 ox8 = _mm256_load_ps( packet[j].ox ), oy8 = _mm256_load_ps( packet[j].oy ), oz8 = _mm256_load_ps( packet[j].oz );
+				const __m256 dx8 = _mm256_load_ps( packet[j].dx ), dy8 = _mm256_load_ps( packet[j].dy ), dz8 = _mm256_load_ps( packet[j].dz );
+				__m256 tcur8 = _mm256_load_ps( packet[j].t );
+				bool packetHit = false;
+				for (uint32_t i = 0; i < triCount; i++)
+				{
+					TINYBVH_PACKET_TRI( i )
+					if (!_mm256_movemask_ps( hit8 )) continue;
+					tcur8 = _mm256_blendv_ps( tcur8, bt8, hit8 );
+					_mm256_store_ps( packet[j].u, _mm256_blendv_ps( _mm256_load_ps( packet[j].u ), bu8, hit8 ) );
+					_mm256_store_ps( packet[j].v, _mm256_blendv_ps( _mm256_load_ps( packet[j].v ), bv8, hit8 ) );
+					_mm256_store_si256( (__m256i*)packet[j].prim, _mm256_castps_si256( _mm256_blendv_ps(
+						_mm256_castsi256_ps( _mm256_load_si256( (const __m256i*)packet[j].prim ) ),
+						_mm256_castsi256_ps( _mm256_set1_epi32( (int32_t)leaf->primIdx[i] ) ), hit8 ) ) );
+					_mm256_store_si256( (__m256i*)packet[j].inst, _mm256_castps_si256( _mm256_blendv_ps(
+						_mm256_castsi256_ps( _mm256_load_si256( (const __m256i*)packet[j].inst ) ),
+						_mm256_castsi256_ps( instIdx8 ), hit8 ) ) );
+					packetHit = true;
+				}
+				if (packetHit) _mm256_store_ps( packet[j].t, tcur8 ), anyHit = true;
+			}
+			if (anyHit)
+			{
+				__m256 m8 = _mm256_load_ps( packet[0].t );
+				for (uint32_t j = 1; j < packetCount; j++) m8 = _mm256_max_ps( m8, _mm256_load_ps( packet[j].t ) );
+				far8 = tinybvh_hmax8( m8 );
+			}
+		}
+		// pop entries until some ray of some packet enters one.
+		while (1)
+		{
+			if (!stackPtr) ISUNLIKELY goto the_end;
+			const uint32_t info = infoStack[--stackPtr];
+			const uint32_t child = nodeStack[stackPtr];
+			const bool isLeaf = (child & LEAF_BIT) != 0;
+			TINYBVH_PACKET_BOX( info )
+			// scan the packets, starting at the one that got us into the parent.
+			const uint32_t first = fpiStack[stackPtr];
+			uint32_t entering = 0, firstHit = 0, i = first;
+			do
+			{
+				if (TINYBVH_PACKET_BOX_TEST( _mm256_load_ps( packet[i].rdx ), _mm256_load_ps( packet[i].rdy ),
+					_mm256_load_ps( packet[i].rdz ), rx8[i], ry8[i], rz8[i], _mm256_load_ps( packet[i].t ) ))
+				{
+					if (!entering) firstHit = i;
+					entering |= 1u << i;
+					// for an interior node, one entering packet is all we need to know.
+					if (!isLeaf) break;
+				}
+				if (++i == packetCount) i = 0;
+			}
+			while (i != first);
+			if (!entering) continue; // nothing enters; try the next entry
+			nodeIdx = child, fpi = firstHit, active = entering;
+			break;
+		}
+	}
+the_end:
+	return steps;
+}
+
+// Occlusion. A resolved lane is retired by writing -1 into its working tmax,
+// and that one sentinel does all three jobs the traversal needs: the deferred
+// box test computes tmax = min( .., t ) against a tmin clamped to zero, so a
+// retired lane can never enter a node; the leaf test requires t in (0, tcur),
+// so it can never hit a triangle; and the interval ray's far plane is hmax over
+// the lanes, which now tracks the farthest unresolved ray - a shrinking bound
+// the closest-hit kernels only get by finding nearer hits. The lane mask
+// travels in and out through RayPacket8::occluded, so a TLAS can hand the same
+// packet to one instance after another without retracing resolved lanes.
+template <> template <bool posX, bool posY, bool posZ>
+int32_t impl::BVH8_CPU<float, uint32_t>::IsOccludedPacketOctant( RayPacket8& packet ) const
+{
+	if (opmap) ISUNLIKELY return IsOccludedPacketPerRay<posX, posY, posZ>( packet );
+	if (packet.AllOccluded()) return 0;
+	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_PACKET_STACK_SIZE];
+	ALIGNED( 64 ) uint32_t infoStack[TINYBVH_PACKET_STACK_SIZE];
+	int32_t stackPtr = 0;
+	uint32_t nodeIdx = 0;
+	const __m256 zero8 = _mm256_setzero_ps(), sign8 = _mm256_set1_ps( -0.0f );
+	const __m256 minusOne8 = _mm256_set1_ps( -1.0f );
+	const __m256i lane8 = _mm256_setr_epi32( 0, 1, 2, 3, 4, 5, 6, 7 );
+	const __m256 ox8 = _mm256_load_ps( packet.ox ), oy8 = _mm256_load_ps( packet.oy ), oz8 = _mm256_load_ps( packet.oz );
+	const __m256 dx8 = _mm256_load_ps( packet.dx ), dy8 = _mm256_load_ps( packet.dy ), dz8 = _mm256_load_ps( packet.dz );
+	const __m256 rdx8 = _mm256_load_ps( packet.rdx ), rdy8 = _mm256_load_ps( packet.rdy ), rdz8 = _mm256_load_ps( packet.rdz );
+	const __m256 rx8 = _mm256_mul_ps( ox8, rdx8 ), ry8 = _mm256_mul_ps( oy8, rdy8 ), rz8 = _mm256_mul_ps( oz8, rdz8 );
+	// retire the lanes an earlier instance already resolved.
+	__m256 tcur8 = _mm256_blendv_ps( _mm256_load_ps( packet.t ), minusOne8, tinybvh_lanemask8( packet.occluded ) );
+	const __m256 rdxMin = tinybvh_hmin8( rdx8 ), rdxMax = tinybvh_hmax8( rdx8 );
+	const __m256 rdyMin = tinybvh_hmin8( rdy8 ), rdyMax = tinybvh_hmax8( rdy8 );
+	const __m256 rdzMin = tinybvh_hmin8( rdz8 ), rdzMax = tinybvh_hmax8( rdz8 );
+	const __m256 rxMin = tinybvh_hmin8( rx8 ), rxMax = tinybvh_hmax8( rx8 );
+	const __m256 ryMin = tinybvh_hmin8( ry8 ), ryMax = tinybvh_hmax8( ry8 );
+	const __m256 rzMin = tinybvh_hmin8( rz8 ), rzMax = tinybvh_hmax8( rz8 );
+	__m256 far8 = tinybvh_hmax8( tcur8 );
+	uint32_t occluded = packet.occluded;
+	int32_t steps = 0;
+	while (1)
+	{
+		if (!(nodeIdx & LEAF_BIT)) ISLIKELY
+		{
+			steps++;
+			const BVHNode* n = (const BVHNode*)(bvh8Data + nodeIdx);
+			TINYBVH_INTERVAL_SLAB_TEST
+			if (mask)
+			{
+				TINYBVH_PACKET_PUSH_ANY
+				stackPtr += __popc( mask );
+				BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_PACKET_STACK_SIZE - 8,
+					"BVH8_CPU::IsOccludedPacket, traversal stack overflow." );
+			}
+		}
+		else
+		{
+			const BVHTri4Leaf* leaf = (const BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
+			const uint32_t triCount = tinybvh_leaftris( leaf->primIdx );
+			bool retired = false;
+			for (uint32_t i = 0; i < triCount; i++)
+			{
+				TINYBVH_PACKET_TRI_ANY( i )
+				const uint32_t hit = _mm256_movemask_ps( hit8 );
+				if (!hit) continue;
+				// retire the lanes this triangle occludes, and stop if that is all of them.
+				occluded |= hit, retired = true;
+				tcur8 = _mm256_blendv_ps( tcur8, minusOne8, hit8 );
+				if (occluded == 0xff) ISUNLIKELY goto the_end;
+			}
+			// the interval ray now only has to reach the farthest live ray.
+			if (retired) far8 = tinybvh_hmax8( tcur8 );
+		}
+		while (1)
+		{
+			if (!stackPtr) ISUNLIKELY goto the_end;
+			const uint32_t info = infoStack[--stackPtr];
+			TINYBVH_PACKET_BOX( info )
+			if (TINYBVH_PACKET_BOX_TEST( rdx8, rdy8, rdz8, rx8, ry8, rz8, tcur8 ))
+			{
+				nodeIdx = nodeStack[stackPtr];
+				break;
+			}
+		}
+	}
+the_end:
+	packet.occluded = occluded;
+	return steps;
+}
+
+// As the multi-packet closest-hit kernel, with one addition: a packet whose
+// eight lanes are all resolved leaves the round robin for good. 'alive' is that
+// set, and when it empties the call is over - the multi-packet analogue of a
+// single ray returning true.
+template <> template <bool posX, bool posY, bool posZ>
+int32_t impl::BVH8_CPU<float, uint32_t>::IsOccludedPacketsOctant( RayPacket8* packet, const uint32_t packetCount ) const
+{
+	if (opmap) ISUNLIKELY
+	{
+		int32_t steps = 0;
+		for (uint32_t i = 0; i < packetCount; i++) steps += IsOccludedPacketPerRay<posX, posY, posZ>( packet[i] );
+		return steps;
+	}
+	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_PACKET_STACK_SIZE];
+	ALIGNED( 64 ) uint32_t infoStack[TINYBVH_PACKET_STACK_SIZE];
+	ALIGNED( 64 ) uint32_t fpiStack[TINYBVH_PACKET_STACK_SIZE];
+	ALIGNED( 64 ) __m256 rx8[TINYBVH_MAX_PACKETS], ry8[TINYBVH_MAX_PACKETS], rz8[TINYBVH_MAX_PACKETS];
+	ALIGNED( 64 ) __m256 tcur[TINYBVH_MAX_PACKETS]; // working tmax, -1 for a retired lane
+	int32_t stackPtr = 0;
+	uint32_t nodeIdx = 0, fpi = 0, alive = 0, active;
+	const __m256 zero8 = _mm256_setzero_ps(), sign8 = _mm256_set1_ps( -0.0f );
+	const __m256 minusOne8 = _mm256_set1_ps( -1.0f );
+	const __m256i lane8 = _mm256_setr_epi32( 0, 1, 2, 3, 4, 5, 6, 7 );
+	// packet 0 first, so that the fold below starts from a written element.
+	for (uint32_t i = 0; i < tinybvh_max( 1u, packetCount ); i++)
+	{
+		rx8[i] = _mm256_mul_ps( _mm256_load_ps( packet[i].ox ), _mm256_load_ps( packet[i].rdx ) );
+		ry8[i] = _mm256_mul_ps( _mm256_load_ps( packet[i].oy ), _mm256_load_ps( packet[i].rdy ) );
+		rz8[i] = _mm256_mul_ps( _mm256_load_ps( packet[i].oz ), _mm256_load_ps( packet[i].rdz ) );
+		tcur[i] = _mm256_blendv_ps( _mm256_load_ps( packet[i].t ), minusOne8, tinybvh_lanemask8( packet[i].occluded ) );
+		if (packet[i].occluded != 0xff) alive |= 1u << i;
+	}
+	if (!alive) return 0;
+	active = alive;
+	__m256 rdxMin = _mm256_load_ps( packet[0].rdx ), rdxMax = rdxMin;
+	__m256 rdyMin = _mm256_load_ps( packet[0].rdy ), rdyMax = rdyMin;
+	__m256 rdzMin = _mm256_load_ps( packet[0].rdz ), rdzMax = rdzMin;
+	__m256 rxMin = rx8[0], rxMax = rx8[0], ryMin = ry8[0], ryMax = ry8[0], rzMin = rz8[0], rzMax = rz8[0];
+	__m256 tmax8 = tcur[0];
+	for (uint32_t i = 1; i < packetCount; i++)
+	{
+		const __m256 rdx = _mm256_load_ps( packet[i].rdx ), rdy = _mm256_load_ps( packet[i].rdy ), rdz = _mm256_load_ps( packet[i].rdz );
+		rdxMin = _mm256_min_ps( rdxMin, rdx ), rdxMax = _mm256_max_ps( rdxMax, rdx );
+		rdyMin = _mm256_min_ps( rdyMin, rdy ), rdyMax = _mm256_max_ps( rdyMax, rdy );
+		rdzMin = _mm256_min_ps( rdzMin, rdz ), rdzMax = _mm256_max_ps( rdzMax, rdz );
+		rxMin = _mm256_min_ps( rxMin, rx8[i] ), rxMax = _mm256_max_ps( rxMax, rx8[i] );
+		ryMin = _mm256_min_ps( ryMin, ry8[i] ), ryMax = _mm256_max_ps( ryMax, ry8[i] );
+		rzMin = _mm256_min_ps( rzMin, rz8[i] ), rzMax = _mm256_max_ps( rzMax, rz8[i] );
+		tmax8 = _mm256_max_ps( tmax8, tcur[i] );
+	}
+	rdxMin = tinybvh_hmin8( rdxMin ), rdxMax = tinybvh_hmax8( rdxMax );
+	rdyMin = tinybvh_hmin8( rdyMin ), rdyMax = tinybvh_hmax8( rdyMax );
+	rdzMin = tinybvh_hmin8( rdzMin ), rdzMax = tinybvh_hmax8( rdzMax );
+	rxMin = tinybvh_hmin8( rxMin ), rxMax = tinybvh_hmax8( rxMax );
+	ryMin = tinybvh_hmin8( ryMin ), ryMax = tinybvh_hmax8( ryMax );
+	rzMin = tinybvh_hmin8( rzMin ), rzMax = tinybvh_hmax8( rzMax );
+	__m256 far8 = tinybvh_hmax8( tmax8 );
+	int32_t steps = 0;
+	while (1)
+	{
+		if (!(nodeIdx & LEAF_BIT)) ISLIKELY
+		{
+			steps++;
+			const BVHNode* n = (const BVHNode*)(bvh8Data + nodeIdx);
+			TINYBVH_INTERVAL_SLAB_TEST
+			if (mask)
+			{
+				TINYBVH_PACKET_PUSH_ANY
+				_mm256_storeu_si256( (__m256i*)(fpiStack + stackPtr), _mm256_set1_epi32( (int32_t)fpi ) );
+				stackPtr += __popc( mask );
+				BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_PACKET_STACK_SIZE - 8,
+					"BVH8_CPU::IsOccludedPackets, traversal stack overflow." );
+			}
+		}
+		else
+		{
+			const BVHTri4Leaf* leaf = (const BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
+			const uint32_t triCount = tinybvh_leaftris( leaf->primIdx );
+			bool retired = false;
+			// 'active' was computed at the pop; a packet may have finished since.
+			for (uint32_t a = active & alive; a; a &= a - 1)
+			{
+				const uint32_t j = __bscan( a );
+				const __m256 ox8 = _mm256_load_ps( packet[j].ox ), oy8 = _mm256_load_ps( packet[j].oy ), oz8 = _mm256_load_ps( packet[j].oz );
+				const __m256 dx8 = _mm256_load_ps( packet[j].dx ), dy8 = _mm256_load_ps( packet[j].dy ), dz8 = _mm256_load_ps( packet[j].dz );
+				__m256 tcur8 = tcur[j];
+				for (uint32_t i = 0; i < triCount; i++)
+				{
+					TINYBVH_PACKET_TRI_ANY( i )
+					const uint32_t hit = _mm256_movemask_ps( hit8 );
+					if (!hit) continue;
+					packet[j].occluded |= hit, retired = true;
+					tcur8 = _mm256_blendv_ps( tcur8, minusOne8, hit8 );
+					if (packet[j].occluded == 0xff) { alive &= ~(1u << j); break; }
+				}
+				tcur[j] = tcur8;
+			}
+			if (!alive) ISUNLIKELY goto the_end;
+			if (retired)
+			{
+				__m256 m8 = minusOne8;
+				for (uint32_t a = alive; a; a &= a - 1) m8 = _mm256_max_ps( m8, tcur[__bscan( a )] );
+				far8 = tinybvh_hmax8( m8 );
+			}
+		}
+		while (1)
+		{
+			if (!stackPtr) ISUNLIKELY goto the_end;
+			const uint32_t info = infoStack[--stackPtr];
+			const uint32_t child = nodeStack[stackPtr];
+			const bool isLeaf = (child & LEAF_BIT) != 0;
+			TINYBVH_PACKET_BOX( info )
+			const uint32_t first = fpiStack[stackPtr];
+			uint32_t entering = 0, firstHit = 0, i = first;
+			do
+			{
+				// a packet that finished is not tested again.
+				if (alive & (1u << i)) if (TINYBVH_PACKET_BOX_TEST( _mm256_load_ps( packet[i].rdx ),
+					_mm256_load_ps( packet[i].rdy ), _mm256_load_ps( packet[i].rdz ), rx8[i], ry8[i], rz8[i], tcur[i] ))
+				{
+					if (!entering) firstHit = i;
+					entering |= 1u << i;
+					if (!isLeaf) break;
+				}
+				if (++i == packetCount) i = 0;
+			}
+			while (i != first);
+			if (!entering) continue;
+			nodeIdx = child, fpi = firstHit, active = entering;
+			break;
+		}
+	}
+the_end:
+	return steps;
+}
+
+#undef TINYBVH_INTERVAL_SLAB_TEST
+#undef TINYBVH_PACKET_PUSH
+#undef TINYBVH_PACKET_PUSH_ANY
+#undef TINYBVH_PACKET_BOX
+#undef TINYBVH_PACKET_BOX_TEST
+#undef TINYBVH_PACKET_TRI_COMMON
+#undef TINYBVH_PACKET_TRI
+#undef TINYBVH_PACKET_TRI_ANY
 
 #endif // BVH_USEAVX2
 

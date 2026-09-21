@@ -141,12 +141,19 @@ THE SOFTWARE.
 #ifndef HQBVHBINS
 #define HQBVHBINS 8 // default; gets copied to hqbvhbins, which can be modified.
 #define MAXHQBINS 128 // max value for hqbvhbins.
-#endif
+#endif // HQBVHBINS
 
 // Stack size for all CPU-side traversal functions.
 #ifndef TINYBVH_STACK_SIZE
 #define TINYBVH_STACK_SIZE 128
+
+// Packet traversal: max number of 8-ray packets handled in one call
+#ifndef TINYBVH_MAX_PACKETS
+#define TINYBVH_MAX_PACKETS 16 // cannot exceed 32
 #endif
+#define TINYBVH_PACKET_STACK_SIZE (TINYBVH_STACK_SIZE * 7 + 8)
+
+#endif // TINYBVH_STACK_SIZE
 
 // TLAS setting
 // Note: Except when INST_IDX_BITS is set to 32, the instance index is encoded in
