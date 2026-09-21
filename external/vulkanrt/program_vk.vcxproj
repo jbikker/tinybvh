@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!--
+    Visual Studio 2022 project for the Vulkan tinybvh ray tracing benchmark.
+
+    Assumes this .vcxproj sits next to program_vk.cpp and the shaders folder,
+    two levels below the tinybvh root, so that:
+      ..\..\tiny_bvh.h                  resolves at compile time
+      ..\..\testdata\cryteksponza.bin   resolves at run time
+      raysets\view3rays.bin             resolves at run time
+    Both run-time paths are relative to the working directory, which for a
+    debugger launch defaults to $(ProjectDir); that is what the layout needs, so
+    leave it alone. Running the .exe from bin\<Config> directly will not find
+    the scene - launch from the IDE, or cd to the project folder first.
+
+    Needs the LunarG Vulkan SDK; its installer sets VULKAN_SDK. Visual Studio
+    only picks up environment variables that existed when it started, so if the
+    SDK was installed while the IDE was open, restart it.
+  -->
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{B086C4C3-E9AF-4260-A260-1DE3020038E3}</ProjectGuid>
+    <RootNamespace>program_vk</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)bin\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)obj\$(Configuration)\</IntDir>
+    <TargetName>program_vk</TargetName>
+    <LinkIncremental Condition="'$(Configuration)'=='Debug'">true</LinkIncremental>
+    <LinkIncremental Condition="'$(Configuration)'=='Release'">false</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <!-- C++20 for the designated initializers program_vk.cpp uses. -->
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <!-- tinybvh's x86 kernels are built for AVX2/FMA. -->
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalIncludeDirectories>$(VULKAN_SDK)\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- the ray set and scene are read with fopen/fread, as in the D3D12 version -->
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;NOMINMAX;WIN32_LEAN_AND_MEAN;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>$(VULKAN_SDK)\Lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <!-- program_vk.cpp also has a #pragma comment(lib, "vulkan-1"); naming it
+           here too is harmless and makes the dependency visible in the IDE. -->
+      <AdditionalDependencies>vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="program_vk.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- browsing only; tinybvh is header-only and pulled in by program_vk.cpp -->
+    <ClInclude Include="..\..\tiny_bvh.h" />
+    <ClInclude Include="..\..\tiny_bvh_base.h" />
+    <ClInclude Include="..\..\tiny_bvh_x86_float.h" />
+    <ClInclude Include="..\..\tiny_bvh_x86_double.h" />
+    <ClInclude Include="..\..\tiny_bvh_arm_float.h" />
+    <ClInclude Include="..\..\tiny_bvh_arm_double.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- included by the shaders below, not compiled on its own -->
+    <None Include="shaders\common.glsl" />
+    <None Include="compile_shaders.bat" />
+    <None Include="build.bat" />
+    <None Include="README_vulkan.md" />
+  </ItemGroup>
+  <ItemGroup>
+    <!--
+      Each shader compiles in place to shaders\[name].spv, which is where
+      program_vk.cpp's LoadShaderModule looks (relative to the working
+      directory, i.e. $(ProjectDir)). Editing common.glsl rebuilds all of them,
+      via AdditionalInputs.
+
+      The vulkan1.2 target env below is required, not cosmetic: ray tracing and
+      ray query need SPIR-V 1.4, which the vulkan1.0/1.1 targets cannot emit.
+      (Spelled out in prose because a double hyphen cannot appear in an XML
+      comment.)
+    -->
+    <CustomBuild Include="shaders\trace.rgen">
+      <FileType>Document</FileType>
+      <Message>glslangValidator %(Identity)</Message>
+      <Command>"$(VULKAN_SDK)\Bin\glslangValidator.exe" --target-env vulkan1.2 -I"$(ProjectDir)shaders" -o "%(FullPath).spv" "%(FullPath)"</Command>
+      <Outputs>%(FullPath).spv</Outputs>
+      <AdditionalInputs>$(ProjectDir)shaders\common.glsl</AdditionalInputs>
+    </CustomBuild>
+    <CustomBuild Include="shaders\trace.rmiss">
+      <FileType>Document</FileType>
+      <Message>glslangValidator %(Identity)</Message>
+      <Command>"$(VULKAN_SDK)\Bin\glslangValidator.exe" --target-env vulkan1.2 -I"$(ProjectDir)shaders" -o "%(FullPath).spv" "%(FullPath)"</Command>
+      <Outputs>%(FullPath).spv</Outputs>
+    </CustomBuild>
+    <CustomBuild Include="shaders\trace.rchit">
+      <FileType>Document</FileType>
+      <Message>glslangValidator %(Identity)</Message>
+      <Command>"$(VULKAN_SDK)\Bin\glslangValidator.exe" --target-env vulkan1.2 -I"$(ProjectDir)shaders" -o "%(FullPath).spv" "%(FullPath)"</Command>
+      <Outputs>%(FullPath).spv</Outputs>
+    </CustomBuild>
+    <CustomBuild Include="shaders\tiny.comp">
+      <FileType>Document</FileType>
+      <Message>glslangValidator %(Identity)</Message>
+      <Command>"$(VULKAN_SDK)\Bin\glslangValidator.exe" --target-env vulkan1.2 -I"$(ProjectDir)shaders" -o "%(FullPath).spv" "%(FullPath)"</Command>
+      <Outputs>%(FullPath).spv</Outputs>
+      <AdditionalInputs>$(ProjectDir)shaders\common.glsl</AdditionalInputs>
+    </CustomBuild>
+    <CustomBuild Include="shaders\tiny4.comp">
+      <FileType>Document</FileType>
+      <Message>glslangValidator %(Identity)</Message>
+      <Command>"$(VULKAN_SDK)\Bin\glslangValidator.exe" --target-env vulkan1.2 -I"$(ProjectDir)shaders" -o "%(FullPath).spv" "%(FullPath)"</Command>
+      <Outputs>%(FullPath).spv</Outputs>
+      <AdditionalInputs>$(ProjectDir)shaders\common.glsl</AdditionalInputs>
+    </CustomBuild>
+    <CustomBuild Include="shaders\tiny8.comp">
+      <FileType>Document</FileType>
+      <Message>glslangValidator %(Identity)</Message>
+      <Command>"$(VULKAN_SDK)\Bin\glslangValidator.exe" --target-env vulkan1.2 -I"$(ProjectDir)shaders" -o "%(FullPath).spv" "%(FullPath)"</Command>
+      <Outputs>%(FullPath).spv</Outputs>
+      <AdditionalInputs>$(ProjectDir)shaders\common.glsl</AdditionalInputs>
+    </CustomBuild>
+    <CustomBuild Include="shaders\tinyrq.comp">
+      <FileType>Document</FileType>
+      <Message>glslangValidator %(Identity)</Message>
+      <Command>"$(VULKAN_SDK)\Bin\glslangValidator.exe" --target-env vulkan1.2 -I"$(ProjectDir)shaders" -o "%(FullPath).spv" "%(FullPath)"</Command>
+      <Outputs>%(FullPath).spv</Outputs>
+      <AdditionalInputs>$(ProjectDir)shaders\common.glsl</AdditionalInputs>
+    </CustomBuild>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+  <Target Name="CheckVulkanSDK" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(VULKAN_SDK)'==''" Text="VULKAN_SDK is not set. Install the LunarG Vulkan SDK, then restart Visual Studio so it picks up the environment variable." />
+    <Error Condition="'$(VULKAN_SDK)'!='' And !Exists('$(VULKAN_SDK)\Bin\glslangValidator.exe')" Text="glslangValidator.exe not found under $(VULKAN_SDK)\Bin. Check the Vulkan SDK installation." />
+  </Target>
+  <Target Name="CleanShaderOutputs" AfterTargets="Clean">
+    <ItemGroup>
+      <ShaderSpv Include="$(ProjectDir)shaders\*.spv" />
+    </ItemGroup>
+    <Delete Files="@(ShaderSpv)" />
+  </Target>
+</Project>
