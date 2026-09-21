@@ -52,9 +52,12 @@ Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, Ra
 		bvh = new AccStruc( layout, buildFlags ); // actual construction is postponed until ::Run.
 		// Create description.
 		title = new char[1024];
-		snprintf( title, 1024, "BVH TRACE%s - %s - %s (%ik tris) - %s",
-			(flags & MULTICORE) ? " (MT)" : ((flags & USE_GPU) ? " (GPU)" : ""),
-			bvh->GetDescription(),
+		char features[128] = "";
+		if (flags & MULTICORE) if (flags & PACKETS) strncpy( features, " (MT/packets)", 100 ); else strncpy( features, " (MT)", 100 );
+		else if (flags & USE_GPU) strncpy( features, " (GPU)", 100 ); 
+		else if (flags & PACKETS) strncpy( features, " (packets)", 100 ); 
+		snprintf( title, 1024, "BVH TRACE%s - %s - %s (%ik tris) - %s", 
+			features, bvh->GetDescription(),
 			cachedPrimSet[primSet]->GetDescription(),
 			cachedPrimSet[primSet]->primCount / 1000,
 			cachedRaySet[raySet]->GetDescription() );
@@ -105,7 +108,9 @@ void Experiment::RunTraceExperiment()
 	// write experiment settings to csv
 	if (csv)
 	{
-		if (flags & USE_GPU) fprintf( csv, "gpu," ); else if (flags & MULTICORE) fprintf( csv, "cpu (MT)," ); else fprintf( csv, "cpu," );
+		if (flags & USE_GPU) fprintf( csv, "gpu," ); 
+		else if (flags & MULTICORE) fprintf( csv, (flags & PACKETS) ? "cpu (MT/packets)" : "cpu (MT)" ); 
+		else fprintf( csv, (flags & PACKETS) ? "cpu (packets)" : "cpu," );
 		fprintf( csv, "%s,%i,", cachedPrimSet[primSet]->shrt, cachedPrimSet[primSet]->primCount );
 		fprintf( csv, "%s,%s,", bvh->shrt, bvh->flagShrt );
 		fprintf( csv, "%s,", cachedRaySet[raySet]->shrt );
@@ -191,7 +196,16 @@ void Experiment::RunTraceExperiment()
 			t.reset();
 			while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
 			{
-				if (flags & MULTICORE) bvh->IntersectBatchMT( extensionRays, N ); else bvh->IntersectBatch( extensionRays, N );
+				if (flags & MULTICORE) 
+				{
+					if (flags & PACKETS) bvh->IntersectBatchMTPackets( extensionRays, N ); 
+					else bvh->IntersectBatchMT( extensionRays, N ); 
+				}
+				else 
+				{
+					if (flags & PACKETS) bvh->IntersectBatchPackets( extensionRays, N );
+					else bvh->IntersectBatch( extensionRays, N );
+				}
 				runs++;
 			}
 			traceTime = t.elapsed() * (1.0f / runs); // average of runs.
@@ -274,7 +288,16 @@ void Experiment::RunTraceExperiment()
 				t.reset();
 				while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
 				{
-					if (flags & MULTICORE) bvh->OcclusionBatchMT( extensionRays, N ); else bvh->OcclusionBatch( shadowRays, N );
+					if (flags & MULTICORE) 
+					{
+						if (flags & PACKETS) bvh->OcclusionBatchMTPackets( extensionRays, N ); 
+						else bvh->OcclusionBatchMT( extensionRays, N ); 
+					}
+					else 
+					{
+						if (flags & PACKETS) bvh->OcclusionBatchPackets( shadowRays, N );
+						else bvh->OcclusionBatch( shadowRays, N );
+					}
 					runs++;
 				}
 				traceTime = t.elapsed() * (1.0f / runs); // average of runs.
@@ -372,13 +395,6 @@ void Experiment::WriteImage( char* raySet, const char* tracedRays )
 
 float Experiment::RunGPU_BVH2( char* raySet, const int N, const char* tgaFile )
 {
-	// enable stable power state, if requested
-	/* if (flags & STABLE_POWER)
-	{
-		static bool stablePowerEnabled = false;
-		if (!stablePowerEnabled) InitDXR();
-		stablePowerEnabled = true;
-	} */
 	// trace 'first hit' rays on GPU
 	BVH_GPU* bvh_gpu = (BVH_GPU*)bvh->GetBVH();
 	// create OpenCL buffers for the BVH data calculated by tiny_bvh.h

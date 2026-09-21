@@ -46,6 +46,10 @@ public:
 	void IntersectBatchMT( char* rayData, const int rayCount );
 	void OcclusionBatch( char* rayData, const int rayCount );
 	void OcclusionBatchMT( char* rayData, const int rayCount );
+	float IntersectBatchPackets( char* rayData, const int rayCount );
+	void IntersectBatchMTPackets( char* rayData, const int rayCount );
+	void OcclusionBatchPackets( char* rayData, const int rayCount );
+	void OcclusionBatchMTPackets( char* rayData, const int rayCount );
 	bvhvec3 SceneExtent();
 	int NodeCount();
 	BVHLayout layout = BVH2;

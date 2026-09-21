@@ -12,7 +12,7 @@ enum ExperimentFlags : int {
 	DEFAULT = 0,
 	MULTICORE = 1,
 	USE_GPU = 2,
-	STABLE_POWER = 4 // windows only; requires 'Developer Mode'; opens a DX12 window.
+	PACKETS = 4
 };
 
 struct Timer

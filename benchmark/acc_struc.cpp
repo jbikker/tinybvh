@@ -327,6 +327,10 @@ void AccStruc::IntersectBatchMT( char* rayData, int rayCount )
 	BatchIntersectArgs args = { this, rayData, rayCount, slices, sliceSize };
 	tinybvh_parallel_for( context, slices, &IntersectBatchSlice, &args );
 }
+void AccStruc::IntersectBatchMTPackets( char* rayData, int rayCount )
+{
+	// TODO
+}
 
 float AccStruc::IntersectBatch( char* rayData, int rayCount )
 {
@@ -471,6 +475,12 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 	return dist;
 }
 
+float AccStruc::IntersectBatchPackets( char* rayData, int rayCount )
+{
+	// TODO
+	return 0;
+}
+
 struct BatchOcclusionArgs { AccStruc* accstruc; char* rayData; int rayCount; int sliceSize; };
 static void OcclusionBatchSlice( uint32_t i, void* payload )
 {
@@ -483,6 +493,10 @@ void AccStruc::OcclusionBatchMT( char* rayData, int rayCount )
 	int sliceSize = rayCount / slices;
 	BatchIntersectArgs args = { this, rayData, rayCount, sliceSize };
 	tinybvh_parallel_for( context, slices, &OcclusionBatchSlice, &args );
+}
+void AccStruc::OcclusionBatchMTPackets( char* rayData, int rayCount )
+{
+	// TODO
 }
 
 void AccStruc::OcclusionBatch( char* rayData, int rayCount )
@@ -563,6 +577,11 @@ void AccStruc::OcclusionBatch( char* rayData, int rayCount )
 	default: // unsupported layout. See note in constructor.
 		break;
 	}
+}
+
+void AccStruc::OcclusionBatchPackets( char* rayData, int rayCount )
+{
+	// TODO
 }
 
 bvhvec3 AccStruc::SceneExtent()
