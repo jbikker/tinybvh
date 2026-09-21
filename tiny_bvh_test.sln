@@ -43,8 +43,6 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_foliage", "vcproj\
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_benchmark", "vcproj\tiny_bvh_benchmark.vcxproj", "{E91E27FD-9FA8-4B6A-963A-833BB845F7FC}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_double_test", "vcproj\tiny_bvh_double_test.vcxproj", "{BBDD63AC-0649-42DA-956E-4BD66EF96BC6}"
-EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_viewer", "vcproj\tiny_bvh_viewer.vcxproj", "{E8E37A71-0B3F-4ABC-A78A-69B1F12E80F4}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_gpu_hair", "vcproj\tiny_bvh_gpu_hair.vcxproj", "{FECD9B6D-15A9-4EE4-8D10-3152D9CF4C05}"
@@ -217,14 +215,6 @@ Global
 		{E91E27FD-9FA8-4B6A-963A-833BB845F7FC}.Release|x64.Build.0 = Release|x64
 		{E91E27FD-9FA8-4B6A-963A-833BB845F7FC}.Release|x86.ActiveCfg = Release|Win32
 		{E91E27FD-9FA8-4B6A-963A-833BB845F7FC}.Release|x86.Build.0 = Release|Win32
-		{BBDD63AC-0649-42DA-956E-4BD66EF96BC6}.Debug|x64.ActiveCfg = Debug|x64
-		{BBDD63AC-0649-42DA-956E-4BD66EF96BC6}.Debug|x64.Build.0 = Debug|x64
-		{BBDD63AC-0649-42DA-956E-4BD66EF96BC6}.Debug|x86.ActiveCfg = Debug|Win32
-		{BBDD63AC-0649-42DA-956E-4BD66EF96BC6}.Debug|x86.Build.0 = Debug|Win32
-		{BBDD63AC-0649-42DA-956E-4BD66EF96BC6}.Release|x64.ActiveCfg = Release|x64
-		{BBDD63AC-0649-42DA-956E-4BD66EF96BC6}.Release|x64.Build.0 = Release|x64
-		{BBDD63AC-0649-42DA-956E-4BD66EF96BC6}.Release|x86.ActiveCfg = Release|Win32
-		{BBDD63AC-0649-42DA-956E-4BD66EF96BC6}.Release|x86.Build.0 = Release|Win32
 		{E8E37A71-0B3F-4ABC-A78A-69B1F12E80F4}.Debug|x64.ActiveCfg = Debug|x64
 		{E8E37A71-0B3F-4ABC-A78A-69B1F12E80F4}.Debug|x64.Build.0 = Debug|x64
 		{E8E37A71-0B3F-4ABC-A78A-69B1F12E80F4}.Debug|x86.ActiveCfg = Debug|Win32
