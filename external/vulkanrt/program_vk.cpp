@@ -698,7 +698,7 @@ static void UpdateRayBuffer()
 	float* data = (float*)staging.mapped;
 	memset( data, 0, (size_t)size );
 	// The recorded set stores all origins first, then all directions.
-	FILE* f = fopen( "raysets/view3rays.bin", "rb" );
+	FILE* f = fopen( "../../view3rays.bin", "rb" );
 	if (f)
 	{
 		for (uint32_t i = 0; i < rtWidth * rtHeight; i++) fread( data + i * 8, 4, 3, f );
