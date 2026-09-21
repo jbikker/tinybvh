@@ -1,0 +1,222 @@
+// Software ray tracing compute shader, for BVH8_CWBVH layout.
+// Vulkan/GLSL translation of tiny8.hlsl.
+// Original CUDA code by AlanWBFT, https://github.com/AlanIWBFT
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common.glsl"
+
+// --- resources -------------------------------------------------------------
+layout( set = 0, binding = 0, rgba8 ) uniform image2D uav;                             // render target
+layout( set = 0, binding = 7, std430 ) readonly buffer CwNodeBuf { vec4 cwbvhNodes[]; }; // 5x vec4 per CWBVH node
+layout( set = 0, binding = 8, std430 ) readonly buffer CwTriBuf { vec4 cwbvhTris[]; };   // 3x (or 4x) vec4 per triangle
+
+#define CWBVH_COMPRESSED_TRIS
+
+#ifdef CWBVH_COMPRESSED_TRIS
+#define TRI_STRIDE 4u // must match the tiny_bvh.h build define
+#else
+#define TRI_STRIDE 3u
+#endif
+
+#define QUNPACK_BITTRICK 1
+#if QUNPACK_BITTRICK
+#define QUNPACK_SCALE 256.0f
+#define QUNPACK_BIAS  1.0f
+#else
+#define QUNPACK_SCALE 1.0f
+#define QUNPACK_BIAS  0.0f
+#endif
+
+#define GROUP_X    8
+#define GROUP_Y    8
+#define GROUP_SIZE (GROUP_X * GROUP_Y)
+
+layout( local_size_x = GROUP_X, local_size_y = GROUP_Y, local_size_z = 1 ) in;
+
+// Stack entries are node groups, not nodes. At most one group is pushed per level,
+// so this only has to cover tree depth. Measured peak: 6 at 450k primitives.
+#define CWBVH_STACK_SIZE 8
+
+// Depth-major, and split into two uint arrays rather than one uvec2 array: a
+// uvec2 would give an 8-byte stride, landing all lanes at a given depth on
+// every other LDS bank. This way consecutive lanes hit consecutive banks.
+// 16 * 64 * 8 = 8KB per group, the same budget tiny.comp already uses.
+shared uint g_stackX[CWBVH_STACK_SIZE * GROUP_SIZE];
+shared uint g_stackY[CWBVH_STACK_SIZE * GROUP_SIZE];
+#define STACK_PUSH(g) { const uint s_ = stackPtr++ * GROUP_SIZE + lane; \
+                        g_stackX[s_] = (g).x, g_stackY[s_] = (g).y; }
+#define STACK_POP(g)  { const uint s_ = --stackPtr * GROUP_SIZE + lane; \
+                        (g) = uvec2( g_stackX[s_], g_stackY[s_] ); }
+
+// Unpack four quantized child bounds.
+vec4 unpack_q8x4( in uint w )
+{
+#if QUNPACK_BITTRICK
+	const uint m = 0x007F8000u, b = 0x3F800000u; // mantissa slot 22..15, exponent 0
+	return uintBitsToFloat( (uvec4( w << 15, w << 7, w >> 1, w >> 9 ) & m) | b );
+#else
+	return vec4( uvec4( w, w >> 8, w >> 16, w >> 24 ) & 255u );
+#endif
+}
+
+// HLSL firstbithigh / countbits; GLSL returns signed ints, so cast back.
+#define bfind(x)   uint( findMSB( x ) )
+#define popcount(x) uint( bitCount( x ) )
+
+// slab test for one group of four children
+uint intersect_quad( in uint meta4, in uint octinv4,
+	in vec4 lox4, in vec4 hix4,
+	in vec4 loy4, in vec4 hiy4,
+	in vec4 loz4, in vec4 hiz4,
+	in vec3 idir, in vec3 orig, in float tmax )
+{
+	const uint is_inner4 = (meta4 & (meta4 << 1)) & 0x10101010u;
+	// expand the 0x10 marker in each byte to 0xFF: (x << 4) - (x >> 4) is
+	// 0x100 - 0x01 per marked byte, with no carry into the neighbours.
+	const uint inner_mask4 = (is_inner4 << 4) - (is_inner4 >> 4);
+	const uint bit_index4 = (meta4 ^ (octinv4 & inner_mask4)) & 0x1F1F1F1Fu;
+	const uint child_bits4 = (meta4 >> 5) & 0x07070707u;
+	// intersect all four children at once
+	const vec4 tminx = lox4 * idir.xxxx + orig.xxxx, tmaxx = hix4 * idir.xxxx + orig.xxxx;
+	const vec4 tminy = loy4 * idir.yyyy + orig.yyyy, tmaxy = hiy4 * idir.yyyy + orig.yyyy;
+	const vec4 tminz = loz4 * idir.zzzz + orig.zzzz, tmaxz = hiz4 * idir.zzzz + orig.zzzz;
+	const vec4 cmin = max( max( max( tminx, tminy ), tminz ), 0.0f );
+	const vec4 cmax = min( min( min( tmaxx, tmaxy ), tmaxz ), tmax );
+	// each surviving child contributes its child_bits, shifted to its slot
+	uint hitmask = 0u;
+	if (cmin.x <= cmax.x) hitmask |= (child_bits4 & 255u) << (bit_index4 & 31u);
+	if (cmin.y <= cmax.y) hitmask |= ((child_bits4 >> 8) & 255u) << ((bit_index4 >> 8) & 31u);
+	if (cmin.z <= cmax.z) hitmask |= ((child_bits4 >> 16) & 255u) << ((bit_index4 >> 16) & 31u);
+	if (cmin.w <= cmax.w) hitmask |= (child_bits4 >> 24) << (bit_index4 >> 24);
+	return hitmask;
+}
+
+vec4 traverse_cwbvh( in vec3 O, in vec3 D, in vec3 rD, in float t, in uint lane )
+{
+	// prepare traversal
+	vec4 hit = vec4( t, 0, 0, 0 ); // returned unchanged if we miss everything
+	uint hitAddr = 0u, stackPtr = 0u;
+	vec2 uv = vec2( 0, 0 );
+	float tmax = t;
+	const uint octinv4 = (7u - ((D.x < 0.0f ? 4u : 0u) | (D.y < 0.0f ? 2u : 0u) | (D.z < 0.0f ? 1u : 0u))) * 0x01010101u;
+	const vec3 rDs = rD * QUNPACK_SCALE; // per-ray, hoisted out of the node loop
+	// a 'group' is (base index, mask); the root is node 0 with only bit 31 set.
+	uvec2 ngroup = uvec2( 0u, 0x80000000u ), tgroup = uvec2( 0u, 0u );
+	while (true)
+	{
+		if (ngroup.y > 0x00FFFFFFu)
+		{
+			// the node group still holds child nodes; pop the last one
+			const uint imask = ngroup.y;
+			const uint child_bit_index = bfind( ngroup.y );
+			const uint child_node_base_index = ngroup.x;
+			ngroup.y &= ~(1u << child_bit_index);
+			if (ngroup.y > 0x00FFFFFFu && stackPtr < uint( CWBVH_STACK_SIZE ))
+				STACK_PUSH( ngroup ); // there are siblings left; save them
+			const uint slot_index = (child_bit_index - 24u) ^ (octinv4 & 255u);
+			const uint relative_index = popcount( imask & ~(0xFFFFFFFFu << slot_index) );
+			const uint child_node_index = (child_node_base_index + relative_index) * 5u;
+			const vec4 n0 = cwbvhNodes[child_node_index + 0u];
+			const vec4 n1 = cwbvhNodes[child_node_index + 1u];
+			const vec4 n2 = cwbvhNodes[child_node_index + 2u];
+			const vec4 n3 = cwbvhNodes[child_node_index + 3u];
+			const vec4 n4 = cwbvhNodes[child_node_index + 4u];
+			ngroup.x = floatBitsToUint( n1.x ), tgroup = uvec2( floatBitsToUint( n1.y ), 0u );
+			// n0.w packs three 127-biased per-axis exponents plus imask.
+			const uint packed_e = floatBitsToUint( n0.w );
+			const vec3 idir = uintBitsToFloat( (uvec3( packed_e, packed_e >> 8, packed_e >> 16 ) & 255u) << 23 ) * rDs;
+			// dequantized bounds start at QUNPACK_BIAS, not 0; subtract it once
+			// per node instead of per child.
+			const vec3 orig = (n0.xyz - O) * rD - QUNPACK_BIAS * idir;
+			// children 0..3: quantized bounds live in the low bytes of n2/n3/n4
+			uint hitmask = intersect_quad( floatBitsToUint( n1.z ), octinv4,
+				unpack_q8x4( floatBitsToUint( rD.x < 0.0f ? n3.z : n2.x ) ), unpack_q8x4( floatBitsToUint( rD.x < 0.0f ? n2.x : n3.z ) ),
+				unpack_q8x4( floatBitsToUint( rD.y < 0.0f ? n4.x : n2.z ) ), unpack_q8x4( floatBitsToUint( rD.y < 0.0f ? n2.z : n4.x ) ),
+				unpack_q8x4( floatBitsToUint( rD.z < 0.0f ? n4.z : n3.x ) ), unpack_q8x4( floatBitsToUint( rD.z < 0.0f ? n3.x : n4.z ) ),
+				idir, orig, tmax );
+			// children 4..7: same, one float further into each pair
+			hitmask |= intersect_quad( floatBitsToUint( n1.w ), octinv4,
+				unpack_q8x4( floatBitsToUint( rD.x < 0.0f ? n3.w : n2.y ) ), unpack_q8x4( floatBitsToUint( rD.x < 0.0f ? n2.y : n3.w ) ),
+				unpack_q8x4( floatBitsToUint( rD.y < 0.0f ? n4.y : n2.w ) ), unpack_q8x4( floatBitsToUint( rD.y < 0.0f ? n2.w : n4.y ) ),
+				unpack_q8x4( floatBitsToUint( rD.z < 0.0f ? n4.w : n3.y ) ), unpack_q8x4( floatBitsToUint( rD.z < 0.0f ? n3.y : n4.w ) ),
+				idir, orig, tmax );
+			// split the hitmask: high byte selects child nodes, low 24 bits triangles
+			ngroup.y = (hitmask & 0xFF000000u) | (packed_e >> 24);
+			tgroup.y = hitmask & 0x00FFFFFFu;
+		}
+		else tgroup = ngroup, ngroup = uvec2( 0u, 0u );
+		// process the triangles referenced by the current triangle group
+		while (tgroup.y != 0u)
+		{
+			const uint triangleIndex = bfind( tgroup.y );
+			const uint triAddr = tgroup.x + triangleIndex * TRI_STRIDE;
+			tgroup.y -= 1u << triangleIndex;
+#ifdef CWBVH_COMPRESSED_TRIS
+			// "Fast Ray-Triangle Intersections by Coordinate Transformation",
+			// Baldwin & Weber, 2016.
+			const vec4 T2 = cwbvhTris[triAddr + 2u];
+			const float transS = T2.x * O.x + T2.y * O.y + T2.z * O.z + T2.w;
+			const float transD = T2.x * D.x + T2.y * D.y + T2.z * D.z;
+			const float s = -transS;
+			if (s * transD <= 0.0f) continue; // d <= 0, or transD == 0
+			if (abs( s ) >= tmax * abs( transD )) continue; // d >= tmax
+			const float d = s / transD; // only for survivors
+			const vec4 T0 = cwbvhTris[triAddr + 0u], T1 = cwbvhTris[triAddr + 1u];
+			const vec3 I = O + d * D;
+			const float u = T0.x * I.x + T0.y * I.y + T0.z * I.z + T0.w;
+			const float v = T1.x * I.x + T1.y * I.y + T1.z * I.z + T1.w;
+			if (u < 0.0f || v < 0.0f || u + v >= 1.0f) continue;
+			uv = vec2( u, v ), tmax = d;
+			hitAddr = floatBitsToUint( cwbvhTris[triAddr + 3u].w );
+#else
+			// Moeller-Trumbore, iquilezles.org version. Tris are stored as 3x16 bytes:
+			// two edges plus vertex 0, whose w holds the original primitive index.
+			const vec3 e1 = cwbvhTris[triAddr].xyz;
+			const vec3 e2 = cwbvhTris[triAddr + 1u].xyz;
+			const vec4 v0 = cwbvhTris[triAddr + 2u];
+			const vec3 r = cross( D, e1 );
+			const float a = dot( e2, r );
+			const float f = 1.0f / a;
+			const vec3 s = O - v0.xyz;
+			const float u = f * dot( s, r );
+			const vec3 q = cross( s, e2 );
+			const float v = f * dot( D, q );
+			if (u < 0.0f || v < 0.0f || u + v > 1.0f) continue;
+			const float d = f * dot( e1, q );
+			if (d <= 0.0f || d >= tmax) continue;
+			uv = vec2( u, v ), tmax = d;
+			hitAddr = floatBitsToUint( v0.w );
+#endif
+		}
+		// out of child nodes: continue with the group on top of the stack
+		if (ngroup.y <= 0x00FFFFFFu)
+		{
+			if (stackPtr == 0u)
+			{
+				hit = vec4( tmax, uv.x, uv.y, uintBitsToFloat( hitAddr ) );
+				break;
+			}
+			STACK_POP( ngroup );
+		}
+	}
+	return hit;
+}
+
+void main()
+{
+	const ivec2 dim = imageSize( uav );
+	const uvec2 tid = gl_GlobalInvocationID.xy;
+	if (tid.x >= uint( dim.x ) || tid.y >= uint( dim.y )) return; // out of bounds
+	// get primary ray
+	const RayData r = rayBuffer[tid.y * uint( dim.x ) + tid.x];
+	const vec3 O = r.origin.xyz;
+	const vec3 D = r.direction.xyz;
+	const vec3 rD = safe_rcp3( D );
+	// trace
+	const vec4 hit = traverse_cwbvh( O, D, rD, 1e30f, gl_LocalInvocationIndex );
+	// visualize depth
+	const float t = (hit.x >= 1e30f) ? 0.0f : (1.0f - min( 1.0f, hit.x * 0.01f ));
+	imageStore( uav, ivec2( tid ), vec4( t, t, t, 1 ) );
+}

@@ -1,0 +1,115 @@
+// Software ray tracing compute shader, for BVH_GPU layout.
+// Vulkan/GLSL translation of tiny.hlsl.
+
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common.glsl"
+
+struct BVHNode
+{
+	vec4 lmin; // .xyz = left child aabb min,  floatBitsToUint(.w) = left  child node index
+	vec4 lmax; // .xyz = left child aabb max,  floatBitsToUint(.w) = right child node index
+	vec4 rmin; // .xyz = right child aabb min, floatBitsToUint(.w) = triCount (>0 => leaf)
+	vec4 rmax; // .xyz = right child aabb max, floatBitsToUint(.w) = firstTri (index into primIdx)
+};
+
+// --- resources -------------------------------------------------------------
+layout( set = 0, binding = 0, rgba8 ) uniform image2D uav;                          // render target
+layout( set = 0, binding = 3, std430 ) readonly buffer NodeBuf { BVHNode bvhNodes[]; }; // tinybvh BVH_GPU nodes
+layout( set = 0, binding = 4, std430 ) readonly buffer IdxBuf { uint primIdx[]; };      // tinybvh primitive index array
+layout( set = 0, binding = 5, std430 ) readonly buffer TriBuf { vec4 triData[]; };      // 3x vec4 per triangle
+
+#define GROUP_X    8
+#define GROUP_Y    8
+#define GROUP_SIZE (GROUP_X * GROUP_Y)
+#define STACK_SIZE 32
+
+layout( local_size_x = GROUP_X, local_size_y = GROUP_Y, local_size_z = 1 ) in;
+
+// depth-major indexing so that all lanes at the same stack depth land on
+// consecutive LDS banks: GROUP_SIZE * STACK_SIZE * 4 = 8KB per group.
+shared uint g_stack[STACK_SIZE * GROUP_SIZE];
+#define STACK_AT(i) g_stack[(i) * GROUP_SIZE + lane]
+
+vec4 traverse_ailalaine( in vec3 O, in vec3 D, in vec3 rD,
+	in vec3 Ord, in float tmax, in uint lane )
+{
+	vec4 hit = vec4( tmax, 0, 0, 0 );
+	uint node = 0u, stackPtr = 0u;
+	while (true)
+	{
+		if ((node & 0x80000000u) != 0u)
+		{
+			// leaf node
+			const uint triCount = (node >> 24) & 127u;
+			uint v0 = (node & 0xffffffu) * 3u;
+			for (uint i = 0u; i < triCount; i++)
+			{
+				const vec4 v04 = triData[v0];
+				const vec3 edge1 = triData[v0 + 1u].xyz;
+				const vec3 edge2 = triData[v0 + 2u].xyz;
+				const vec3 h = cross( D, edge2 );
+				const float a = dot( edge1, h );
+				const float f = 1.0f / a;
+				const vec3 s = O - v04.xyz;
+				const float u = f * dot( s, h );
+				const vec3 q = cross( s, edge1 );
+				const float v = f * dot( D, q );
+				const float d = f * dot( edge2, q );
+				const bool valid = (u >= 0.0f) && (v >= 0.0f) && (u + v <= 1.0f) &&
+					(d > 0.0f) && (d < hit.x);
+				hit = valid ? vec4( d, u, v, v04.w ) : hit;
+				v0 += 3u;
+			}
+			if (stackPtr == 0u) break;
+			node = STACK_AT( --stackPtr );
+			continue;
+		}
+		const BVHNode n = bvhNodes[node];
+		const vec4 lmin = n.lmin, lmax = n.lmax;
+		const vec4 rmin = n.rmin, rmax = n.rmax;
+		const uint left = floatBitsToUint( lmin.w ), right = floatBitsToUint( lmax.w );
+		const vec3 t1a = lmin.xyz * rD - Ord, t2a = lmax.xyz * rD - Ord;
+		const vec3 t1b = rmin.xyz * rD - Ord, t2b = rmax.xyz * rD - Ord;
+		const vec3 minta = min( t1a, t2a ), maxta = max( t1a, t2a );
+		const vec3 mintb = min( t1b, t2b ), maxtb = max( t1b, t2b );
+		const float tmina = max( max( max( minta.x, minta.y ), minta.z ), 0.0f );
+		const float tminb = max( max( max( mintb.x, mintb.y ), mintb.z ), 0.0f );
+		const float tmaxa = min( min( min( maxta.x, maxta.y ), maxta.z ), hit.x );
+		const float tmaxb = min( min( min( maxtb.x, maxtb.y ), maxtb.z ), hit.x );
+		const bool hitL = tmina <= tmaxa, hitR = tminb <= tmaxb;
+		if (hitL && hitR)
+		{
+			const bool leftFirst = tmina <= tminb;
+			node = leftFirst ? left : right;
+			const uint far = leftFirst ? right : left;
+			if (stackPtr < uint( STACK_SIZE )) STACK_AT( stackPtr++ ) = far;
+		}
+		else if (hitL) node = left;
+		else if (hitR) node = right;
+		else
+		{
+			if (stackPtr == 0u) break;
+			node = STACK_AT( --stackPtr );
+		}
+	}
+	return hit;
+}
+
+void main()
+{
+	const ivec2 dim = imageSize( uav );
+	const uvec2 tid = gl_GlobalInvocationID.xy;
+	if (tid.x >= uint( dim.x ) || tid.y >= uint( dim.y )) return; // out of bounds
+	// read primary ray
+	const RayData r = rayBuffer[tid.y * uint( dim.x ) + tid.x];
+	const vec3 O = r.origin.xyz, D = r.direction.xyz;
+	const vec3 rD = safe_rcp3( D );
+	const vec3 Ord = O * rD; // hoisted out of the traversal loop
+	// trace
+	const vec4 hit = traverse_ailalaine( O, D, rD, Ord, 1e30f, gl_LocalInvocationIndex );
+	// visualize depth
+	const float t = (hit.x >= 1e30f) ? 0.0f : (1.0f - min( 1.0f, hit.x * 0.01f ));
+	imageStore( uav, ivec2( tid ), vec4( t, t, t, 1 ) );
+}

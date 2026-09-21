@@ -1,0 +1,38 @@
+// Hardware ray tracing compute shader, using VK_KHR_ray_query.
+// Vulkan/GLSL translation of tinyrq.hlsl; this is a reference backend.
+
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "common.glsl"
+
+// --- resources -------------------------------------------------------------
+// binding 1 is the same TLAS descriptor the ray tracing pipeline path uses, so
+// this backend needs no additions to the descriptor set layout.
+layout( set = 0, binding = 0, rgba8 ) uniform image2D uav;          // render target
+layout( set = 0, binding = 1 ) uniform accelerationStructureEXT sceneTLAS;
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+void main()
+{
+	const ivec2 dim = imageSize( uav );
+	const uvec2 tid = gl_GlobalInvocationID.xy;
+	if (tid.x >= uint( dim.x ) || tid.y >= uint( dim.y )) return; // out of bounds
+	// get primary ray
+	const RayData r = rayBuffer[tid.y * uint( dim.x ) + tid.x];
+	// trace
+	rayQueryEXT q;
+	rayQueryInitializeEXT( q, sceneTLAS, gl_RayFlagsOpaqueEXT, 0xFF,
+		r.origin.xyz, 0.0f, r.direction.xyz, 1e30f );
+	// With opaque triangle geometry and no any-hit shaders there are no candidate
+	// intersections to resolve, so this loop exits on the first call; it is kept
+	// in loop form because that is the only spec-correct way to drive a query.
+	while (rayQueryProceedEXT( q )) {}
+	const float d = (rayQueryGetIntersectionTypeEXT( q, true ) == gl_RayQueryCommittedIntersectionTriangleEXT)
+		? rayQueryGetIntersectionTEXT( q, true ) : 1e30f;
+	// visualize depth
+	const float t = (d >= 1e30f) ? 0.0f : (1.0f - min( 1.0f, d * 0.01f ));
+	imageStore( uav, ivec2( tid ), vec4( t, t, t, 1 ) );
+}

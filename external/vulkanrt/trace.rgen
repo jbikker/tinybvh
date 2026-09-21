@@ -1,0 +1,29 @@
+// Hardware ray tracing via a VK_KHR_ray_tracing_pipeline pipeline.
+// Vulkan translation of the raygeneration shader in shader.hlsl.
+
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "common.glsl"
+
+layout( set = 0, binding = 0, rgba8 ) uniform image2D uav;
+layout( set = 0, binding = 1 ) uniform accelerationStructureEXT scene;
+
+layout( location = 0 ) rayPayloadEXT float payloadT;
+
+void main()
+{
+	const uvec2 idx = gl_LaunchIDEXT.xy;
+	const uvec2 dims = gl_LaunchSizeEXT.xy;
+	const RayData rd = rayBuffer[idx.y * dims.x + idx.x];
+	// The miss shader writes the payload, but initialize it anyway: a ray that
+	// is culled before either shader runs would otherwise read stale storage.
+	payloadT = 1e30f;
+	traceRayEXT( scene, gl_RayFlagsOpaqueEXT, 0xFF, 0 /* sbtRecordOffset */,
+		0 /* sbtRecordStride */, 0 /* missIndex */,
+		rd.origin.xyz, 0.001f, rd.direction.xyz, 1000.0f, 0 /* payload location */ );
+	// visualize depth; a miss leaves payloadT at 1e30, which saturates to 0.
+	const float t = 1.0f - min( 1.0f, payloadT * 0.01f );
+	imageStore( uav, ivec2( idx ), vec4( t, t, t, 1 ) );
+}
