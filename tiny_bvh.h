@@ -147,14 +147,15 @@ THE SOFTWARE.
 // Stack size for all CPU-side traversal functions.
 #ifndef TINYBVH_STACK_SIZE
 #define TINYBVH_STACK_SIZE 128
+#endif
 
 // Packet traversal: max number of 8-ray packets handled in one call
 #ifndef TINYBVH_MAX_PACKETS
 #define TINYBVH_MAX_PACKETS 16 // cannot exceed 32
 #endif
+#ifndef TINYBVH_PACKET_STACK_SIZE
 #define TINYBVH_PACKET_STACK_SIZE (TINYBVH_STACK_SIZE * 7 + 8)
-
-#endif // TINYBVH_STACK_SIZE
+#endif
 
 // TLAS setting
 // Note: Except when INST_IDX_BITS is set to 32, the instance index is encoded in
