@@ -50,6 +50,7 @@ int main()
 #endif
 
 #if 1
+
 	// 2. CPU BVH traversal
 	// PART 1 - TinyBVH, from default bvh via quick bvh builds to ultra-quality
 	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1 ) ); // basic BVH
@@ -62,18 +63,21 @@ int main()
 	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, PRIMARY_VIEW3 ) );
 	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, FIRST_BOUNCE ) );
 	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, AO_RAYS ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW1 ) ); // BVH for fast traversal
-	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW2 ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW3 ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, FIRST_BOUNCE ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, AO_RAYS ) );
-	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1 ) ); // HQ BVH
-	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2 ) );
-	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3 ) );
-	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE ) );
-	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1 ) ); // BVH for fast traversal
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1 ) ); // HQ BVH
+	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS ) );
+
 #endif
+
 #if 0
+
 	// PART 2 - Embree: low, medium, high
 	experiment.push_back( new Experiment( EMBREE, LOW, scene, PRIMARY_VIEW1 ) );
 	experiment.push_back( new Experiment( EMBREE, LOW, scene, PRIMARY_VIEW2 ) );
@@ -90,8 +94,11 @@ int main()
 	experiment.push_back( new Experiment( EMBREE, HIGH, scene, PRIMARY_VIEW3 ) );
 	experiment.push_back( new Experiment( EMBREE, HIGH, scene, FIRST_BOUNCE ) );
 	experiment.push_back( new Experiment( EMBREE, HIGH, scene, AO_RAYS ) );
+
 #endif
+
 #if 0
+
 	// PART 3 - Madmann91: low, medium, high
 	experiment.push_back( new Experiment( MADMANN91, LOW, scene, PRIMARY_VIEW1 ) );
 	experiment.push_back( new Experiment( MADMANN91, LOW, scene, PRIMARY_VIEW2 ) );
@@ -108,6 +115,7 @@ int main()
 	experiment.push_back( new Experiment( MADMANN91, HIGH, scene, PRIMARY_VIEW3 ) );
 	experiment.push_back( new Experiment( MADMANN91, HIGH, scene, FIRST_BOUNCE ) );
 	experiment.push_back( new Experiment( MADMANN91, HIGH, scene, AO_RAYS ) );
+
 #endif
 
 #if 0
