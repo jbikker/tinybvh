@@ -1,31 +1,16 @@
-// Vulkan port of the D3D12 tinybvh GPU ray tracing benchmark (program.cpp).
-//
-// Same experiment, same numbers: a fixed set of primary rays is traced N times
-// per frame by one of several backends, and the timestamped interval is turned
-// into MRays/s. The backends are cycled one per frame so they share the same
-// clocks and thermal state.
-//
-//   HWRT      VK_KHR_ray_tracing_pipeline, the hardware reference (was DXR)
-//   BVH_GPU   tinybvh Aila & Laine 64-byte nodes, compute            (tiny.comp)
-//   BVH4_GPU  tinybvh quantized 4-wide single-blob layout, compute   (tiny4.comp)
-//   CWBVH     tinybvh compressed-wide BVH8, compute                  (tiny8.comp)
-//   RayQuery  VK_KHR_ray_query inline tracing, compute               (tinyrq.comp)
-//
-// Structural differences from the D3D12 version, all forced by the API:
-//  - D3D12 root descriptors have no Vulkan equivalent, so every resource lives
-//    in one descriptor set that is written once at init time instead of being
-//    rebound per backend. See the binding table in shaders/common.glsl.
-//  - Shaders are SPIR-V loaded from disk rather than DXIL baked into headers;
-//    run compile_shaders.bat first.
-//  - Resource state transitions become explicit pipeline barriers, and the
-//    swapchain blit replaces CopyResource (it also handles a BGRA swapchain and
-//    a window whose client area is not exactly rtWidth x rtHeight).
-//  - The geometric pre-splitting of the D3D12 version has been dropped.
+﻿// Vulkan port of the D3D12 tinybvh GPU ray tracing benchmark (program.cpp).
 
+#if defined(_WIN32)
 #define VK_USE_PLATFORM_WIN32_KHR
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#define VK_USE_PLATFORM_XCB_KHR
+#include <xcb/xcb.h>
+#include <unistd.h>
+#include <time.h>
+#endif
 #include <vulkan/vulkan.h>
 #include <cstdarg>
 #include <cstdio>
@@ -35,11 +20,40 @@
 #include <fstream>
 #include <vector>
 
+#if defined(_WIN32)
 extern "C" { __declspec( dllexport ) DWORD NvOptimusEnablement = 1; }
 extern "C" { __declspec( dllexport ) int AmdPowerXpressRequestHighPerformance = 1; }
-
+#endif
+#if defined(_MSC_VER)
 #pragma comment(lib, "user32")
 #pragma comment(lib, "vulkan-1")
+#endif
+
+// ----------------------------------------------------------------------------
+// platform primitives
+// ----------------------------------------------------------------------------
+
+#if defined(_WIN32)
+static void* AlignedAlloc64( size_t bytes ) { return _aligned_malloc( bytes, 64 ); }
+static void AlignedFree64( void* p ) { _aligned_free( p ); }
+static void SleepMs( unsigned ms ) { Sleep( ms ); }
+static void GetCwd( char* buf, size_t n ) { if (!GetCurrentDirectoryA( (DWORD)n, buf )) buf[0] = 0; }
+static void ShowFatal( const char* msg ) { MessageBoxA( nullptr, msg, "tinybvh Vulkan benchmark", MB_OK | MB_ICONERROR ); }
+static void QuitProcess() { ExitProcess( 1 ); }
+#else
+static void* AlignedAlloc64( size_t bytes )
+{
+	// aligned_alloc requires a size that is a multiple of the alignment.
+	void* p = nullptr;
+	if (posix_memalign( &p, 64, (bytes + 63) & ~(size_t)63 ) != 0) return nullptr;
+	return p;
+}
+static void AlignedFree64( void* p ) { free( p ); }
+static void SleepMs( unsigned ms ) { struct timespec t{ ms / 1000, (long)(ms % 1000) * 1000000L }; nanosleep( &t, nullptr ); }
+static void GetCwd( char* buf, size_t n ) { if (!getcwd( buf, n )) buf[0] = 0; }
+static void ShowFatal( const char* /*msg*/ ) {} // the console message is enough
+static void QuitProcess() { exit( 1 ); }
+#endif
 
 // settings
 constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
@@ -49,10 +63,8 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 #define ENABLE_CWBVH		true	// display info on BVH8_CWBVH performance
 #define ENABLE_RAY_QUERIES	false	// display info on inline ray query performance
 #define ENABLE_VALIDATION	false	// VK_LAYER_KHRONOS_validation; costs performance
-// Consecutive dispatches in one submission may overlap, in Vulkan exactly as in
-// D3D12, since nothing orders them. Left that way so the two ports measure the
-// same thing; flip this on to serialize them.
 #define BARRIER_BETWEEN_DISPATCHES false
+#define ALLOW_SYNTHETIC_RAYS false
 
 constexpr uint32_t NUM_INSTANCES = 1, FRAME_COUNT = 2;
 constexpr uint32_t NUM_DISPATCHES = 20;
@@ -64,9 +76,6 @@ enum Backend {
 };
 static const char* backendName[BACKEND_COUNT] = { "HWRT", "BVH_GPU", "BVH4_GPU", "CWBVH", "RayQuery" };
 static const bool backendPrint[BACKEND_COUNT] = { ENABLE_HWRT, ENABLE_BVH2, ENABLE_BVH4, ENABLE_CWBVH, ENABLE_RAY_QUERIES };
-// Inline ray tracing needs VK_KHR_ray_query, one extension beyond the
-// VK_KHR_ray_tracing_pipeline the HWRT path requires. If it is missing we simply
-// cycle one backend fewer rather than failing to start.
 static bool rayQuerySupported = false;
 static int activeBackends = BACKEND_COUNT;
 
@@ -75,9 +84,6 @@ static int activeBackends = BACKEND_COUNT;
 using namespace tinybvh;
 
 #ifndef CWBVH_COMPRESSED_TRIS
-// tiny8.comp hard-codes a 4x vec4 triangle stride, exactly as tiny8.hlsl does.
-// tiny_bvh.h normally defines CWBVH_COMPRESSED_TRIS; if it is switched off here
-// the shader would read past the end of cwbvhTriBuffer, so fail loudly instead.
 #error "tiny8.comp assumes CWBVH_COMPRESSED_TRIS; enable it, or set TRI_STRIDE 3 in tiny8.comp and recompile"
 #endif
 
@@ -95,9 +101,6 @@ static BVH bvh2;
 static BVH_GPU bvh;
 static MBVH<4> mbvh4;
 static BVH4_GPU bvh4;
-// CWBVH gets its own build: the layout encodes a leaf's triangle count in three
-// bits, so it needs a tree that has been through SplitLeafs( 3 ), and doing that
-// to the shared bvh2 would change the node counts the other two backends see.
 static BVH8_CWBVH cwbvh;
 
 // ----------------------------------------------------------------------------
@@ -143,8 +146,6 @@ static VkPipeline rtPipeline = VK_NULL_HANDLE;
 static VkPipeline computePso = VK_NULL_HANDLE, computePso4 = VK_NULL_HANDLE;
 static VkPipeline computePso8 = VK_NULL_HANDLE, computePsoRQ = VK_NULL_HANDLE;
 
-// Extension entry points. The loader is not required to export these, so they
-// are fetched through vkGetDeviceProcAddr and called through this table.
 static struct VulkanFns
 {
 	PFN_vkGetBufferDeviceAddressKHR GetBufferDeviceAddress;
@@ -173,8 +174,8 @@ static void Fatal( const char* fmt, ... )
 	va_end( args );
 	printf( "fatal: %s\n", msg );
 	fflush( stdout );
-	MessageBoxA( nullptr, msg, "tinybvh Vulkan benchmark", MB_OK | MB_ICONERROR );
-	ExitProcess( 1 );
+	ShowFatal( msg );
+	QuitProcess();
 }
 
 static void CheckVk( VkResult r, const char* expr, int line )
@@ -239,8 +240,6 @@ static void DestroyBuffer( Buffer& b )
 	if (b.mem) vkFreeMemory( device, b.mem, nullptr ), b.mem = VK_NULL_HANDLE;
 }
 
-// One-shot command buffer that fully drains the queue on submit, the direct
-// equivalent of the cmdAllocs[0] / WaitForGpu pattern in the D3D12 version.
 static VkCommandBuffer BeginOneShot()
 {
 	VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
@@ -266,9 +265,6 @@ static void EndOneShot( VkCommandBuffer cb )
 	vkFreeCommandBuffers( device, setupPool, 1, &cb );
 }
 
-// Fill a device-local buffer through a temporary host-visible staging buffer.
-// 'name' documents the call site the way ID3D12Resource::SetName did; hook it up
-// to vkSetDebugUtilsObjectNameEXT if you ever need it in a capture.
 static Buffer MakeDeviceBuffer( const void* src, VkDeviceSize srcBytes, VkDeviceSize size,
 	VkBufferUsageFlags usage, const char* /*name*/ = nullptr )
 {
@@ -320,10 +316,155 @@ static void AddMesh( const char* file, int N = 0 )
 	std::fstream s{ file, s.binary | s.in };
 	if (!s.is_open()) Fatal( "could not open mesh '%s'", file );
 	s.read( (char*)&N, 4 );
-	bvhvec4* data = (bvhvec4*)_aligned_malloc( (N + triCount) * 48, 64 );
-	if (verts) memcpy( data, verts, triCount * 48 ), _aligned_free( verts );
+	bvhvec4* data = (bvhvec4*)AlignedAlloc64( (size_t)(N + triCount) * 48 );
+	if (verts) memcpy( data, verts, (size_t)triCount * 48 ), AlignedFree64( verts );
 	verts = data, s.read( (char*)verts + triCount * 48, N * 48 ), triCount += N;
 }
+
+// ----------------------------------------------------------------------------
+// window
+// ----------------------------------------------------------------------------
+
+static bool windowClosed = false, windowResized = false;
+
+#if defined(_WIN32)
+
+#define PLATFORM_SURFACE_EXTENSION_NAME VK_KHR_WIN32_SURFACE_EXTENSION_NAME
+static HWND g_hwnd = nullptr;
+
+static LRESULT WINAPI WndProc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+	switch (msg)
+	{
+	case WM_CLOSE: case WM_DESTROY: windowClosed = true; return 0;
+	case WM_SIZE: windowResized = true; return 0;
+	default: return DefWindowProcW( hwnd, msg, wparam, lparam );
+	}
+}
+
+static void CreateAppWindow( uint32_t w, uint32_t h )
+{
+	SetProcessDpiAwarenessContext( DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 );
+	WNDCLASSW wcw = { .lpfnWndProc = &WndProc, .hCursor = LoadCursor( nullptr, IDC_ARROW ), .lpszClassName = L"uVKRT" };
+	RegisterClassW( &wcw );
+	// size the window so its client area is exactly w x h, keeping the presentation blit 1:1
+	RECT r = { 0, 0, (LONG)w, (LONG)h };
+	AdjustWindowRect( &r, WS_OVERLAPPEDWINDOW, FALSE );
+	g_hwnd = CreateWindowExW( 0, L"uVKRT", L"_VK", WS_VISIBLE | WS_OVERLAPPEDWINDOW,
+		CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, 0, 0, 0, 0 );
+	if (!g_hwnd) Fatal( "could not create a window" );
+}
+
+static VkSurfaceKHR CreatePlatformSurface( VkInstance inst )
+{
+	VkWin32SurfaceCreateInfoKHR ci{ VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR };
+	ci.hinstance = GetModuleHandleW( nullptr );
+	ci.hwnd = g_hwnd;
+	VkSurfaceKHR s;
+	VK_CHECK( vkCreateWin32SurfaceKHR( inst, &ci, nullptr, &s ) );
+	return s;
+}
+
+static void PumpEvents()
+{
+	for (MSG msg; PeekMessageW( &msg, nullptr, 0, 0, PM_REMOVE );)
+	{
+		if (msg.message == WM_QUIT) { windowClosed = true; return; }
+		TranslateMessage( &msg );
+		DispatchMessageW( &msg );
+	}
+}
+
+#else // XCB
+
+#define PLATFORM_SURFACE_EXTENSION_NAME VK_KHR_XCB_SURFACE_EXTENSION_NAME
+static xcb_connection_t* g_conn = nullptr;
+static xcb_window_t g_window = 0;
+static xcb_atom_t g_atomDeleteWindow = 0;
+static uint16_t g_winW = 0, g_winH = 0;
+
+static xcb_atom_t InternAtom( const char* name, uint8_t onlyIfExists )
+{
+	xcb_intern_atom_cookie_t c = xcb_intern_atom( g_conn, onlyIfExists, (uint16_t)strlen( name ), name );
+	xcb_intern_atom_reply_t* r = xcb_intern_atom_reply( g_conn, c, nullptr );
+	const xcb_atom_t a = r ? r->atom : (xcb_atom_t)0;
+	free( r );
+	return a;
+}
+
+static void CreateAppWindow( uint32_t w, uint32_t h )
+{
+	int screenIndex = 0;
+	g_conn = xcb_connect( nullptr, &screenIndex );
+	if (!g_conn || xcb_connection_has_error( g_conn ))
+		Fatal( "could not connect to an X server (is DISPLAY set? Wayland-only\n"
+			"sessions need XWayland, which is normally present)" );
+	xcb_screen_iterator_t it = xcb_setup_roots_iterator( xcb_get_setup( g_conn ) );
+	for (int i = 0; i < screenIndex; i++) xcb_screen_next( &it );
+	xcb_screen_t* screen = it.data;
+	g_window = xcb_generate_id( g_conn );
+	const uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK;
+	const uint32_t values[2] = { screen->black_pixel, XCB_EVENT_MASK_STRUCTURE_NOTIFY };
+	xcb_create_window( g_conn, XCB_COPY_FROM_PARENT, g_window, screen->root,
+		0, 0, (uint16_t)w, (uint16_t)h, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
+		screen->root_visual, mask, values );
+	g_winW = (uint16_t)w, g_winH = (uint16_t)h;
+	const char* title = "_VK";
+	xcb_change_property( g_conn, XCB_PROP_MODE_REPLACE, g_window, XCB_ATOM_WM_NAME,
+		XCB_ATOM_STRING, 8, (uint32_t)strlen( title ), title );
+	// Ask the window manager to send a ClientMessage on close instead of just severing the connection.
+	const xcb_atom_t protocols = InternAtom( "WM_PROTOCOLS", 1 );
+	g_atomDeleteWindow = InternAtom( "WM_DELETE_WINDOW", 0 );
+	if (protocols && g_atomDeleteWindow)
+		xcb_change_property( g_conn, XCB_PROP_MODE_REPLACE, g_window, protocols,
+			XCB_ATOM_ATOM, 32, 1, &g_atomDeleteWindow );
+	xcb_map_window( g_conn, g_window );
+	xcb_flush( g_conn );
+	// Wait for the map to complete.
+	for (int spins = 0; spins < 1000; spins++)
+	{
+		xcb_generic_event_t* e = xcb_poll_for_event( g_conn );
+		if (!e) { SleepMs( 2 ); continue; }
+		const uint8_t type = e->response_type & 0x7F;
+		free( e );
+		if (type == XCB_MAP_NOTIFY) break;
+	}
+}
+
+static VkSurfaceKHR CreatePlatformSurface( VkInstance inst )
+{
+	VkXcbSurfaceCreateInfoKHR ci{ VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR };
+	ci.connection = g_conn;
+	ci.window = g_window;
+	VkSurfaceKHR s;
+	VK_CHECK( vkCreateXcbSurfaceKHR( inst, &ci, nullptr, &s ) );
+	return s;
+}
+
+static void PumpEvents()
+{
+	for (xcb_generic_event_t* e; (e = xcb_poll_for_event( g_conn )) != nullptr; free( e ))
+	{
+		switch (e->response_type & 0x7F)
+		{
+		case XCB_CLIENT_MESSAGE:
+			if (((xcb_client_message_event_t*)e)->data.data32[0] == g_atomDeleteWindow)
+				windowClosed = true;
+			break;
+		case XCB_CONFIGURE_NOTIFY:
+		{
+			const xcb_configure_notify_event_t* c = (const xcb_configure_notify_event_t*)e;
+			if (c->width != g_winW || c->height != g_winH) g_winW = c->width, g_winH = c->height, windowResized = true;
+			break;
+		}
+		case XCB_DESTROY_NOTIFY: windowClosed = true; break;
+		default: break;
+		}
+	}
+	if (xcb_connection_has_error( g_conn )) windowClosed = true;
+}
+
+#endif
 
 // ----------------------------------------------------------------------------
 // device
@@ -341,7 +482,7 @@ static void InitDevice()
 	VkApplicationInfo app{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
 	app.pApplicationName = "tinybvh Vulkan benchmark";
 	app.apiVersion = VK_API_VERSION_1_2; // ray tracing needs SPIR-V 1.4, core in 1.2
-	const char* instExt[] = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME };
+	const char* instExt[] = { VK_KHR_SURFACE_EXTENSION_NAME, PLATFORM_SURFACE_EXTENSION_NAME };
 	const char* layers[] = { "VK_LAYER_KHRONOS_validation" };
 	VkInstanceCreateInfo ici{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
 	ici.pApplicationInfo = &app;
@@ -441,10 +582,6 @@ static void InitDevice()
 	dci.ppEnabledExtensionNames = devExt.data();
 	VK_CHECK( vkCreateDevice( physicalDevice, &dci, nullptr, &device ) );
 	vkGetDeviceQueue( device, queueFamily, 0, &queue );
-	// Extension entry points. vkGetBufferDeviceAddress is core in Vulkan 1.2 and
-	// we enable it through VkPhysicalDeviceVulkan12Features rather than through
-	// VK_KHR_buffer_device_address, so the KHR-suffixed alias is not guaranteed
-	// to resolve; ask for the core name first.
 	vk.GetBufferDeviceAddress = (PFN_vkGetBufferDeviceAddressKHR)vkGetDeviceProcAddr( device, "vkGetBufferDeviceAddress" );
 	if (!vk.GetBufferDeviceAddress)
 		vk.GetBufferDeviceAddress = (PFN_vkGetBufferDeviceAddressKHR)vkGetDeviceProcAddr( device, "vkGetBufferDeviceAddressKHR" );
@@ -506,9 +643,6 @@ static void DestroySwapChain()
 	for (VkSemaphore s : renderFinished) vkDestroySemaphore( device, s, nullptr );
 	renderFinished.clear();
 	if (swapChain) vkDestroySwapchainKHR( device, swapChain, nullptr ), swapChain = VK_NULL_HANDLE;
-	// An acquire that returned OUT_OF_DATE may still have signalled its
-	// semaphore, and a binary semaphore nobody waits on stays signalled. There
-	// is no way to unsignal one, so replace them.
 	VkSemaphoreCreateInfo sci{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
 	for (uint32_t i = 0; i < FRAME_COUNT; i++)
 	{
@@ -526,7 +660,6 @@ static void CreateSwapChain()
 	else
 		swapExtent = caps.currentExtent;
 	if (swapExtent.width == 0 || swapExtent.height == 0) return; // minimized
-	// prefer RGBA8 so the render target can be copied with no channel swizzle
 	uint32_t n = 0;
 	vkGetPhysicalDeviceSurfaceFormatsKHR( physicalDevice, surface, &n, nullptr );
 	std::vector<VkSurfaceFormatKHR> formats( n );
@@ -535,8 +668,6 @@ static void CreateSwapChain()
 	for (const VkSurfaceFormatKHR& f : formats)
 		if (f.format == VK_FORMAT_R8G8B8A8_UNORM && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { chosen = f; break; }
 	swapFormat = chosen.format;
-	// Present(0,0) means 'no vsync', so ask for IMMEDIATE and fall back the way
-	// the spec guarantees: FIFO is always available.
 	vkGetPhysicalDeviceSurfacePresentModesKHR( physicalDevice, surface, &n, nullptr );
 	std::vector<VkPresentModeKHR> modes( n );
 	vkGetPhysicalDeviceSurfacePresentModesKHR( physicalDevice, surface, &n, modes.data() );
@@ -561,26 +692,18 @@ static void CreateSwapChain()
 	VK_CHECK( vkGetSwapchainImagesKHR( device, swapChain, &n, nullptr ) );
 	swapImages.resize( n );
 	VK_CHECK( vkGetSwapchainImagesKHR( device, swapChain, &n, swapImages.data() ) );
-	// The present wait has to be a semaphore the image itself owns; reusing a
-	// per-frame semaphore can leave a pending present waiting on a retired one.
 	VkSemaphoreCreateInfo semci{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
 	renderFinished.resize( n );
 	for (uint32_t i = 0; i < n; i++) VK_CHECK( vkCreateSemaphore( device, &semci, nullptr, &renderFinished[i] ) );
 }
 
-static void InitSurfaces( HWND hwnd )
+static void InitSurfaces()
 {
-	VkWin32SurfaceCreateInfoKHR ci{ VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR };
-	ci.hinstance = GetModuleHandleW( nullptr );
-	ci.hwnd = hwnd;
-	VK_CHECK( vkCreateWin32SurfaceKHR( instance, &ci, nullptr, &surface ) );
+	surface = CreatePlatformSurface( instance );
 	VkBool32 ok = VK_FALSE;
 	VK_CHECK( vkGetPhysicalDeviceSurfaceSupportKHR( physicalDevice, queueFamily, surface, &ok ) );
 	if (!ok) Fatal( "queue family %u cannot present to this surface", queueFamily );
 	CreateSwapChain();
-	// The render target is a fixed rtWidth x rtHeight storage image; it never
-	// changes size, so unlike the D3D12 version a resize only touches the
-	// swapchain. The blit at the end of each frame handles any size difference.
 	VkImageCreateInfo ii{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
 	ii.imageType = VK_IMAGE_TYPE_2D;
 	ii.format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -664,32 +787,6 @@ static void InitBVHBuffers()
 	cwbvhTriBuffer = MakeDeviceBuffer( cwbvh.bvh8Tris, cwbvhTriBytes, cwbvhTriBytes, use, "cwbvhTriBuffer" );
 }
 
-// Fallback ray set: a pinhole camera aimed at the scene from outside its bounds.
-// Only used when the recorded ray set is missing, and reported as such, because
-// a different ray distribution is a different benchmark.
-static void GenerateFallbackRays( float* data )
-{
-	bvhvec3 bmin( 1e30f ), bmax( -1e30f );
-	for (int i = 0; i < triCount * 3; i++)
-		bmin = tinybvh_min( bmin, bvhvec3( verts[i] ) ), bmax = tinybvh_max( bmax, bvhvec3( verts[i] ) );
-	const bvhvec3 center = (bmin + bmax) * 0.5f, ext = bmax - bmin;
-	const float diag = tinybvh_length( ext );
-	const bvhvec3 eye = center + tinybvh_normalize( bvhvec3( 1.0f, 0.35f, 1.0f ) ) * diag * 0.55f;
-	const bvhvec3 fwd = tinybvh_normalize( center - eye );
-	const bvhvec3 right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), fwd ) );
-	const bvhvec3 up = tinybvh_cross( fwd, right );
-	const float tanHalfFov = 0.5773503f; // 60 degrees
-	for (uint32_t y = 0; y < rtHeight; y++) for (uint32_t x = 0; x < rtWidth; x++)
-	{
-		const float sx = (2.0f * (x + 0.5f) / rtWidth - 1.0f) * tanHalfFov;
-		const float sy = (1.0f - 2.0f * (y + 0.5f) / rtHeight) * tanHalfFov;
-		const bvhvec3 D = tinybvh_normalize( fwd + right * sx + up * sy );
-		float* r = data + (size_t)(y * rtWidth + x) * 8;
-		r[0] = eye.x, r[1] = eye.y, r[2] = eye.z;
-		r[4] = D.x, r[5] = D.y, r[6] = D.z;
-	}
-}
-
 static void UpdateRayBuffer()
 {
 	const VkDeviceSize size = 32ull * rtWidth * rtHeight; // 32 bytes per ray
@@ -697,19 +794,25 @@ static void UpdateRayBuffer()
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true );
 	float* data = (float*)staging.mapped;
 	memset( data, 0, (size_t)size );
-	// The recorded set stores all origins first, then all directions.
-	FILE* f = fopen( "../../view3rays.bin", "rb" );
+	const char* raySetPath = "../../view3rays.bin";
+	FILE* f = fopen( raySetPath, "rb" );
 	if (f)
 	{
-		for (uint32_t i = 0; i < rtWidth * rtHeight; i++) fread( data + i * 8, 4, 3, f );
-		for (uint32_t i = 0; i < rtWidth * rtHeight; i++) fread( data + i * 8 + 4, 4, 3, f );
+		const long long expected = 2ll * rtWidth * rtHeight * 3 * (long long)sizeof( float );
+		fseek( f, 0, SEEK_END );
+		const long long bytes = ftell( f );
+		fseek( f, 0, SEEK_SET );
+		size_t got = 0;
+		for (uint32_t i = 0; i < rtWidth * rtHeight; i++) got += fread( data + i * 8, 4, 3, f );
+		for (uint32_t i = 0; i < rtWidth * rtHeight; i++) got += fread( data + i * 8 + 4, 4, 3, f );
 		fclose( f );
+		printf( "rays: %s, %u x %u\n", raySetPath, rtWidth, rtHeight );
 	}
 	else
 	{
-		printf( "warning: raysets/view3rays.bin not found; using a synthetic camera\n"
-			"         ray set, so these numbers are not comparable to a recorded run.\n" );
-		GenerateFallbackRays( data );
+		char cwd[1024] = {};
+		GetCwd( cwd, sizeof( cwd ) );
+		Fatal( "could not open '%s' (working directory: %s).\n\n", raySetPath, cwd );
 	}
 	// Device-local buffer the shaders actually read from on every ray.
 	rayBuffer = CreateBuffer( size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -756,8 +859,6 @@ static AccelStruct MakeAccelerationStructure( VkAccelerationStructureTypeKHR typ
 	ci.size = sizes.accelerationStructureSize;
 	ci.type = type;
 	VK_CHECK( vk.CreateAccelerationStructure( device, &ci, nullptr, &as.handle ) );
-	// Scratch addresses have their own alignment requirement, so over-allocate
-	// and start at the first aligned address inside the buffer.
 	const VkDeviceSize align = asProps.minAccelerationStructureScratchOffsetAlignment;
 	Buffer scratch = CreateBuffer( sizes.buildScratchSize + align,
 		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
@@ -876,7 +977,6 @@ static void InitTopLevel()
 // descriptors and pipelines
 // ----------------------------------------------------------------------------
 
-// Every shader stage sees every binding; see the table in shaders/common.glsl.
 static void InitDescriptors()
 {
 	const VkShaderStageFlags stages = VK_SHADER_STAGE_COMPUTE_BIT |
@@ -914,8 +1014,6 @@ static void InitDescriptors()
 	plci.setLayoutCount = 1;
 	plci.pSetLayouts = &descLayout;
 	VK_CHECK( vkCreatePipelineLayout( device, &plci, nullptr, &pipelineLayout ) );
-	// One write, once: unlike D3D12 root descriptors nothing has to be rebound
-	// per backend. The TLAS is updated in place, so its handle stays valid.
 	VkDescriptorImageInfo imgInfo{ VK_NULL_HANDLE, renderTargetView, VK_IMAGE_LAYOUT_GENERAL };
 	VkWriteDescriptorSetAccelerationStructureKHR asInfo{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
 	asInfo.accelerationStructureCount = 1;
@@ -969,8 +1067,6 @@ static VkShaderModule LoadShaderModule( const char* name )
 	return VK_NULL_HANDLE;
 }
 
-// The ray tracing pipeline: raygen + miss + one triangle hit group, the direct
-// equivalent of the D3D12 state object and its HitGroup subobject.
 static void InitPipeline()
 {
 	VkShaderModule rgen = LoadShaderModule( "trace.rgen.spv" );
@@ -1033,9 +1129,6 @@ static void InitComputePipeline()
 	if (rayQuerySupported) computePsoRQ = MakeComputePipeline( "tinyrq.comp.spv" );
 }
 
-// The shader binding table: one record per group, each starting at a
-// shaderGroupBaseAlignment boundary, which is what the D3D12 version achieves by
-// spacing shader identifiers at D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT.
 static void InitShaderTables()
 {
 	const uint32_t handleSize = rtProps.shaderGroupHandleSize;
@@ -1065,8 +1158,6 @@ static void InitShaderTables()
 // per-frame work
 // ----------------------------------------------------------------------------
 
-// Refit the TLAS in place, matching the single UpdateScene() call the D3D12
-// version makes on its first frame.
 static void UpdateScene( VkCommandBuffer cb )
 {
 	VkAccelerationStructureGeometryKHR geom{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
@@ -1126,7 +1217,7 @@ static void Render()
 	// Round-robin the ray tracing backends.
 	const int backend = (int)(frameCounter % activeBackends);
 	// A zero-size client area (minimized) leaves the swapchain uncreatable.
-	if (swapChain == VK_NULL_HANDLE) { Resize(); if (swapChain == VK_NULL_HANDLE) { Sleep( 16 ); return; } }
+	if (swapChain == VK_NULL_HANDLE) { Resize(); if (swapChain == VK_NULL_HANDLE) { SleepMs( 16 ); return; } }
 	VK_CHECK( vkWaitForFences( device, 1, &frameFences[slot], VK_TRUE, UINT64_MAX ) );
 	// This slot's previous submission has retired, so its timestamps are readable.
 	if (frameSubmitted[slot])
@@ -1176,8 +1267,6 @@ static void Render()
 	if (sceneDirty) { UpdateScene( cb ); sceneDirty = false; }
 	if (backend != BACKEND_HWRT)
 	{
-		// The compute backends share the descriptor set and the pipeline layout;
-		// they differ only in the pipeline object.
 		vkCmdBindPipeline( cb, VK_PIPELINE_BIND_POINT_COMPUTE,
 			backend == BACKEND_BVH4_GPU ? computePso4 :
 			backend == BACKEND_BVH8_CWBVH ? computePso8 :
@@ -1221,8 +1310,6 @@ static void Render()
 	}
 	slotBackend[slot] = backend; // for the timing readback next time this slot runs
 	frameCounter++;
-	// Present the result. A blit rather than a copy, so that a swapchain in BGRA
-	// or at a client size other than rtWidth x rtHeight still works.
 	const VkPipelineStageFlags traceStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
 		VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
 	ImageBarrier( cb, renderTarget, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -1241,9 +1328,6 @@ static void Render()
 	ImageBarrier( cb, renderTarget, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
 		VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, traceStage );
 	VK_CHECK( vkEndCommandBuffer( cb ) );
-	// Waiting at TRANSFER rather than TOP_OF_PIPE lets the traversal work start
-	// before the swapchain image is available, so the timestamped interval does
-	// not absorb any stall on the presentation engine.
 	const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 	VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
 	si.waitSemaphoreCount = 1;
@@ -1271,35 +1355,19 @@ static void Resize()
 	VK_CHECK( vkDeviceWaitIdle( device ) ); // must fully drain before touching swapchain images
 	DestroySwapChain();
 	CreateSwapChain();
-	// Pending timestamp results belong to the retired submissions; drop them so
-	// the next pass through Render() does not read a reset query pool.
 	for (uint32_t i = 0; i < FRAME_COUNT; i++) frameSubmitted[i] = false;
 }
 
 // ----------------------------------------------------------------------------
-// window and entry point
+// entry point
 // ----------------------------------------------------------------------------
 
-static bool inSizeMove = false;
-
-static LRESULT WINAPI WndProc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
-{
-	switch (msg)
-	{
-	case WM_CLOSE: case WM_DESTROY: PostQuitMessage( 0 ); return 0;
-	case WM_ENTERSIZEMOVE: inSizeMove = true; return 0;
-	case WM_EXITSIZEMOVE: inSizeMove = false; if (device) Resize(); return 0;
-	case WM_SIZE: if (device && !inSizeMove) Resize(); return 0;
-	default: return DefWindowProcW( hwnd, msg, wparam, lparam );
-	}
-}
-
-static void Init( HWND hwnd )
+static void Init()
 {
 	InitDevice();
 	InitCommand();
 	InitQueryPool();
-	InitSurfaces( hwnd );
+	InitSurfaces();
 	InitMeshes();
 	InitBVHBuffers();
 	UpdateRayBuffer();
@@ -1314,24 +1382,15 @@ static void Init( HWND hwnd )
 
 int main()
 {
-	SetProcessDpiAwarenessContext( DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 );
-	WNDCLASSW wcw = { .lpfnWndProc = &WndProc, .hCursor = LoadCursor( nullptr, IDC_ARROW ), .lpszClassName = L"uVKRT" };
-	RegisterClassW( &wcw );
-	// size the window so its client area is exactly rtWidth x rtHeight, keeping
-	// the presentation blit 1:1
-	RECT r = { 0, 0, (LONG)rtWidth, (LONG)rtHeight };
-	AdjustWindowRect( &r, WS_OVERLAPPEDWINDOW, FALSE );
-	HWND hwnd = CreateWindowExW( 0, L"uVKRT", L"_VK", WS_VISIBLE | WS_OVERLAPPEDWINDOW,
-		CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, 0, 0, 0, 0 );
-	Init( hwnd );
-	for (MSG msg;;)
-	{
-		while (PeekMessageW( &msg, nullptr, 0, 0, PM_REMOVE ))
+	CreateAppWindow( rtWidth, rtHeight );
+	Init();
+	while (!windowClosed)
 		{
-			if (msg.message == WM_QUIT) { vkDeviceWaitIdle( device ); return 0; }
-			TranslateMessage( &msg );
-			DispatchMessageW( &msg );
-		}
+		PumpEvents();
+		if (windowClosed) break;
+		if (windowResized) windowResized = false, Resize();
 		Render(); // Render the next frame
 	}
+	vkDeviceWaitIdle( device );
+	return 0;
 }
