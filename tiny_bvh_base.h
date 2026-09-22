@@ -3918,6 +3918,22 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 				// Check if the ray should intersect this BLAS Instance, otherwise skip it
 				if (!(inst.mask & ray.mask)) continue;
 				const BVHBase<Float, Index>* blas = blasList[inst.blasIdx];
+				if constexpr (bvh_traits<Float>::wide_layouts)
+				{
+					if (blas->layout == LAYOUT_BVH4_CPU || blas->layout == LAYOUT_BVH8_AVX2)
+					{
+						const Vec3 O = ray.O, D = ray.D, rD = ray.rD;
+						const Index rayInstIdx = ray.instIdx;
+						ray.O = tinybvh_transform_point( O, inst.invTransform );
+						ray.D = tinybvh_transform_vector( D, inst.invTransform );
+						ray.rD = tinybvh_rcp( ray.D );
+						ray.instIdx = instIdx << bvh_inst_shift<Index>;
+						if (blas->layout == LAYOUT_BVH4_CPU) cost += ((BVH4_CPU<Float, Index>*)blas)->Intersect( ray );
+						else cost += ((BVH8_CPU<Float, Index>*)blas)->Intersect( ray );
+						ray.O = O, ray.D = D, ray.rD = rD, ray.instIdx = rayInstIdx;
+						continue;
+					}
+				}
 				// 1. Transform ray with the inverse of the instance transform
 				tmpRay.O = tinybvh_transform_point( ray.O, inst.invTransform );
 				tmpRay.D = tinybvh_transform_vector( ray.D, inst.invTransform );
@@ -3931,12 +3947,6 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 			#ifdef ENABLE_VOXEL_SUPPORT
 				else if (blas->layout == LAYOUT_VOXELSET) cost += ((VoxelSet*)blas)->Intersect( tmpRay );
 			#endif
-				else if constexpr (bvh_traits<Float>::wide_layouts)
-				{
-					if (blas->layout == LAYOUT_BVH4_CPU) cost += ((BVH4_CPU<Float, Index>*)blas)->Intersect( tmpRay );
-					else if (blas->layout == LAYOUT_BVH8_AVX2) cost += ((BVH8_CPU<Float, Index>*)blas)->Intersect( tmpRay );
-					else assert( !"unsupported BLAS layout" );
-				}
 				else assert( !"unsupported BLAS layout" );
 				// 3. Restore ray
 				ray.hit = tmpRay.hit;
