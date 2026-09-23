@@ -121,7 +121,7 @@ void GLTFDemo::InitScene1()
 {
 	// load gltf scene
 	scene.SetBVHDefault( GPU_RIGID ); // even the drone does not use BVH rebuilds.
-	scene.CacheBVHs(); // BVHs will be saved to disk for faster loading and optimization.
+	// scene.CacheBVHs(); // BVHs will be saved to disk for faster loading and optimization.
 	terrain = scene.AddScene( "./testdata/cratercity/scene.gltf", mat4::Translate( 0, -18.9f, 0 ) * mat4::RotateY( 1 ) );
 	tree1 = scene.AddScene( "./testdata/mangotree/scene.gltf", mat4::Translate( 5, -3.5f, 0 ) * mat4::Scale( 2 ) );
 	tree2 = scene.AddScene( "./testdata/smallpine/scene.gltf", mat4::Translate( 0, 0, 0 ) * mat4::Scale( 0.03f ) );
@@ -143,7 +143,7 @@ void GLTFDemo::InitScene2()
 	int terrainMesh = scene.CollapseMeshes( terrain ); // combine the meshes into a single mesh; may yield a better BVH.
 	int terrainNode = scene.FindMeshNode( terrain /* possibly a hierarchy */, terrainMesh );
 	scene.SetBVHType( drone, GPU_DYNAMIC );
-	scene.SetBVHType( terrain, GPU_STATIC );
+	scene.SetBVHType( terrain, GPU_DYNAMIC );
 	printf( "building BVHs...\n" );
 	scene.UpdateSceneGraph( 0 ); // this will build the BLASses and TLAS.
 	printf( "all done.\n" );
@@ -156,8 +156,8 @@ void GLTFDemo::InitScene2()
 		mat4 T1 = mat4::Translate( (30 + 2 * RandomFloat()) * sinf( a ), 0, (30 + 2 * RandomFloat()) * cosf( a ) );
 		float3 O( T1[3], 20, T1[11] ), D( 0, -1, 0 );
 		Ray r( float4( O, 1 ) * invTerrain, float4( D, 0 ) * invTerrain );
-		scene.meshPool[terrainMesh]->blas.staticGPU->bvh8.bvh.Intersect( r );
-		T1[7] = (O + D * r.hit.t * 0.1f /* erm... why 0.1? */).y - 0.2f;
+		scene.meshPool[terrainMesh]->blas.dynamicGPU->bvh.Intersect( r );
+		T1[7] = (O + D * r.hit.t).y - 0.2f;
 		float hsize = 0.03f + RandomFloat() * 0.025f, vsize = 0.03f + RandomFloat() * 0.015f;
 		mat4 T2 = mat4::Scale( float3( hsize, vsize, hsize ) );
 		mat4 T3 = mat4::RotateY( RandomFloat() * TWOPI ) * mat4::RotateX( PI * 1.5f );
