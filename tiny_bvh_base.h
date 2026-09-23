@@ -531,13 +531,13 @@ template <typename Float, typename Index> struct Intersection : IntersectionInst
 
 template <typename Float, typename Index> struct ALIGNED( 64 ) Ray
 {
-	// Basic ray class. Note: For single blas traversal it is expected that Ray::rD is 
+	// Basic ray class. Note: For single blas traversal it is expected that Ray::rD is
 	// properly initialized. For tlas/blas traversal this is typically updated for each blas.
 	using Vec3 = typename bvh_traits<Float>::vec3;
 	Ray() = default;
 	Ray( Vec3 origin, Vec3 direction, Float t = bvh_far<Float>, uint32_t rayMask = RAY_MASK_INTERSECT_ALL )
 	{
-		O = origin, D = tinybvh_normalize( direction ), rD = tinybvh_rcp( D );
+		O = origin, D = direction, rD = tinybvh_rcp( D );
 		hit.t = t, hit.u = hit.v = 0, hit.prim = 0;
 		if constexpr (!bvh_packed_inst<Index>) hit.inst = 0;
 		mask = rayMask & RAY_MASK_INTERSECT_ALL;

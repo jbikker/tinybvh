@@ -84,11 +84,13 @@ static void TestCustomShadowRays()
 		CHECK( ray2.hit.t < 1e30 ); // a hit was found
 		CHECK( ray2.hit.prim == 0 );
 	}
-	// Ray into empty space; should not be occluded and should not hit.
+	// Ray into empty space; should not be occluded and should not hit. The sphere
+	// callbacks above assume a unit direction.
 	{
-		RayEx ray( bvhdbl3( 0, 0, 0 ), bvhdbl3( 0, 1, 1 ), 1e30 );
+		const bvhdbl3 dir = tinybvh_normalize( bvhdbl3( 0, 1, 1 ) );
+		RayEx ray( bvhdbl3( 0, 0, 0 ), dir, 1e30 );
 		CHECK( bvh.IsOccluded( ray ) == false );
-		RayEx ray2( bvhdbl3( 0, 0, 0 ), bvhdbl3( 0, 1, 1 ), 1e30 );
+		RayEx ray2( bvhdbl3( 0, 0, 0 ), dir, 1e30 );
 		bvh.Intersect( ray2 );
 		CHECK( ray2.hit.t == 1e30 ); // no hit
 	}
