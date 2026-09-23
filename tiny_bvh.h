@@ -214,9 +214,10 @@ THE SOFTWARE.
 // Optimization statistics for CWBVH construction
 // #define CWBVH_REPORT_FULLNESS
 // Variations for BVH8_CPU traversal
-// #define BVH8_USE_PREFETCHING // does not seem to be beneficial.
+#define BVH8_USE_PREFETCHING // small gain on Linux, unclear on Windows?
 #define BVH8_SORTING_NETWORK // use a sorting network for child distances
 #define BVH8_2VALIDNODES // make 2 valid nodes a special case
+// #define NORMALIZE_RAY_DIR // enable to match previous API behaviour
 
 // ============================================================================
 //
