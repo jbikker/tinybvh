@@ -537,10 +537,22 @@ template <typename Float, typename Index> struct ALIGNED( 64 ) Ray
 	Ray() = default;
 	Ray( Vec3 origin, Vec3 direction, Float t = bvh_far<Float>, uint32_t rayMask = RAY_MASK_INTERSECT_ALL )
 	{
-		O = origin, D = direction, rD = tinybvh_rcp( D );
+		O = origin;
+	#ifdef NORMALIZE_RAY_DIR
+		D = tinybvh_normalize( direction );
+	#else			
+		D = direction;
+	#endif
+		rD = tinybvh_rcp( D );
 		hit.t = t, hit.u = hit.v = 0, hit.prim = 0;
 		if constexpr (!bvh_packed_inst<Index>) hit.inst = 0;
 		mask = rayMask & RAY_MASK_INTERSECT_ALL;
+	}
+	void Normalize()
+	{
+		// 1.9.x API no longer normalizes ray direction in constructor: use Normalize where needed.
+		D = tinybvh_normalize( D );
+		rD = tinybvh_rcp( D );
 	}
 	// Records the hit primitive together with the instance index of the current BLAS.
 	void SetHitPrim( const Index prim )
