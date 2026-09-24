@@ -679,7 +679,6 @@ template <typename Float, typename Index> class BVH4_CPU;
 template <typename Float, typename Index> class BVH8_CWBVH;
 template <typename Float, typename Index> class BVH8_CPU;
 template <typename Float, typename Index> class BLASInstance;
-template <typename Float, typename Index> struct RayPacket8;
 template <typename Float, typename Index> struct BVHTri4Leaf;
 
 // Task trampolines of the SIMD builders in the platform headers; friends of BVH.
@@ -707,7 +706,6 @@ public:
 	using BVH_Verbose = impl::BVH_Verbose<Float, Index>;
 	using BLASInstance = impl::BLASInstance<Float, Index>;
 	using BVHTri4Leaf = impl::BVHTri4Leaf<Float, Index>;
-	using RayPacket8 = impl::RayPacket8<Float, Index>;
 	struct ALIGNED( 32 ) Fragment
 	{
 		// A fragment stores the bounds of an input primitive. The name 'Fragment' is from
@@ -789,7 +787,6 @@ public:
 	using typename Base::Ray;
 	using typename Base::BVH_Verbose;
 	using typename Base::BLASInstance;
-	using typename Base::RayPacket8;
 	using Base::threadedBuild;
 	using Base::settings;
 	using Base::c_trav;
@@ -880,8 +877,6 @@ public:
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	bool IntersectSphere( const Vec3& pos, const Float r ) const;
-	void Intersect256Rays( Ray* first ) const;
-	void Intersect256RaysSSE( Ray* packet ) const; // requires BVH_USEAVX
 	void ConvertFrom( const BVH_Verbose& original, bool compact = true );
 	void SplitLeafs( const Index maxPrims );
 	void CombineLeafs( const Index nodeIdx = 0 );
@@ -945,16 +940,10 @@ protected:
 	template <bool posX, bool posY, bool posZ> int32_t IntersectTLASOctant( Ray& ray ) const;
 	template <bool posX, bool posY, bool posZ> bool IsOccludedOctant( const Ray& ray ) const;
 	template <bool posX, bool posY, bool posZ> bool IsOccludedTLASOctant( const Ray& ray ) const;
-	// TLAS packet traversal
-	template <bool posX, bool posY, bool posZ> int32_t IntersectPacketsTLASOctant( RayPacket8* packets, const uint32_t packetCount ) const;
-	template <bool posX, bool posY, bool posZ> int32_t IsOccludedPacketsTLASOctant( RayPacket8* packets, const uint32_t packetCount ) const;
 public:
-	int32_t IntersectRays( Ray* rays, const uint32_t rayCount ) const;
-	int32_t IsOccludedRays( Ray* rays, const uint32_t rayCount, bool* occluded ) const;
-	int32_t IntersectPacketTLAS( RayPacket8& packet ) const;
-	int32_t IntersectPacketsTLAS( RayPacket8* packets, const uint32_t packetCount ) const;
-	int32_t IsOccludedPacketTLAS( RayPacket8& packet ) const;
-	int32_t IsOccludedPacketsTLAS( RayPacket8* packets, const uint32_t packetCount ) const;
+	// WiVeC bundle traversal over the TLAS: TINYBVH_BUNDLE_RAYS rays at a time.
+	int32_t IntersectBundle( Ray* rays ) const;
+	int32_t IsOccludedBundle( Ray* rays, bool* occluded ) const;
 protected:
 public:
 	// Basic BVH data
@@ -1292,7 +1281,6 @@ public:
 	using typename Base::Slice;
 	using typename Base::Ray;
 	using typename Base::BVHTri4Leaf;
-	using typename Base::RayPacket8;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -1342,6 +1330,9 @@ public:
 	// Traversal kernels specialized for the ray octant; the platform headers provide these.
 	template <bool posX, bool posY, bool posZ> int32_t IntersectOctant( Ray& ray ) const;
 	template <bool posX, bool posY, bool posZ> bool IsOccludedOctant( const Ray& ray ) const;
+	// WiVeC bundle traversal: TINYBVH_BUNDLE_RAYS rays at a time, closest hit.
+	int32_t IntersectBundle( Ray* rays ) const;
+	int32_t IsOccludedBundle( Ray* rays, bool* occluded ) const;
 	// BVH4 data
 	CacheLine* bvh4Data = 0;		// Interleaved interior (128b) and leaf (192b) data.
 	MBVH<4, Float, Index> bvh4;		// BVH4_CPU is created from BVH4 and uses its data.
@@ -1475,7 +1466,6 @@ public:
 	using typename Base::Slice;
 	using typename Base::Ray;
 	using typename Base::BVHTri4Leaf;
-	using typename Base::RayPacket8;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -1533,21 +1523,6 @@ public:
 	// Traversal kernels specialized for the ray octant; the platform headers provide these.
 	template <bool posX, bool posY, bool posZ> int32_t IntersectOctant( Ray& ray ) const;
 	template <bool posX, bool posY, bool posZ> bool IsOccludedOctant( const Ray& ray ) const;
-	// Packet traversal; see RayPacket8.
-	int32_t IntersectRays( Ray* rays, const uint32_t rayCount ) const;
-	int32_t IsOccludedRays( Ray* rays, const uint32_t rayCount, bool* occluded ) const;
-	int32_t IntersectPacket( RayPacket8& packet ) const;
-	int32_t IntersectPackets( RayPacket8* packets, const uint32_t packetCount ) const;
-	int32_t IsOccludedPacket( RayPacket8& packet ) const;
-	int32_t IsOccludedPackets( RayPacket8* packets, const uint32_t packetCount ) const;
-	// Packet kernels specialized for the packet octant; the platform headers provide these.
-	template <bool posX, bool posY, bool posZ> int32_t IntersectPacketOctant( RayPacket8& packet ) const;
-	template <bool posX, bool posY, bool posZ> int32_t IntersectPacketsOctant( RayPacket8* packets, const uint32_t packetCount ) const;
-	template <bool posX, bool posY, bool posZ> int32_t IsOccludedPacketOctant( RayPacket8& packet ) const;
-	template <bool posX, bool posY, bool posZ> int32_t IsOccludedPacketsOctant( RayPacket8* packets, const uint32_t packetCount ) const;
-	// Escape hatch for packet features the wide kernels do not implement.
-	template <bool posX, bool posY, bool posZ> int32_t IntersectPacketPerRay( RayPacket8& packet ) const;
-	template <bool posX, bool posY, bool posZ> int32_t IsOccludedPacketPerRay( RayPacket8& packet ) const;
 	// BVH8 data
 	CacheLine* bvh8Data = 0;		// Interleaved interior (256b) and leaf (192b) data.
 	MBVH<8, Float, Index> bvh8;		// BVH8_CPU is created from BVH8 and uses its data.
@@ -1578,82 +1553,6 @@ public:
 	void InvertTransform();
 };
 
-// RayPacket8: eight rays in SoA layout.
-// The rays must share an octant and a ray mask. Octant() reports -1 when they do not.
-template <typename Float, typename Index> struct ALIGNED( 64 ) RayPacket8
-{
-	using Vec3 = typename bvh_traits<Float>::vec3;
-	using Mat4 = typename bvh_traits<Float>::mat4;
-	void SetRay( const uint32_t lane, const Ray<Float, Index>& ray )
-	{
-		ox[lane] = ray.O.x, oy[lane] = ray.O.y, oz[lane] = ray.O.z;
-		dx[lane] = ray.D.x, dy[lane] = ray.D.y, dz[lane] = ray.D.z;
-		rdx[lane] = ray.rD.x, rdy[lane] = ray.rD.y, rdz[lane] = ray.rD.z;
-		t[lane] = ray.hit.t, u[lane] = ray.hit.u, v[lane] = ray.hit.v;
-		occluded &= ~(1u << lane);
-		// an incoming hit record round-trips, so a packet can continue a trace.
-		if constexpr (bvh_packed_inst<Index>)
-			prim[lane] = ray.hit.prim & PRIM_IDX_MASK, inst[lane] = ray.hit.prim & ~(Index)PRIM_IDX_MASK;
-		else prim[lane] = ray.hit.prim, inst[lane] = ray.hit.inst;
-	}
-	void GetHit( const uint32_t lane, Ray<Float, Index>& ray ) const
-	{
-		ray.hit.t = t[lane], ray.hit.u = u[lane], ray.hit.v = v[lane];
-		if constexpr (bvh_packed_inst<Index>) ray.hit.prim = (prim[lane] & PRIM_IDX_MASK) + inst[lane];
-		else ray.hit.prim = prim[lane], ray.hit.inst = inst[lane];
-	}
-	int32_t Octant() const
-	{
-		if (perRay) return -1;
-		const int32_t o = (rdx[0] >= 0 ? 1 : 0) + (rdy[0] >= 0 ? 2 : 0) + (rdz[0] >= 0 ? 4 : 0);
-		for (uint32_t i = 1; i < 8; i++) if (o !=
-			((rdx[i] >= 0 ? 1 : 0) + (rdy[i] >= 0 ? 2 : 0) + (rdz[i] >= 0 ? 4 : 0))) return -1;
-		return o;
-	}
-	// Build the object space counterpart of this packet for one instance. As in
-	// BVH::IntersectTLASOctant the direction is left unnormalized, which keeps t
-	// in the world space parameterization, so the hit records travel with the
-	// packet and the blas can cull against them.
-	void TransformTo( RayPacket8& dst, const Mat4& inv, const Index instance ) const
-	{
-		for (uint32_t l = 0; l < 8; l++)
-		{
-			const Vec3 O = tinybvh_transform_point( Vec3( ox[l], oy[l], oz[l] ), inv );
-			const Vec3 D = tinybvh_transform_vector( Vec3( dx[l], dy[l], dz[l] ), inv );
-			dst.ox[l] = O.x, dst.oy[l] = O.y, dst.oz[l] = O.z;
-			dst.dx[l] = D.x, dst.dy[l] = D.y, dst.dz[l] = D.z;
-			dst.rdx[l] = tinybvh_safercp( D.x ), dst.rdy[l] = tinybvh_safercp( D.y ), dst.rdz[l] = tinybvh_safercp( D.z );
-			dst.t[l] = t[l], dst.u[l] = u[l], dst.v[l] = v[l];
-			dst.prim[l] = prim[l], dst.inst[l] = inst[l];
-		}
-		dst.instIdx = instance, dst.mask = mask, dst.perRay = perRay;
-		dst.occluded = occluded;	// lanes another instance already resolved
-	}
-	// Occlusion results are a lane mask rather than a hit record, so they merge by
-	// union: a lane occluded anywhere is occluded.
-	void MergeOcclusion( const RayPacket8& src ) { occluded |= src.occluded; }
-	bool AllOccluded() const { return occluded == 0xff; }
-	// Take over whatever the object space packet found. Returns true if anything
-	// moved, which tells the caller its interval ray has shortened.
-	bool MergeHits( const RayPacket8& src )
-	{
-		bool improved = false;
-		for (uint32_t l = 0; l < 8; l++) if (src.t[l] < t[l]) t[l] = src.t[l],
-			u[l] = src.u[l], v[l] = src.v[l], prim[l] = src.prim[l], inst[l] = src.inst[l], improved = true;
-		return improved;
-	}
-	Float ox[8], oy[8], oz[8];		// ray origins
-	Float dx[8], dy[8], dz[8];		// ray directions
-	Float rdx[8], rdy[8], rdz[8];	// reciprocal directions; see tinybvh_safercp
-	Float t[8], u[8], v[8];			// hit distance and barycentrics
-	Index prim[8];					// hit primitive, without instance bits
-	Index inst[8];					// hit instance, pre-shifted as Ray::instIdx is
-	Index instIdx = 0;				// instance whose space this packet is in
-	uint32_t mask = RAY_MASK_INTERSECT_ALL;	// uniform over the packet
-	uint32_t occluded = 0;			// lanes resolved as occluded; in and out of the occlusion kernels
-	bool perRay = false;			// set when the rays cannot be traced together
-};									// total: 512 bytes for float / uint32_t
-
 } // namespace impl
 
 // Single precision, 32-bit indices: the default layouts.
@@ -1669,7 +1568,6 @@ using BVH4_CPU = impl::BVH4_CPU<float, uint32_t>;
 using BVH8_CWBVH = impl::BVH8_CWBVH<float, uint32_t>;
 using BVH8_CPU = impl::BVH8_CPU<float, uint32_t>;
 using BVHTri4Leaf = impl::BVHTri4Leaf<float, uint32_t>;
-using RayPacket8 = impl::RayPacket8<float, uint32_t>;
 using BLASInstance = impl::BLASInstance<float, uint32_t>;
 #ifdef DOUBLE_PRECISION_SUPPORT
 // Double precision, 64-bit indices.
@@ -1799,17 +1697,6 @@ void tinybvh_fatal_error( const char* file, const int line, const char* message 
 	else fputs( t, stderr );
 #endif
 	exit( 1 );
-}
-
-TINYBVH_FORCEINLINE uint32_t __bscan( uint32_t x ) // index of the lowest set bit
-{
-#if defined _MSC_VER && !defined __clang__
-	unsigned long i;
-	_BitScanForward( &i, x );
-	return (uint32_t)i;
-#else
-	return (uint32_t)__builtin_ctz( x );
-#endif
 }
 
 TINYBVH_FORCEINLINE uint32_t __bfind( uint32_t x ) // https://github.com/mackron/refcode/blob/master/lzcnt.c
@@ -3824,21 +3711,6 @@ template <typename Float, typename Index> bool BVH<Float, Index>::IntersectSpher
 		return posZ ? kernel<false, false, true>( ray ) : kernel<false, false, false>( ray ); \
 	}
 
-#define OCTANT_DISPATCH_IDX( kernel, octant, ... ) /* for packets */ \
-	{ \
-		switch (octant) \
-		{ \
-		case 1: return kernel<true, false, false>( __VA_ARGS__ ); \
-		case 2: return kernel<false, true, false>( __VA_ARGS__ ); \
-		case 3: return kernel<true, true, false>( __VA_ARGS__ ); \
-		case 4: return kernel<false, false, true>( __VA_ARGS__ ); \
-		case 5: return kernel<true, false, true>( __VA_ARGS__ ); \
-		case 6: return kernel<false, true, true>( __VA_ARGS__ ); \
-		case 7: return kernel<true, true, true>( __VA_ARGS__ ); \
-		default: return kernel<false, false, false>( __VA_ARGS__ ); \
-		} \
-	}
-
 template <typename Float, typename Index> int32_t BVH<Float, Index>::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
@@ -4108,170 +3980,6 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 		}
 	}
 	return false;
-}
-
-// Intersect a WALD_32BYTE BVH with a ray packet.
-// The 256 rays travel together to better utilize the caches and to amortize the cost
-// of memory transfers over the rays in the bundle.
-// Note that this basic implementation assumes a specific layout of the rays. Provided
-// as 'proof of concept', should not be used in production code.
-// Based on Large Ray Packets for Real-time Whitted Ray Tracing, Overbeck et al., 2008,
-// extended with sorted traversal and reduced stack traffic.
-template <typename Float, typename Index> void BVH<Float, Index>::Intersect256Rays( Ray* packet ) const
-{
-	// convenience macro
-#define CALC_TMIN_TMAX_WITH_SLABTEST_ON_RAY( r ) const Vec3 rD = packet[r].rD, t1 = o1 * rD, t2 = o2 * rD; \
-	const Float tmin = tinybvh_max( tinybvh_max( tinybvh_min( t1.x, t2.x ), tinybvh_min( t1.y, t2.y ) ), tinybvh_min( t1.z, t2.z ) ); \
-	const Float tmax = tinybvh_min( tinybvh_min( tinybvh_max( t1.x, t2.x ), tinybvh_max( t1.y, t2.y ) ), tinybvh_max( t1.z, t2.z ) );
-	// Corner rays are: 0, 51, 204 and 255
-	// Construct the bounding planes, with normals pointing outwards
-	const Vec3 O = packet[0].O; // same for all rays in this case
-	const Vec3 p0 = packet[0].O + packet[0].D; // top-left
-	const Vec3 p1 = packet[51].O + packet[51].D; // top-right
-	const Vec3 p2 = packet[204].O + packet[204].D; // bottom-left
-	const Vec3 p3 = packet[255].O + packet[255].D; // bottom-right
-	const Vec3 plane0 = tinybvh_normalize( tinybvh_cross( p0 - O, p0 - p2 ) ); // left plane
-	const Vec3 plane1 = tinybvh_normalize( tinybvh_cross( p3 - O, p3 - p1 ) ); // right plane
-	const Vec3 plane2 = tinybvh_normalize( tinybvh_cross( p1 - O, p1 - p0 ) ); // top plane
-	const Vec3 plane3 = tinybvh_normalize( tinybvh_cross( p2 - O, p2 - p3 ) ); // bottom plane
-	const Float d0 = tinybvh_dot( O, plane0 ), d1 = tinybvh_dot( O, plane1 );
-	const Float d2 = tinybvh_dot( O, plane2 ), d3 = tinybvh_dot( O, plane3 );
-	// The box corner with the smallest signed distance to a plane. The box lies outside if this corner does.
-	auto corner = []( const BVHNode* n, const Vec3& plane )
-	{
-		return Vec3( plane.x < 0 ? n->aabbMax.x : n->aabbMin.x, plane.y < 0 ? n->aabbMax.y : n->aabbMin.y, plane.z < 0 ? n->aabbMax.z : n->aabbMin.z );
-	};
-	// Traverse the tree with the packet
-	int32_t first = 0, last = 255; // first and last active ray in the packet
-	const BVHNode* node = &bvhNode[0];
-	ALIGNED( 64 ) Index stack[2 * TINYBVH_STACK_SIZE], stackPtr = 0;
-	while (1)
-	{
-		if (node->isLeaf())
-		{
-			// handle leaf node
-			for (Index j = 0; j < node->triCount; j++)
-			{
-				const Index idx = primIdx[node->leftFirst + j], vid = idx * 3;
-				const Vec3 e1 = verts[vid + 1] - verts[vid], e2 = verts[vid + 2] - verts[vid];
-				const Vec3 s = O - Vec3( verts[vid] );
-				for (int32_t i = first; i <= last; i++)
-				{
-					Ray& ray = packet[i];
-					const Vec3 h = tinybvh_cross( ray.D, e2 );
-					const Float a = tinybvh_dot( e1, h );
-					if (a == 0) continue; // ray parallel to triangle
-					const Float f = 1 / a, u = f * tinybvh_dot( s, h );
-					const Vec3 q = tinybvh_cross( s, e1 );
-					const Float v = f * tinybvh_dot( ray.D, q );
-					if (!(u >= 0 && v >= 0 && u + v <= 1)) continue;
-					const Float t = f * tinybvh_dot( e2, q );
-					if (!(t > 0 && t < ray.hit.t)) continue;
-					ray.hit.t = t, ray.hit.u = u, ray.hit.v = v;
-					ray.SetHitPrim( idx );
-				}
-			}
-			if (stackPtr == 0) break; else // pop
-				last = (int32_t)stack[--stackPtr], node = bvhNode + stack[--stackPtr],
-				first = last >> 8, last &= 255;
-		}
-		else
-		{
-			// fetch pointers to child nodes
-			const BVHNode* left = bvhNode + node->leftFirst;
-			const BVHNode* right = bvhNode + node->leftFirst + 1;
-			bool visitLeft = true, visitRight = true;
-			int32_t leftFirst = first, leftLast = last, rightFirst = first, rightLast = last;
-			Float distLeft, distRight;
-			{
-				// see if we want to intersect the left child
-				const Vec3 o1( left->aabbMin.x - O.x, left->aabbMin.y - O.y, left->aabbMin.z - O.z );
-				const Vec3 o2( left->aabbMax.x - O.x, left->aabbMax.y - O.y, left->aabbMax.z - O.z );
-				// 1. Early-in test: if first ray hits the node, the packet visits the node
-				bool earlyHit;
-				{
-					CALC_TMIN_TMAX_WITH_SLABTEST_ON_RAY( first );
-					earlyHit = (tmax >= tmin && tmin < packet[first].hit.t && tmax >= 0);
-					distLeft = tmin;
-				}
-				if (!earlyHit) // 2. Early-out test: if the node aabb is outside the four planes, we skip the node
-				{
-					if (tinybvh_dot( corner( left, plane0 ), plane0 ) > d0 || tinybvh_dot( corner( left, plane1 ), plane1 ) > d1 ||
-						tinybvh_dot( corner( left, plane2 ), plane2 ) > d2 || tinybvh_dot( corner( left, plane3 ), plane3 ) > d3)
-						visitLeft = false;
-					else // 3. Last resort: update first and last, stay in node if first > last
-					{
-						for (; leftFirst <= leftLast; leftFirst++)
-						{
-							CALC_TMIN_TMAX_WITH_SLABTEST_ON_RAY( leftFirst );
-							if (tmax >= tmin && tmin < packet[leftFirst].hit.t && tmax >= 0) { distLeft = tmin; break; }
-						}
-						for (; leftLast >= leftFirst; leftLast--)
-						{
-							CALC_TMIN_TMAX_WITH_SLABTEST_ON_RAY( leftLast );
-							if (tmax >= tmin && tmin < packet[leftLast].hit.t && tmax >= 0) break;
-						}
-						visitLeft = leftLast >= leftFirst;
-					}
-				}
-			}
-			{
-				// see if we want to intersect the right child
-				const Vec3 o1( right->aabbMin.x - O.x, right->aabbMin.y - O.y, right->aabbMin.z - O.z );
-				const Vec3 o2( right->aabbMax.x - O.x, right->aabbMax.y - O.y, right->aabbMax.z - O.z );
-				// 1. Early-in test: if first ray hits the node, the packet visits the node
-				bool earlyHit;
-				{
-					CALC_TMIN_TMAX_WITH_SLABTEST_ON_RAY( first );
-					earlyHit = (tmax >= tmin && tmin < packet[first].hit.t && tmax >= 0);
-					distRight = tmin;
-				}
-				if (!earlyHit) // 2. Early-out test: if the node aabb is outside the four planes, we skip the node
-				{
-					if (tinybvh_dot( corner( right, plane0 ), plane0 ) > d0 || tinybvh_dot( corner( right, plane1 ), plane1 ) > d1 ||
-						tinybvh_dot( corner( right, plane2 ), plane2 ) > d2 || tinybvh_dot( corner( right, plane3 ), plane3 ) > d3)
-						visitRight = false;
-					else // 3. Last resort: update first and last, stay in node if first > last
-					{
-						for (; rightFirst <= rightLast; rightFirst++)
-						{
-							CALC_TMIN_TMAX_WITH_SLABTEST_ON_RAY( rightFirst );
-							if (tmax >= tmin && tmin < packet[rightFirst].hit.t && tmax >= 0) { distRight = tmin; break; }
-						}
-						for (; rightLast >= first; rightLast--)
-						{
-							CALC_TMIN_TMAX_WITH_SLABTEST_ON_RAY( rightLast );
-							if (tmax >= tmin && tmin < packet[rightLast].hit.t && tmax >= 0) break;
-						}
-						visitRight = rightLast >= rightFirst;
-					}
-				}
-			}
-			// process intersection result
-			if (visitLeft && visitRight)
-			{
-				if (distLeft < distRight) // push right, continue with left
-				{
-					stack[stackPtr++] = node->leftFirst + 1;
-					stack[stackPtr++] = (rightFirst << 8) + rightLast;
-					node = left, first = leftFirst, last = leftLast;
-				}
-				else // push left, continue with right
-				{
-					stack[stackPtr++] = node->leftFirst;
-					stack[stackPtr++] = (leftFirst << 8) + leftLast;
-					node = right, first = rightFirst, last = rightLast;
-				}
-			}
-			else if (visitLeft) // continue with left
-				node = left, first = leftFirst, last = leftLast;
-			else if (visitRight) // continue with right
-				node = right, first = rightFirst, last = rightLast;
-			else if (stackPtr == 0) break; else // pop
-				last = (int32_t)stack[--stackPtr], node = bvhNode + stack[--stackPtr],
-				first = last >> 8, last &= 255;
-		}
-	}
 }
 
 template <typename Float, typename Index> Index BVH<Float, Index>::NodeCount() const
@@ -6411,8 +6119,6 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMD( con
 	BuildSIMDSubtree( 0u, 0u );
 	BuildSIMDFinalize();
 }
-template <typename Float, typename Index> void BVH<Float, Index>::Intersect256RaysSSE( Ray* ) const
-{ BVH_FATAL_ERROR( "BVH::Intersect256RaysSSE requires AVX and single precision." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::PrepareSIMDBuild( const Slice&, const uint32_t*, const Index )
 { BVH_FATAL_ERROR( "BVH::PrepareSIMDBuild requires a SIMD builder; see BVHSIMDBuilders." ); }
 template <typename Float, typename Index> void BVH<Float, Index>::PrepareSIMDBuildFragSlice( const Index, const Index, const uint32_t*, const int8_t*, const uint32_t, void*, Float*, Float* )
@@ -6920,717 +6626,37 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::MergeS
 	MergeSubtree( node.right, newIdx, newIdxPtr );
 }
 
-// ============================================================================
-//
-//        PACKET TRAVERSAL
-//
-// Fuetterling-style packet traversal: an interval ray bounding the packet is
-// tested against all children at once, exactly as a single ray would be;
-// children it hits are pushed, and the cheap per-ray test is deferred until the
-// entry is popped. Only if an actual ray hits the box do we descend, so the
-// interval ray's conservatism costs box tests rather than subtree visits.
-// Based on: "Accelerated Single Ray Tracing for Wide Vector Units", Fuetterling
-// et al., HPG 2017, section 4 (WiVeC) and Listing 3. Two deviations from the
-// published algorithm, both noted at the sites that make them:
-//  - the slab test is not the paper's Equation 2 (see the kernels);
-//  - a leaf gets the exact set of packets that enter it, where the paper
-//    predicts that the rest enter too (see IntersectPacketsOctant).
-//
-// ============================================================================
 
-template <typename Float, typename Index> int32_t tinybvh_trace_packets(
-	const BVHBase<Float, Index>* bvh, RayPacket8<Float, Index>* packet, const uint32_t packetCount );
-template <typename Float, typename Index> int32_t tinybvh_occlude_packets(
-	const BVHBase<Float, Index>* bvh, RayPacket8<Float, Index>* packet, const uint32_t packetCount );
-
-// Trace one ray through a blas of any layout.
-template <typename Float, typename Index>
-int32_t tinybvh_blas_intersect( const BVHBase<Float, Index>* blas, Ray<Float, Index>& ray )
+// Bundle traversal - scalar fallback.
+template <typename Float, typename Index> int32_t BVH4_CPU<Float, Index>::IntersectBundle( Ray* rays ) const
 {
-	if (blas->layout == LAYOUT_BVH) return ((BVH<Float, Index>*)blas)->Intersect( ray );
-#ifdef ENABLE_VOXEL_SUPPORT
-	if (blas->layout == LAYOUT_VOXELSET) return ((VoxelSet*)blas)->Intersect( ray );
-#endif
-	if constexpr (bvh_traits<Float>::wide_layouts)
-	{
-		if (blas->layout == LAYOUT_BVH4_CPU) return ((BVH4_CPU<Float, Index>*)blas)->Intersect( ray );
-		if (blas->layout == LAYOUT_BVH8_AVX2) return ((BVH8_CPU<Float, Index>*)blas)->Intersect( ray );
-	}
-	assert( !"unsupported BLAS layout" );
-	return 0;
-}
-
-template <typename Float, typename Index>
-bool tinybvh_blas_occluded( const BVHBase<Float, Index>* blas, const Ray<Float, Index>& ray )
-{
-	if (blas->layout == LAYOUT_BVH) return ((BVH<Float, Index>*)blas)->IsOccluded( ray );
-#ifdef ENABLE_VOXEL_SUPPORT
-	if (blas->layout == LAYOUT_VOXELSET) return ((VoxelSet*)blas)->IsOccluded( ray );
-#endif
-	if constexpr (bvh_traits<Float>::wide_layouts)
-	{
-		if (blas->layout == LAYOUT_BVH4_CPU) return ((BVH4_CPU<Float, Index>*)blas)->IsOccluded( ray );
-		if (blas->layout == LAYOUT_BVH8_AVX2) return ((BVH8_CPU<Float, Index>*)blas)->IsOccluded( ray );
-	}
-	assert( !"unsupported BLAS layout" );
-	return false;
-}
-
-// Trace the rays of one packet individually: the fallback for a packet whose
-// rays have scattered, and for layouts without a packet kernel.
-template <typename Float, typename Index>
-int32_t tinybvh_packet_per_ray( const BVHBase<Float, Index>* blas, RayPacket8<Float, Index>& packet )
-{
-	using Vec3 = typename bvh_traits<Float>::vec3;
 	int32_t cost = 0;
-	for (uint32_t l = 0; l < 8; l++)
-	{
-		Ray<Float, Index> ray;
-		ray.O = Vec3( packet.ox[l], packet.oy[l], packet.oz[l] );
-		ray.D = Vec3( packet.dx[l], packet.dy[l], packet.dz[l] );
-		ray.rD = Vec3( packet.rdx[l], packet.rdy[l], packet.rdz[l] );
-		ray.hit.t = packet.t[l], ray.hit.u = ray.hit.v = 0, ray.hit.prim = 0;
-		if constexpr (!bvh_packed_inst<Index>) ray.hit.inst = 0;
-		ray.instIdx = packet.instIdx, ray.mask = packet.mask;
-		cost += tinybvh_blas_intersect( blas, ray );
-		if (ray.hit.t < packet.t[l])
-		{
-			packet.t[l] = ray.hit.t, packet.u[l] = ray.hit.u, packet.v[l] = ray.hit.v;
-			// a nested TLAS resolves the instance itself; a blas reports ours.
-			if constexpr (bvh_packed_inst<Index>)
-				packet.prim[l] = ray.hit.prim & PRIM_IDX_MASK, packet.inst[l] = ray.hit.prim & ~(Index)PRIM_IDX_MASK;
-			else packet.prim[l] = ray.hit.prim, packet.inst[l] = ray.hit.inst;
-		}
-	}
+	for (uint32_t i = 0; i < TINYBVH_BUNDLE_RAYS; i++) cost += Intersect( rays[i] );
 	return cost;
 }
 
-template <typename Float, typename Index>
-int32_t tinybvh_packet_occluded_per_ray( const BVHBase<Float, Index>* blas, RayPacket8<Float, Index>& packet )
+template <typename Float, typename Index> int32_t BVH<Float, Index>::IntersectBundle( Ray* rays ) const
 {
-	using Vec3 = typename bvh_traits<Float>::vec3;
+	BVH_FATAL_ERROR_IF( !isTLAS(), "BVH::IntersectBundle, not a TLAS." );
 	int32_t cost = 0;
-	for (uint32_t l = 0; l < 8; l++)
-	{
-		if (packet.occluded & (1u << l)) continue;
-		Ray<Float, Index> ray;
-		ray.O = Vec3( packet.ox[l], packet.oy[l], packet.oz[l] );
-		ray.D = Vec3( packet.dx[l], packet.dy[l], packet.dz[l] );
-		ray.rD = Vec3( packet.rdx[l], packet.rdy[l], packet.rdz[l] );
-		ray.hit.t = packet.t[l], ray.instIdx = packet.instIdx, ray.mask = packet.mask;
-		cost++;
-		if (tinybvh_blas_occluded( blas, ray )) packet.occluded |= 1u << l;
-	}
+	for (uint32_t i = 0; i < TINYBVH_BUNDLE_RAYS; i++) cost += Intersect( rays[i] );
 	return cost;
 }
 
-// Trace an array of packets, already in the space of 'bvh', through it. Packets
-// that share an octant go to the multi-packet kernel together, in batches of
-// TINYBVH_MAX_PACKETS; a packet whose rays have scattered is traced ray by ray.
-// A layout without a packet kernel takes the per-ray path as a whole.
-// This is the grouping rend.c performs twice - once to form the initial batches
-// and again inside every TLAS leaf, because the instance transform can scatter
-// a packet that was coherent in world space.
-#define TINYBVH_FLUSH_RUN \
-	if (run > 0) \
-	{ \
-		if (tlas) cost += tlas->IntersectPacketsTLAS( packet + runStart, run ); \
-		else cost += run == 1 ? blas8->IntersectPacket( packet[runStart] ) \
-			: blas8->IntersectPackets( packet + runStart, run ); \
-		run = 0; \
-	}
-
-template <typename Float, typename Index> int32_t tinybvh_trace_packets(
-	const BVHBase<Float, Index>* bvh, RayPacket8<Float, Index>* packet, const uint32_t packetCount )
+template <typename Float, typename Index> int32_t BVH4_CPU<Float, Index>::IsOccludedBundle( Ray* rays, bool* occluded ) const
 {
-	const BVH<Float, Index>* tlas = 0;
-	const BVH8_CPU<Float, Index>* blas8 = 0;
-	if (bvh->layout == LAYOUT_BVH && ((const BVH<Float, Index>*)bvh)->isTLAS())
-		tlas = (const BVH<Float, Index>*)bvh;
-	else if constexpr (bvh_traits<Float>::wide_layouts)
-		if (bvh->layout == LAYOUT_BVH8_AVX2) blas8 = (const BVH8_CPU<Float, Index>*)bvh;
 	int32_t cost = 0;
-	if (!tlas && !blas8)
-	{
-		for (uint32_t p = 0; p < packetCount; p++) cost += tinybvh_packet_per_ray( bvh, packet[p] );
-		return cost;
-	}
-	uint32_t run = 0, runStart = 0;
-	int32_t runOctant = -1;
-	for (uint32_t p = 0; p < packetCount; p++)
-	{
-		const int32_t octant = packet[p].Octant();
-		if (octant < 0)
-		{
-			// cannot join a run, and leaving it pending would break the run's
-			// contiguity in the array, so flush and fall back to single rays.
-			TINYBVH_FLUSH_RUN
-			cost += tinybvh_packet_per_ray( bvh, packet[p] );
-			continue;
-		}
-		if (run > 0 && (octant != runOctant || run == TINYBVH_MAX_PACKETS)) TINYBVH_FLUSH_RUN
-		if (run == 0) runStart = p, runOctant = octant;
-		run++;
-	}
-	TINYBVH_FLUSH_RUN
-	return cost;
-}
-#undef TINYBVH_FLUSH_RUN
-
-// The occlusion twin. Packets that are already fully resolved are dropped from
-// the runs rather than handed to a kernel that would return immediately.
-#define TINYBVH_FLUSH_RUN \
-	if (run > 0) \
-	{ \
-		if (tlas) cost += tlas->IsOccludedPacketsTLAS( packet + runStart, run ); \
-		else cost += run == 1 ? blas8->IsOccludedPacket( packet[runStart] ) \
-			: blas8->IsOccludedPackets( packet + runStart, run ); \
-		run = 0; \
-	}
-
-template <typename Float, typename Index> int32_t tinybvh_occlude_packets(
-	const BVHBase<Float, Index>* bvh, RayPacket8<Float, Index>* packet, const uint32_t packetCount )
-{
-	const BVH<Float, Index>* tlas = 0;
-	const BVH8_CPU<Float, Index>* blas8 = 0;
-	if (bvh->layout == LAYOUT_BVH && ((const BVH<Float, Index>*)bvh)->isTLAS())
-		tlas = (const BVH<Float, Index>*)bvh;
-	else if constexpr (bvh_traits<Float>::wide_layouts)
-		if (bvh->layout == LAYOUT_BVH8_AVX2) blas8 = (const BVH8_CPU<Float, Index>*)bvh;
-	int32_t cost = 0;
-	if (!tlas && !blas8)
-	{
-		for (uint32_t p = 0; p < packetCount; p++) cost += tinybvh_packet_occluded_per_ray( bvh, packet[p] );
-		return cost;
-	}
-	uint32_t run = 0, runStart = 0;
-	int32_t runOctant = -1;
-	for (uint32_t p = 0; p < packetCount; p++)
-	{
-		if (packet[p].AllOccluded()) { TINYBVH_FLUSH_RUN continue; }
-		const int32_t octant = packet[p].Octant();
-		if (octant < 0)
-		{
-			TINYBVH_FLUSH_RUN
-			cost += tinybvh_packet_occluded_per_ray( bvh, packet[p] );
-			continue;
-		}
-		if (run > 0 && (octant != runOctant || run == TINYBVH_MAX_PACKETS)) TINYBVH_FLUSH_RUN
-		if (run == 0) runStart = p, runOctant = octant;
-		run++;
-	}
-	TINYBVH_FLUSH_RUN
-	return cost;
-}
-#undef TINYBVH_FLUSH_RUN
-
-// ----------------------------------------------------------------------------
-// BVH8_CPU packet entry points
-// ----------------------------------------------------------------------------
-
-template <typename Float, typename Index> int32_t BVH8_CPU<Float, Index>::IntersectPacket( RayPacket8& packet ) const
-{
-	const int32_t octant = packet.Octant();
-	BVH_FATAL_ERROR_IF( octant < 0, "BVH8_CPU::IntersectPacket, packet is not octant-coherent." );
-	OCTANT_DISPATCH_IDX( IntersectPacketOctant, octant, packet )
-}
-
-template <typename Float, typename Index> int32_t BVH8_CPU<Float, Index>::IntersectPackets( RayPacket8* packets, const uint32_t packetCount ) const
-{
-	BVH_FATAL_ERROR_IF( packetCount == 0 || packetCount > TINYBVH_MAX_PACKETS, "BVH8_CPU::IntersectPackets, bad packet count." );
-	const int32_t octant = packets[0].Octant();
-	BVH_FATAL_ERROR_IF( octant < 0, "BVH8_CPU::IntersectPackets, packet is not octant-coherent." );
-	OCTANT_DISPATCH_IDX( IntersectPacketsOctant, octant, packets, packetCount )
-}
-
-template <typename Float, typename Index> int32_t BVH8_CPU<Float, Index>::IsOccludedPacket( RayPacket8& packet ) const
-{
-	const int32_t octant = packet.Octant();
-	BVH_FATAL_ERROR_IF( octant < 0, "BVH8_CPU::IsOccludedPacket, packet is not octant-coherent." );
-	OCTANT_DISPATCH_IDX( IsOccludedPacketOctant, octant, packet )
-}
-
-template <typename Float, typename Index> int32_t BVH8_CPU<Float, Index>::IsOccludedPackets( RayPacket8* packets, const uint32_t packetCount ) const
-{
-	BVH_FATAL_ERROR_IF( packetCount == 0 || packetCount > TINYBVH_MAX_PACKETS, "BVH8_CPU::IsOccludedPackets, bad packet count." );
-	const int32_t octant = packets[0].Octant();
-	BVH_FATAL_ERROR_IF( octant < 0, "BVH8_CPU::IsOccludedPackets, packet is not octant-coherent." );
-	OCTANT_DISPATCH_IDX( IsOccludedPacketsOctant, octant, packets, packetCount )
-}
-
-// Reference packet traversal: trace the rays of a packet one at a time. Used on
-// targets without an AVX2 kernel, and by the AVX2 kernels for the cases they
-// leave out (currently: opacity maps).
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ>
-int32_t BVH8_CPU<Float, Index>::IntersectPacketPerRay( RayPacket8& packet ) const
-{
-	int32_t steps = 0;
-	for (uint32_t lane = 0; lane < 8; lane++)
-	{
-		Ray ray;
-		ray.O = Vec3( packet.ox[lane], packet.oy[lane], packet.oz[lane] );
-		ray.D = Vec3( packet.dx[lane], packet.dy[lane], packet.dz[lane] );
-		ray.rD = Vec3( packet.rdx[lane], packet.rdy[lane], packet.rdz[lane] );
-		ray.hit.t = packet.t[lane], ray.hit.u = ray.hit.v = 0, ray.hit.prim = 0;
-		ray.instIdx = 0, ray.mask = packet.mask;
-		steps += tinybvh_wide_intersect<BVH8_CPU, 8, posX, posY, posZ>( bvh8Data, ray, opmap, opmapN );
-		if (ray.hit.t < packet.t[lane]) packet.t[lane] = ray.hit.t, packet.u[lane] = ray.hit.u,
-			packet.v[lane] = ray.hit.v, packet.prim[lane] = ray.hit.prim, packet.inst[lane] = packet.instIdx;
-	}
-	return steps;
-}
-
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ>
-int32_t BVH8_CPU<Float, Index>::IsOccludedPacketPerRay( RayPacket8& packet ) const
-{
-	int32_t steps = 0;
-	for (uint32_t lane = 0; lane < 8; lane++)
-	{
-		if (packet.occluded & (1u << lane)) continue;
-		Ray ray;
-		ray.O = Vec3( packet.ox[lane], packet.oy[lane], packet.oz[lane] );
-		ray.D = Vec3( packet.dx[lane], packet.dy[lane], packet.dz[lane] );
-		ray.rD = Vec3( packet.rdx[lane], packet.rdy[lane], packet.rdz[lane] );
-		ray.hit.t = packet.t[lane], ray.instIdx = 0, ray.mask = packet.mask;
-		steps++;
-		if (tinybvh_wide_occluded<BVH8_CPU, 8, posX, posY, posZ>( bvh8Data, ray, opmap, opmapN ))
-			packet.occluded |= 1u << lane;
-	}
-	return steps;
-}
-
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ>
-int32_t BVH8_CPU<Float, Index>::IntersectPacketOctant( RayPacket8& packet ) const
-{
-	return IntersectPacketPerRay<posX, posY, posZ>( packet );
-}
-
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ>
-int32_t BVH8_CPU<Float, Index>::IntersectPacketsOctant( RayPacket8* packets, const uint32_t packetCount ) const
-{
-	int32_t steps = 0;
-	for (uint32_t i = 0; i < packetCount; i++) steps += IntersectPacketPerRay<posX, posY, posZ>( packets[i] );
-	return steps;
-}
-
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ>
-int32_t BVH8_CPU<Float, Index>::IsOccludedPacketOctant( RayPacket8& packet ) const
-{
-	return IsOccludedPacketPerRay<posX, posY, posZ>( packet );
-}
-
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ>
-int32_t BVH8_CPU<Float, Index>::IsOccludedPacketsOctant( RayPacket8* packets, const uint32_t packetCount ) const
-{
-	int32_t steps = 0;
-	for (uint32_t i = 0; i < packetCount; i++) steps += IsOccludedPacketPerRay<posX, posY, posZ>( packets[i] );
-	return steps;
-}
-
-// ----------------------------------------------------------------------------
-// TLAS packet traversal
-// ----------------------------------------------------------------------------
-
-// The interval ray against one node's box. The entry plane is minimized and the
-// exit plane maximized over the packet's rD interval; the origin term uses the
-// true extremes of O * rD over the packet's rays, which is tighter than
-// combining the O and rD intervals. Returns the entry distance, or bvh_far on a
-// miss, as tinybvh_intersect_aabb does.
-template <bool posX, bool posY, bool posZ, typename Float, typename Vec3>
-TINYBVH_FORCEINLINE Float tinybvh_interval_slab( const Vec3& bmin, const Vec3& bmax,
-	const Float* rdMin, const Float* rdMax, const Float* roMin, const Float* roMax, const Float tfar )
-{
-	const Float ex = posX ? bmin.x : bmax.x, ey = posY ? bmin.y : bmax.y, ez = posZ ? bmin.z : bmax.z;
-	const Float fx = posX ? bmax.x : bmin.x, fy = posY ? bmax.y : bmin.y, fz = posZ ? bmax.z : bmin.z;
-	const Float x1 = tinybvh_min( ex * rdMin[0], ex * rdMax[0] ) - roMax[0];
-	const Float y1 = tinybvh_min( ey * rdMin[1], ey * rdMax[1] ) - roMax[1];
-	const Float z1 = tinybvh_min( ez * rdMin[2], ez * rdMax[2] ) - roMax[2];
-	const Float x2 = tinybvh_max( fx * rdMin[0], fx * rdMax[0] ) - roMin[0];
-	const Float y2 = tinybvh_max( fy * rdMin[1], fy * rdMax[1] ) - roMin[1];
-	const Float z2 = tinybvh_max( fz * rdMin[2], fz * rdMax[2] ) - roMin[2];
-	const Float tmin = tinybvh_max( tinybvh_max( x1, y1 ), tinybvh_max( z1, Float( 0 ) ) );
-	const Float tmax = tinybvh_min( tinybvh_min( x2, y2 ), tinybvh_min( z2, tfar ) );
-	return tmin <= tmax ? tmin : bvh_far<Float>;
-}
-
-// Do any of the eight rays of 'packet' enter this box? The deferred test of the
-// packet traversal, for a binary node, which carries its own bounds - so unlike
-// the wide kernels there is no parent and lane to record, the node index is
-// enough. Scalar, but the loop is branch-free SoA arithmetic over eight
-// contiguous lanes and vectorizes; if it turns out to matter, this is the one
-// function to lift into a platform header.
-template <bool posX, bool posY, bool posZ, typename Float, typename Index, typename Vec3>
-TINYBVH_FORCEINLINE bool tinybvh_packet_enters( const RayPacket8<Float, Index>& p,
-	const Vec3& bmin, const Vec3& bmax, const uint32_t skip = 0 )
-{
-	uint32_t hit = 0;
-	for (uint32_t l = 0; l < 8; l++)
-	{
-		const Float rox = p.ox[l] * p.rdx[l], roy = p.oy[l] * p.rdy[l], roz = p.oz[l] * p.rdz[l];
-		const Float x1 = (posX ? bmin.x : bmax.x) * p.rdx[l] - rox;
-		const Float y1 = (posY ? bmin.y : bmax.y) * p.rdy[l] - roy;
-		const Float z1 = (posZ ? bmin.z : bmax.z) * p.rdz[l] - roz;
-		const Float x2 = (posX ? bmax.x : bmin.x) * p.rdx[l] - rox;
-		const Float y2 = (posY ? bmax.y : bmin.y) * p.rdy[l] - roy;
-		const Float z2 = (posZ ? bmax.z : bmin.z) * p.rdz[l] - roz;
-		const Float tmin = tinybvh_max( tinybvh_max( x1, y1 ), tinybvh_max( z1, Float( 0 ) ) );
-		const Float tmax = tinybvh_min( tinybvh_min( x2, y2 ), tinybvh_min( z2, p.t[l] ) );
-		hit |= (tmin <= tmax) ? (1u << l) : 0;
-	}
-	return (hit & ~skip) != 0;	// 'skip' retires lanes the occlusion kernels resolved
-}
-
-template <typename Float, typename Index> int32_t BVH<Float, Index>::IntersectPacketTLAS( RayPacket8& packet ) const
-{
-	return IntersectPacketsTLAS( &packet, 1 );
-}
-
-template <typename Float, typename Index> int32_t BVH<Float, Index>::IntersectPacketsTLAS( RayPacket8* packets, const uint32_t packetCount ) const
-{
-	BVH_FATAL_ERROR_IF( !isTLAS(), "BVH::IntersectPacketsTLAS, not a TLAS." );
-	BVH_FATAL_ERROR_IF( packetCount == 0 || packetCount > TINYBVH_MAX_PACKETS, "BVH::IntersectPacketsTLAS, bad packet count." );
-	const int32_t octant = packets[0].Octant();
-	BVH_FATAL_ERROR_IF( octant < 0, "BVH::IntersectPacketsTLAS, packet is not octant-coherent." );
-	OCTANT_DISPATCH_IDX( IntersectPacketsTLASOctant, octant, packets, packetCount )
-}
-
-template <typename Float, typename Index> int32_t BVH<Float, Index>::IsOccludedPacketTLAS( RayPacket8& packet ) const
-{
-	return IsOccludedPacketsTLAS( &packet, 1 );
-}
-
-template <typename Float, typename Index> int32_t BVH<Float, Index>::IsOccludedPacketsTLAS( RayPacket8* packets, const uint32_t packetCount ) const
-{
-	BVH_FATAL_ERROR_IF( !isTLAS(), "BVH::IsOccludedPacketsTLAS, not a TLAS." );
-	BVH_FATAL_ERROR_IF( packetCount == 0 || packetCount > TINYBVH_MAX_PACKETS, "BVH::IsOccludedPacketsTLAS, bad packet count." );
-	const int32_t octant = packets[0].Octant();
-	BVH_FATAL_ERROR_IF( octant < 0, "BVH::IsOccludedPacketsTLAS, packet is not octant-coherent." );
-	OCTANT_DISPATCH_IDX( IsOccludedPacketsTLASOctant, octant, packets, packetCount )
-}
-
-// Packet traversal of a TLAS. Same skeleton as the wide blas kernels: the
-// interval ray descends and pushes what it hits, the real rays are tested on
-// the way back up, and only a node some ray actually enters is descended into.
-// Three things differ from rend.c, all because a tinybvh TLAS is a binary BVH
-// over instance boxes rather than another eight-wide tree:
-//  - the node test is two boxes, so it is scalar rather than a wide slab test,
-//    and the traversal order comes from comparing two interval entry distances
-//    instead of a permutation table;
-//  - a node carries its own bounds, so the stack holds node indices only - no
-//    parent and lane to pack, and no 2^29 limit to respect;
-//  - pushing two children and consuming one grows the stack by at most one per
-//    level, so TINYBVH_STACK_SIZE is enough.
-// The leaf is where rend.c's structure returns in full: every instance gets the
-// packets that entered the leaf box, transformed into its object space, and
-// then the same octant grouping the front end does - the transform can scatter
-// a bundle that was perfectly coherent in world space, and a rotation only has
-// to straddle an axis plane for that to happen.
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ>
-int32_t BVH<Float, Index>::IntersectPacketsTLASOctant( RayPacket8* packet, const uint32_t packetCount ) const
-{
-	uint32_t nodeStack[TINYBVH_STACK_SIZE], fpiStack[TINYBVH_STACK_SIZE];
-	RayPacket8 obj[TINYBVH_MAX_PACKETS];	// object space copies; ~8 KB of stack
-	int32_t stackPtr = 0;
-	uint32_t nodeIdx = 0, fpi = 0, active = (1u << packetCount) - 1;
-	Float cost = 0;
-	// the interval ray, folded over every lane of every packet.
-	Float rdMin[3], rdMax[3], roMin[3], roMax[3], tfar = 0;
-	for (uint32_t a = 0; a < 3; a++) rdMin[a] = roMin[a] = bvh_far<Float>, rdMax[a] = roMax[a] = -bvh_far<Float>;
-	for (uint32_t p = 0; p < packetCount; p++)
-	{
-		const RayPacket8& q = packet[p];
-		for (uint32_t l = 0; l < 8; l++)
-		{
-			const Float rd[3] = { q.rdx[l], q.rdy[l], q.rdz[l] };
-			const Float ro[3] = { q.ox[l] * rd[0], q.oy[l] * rd[1], q.oz[l] * rd[2] };
-			for (uint32_t a = 0; a < 3; a++)
-			{
-				rdMin[a] = tinybvh_min( rdMin[a], rd[a] ), rdMax[a] = tinybvh_max( rdMax[a], rd[a] );
-				roMin[a] = tinybvh_min( roMin[a], ro[a] ), roMax[a] = tinybvh_max( roMax[a], ro[a] );
-			}
-			tfar = tinybvh_max( tfar, q.t[l] );
-		}
-	}
-	while (1)
-	{
-		const BVHNode& node = bvhNode[nodeIdx];
-		cost += c_trav;
-		if (!node.isLeaf())
-		{
-			// push both children the interval ray reaches, farthest first.
-			const Index c1 = node.leftFirst, c2 = c1 + 1;
-			Float d1 = tinybvh_interval_slab<posX, posY, posZ>( bvhNode[c1].aabbMin, bvhNode[c1].aabbMax, rdMin, rdMax, roMin, roMax, tfar );
-			Float d2 = tinybvh_interval_slab<posX, posY, posZ>( bvhNode[c2].aabbMin, bvhNode[c2].aabbMax, rdMin, rdMax, roMin, roMax, tfar );
-			uint32_t n1 = (uint32_t)c1, n2 = (uint32_t)c2;
-			if (d1 < d2) tinybvh_swap( d1, d2 ), tinybvh_swap( n1, n2 );
-			if (d1 < bvh_far<Float>) nodeStack[stackPtr] = n1, fpiStack[stackPtr++] = fpi;
-			if (d2 < bvh_far<Float>) nodeStack[stackPtr] = n2, fpiStack[stackPtr++] = fpi;
-			BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_STACK_SIZE - 2, "BVH::IntersectPacketsTLAS, traversal stack overflow." );
-		}
-		else
-		{
-			// 'active' holds the packets that entered this leaf's box; the others
-			// are not transformed and not traced.
-			bool anyHit = false;
-			for (Index i = 0; i < node.triCount; i++)
-			{
-				const Index instIdx = primIdx[node.leftFirst + i];
-				const BLASInstance& inst = instList[instIdx];
-				// the instance mask is per ray in tinybvh and uniform per packet here,
-				// so it selects packets rather than lanes.
-				uint32_t visiting = 0;
-				for (uint32_t a = active; a; a &= a - 1)
-				{
-					const uint32_t j = __bscan( a );
-					if (inst.mask & packet[j].mask) visiting |= 1u << j;
-				}
-				if (!visiting) continue;
-				const BVHBase<Float, Index>* blas = blasList[inst.blasIdx];
-				uint32_t n = 0;
-				for (uint32_t a = visiting; a; a &= a - 1)
-					packet[__bscan( a )].TransformTo( obj[n++], inst.invTransform, instIdx << bvh_inst_shift<Index> );
-				cost += (Float)tinybvh_trace_packets( blas, obj, n );
-				n = 0;
-				for (uint32_t a = visiting; a; a &= a - 1) anyHit |= packet[__bscan( a )].MergeHits( obj[n++] );
-			}
-			if (anyHit)
-			{
-				// rays have shortened; pull the interval ray's far plane in with them.
-				tfar = 0;
-				for (uint32_t p = 0; p < packetCount; p++) for (uint32_t l = 0; l < 8; l++)
-					tfar = tinybvh_max( tfar, packet[p].t[l] );
-			}
-		}
-		// pop entries until some ray of some packet enters one. As in the wide
-		// kernel, a leaf gets the full entering set - here that decides which
-		// packets are transformed and pushed through a blas, which is far more
-		// expensive than the scan - while an interior node stops at the first.
-		while (1)
-		{
-			if (!stackPtr) return (int32_t)cost;
-			const uint32_t entry = nodeStack[--stackPtr];
-			const BVHNode& cand = bvhNode[entry];
-			const bool leafEntry = cand.isLeaf();
-			const uint32_t first = fpiStack[stackPtr];
-			uint32_t entering = 0, firstHit = 0, i = first;
-			do
-			{
-				if (tinybvh_packet_enters<posX, posY, posZ>( packet[i], cand.aabbMin, cand.aabbMax ))
-				{
-					if (!entering) firstHit = i;
-					entering |= 1u << i;
-					if (!leafEntry) break;
-				}
-				if (++i == packetCount) i = 0;
-			}
-			while (i != first);
-			if (!entering) continue;
-			nodeIdx = entry, fpi = firstHit, active = entering;
-			break;
-		}
-	}
-}
-
-// The occlusion twin of IntersectPacketsTLASOctant. No hit records to merge, so
-// a leaf unions the instance's resolved lanes into the packet and drops the
-// packet from 'alive' once all eight are accounted for.
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ>
-int32_t BVH<Float, Index>::IsOccludedPacketsTLASOctant( RayPacket8* packet, const uint32_t packetCount ) const
-{
-	uint32_t nodeStack[TINYBVH_STACK_SIZE], fpiStack[TINYBVH_STACK_SIZE];
-	int32_t stackPtr = 0;
-	uint32_t nodeIdx = 0, fpi = 0, alive = 0, active;
-	Float cost = 0;
-	Float rdMin[3], rdMax[3], roMin[3], roMax[3], tfar = 0;
-	for (uint32_t a = 0; a < 3; a++) rdMin[a] = roMin[a] = bvh_far<Float>, rdMax[a] = roMax[a] = -bvh_far<Float>;
-	for (uint32_t p = 0; p < packetCount; p++)
-	{
-		const RayPacket8& q = packet[p];
-		if (!q.AllOccluded()) alive |= 1u << p;
-		for (uint32_t l = 0; l < 8; l++)
-		{
-			const Float rd[3] = { q.rdx[l], q.rdy[l], q.rdz[l] };
-			const Float ro[3] = { q.ox[l] * rd[0], q.oy[l] * rd[1], q.oz[l] * rd[2] };
-			for (uint32_t a = 0; a < 3; a++)
-			{
-				rdMin[a] = tinybvh_min( rdMin[a], rd[a] ), rdMax[a] = tinybvh_max( rdMax[a], rd[a] );
-				roMin[a] = tinybvh_min( roMin[a], ro[a] ), roMax[a] = tinybvh_max( roMax[a], ro[a] );
-			}
-			if (!(q.occluded & (1u << l))) tfar = tinybvh_max( tfar, q.t[l] );
-		}
-	}
-	if (!alive) return 0;
-	active = alive;
-	RayPacket8 obj[TINYBVH_MAX_PACKETS];	// object space copies; ~8 KB of stack
-	while (1)
-	{
-		const BVHNode& node = bvhNode[nodeIdx];
-		cost += c_trav;
-		if (!node.isLeaf())
-		{
-			const Index c1 = node.leftFirst, c2 = c1 + 1;
-			const Float d1 = tinybvh_interval_slab<posX, posY, posZ>( bvhNode[c1].aabbMin, bvhNode[c1].aabbMax, rdMin, rdMax, roMin, roMax, tfar );
-			const Float d2 = tinybvh_interval_slab<posX, posY, posZ>( bvhNode[c2].aabbMin, bvhNode[c2].aabbMax, rdMin, rdMax, roMin, roMax, tfar );
-			// no ordering: any occluder will do.
-			if (d1 < bvh_far<Float>) nodeStack[stackPtr] = (uint32_t)c1, fpiStack[stackPtr++] = fpi;
-			if (d2 < bvh_far<Float>) nodeStack[stackPtr] = (uint32_t)c2, fpiStack[stackPtr++] = fpi;
-			BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_STACK_SIZE - 2, "BVH::IsOccludedPacketsTLAS, traversal stack overflow." );
-		}
-		else
-		{
-			bool retired = false;
-			for (Index i = 0; i < node.triCount; i++)
-			{
-				const Index instIdx = primIdx[node.leftFirst + i];
-				const BLASInstance& inst = instList[instIdx];
-				uint32_t visiting = 0;
-				for (uint32_t a = active & alive; a; a &= a - 1)
-				{
-					const uint32_t j = __bscan( a );
-					if (inst.mask & packet[j].mask) visiting |= 1u << j;
-				}
-				if (!visiting) continue;
-				const BVHBase<Float, Index>* blas = blasList[inst.blasIdx];
-				uint32_t n = 0;
-				for (uint32_t a = visiting; a; a &= a - 1)
-					packet[__bscan( a )].TransformTo( obj[n++], inst.invTransform, instIdx << bvh_inst_shift<Index> );
-				cost += (Float)tinybvh_occlude_packets( blas, obj, n );
-				n = 0;
-				for (uint32_t a = visiting; a; a &= a - 1)
-				{
-					const uint32_t j = __bscan( a );
-					const uint32_t before = packet[j].occluded;
-					packet[j].MergeOcclusion( obj[n++] );
-					if (packet[j].occluded != before) retired = true;
-					if (packet[j].AllOccluded()) alive &= ~(1u << j);
-				}
-				if (!alive) return (int32_t)cost;
-			}
-			if (retired)
-			{
-				tfar = 0;
-				for (uint32_t a = alive; a; a &= a - 1)
-				{
-					const RayPacket8& q = packet[__bscan( a )];
-					for (uint32_t l = 0; l < 8; l++) if (!(q.occluded & (1u << l))) tfar = tinybvh_max( tfar, q.t[l] );
-				}
-			}
-		}
-		while (1)
-		{
-			if (!stackPtr) return (int32_t)cost;
-			const uint32_t entry = nodeStack[--stackPtr];
-			const BVHNode& cand = bvhNode[entry];
-			const bool leafEntry = cand.isLeaf();
-			const uint32_t first = fpiStack[stackPtr];
-			uint32_t entering = 0, firstHit = 0, i = first;
-			do
-			{
-				if (alive & (1u << i)) if (tinybvh_packet_enters<posX, posY, posZ>(
-					packet[i], cand.aabbMin, cand.aabbMax, packet[i].occluded ))
-				{
-					if (!entering) firstHit = i;
-					entering |= 1u << i;
-					if (!leafEntry) break;
-				}
-				if (++i == packetCount) i = 0;
-			}
-			while (i != first);
-			if (!entering) continue;
-			nodeIdx = entry, fpi = firstHit, active = entering;
-			break;
-		}
-	}
-}
-
-// trace an array of rays, as packets wherever that is possible.
-template <typename Float, typename Index>
-void tinybvh_build_packets( RayPacket8<Float, Index>* packet, Ray<Float, Index>* rays,
-	const uint32_t base, const uint32_t n )
-{
-	for (uint32_t i = 0; i < n; i++)
-	{
-		Ray<Float, Index>* first = rays + (base + i) * 8;
-		RayPacket8<Float, Index>& p = packet[i];
-		p.occluded = 0, p.instIdx = 0, p.perRay = false;
-		for (uint32_t l = 0; l < 8; l++) p.SetRay( l, first[l] );
-		// a packet shares one ray mask; if input is mixed, trace single rays.
-		p.mask = first[0].mask;
-		for (uint32_t l = 1; l < 8; l++) if (first[l].mask != p.mask) p.perRay = true;
-	}
-}
-
-template <typename Float, typename Index>
-int32_t tinybvh_intersect_rays( const BVHBase<Float, Index>* bvh, Ray<Float, Index>* rays, const uint32_t rayCount )
-{
-	RayPacket8<Float, Index> packet[TINYBVH_MAX_PACKETS];
-	const uint32_t packetCount = rayCount >> 3;
-	int32_t cost = 0;
-	for (uint32_t base = 0; base < packetCount; base += TINYBVH_MAX_PACKETS)
-	{
-		const uint32_t n = tinybvh_min( (uint32_t)TINYBVH_MAX_PACKETS, packetCount - base );
-		tinybvh_build_packets( packet, rays, base, n );
-		cost += tinybvh_trace_packets( bvh, packet, n );
-		for (uint32_t i = 0; i < n; i++) for (uint32_t l = 0; l < 8; l++)
-			packet[i].GetHit( l, rays[(base + i) * 8 + l] );
-	}
-	// the tail, and any ray the packet path could not take
-	for (uint32_t i = packetCount * 8; i < rayCount; i++) cost += tinybvh_blas_intersect( bvh, rays[i] );
+	for (uint32_t i = 0; i < TINYBVH_BUNDLE_RAYS; i++) occluded[i] = IsOccluded( rays[i] ), cost++;
 	return cost;
 }
 
-template <typename Float, typename Index>
-int32_t tinybvh_isoccluded_rays( const BVHBase<Float, Index>* bvh, Ray<Float, Index>* rays,
-	const uint32_t rayCount, bool* occluded )
+template <typename Float, typename Index> int32_t BVH<Float, Index>::IsOccludedBundle( Ray* rays, bool* occluded ) const
 {
-	RayPacket8<Float, Index> packet[TINYBVH_MAX_PACKETS];
-	const uint32_t packetCount = rayCount >> 3;
+	BVH_FATAL_ERROR_IF( !isTLAS(), "BVH::IsOccludedBundle, not a TLAS." );
 	int32_t cost = 0;
-	for (uint32_t base = 0; base < packetCount; base += TINYBVH_MAX_PACKETS)
-	{
-		const uint32_t n = tinybvh_min( (uint32_t)TINYBVH_MAX_PACKETS, packetCount - base );
-		tinybvh_build_packets( packet, rays, base, n );
-		cost += tinybvh_occlude_packets( bvh, packet, n );
-		for (uint32_t i = 0; i < n; i++) for (uint32_t l = 0; l < 8; l++)
-			occluded[(base + i) * 8 + l] = (packet[i].occluded & (1u << l)) != 0;
-	}
-	for (uint32_t i = packetCount * 8; i < rayCount; i++)
-		occluded[i] = tinybvh_blas_occluded( bvh, rays[i] ), cost++;
+	for (uint32_t i = 0; i < TINYBVH_BUNDLE_RAYS; i++) occluded[i] = IsOccluded( rays[i] ), cost++;
 	return cost;
 }
-
-template <typename Float, typename Index> int32_t BVH<Float, Index>::IntersectRays( Ray* rays, const uint32_t rayCount ) const
-{
-	if (!isTLAS())
-	{
-		int32_t cost = 0;
-		for (uint32_t i = 0; i < rayCount; i++) cost += Intersect( rays[i] );
-		return cost;
-	}
-	return tinybvh_intersect_rays( this, rays, rayCount );
-}
-
-template <typename Float, typename Index> int32_t BVH<Float, Index>::IsOccludedRays( Ray* rays, const uint32_t rayCount, bool* occluded ) const
-{
-	if (!isTLAS())
-	{
-		int32_t cost = 0;
-		for (uint32_t i = 0; i < rayCount; i++) occluded[i] = IsOccluded( rays[i] ), cost++;
-		return cost;
-	}
-	return tinybvh_isoccluded_rays( this, rays, rayCount, occluded );
-}
-
-template <typename Float, typename Index> int32_t BVH8_CPU<Float, Index>::IntersectRays( Ray* rays, const uint32_t rayCount ) const
-{
-	return tinybvh_intersect_rays( this, rays, rayCount );
-}
-
-template <typename Float, typename Index> int32_t BVH8_CPU<Float, Index>::IsOccludedRays( Ray* rays, const uint32_t rayCount, bool* occluded ) const
-{
-	return tinybvh_isoccluded_rays( this, rays, rayCount, occluded );
-}
-
 
 } // namespace impl
 
