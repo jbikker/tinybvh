@@ -327,29 +327,18 @@ void AccStruc::IntersectBatchMT( char* rayData, int rayCount )
 	BatchIntersectArgs args = { this, rayData, rayCount, slices, sliceSize };
 	tinybvh_parallel_for( context, slices, &IntersectBatchSlice, &args );
 }
+
+static void IntersectBatchPacketsSlice( uint32_t i, void* payload )
+{
+	BatchIntersectArgs* a = (BatchIntersectArgs*)payload;
+	a->accstruc->IntersectBatchPackets( a->rayData + a->sliceSize * i * 64, a->sliceSize );
+}
 void AccStruc::IntersectBatchMTPackets( char* rayData, int rayCount )
 {
-	float origDist = ((Ray*)rayData)[0].hit.t;
-	float dist = origDist;
-	Ray batch[TINYBVH_BUNDLE_RAYS];
-	char* rd = rayData;
-	switch (layout)
-	{
-	case BVH4_WIVE:
-	{
-		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
-		#pragma omp parallel for schedule(dynamic) // TODO: proper MT.
-		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
-		{
-			char* rd = rayData + i * 64;
-			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( batch + j, rd, 64 );
-			accstruc->IntersectBundle( batch );
-		}
-		break;
-	}
-	default: // unsupported layout. Packets require BVH4_WIVE.
-		break;
-	}
+	constexpr int slices = 64;
+	int sliceSize = rayCount / slices;
+	BatchIntersectArgs args = { this, rayData, rayCount, slices, sliceSize };
+	tinybvh_parallel_for( context, slices, &IntersectBatchPacketsSlice, &args );
 }
 
 float AccStruc::IntersectBatch( char* rayData, int rayCount )
@@ -527,32 +516,22 @@ static void OcclusionBatchSlice( uint32_t i, void* payload )
 }
 void AccStruc::OcclusionBatchMT( char* rayData, int rayCount )
 {
-	constexpr int slices = 64;
+	int slices = std::thread::hardware_concurrency() * 4;
 	int sliceSize = rayCount / slices;
 	BatchIntersectArgs args = { this, rayData, rayCount, sliceSize };
 	tinybvh_parallel_for( context, slices, &OcclusionBatchSlice, &args );
 }
+static void OcclusionBatchPacketsSlice( uint32_t i, void* payload )
+{
+	BatchOcclusionArgs* a = (BatchOcclusionArgs*)payload;
+	a->accstruc->OcclusionBatchPackets( a->rayData + a->sliceSize * i * 64, a->sliceSize );
+}
 void AccStruc::OcclusionBatchMTPackets( char* rayData, int rayCount )
 {
-	Ray batch[TINYBVH_BUNDLE_RAYS];
-	bool occluded[TINYBVH_BUNDLE_RAYS];
-	switch (layout)
-	{
-	case BVH4_WIVE:
-	{
-		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
-		#pragma omp parallel for schedule(dynamic) // TODO: proper MT.
-		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
-		{
-			char* rd = rayData + i * 64;
-			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( batch + j, rd, 64 );
-			accstruc->IsOccludedBundle( batch, occluded );
-		}
-		break;
-	}
-	default: // unsupported layout, must be BVH4_WIVE.
-		break;
-	}
+	constexpr int slices = 64;
+	int sliceSize = rayCount / slices;
+	BatchIntersectArgs args = { this, rayData, rayCount, sliceSize };
+	tinybvh_parallel_for( context, slices, &OcclusionBatchPacketsSlice, &args );
 }
 
 void AccStruc::OcclusionBatch( char* rayData, int rayCount )

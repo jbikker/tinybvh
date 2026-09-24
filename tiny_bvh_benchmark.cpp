@@ -73,7 +73,9 @@ int main()
 	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3 ) );
 	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE ) );
 	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS ) );
-
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, PACKETS ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, PACKETS ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, PACKETS ) );
 #endif
 
 #if 0
@@ -121,21 +123,24 @@ int main()
 #if 0
 
 	// 3. MULTI-CORE CPU TRAVERSAL
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW2, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW3, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, FIRST_BOUNCE, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, AO_RAYS, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW1, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW2, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, PRIMARY_VIEW3, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, FIRST_BOUNCE, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, PRESPLIT, scene, AO_RAYS, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, MULTICORE ) );
-	experiment.push_back( new Experiment( BVH8_WIVE, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, MULTICORE ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, MULTICORE|PACKETS ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, MULTICORE|PACKETS ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, MULTICORE|PACKETS ) );
 
 #endif
 
