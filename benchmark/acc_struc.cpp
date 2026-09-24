@@ -329,7 +329,27 @@ void AccStruc::IntersectBatchMT( char* rayData, int rayCount )
 }
 void AccStruc::IntersectBatchMTPackets( char* rayData, int rayCount )
 {
-	// TODO
+	float origDist = ((Ray*)rayData)[0].hit.t;
+	float dist = origDist;
+	Ray batch[TINYBVH_BUNDLE_RAYS];
+	char* rd = rayData;
+	switch (layout)
+	{
+	case BVH4_WIVE:
+	{
+		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
+		#pragma omp parallel for schedule(dynamic) // TODO: proper MT.
+		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
+		{
+			char* rd = rayData + i * 64;
+			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( batch + j, rd, 64 );
+			accstruc->IntersectBundle( batch );
+		}
+		break;
+	}
+	default: // unsupported layout. Packets require BVH4_WIVE.
+		break;
+	}
 }
 
 float AccStruc::IntersectBatch( char* rayData, int rayCount )
@@ -477,8 +497,26 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 
 float AccStruc::IntersectBatchPackets( char* rayData, int rayCount )
 {
-	// TODO
-	return 0;
+	float origDist = ((Ray*)rayData)[0].hit.t;
+	float dist = origDist;
+	Ray batch[TINYBVH_BUNDLE_RAYS];
+	switch (layout)
+	{
+	case BVH4_WIVE:
+	{
+		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
+		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
+		{
+			char* rd = rayData + i * 64;
+			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( batch + j, rd, 64 );
+			accstruc->IntersectBundle( batch );
+		}
+		break;
+	}
+	default: // unsupported layout. Packets require BVH4_WIVE.
+		break;
+	}
+	return dist;
 }
 
 struct BatchOcclusionArgs { AccStruc* accstruc; char* rayData; int rayCount; int sliceSize; };
@@ -496,7 +534,25 @@ void AccStruc::OcclusionBatchMT( char* rayData, int rayCount )
 }
 void AccStruc::OcclusionBatchMTPackets( char* rayData, int rayCount )
 {
-	// TODO
+	Ray batch[TINYBVH_BUNDLE_RAYS];
+	bool occluded[TINYBVH_BUNDLE_RAYS];
+	switch (layout)
+	{
+	case BVH4_WIVE:
+	{
+		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
+		#pragma omp parallel for schedule(dynamic) // TODO: proper MT.
+		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
+		{
+			char* rd = rayData + i * 64;
+			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( batch + j, rd, 64 );
+			accstruc->IsOccludedBundle( batch, occluded );
+		}
+		break;
+	}
+	default: // unsupported layout, must be BVH4_WIVE.
+		break;
+	}
 }
 
 void AccStruc::OcclusionBatch( char* rayData, int rayCount )
@@ -581,7 +637,24 @@ void AccStruc::OcclusionBatch( char* rayData, int rayCount )
 
 void AccStruc::OcclusionBatchPackets( char* rayData, int rayCount )
 {
-	// TODO
+	Ray batch[TINYBVH_BUNDLE_RAYS];
+	bool occluded[TINYBVH_BUNDLE_RAYS];
+	switch (layout)
+	{
+	case BVH4_WIVE:
+	{
+		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
+		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
+		{
+			char* rd = rayData + i * 64;
+			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( batch + j, rd, 64 );
+			accstruc->IsOccludedBundle( batch, occluded );
+		}
+		break;
+	}
+	default: // unsupported layout, must be BVH4_WIVE.
+		break;
+	}
 }
 
 bvhvec3 AccStruc::SceneExtent()
