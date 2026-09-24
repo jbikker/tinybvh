@@ -76,6 +76,8 @@ int main()
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, PACKETS ) );
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, PACKETS ) );
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, PACKETS ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, PACKETS ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, PACKETS ) );
 #endif
 
 #if 0

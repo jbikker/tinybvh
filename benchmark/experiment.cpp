@@ -127,7 +127,7 @@ void Experiment::RunTraceExperiment()
 		Ray r( O[i] + D[i] * tmin[i], D[i], tmax[i] - tmin[i] );
 		Ray s( O[i] + D[i] * tmin[i], D[i], tmax[i] - tmin[i] );
 		memcpy( extensionRays + 64 * i, &r, 64 );
-		memcpy( shadowRays + 64 * i, &r, 64 );
+		memcpy( shadowRays + 64 * i, &s, 64 );
 	}
 	// trace extension rays
 	float traceTime, raysPerSecond;
@@ -290,8 +290,8 @@ void Experiment::RunTraceExperiment()
 				{
 					if (flags & MULTICORE) 
 					{
-						if (flags & PACKETS) bvh->OcclusionBatchMTPackets( extensionRays, N ); 
-						else bvh->OcclusionBatchMT( extensionRays, N ); 
+						if (flags & PACKETS) bvh->OcclusionBatchMTPackets( shadowRays, N ); 
+						else bvh->OcclusionBatchMT( shadowRays, N ); 
 					}
 					else 
 					{

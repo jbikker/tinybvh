@@ -335,7 +335,7 @@ static void IntersectBatchPacketsSlice( uint32_t i, void* payload )
 }
 void AccStruc::IntersectBatchMTPackets( char* rayData, int rayCount )
 {
-	constexpr int slices = 64;
+	constexpr int slices = 64; // intentional power of 2 so we always get bundles of 64N.
 	int sliceSize = rayCount / slices;
 	BatchIntersectArgs args = { this, rayData, rayCount, slices, sliceSize };
 	tinybvh_parallel_for( context, slices, &IntersectBatchPacketsSlice, &args );
@@ -528,7 +528,7 @@ static void OcclusionBatchPacketsSlice( uint32_t i, void* payload )
 }
 void AccStruc::OcclusionBatchMTPackets( char* rayData, int rayCount )
 {
-	constexpr int slices = 64;
+	constexpr int slices = 64; // intentional power of 2 so we always get bundles of 64N.
 	int sliceSize = rayCount / slices;
 	BatchIntersectArgs args = { this, rayData, rayCount, sliceSize };
 	tinybvh_parallel_for( context, slices, &OcclusionBatchPacketsSlice, &args );
