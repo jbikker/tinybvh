@@ -15,7 +15,7 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_pt", "vcproj\tiny_
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_custom", "vcproj\tiny_bvh_custom.vcxproj", "{05E87951-A43C-49D9-BC3B-5F6387285D2E}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_anim", "vcproj\tiny_bvh_anim.vcxproj", "{66E868CC-64CC-4A18-B2E3-9BD0BA5FEB14}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_instancing", "vcproj\tiny_bvh_instancing.vcxproj", "{66E868CC-64CC-4A18-B2E3-9BD0BA5FEB14}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_gpu2", "vcproj\tiny_bvh_gpu2.vcxproj", "{0D99C966-8C79-4C2D-B1F1-4D8E15B3A2BE}"
 EndProject
@@ -23,7 +23,7 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_interop", "tmpl8\t
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_custom_double", "vcproj\tiny_bvh_custom_double.vcxproj", "{8A22807D-400D-407E-B54B-58826BDAFAC1}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_anim_double", "vcproj\tiny_bvh_anim_double.vcxproj", "{C5214FDA-35D0-424A-8978-A1F9C2B190CE}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_instancing_double", "vcproj\tiny_bvh_instancing_double.vcxproj", "{C5214FDA-35D0-424A-8978-A1F9C2B190CE}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_collide", "vcproj\tiny_bvh_collide.vcxproj", "{2BFDD504-7B2B-48D7-B5C4-07A346E2B1C3}"
 EndProject
