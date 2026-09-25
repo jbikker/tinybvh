@@ -1,11 +1,11 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="..\examples\tiny_bvh_anim_double.cpp" />
+    <ClCompile Include="..\examples\tiny_bvh_instancing.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="tinybvh">
-      <UniqueIdentifier>{7d9aa8e5-40d2-4a34-b1da-e501de43be05}</UniqueIdentifier>
+      <UniqueIdentifier>{38eb8d1a-df19-4e57-ab80-aafa5c9d0917}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
