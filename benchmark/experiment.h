@@ -12,6 +12,7 @@ enum ExperimentFlags : int {
 	DEFAULT = 0,
 	MULTICORE = 1,
 	USE_GPU = 2,
+	PACKETS = 4
 };
 
 struct Timer
@@ -29,7 +30,7 @@ struct Timer
 class Experiment
 {
 public:
-	Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays = RaySet::UNSPECIFIED, ExperimentFlags = DEFAULT, const char* view = 0 );
+	Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays = RaySet::UNSPECIFIED, ExperimentFlags = DEFAULT, const char* view = 0, const char* rayFile = 0 );
 	void Run();
 private:
 	void RunBuildExperiment();
@@ -50,6 +51,11 @@ private:
 	inline static PrimitiveSet* cachedPrimSet[99] = { 0 };
 	inline static RayDistribution* cachedRaySet[99] = { 0 };
 };
+
+inline ExperimentFlags operator|( ExperimentFlags a, ExperimentFlags b )
+{
+	return static_cast<ExperimentFlags>(static_cast<int>(a) | static_cast<int>(b));
+}
 
 };
 

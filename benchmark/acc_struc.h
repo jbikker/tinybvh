@@ -6,14 +6,15 @@ namespace tinybvh
 enum BuildFlags : int {
 	NO_FLAGS = 0,
 	INDEXED = 1,
-	AVXBUILD = 2,
+	SIMDBUILD = 2,
 	FULLSWEEP = 4,
-	PRESPLIT = 8,
-	SPATIALSPLITS = 16,
-	OPTIMIZE = 32,
-	LOW = 64, // low, medium, high: For Embree and Madmann91.
-	MEDIUM = 128,
-	HIGH = 256 
+	LBVH = 8,
+	PRESPLIT = 16,
+	SPATIALSPLITS = 32,
+	OPTIMIZE = 64,
+	LOW = 128, // low, medium, high: For Embree and Madmann91.
+	MEDIUM = 256,
+	HIGH = 512 
 };
 
 enum BVHLayout
@@ -45,6 +46,10 @@ public:
 	void IntersectBatchMT( char* rayData, const int rayCount );
 	void OcclusionBatch( char* rayData, const int rayCount );
 	void OcclusionBatchMT( char* rayData, const int rayCount );
+	float IntersectBatchPackets( char* rayData, const int rayCount );
+	void IntersectBatchMTPackets( char* rayData, const int rayCount );
+	void OcclusionBatchPackets( char* rayData, const int rayCount );
+	void OcclusionBatchMTPackets( char* rayData, const int rayCount );
 	bvhvec3 SceneExtent();
 	int NodeCount();
 	BVHLayout layout = BVH2;

@@ -368,7 +368,8 @@ float RRSTraceTimeCPU( const BVH* bvh )
 {
 	BVH8_CPU fastbvh;
 	fastbvh.bvh8.bvh.context = fastbvh.bvh8.context = bvh->context;
-	fastbvh.bvh8.bvh = *bvh;
+	fastbvh.bvh8.bvh.ReferenceFrom( *bvh );
+	fastbvh.bvh8.ownBVH = false; // the caller keeps its tree
 	fastbvh.ConvertFrom( fastbvh.bvh8 );
 	Timer t;
 	uint32_t sum = 0;
@@ -380,7 +381,6 @@ float RRSTraceTimeCPU( const BVH* bvh )
 	}
 	float runtime = t.elapsed() * 0.1f;
 	fastbvh.bvh8.triCount = sum; // dummy operation to avoid dead code elimination
-	fastbvh.bvh8 = MBVH<8>();
 	return runtime; // average of 10 runs
 }
 float RRSTraceTimeGPU( const BVH* bvh )

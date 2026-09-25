@@ -17,22 +17,19 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 	// safety net
 	if (isnan( O4.x + O4.y + O4.z + D4.x + D4.y + D4.z )) return hit;
 	// traverse BVH
-	unsigned node = 0, stack[STACK_SIZE], stackPtr = 0, steps = 0;
+	unsigned nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0, steps = 0;
 	if (stepCount) *stepCount = 0;
 	while (1)
 	{
 		steps++;
-		// fetch the node
-		const float4 lmin = tlasNodes[node].lmin, lmax = tlasNodes[node].lmax;
-		const float4 rmin = tlasNodes[node].rmin, rmax = tlasNodes[node].rmax;
-		const unsigned triCount = as_uint( rmin.w );
-		if (triCount > 0)
+		if (nodeIdx & 0x80000000)
 		{
 			// process leaf node
-			const unsigned firstTri = as_uint( rmax.w );
-			for (unsigned i = 0; i < triCount; i++)
+			const uint instCount = (nodeIdx >> 24) & 127;
+			uint firstInst = nodeIdx & 0xffffff;
+			for (unsigned i = 0; i < instCount; i++)
 			{
-				const uint instIdx = tlasIdx[firstTri + i];
+				const uint instIdx = tlasIdx[firstInst + i];
 				const struct Instance* inst = instances + instIdx;
 				const float3 Oblas = TransformPoint( O4.xyz, inst->invTransform );
 				const float3 Dblas = TransformVector( D4.xyz, inst->invTransform );
@@ -42,9 +39,9 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 				const global float4* blasNodes = instIdx == 0 ? bistroNodes : dragonNodes;
 				const global float4* blasTris = instIdx == 0 ? bistroTris : dragonTris;
 			#ifdef SIMD_AABBTEST
-				const float4 blasHit = traverse_cwbvh( blasNodes, blasTris, (float4)(Oblas, 1), (float4)(Dblas, 0), (float4)(rDblas, 1), hit.x, stepCount );
+				const float4 blasHit = traverse_cwbvh( blasNodes, blasTris, (float4)(Oblas, 1), (float4)(Dblas, 0), (float4)(rDblas, 1), hit.x );
 			#else
-				const float4 blasHit = traverse_cwbvh( blasNodes, blasTris, Oblas, Dblas, rDblas, hit.x, stepCount );
+				const float4 blasHit = traverse_cwbvh( blasNodes, blasTris, Oblas, Dblas, rDblas, hit.x );
 			#endif
 			#else
 				// this code handles arbitrary tlas/blas scenes.
@@ -58,9 +55,9 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 					const global float4* nodes = blasCWNodes + blasDesc[blas].node8Offset * 5;
 					const global float4* tris = blasTri8 + blasDesc[blas].tri8Offset * 4;
 				#ifdef SIMD_AABBTEST
-					blasHit = traverse_cwbvh( nodes, tris, (float4)(Oblas, 1), (float4)(Dblas, 0), (float4)(rDblas, 1), hit.x, stepCount );
+					blasHit = traverse_cwbvh( nodes, tris, (float4)(Oblas, 1), (float4)(Dblas, 0), (float4)(rDblas, 1), hit.x );
 				#else
-					blasHit = traverse_cwbvh( nodes, tris, Oblas, Dblas, rDblas, hit.x, stepCount );
+					blasHit = traverse_cwbvh( nodes, tris, Oblas, Dblas, rDblas, hit.x );
 				#endif
 				}
 				else // if (blasType == 2 || blasType == 3 /* GPU_DYNAMIC or GPU_RIGID */)
@@ -68,7 +65,7 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 					const global struct BVHNode* nodes = blasNodes + blasDesc[blas].nodeOffset; // TODO: read offset data as uint4
 					const global uint* idx = blasIdx + blasDesc[blas].indexOffset;
 					const global float4* tris = blasTris + blasDesc[blas].triOffset * 3;
-					blasHit = traverse_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, hit.x, stepCount );
+					blasHit = traverse( nodes, tris, opmap, Oblas, Dblas, rDblas, hit.x, stepCount );
 				}
 			#endif
 				if (blasHit.x < hit.x)
@@ -77,9 +74,11 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 					hit.w = as_float( as_uint( hit.w ) + (instIdx << 24) );
 				}
 			}
-			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
 			continue;
 		}
+		const float4 lmin = tlasNodes[nodeIdx].lmin, lmax = tlasNodes[nodeIdx].lmax;
+		const float4 rmin = tlasNodes[nodeIdx].rmin, rmax = tlasNodes[nodeIdx].rmax;
 		unsigned left = as_uint( lmin.w ), right = as_uint( lmax.w );
 		// child AABB intersection tests
 		const float3 t1a = (lmin.xyz - O4.xyz) * rD4.xyz, t2a = (lmax.xyz - O4.xyz) * rD4.xyz;
@@ -98,8 +97,8 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 			float h = dist1; dist1 = dist2; dist2 = h;
 			unsigned t = left; left = right; right = t;
 		}
-		if (dist1 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
-		else { node = left; if (dist2 != 1e30f) stack[stackPtr++] = right; }
+		if (dist1 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
+		else { nodeIdx = left; if (dist2 != 1e30f) stack[stackPtr++] = right; }
 	}
 	// write back intersection result
 	if (stepCount) *stepCount += steps;
@@ -109,23 +108,20 @@ float4 traverse_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 bool isoccluded_tlas( const float4 O4, const float4 D4, const float4 rD4, const float tmax )
 {
 	// traverse BVH
-	unsigned node = 0, stack[STACK_SIZE], stackPtr = 0;
+	unsigned nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0;
 	// safety net
 	if (isnan( O4.x + O4.y + O4.z + D4.x + D4.y + D4.z )) return true;
 	// traverse
 	while (1)
 	{
-		// fetch the node
-		const float4 lmin = tlasNodes[node].lmin, lmax = tlasNodes[node].lmax;
-		const float4 rmin = tlasNodes[node].rmin, rmax = tlasNodes[node].rmax;
-		const unsigned triCount = as_uint( rmin.w );
-		if (triCount > 0)
+		if (nodeIdx & 0x80000000)
 		{
 			// process leaf node
-			const unsigned firstTri = as_uint( rmax.w );
-			for (unsigned i = 0; i < triCount; i++)
+			const uint instCount = (nodeIdx >> 24) & 127;
+			uint firstInst = nodeIdx & 0xffffff;
+			for (unsigned i = 0; i < instCount; i++)
 			{
-				const uint instIdx = tlasIdx[firstTri + i];
+				const uint instIdx = tlasIdx[firstInst + i];
 				const struct Instance* inst = instances + instIdx;
 				const float3 Oblas = TransformPoint( O4.xyz, inst->invTransform );
 				const float3 Dblas = TransformVector( D4.xyz, inst->invTransform );
@@ -160,13 +156,15 @@ bool isoccluded_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 					const global struct BVHNode* nodes = blasNodes + blasDesc[blas].nodeOffset; // TODO: read offset data as uint4
 					const global uint* idx = blasIdx + blasDesc[blas].indexOffset;
 					const global float4* tris = blasTris + blasDesc[blas].triOffset * 3;
-					if (isoccluded_ailalaine( nodes, idx, tris, opmap, Oblas, Dblas, rDblas, tmax )) return true;
+					if (isoccluded( nodes, tris, opmap, Oblas, Dblas, rDblas, tmax )) return true;
 				}
 			#endif
 			}
-			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
 			continue;
 		}
+		const float4 lmin = tlasNodes[nodeIdx].lmin, lmax = tlasNodes[nodeIdx].lmax;
+		const float4 rmin = tlasNodes[nodeIdx].rmin, rmax = tlasNodes[nodeIdx].rmax;
 		unsigned left = as_uint( lmin.w ), right = as_uint( lmax.w );
 		// child AABB intersection tests
 		const float3 t1a = (lmin.xyz - O4.xyz) * rD4.xyz, t2a = (lmax.xyz - O4.xyz) * rD4.xyz;
@@ -185,8 +183,8 @@ bool isoccluded_tlas( const float4 O4, const float4 D4, const float4 rD4, const 
 			float h = dist1; dist1 = dist2; dist2 = h;
 			unsigned t = left; left = right; right = t;
 		}
-		if (dist1 == 1e30f) { if (stackPtr == 0) break; else node = stack[--stackPtr]; }
-		else { node = left; if (dist2 != 1e30f) stack[stackPtr++] = right; }
+		if (dist1 == 1e30f) { if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
+		else { nodeIdx = left; if (dist2 != 1e30f) stack[stackPtr++] = right; }
 	}
 	// no hit found
 	return false;

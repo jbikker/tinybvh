@@ -6,34 +6,26 @@
 
 // preliminaries
 
-inline uint __activemask() // OpenCL alternative for CUDA's native __activemask
-{
-	uint mask;
-#ifdef ISNVIDIA
-	// this obviously only works on NVIDIA hardware.
-	asm( "activemask.b32 %0;" : "=r"(mask) );
-#endif
-	return mask;
-}
+#define CWBVH_STACK 24
 
 inline uint __bfind( const uint v ) // OpenCL alternative for CUDA's native __bfind
 {
 	// see https://docs.nvidia.com/cuda/parallel-thread-execution/#integer-arithmetic-instructions-bfind
 #ifdef ISNVIDIA
 	uint b;
-	asm volatile("bfind.u32 %0, %1; " : "=r"(b) : "r"(v));
+	asm ("bfind.u32 %0, %1; " : "=r"(b) : "r"(v));
 	return b;
 #else
-	return 31 - clz( v ); // only correct if v cannot be zero, which is the case in traverse_cwbvh.
+	return 31 ^ clz( v ); // only correct if v cannot be zero, which is the case in traverse_cwbvh.
 #endif
 }
 
-inline uint __popc( const uint v ) // OpenCL alternative for CUDA's native __bfind
+inline uint __popc( const uint v ) // OpenCL alternative for CUDA's native __popc
 {
 	// CUDA documentation: "Count the number of bits that are set to 1 in an integer."
 #ifdef ISNVIDIA
 	int p;
-	asm volatile("popc.b32 %0, %1; " : "=r"(p) : "r"(v));
+	asm ("popc.b32 %0, %1; " : "=r"(p) : "r"(v));
 	return p; // note: identical performance to OpenCL popcount?
 #else
 	return popcount( v );
@@ -44,7 +36,7 @@ inline float _native_fma( const float a, const float b, const float c )
 {
 #ifdef ISNVIDIA
 	float d;
-	asm volatile("fma.rz.f32 %0, %1, %2, %3;" : "=f"(d) : "f"(a), "f"(b), "f"(c));
+	asm ("fma.rz.f32 %0, %1, %2, %3;" : "=f"(d) : "f"(a), "f"(b), "f"(c));
 	return d;
 #else
 #ifdef FP_FAST_FMAF // https://registry.khronos.org/OpenCL/specs/3.0-unified/html/OpenCL_C.html
@@ -81,22 +73,6 @@ inline float fmax_fmax( const float a, const float b, const float c )
 #define STACK_POP(X) { X = stack[--stackPtr]; }
 #define STACK_PUSH(X) { stack[stackPtr++] = X; }
 #endif
-inline unsigned sign_extend_s8x4( const unsigned i )
-{
-#ifdef ISNVIDIA
-	// inline ptx as suggested by AlanWBFT
-	uint v;
-	asm( "prmt.b32 %0, %1, 0x0, 0x0000BA98;" : "=r"(v) : "r"(i) ); // BA98: 1011`1010`1001`1000
-	return v;
-#else
-	// docs: "with the given parameters, prmt will extend the sign to all bits in a byte."
-	const unsigned b0 = (i & 0b10000000000000000000000000000000) ? 0xff000000 : 0;
-	const unsigned b1 = (i & 0b00000000100000000000000000000000) ? 0x00ff0000 : 0;
-	const unsigned b2 = (i & 0b00000000000000001000000000000000) ? 0x0000ff00 : 0;
-	const unsigned b3 = (i & 0b00000000000000000000000010000000) ? 0x000000ff : 0;
-	return b0 + b1 + b2 + b3; // probably can do better than this.
-#endif
-}
 #ifdef ISNVIDIA
 #define UPDATE_HITMASK asm( "vshl.u32.u32.u32.wrap.add %0,%1.b0, %2.b0, %3;" : "=r"(hitmask) : "r"(child_bits4), "r"(bit_index4), "r"(hitmask) );
 #define UPDATE_HITMASK0 asm( "vshl.u32.u32.u32.wrap.add %0,%1.b0, %2.b0, %3;" : "=r"(hitmask) : "r"(child_bits4), "r"(bit_index4), "r"(hitmask) );
@@ -111,34 +87,45 @@ inline unsigned sign_extend_s8x4( const unsigned i )
 #define UPDATE_HITMASK3 hitmask |= (child_bits4 >> 24) << (bit_index4 >> 24);
 #endif
 
+#define QUNPACK_SCALE	256.0f
+#define QUNPACK_BIAS	1.0f
+inline float4 unpack_q8x4( const uint w )
+{
+	const uint m = 0x007F8000u, b = 0x3F800000u; // mantissa slot 22..15, exponent 0
+#ifndef ISNVIDIA
+	return as_float4( ((uint4)(w << 15, w << 7, w >> 1, w >> 9) & m) | b );
+#else
+	return (float4)(
+		as_float( ((w << 15) & m) | b ), as_float( ((w <<  7) & m) | b ),
+		as_float( ((w >>  1) & m) | b ), as_float( ((w >>  9) & m) | b ) );
+#endif
+}
+
 #ifdef SIMD_AABBTEST
 #define float3or4 float4
 #else
 #define float3or4 float3
 #endif
 
-// kernel
-// based on CUDA code by AlanWBFT https://github.com/AlanIWBFT
+// cwbvh kernel - based on CUDA code by AlanWBFT https://github.com/AlanIWBFT
 
 #ifdef SIMD_AABBTEST
-float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwbvhTris, const float4 O, const float4 D, const float4 rD, const float t, uint* stepCount )
+float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwbvhTris, const float4 O, const float4 D, const float4 rD, const float t )
 #else
-float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwbvhTris, const float3 O, const float3 D, const float3 rD, const float t, uint* stepCount )
+float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwbvhTris, const float3 O, const float3 D, const float3 rD, const float t )
 #endif
 {
-	// initialize ray
-	const unsigned threadId = get_global_id( 0 );
-	float4 hit = (float4)( t, 0, 0, 0 ); // not fetching t from ray data to avoid one memory operation.
 	// prepare traversal
-	uint2 stack[STACK_SIZE];
-	uint hitAddr, stackPtr = 0, steps = 0;
+	uint2 stack[CWBVH_STACK];
+	uint hitAddr, stackPtr = 0;
 	float2 uv;
+	float4 hit;
 	float tmax = t;
 	const uint octinv4 = (7 - ((D.x < 0 ? 4 : 0) | (D.y < 0 ? 2 : 0) | (D.z < 0 ? 1 : 0))) * 0x1010101;
+	const float3or4 rDs = rD * QUNPACK_SCALE; // per-ray, hoisted out of the node loop.
 	uint2 ngroup = (uint2)(0, 0b10000000000000000000000000000000), tgroup = (uint2)(0);
 	do
 	{
-		steps++;
 		if (ngroup.y > 0x00FFFFFF)
 		{
 			const unsigned hits = ngroup.y, imask = ngroup.y;
@@ -159,29 +146,31 @@ float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwb
 				float4 n2 = cwbvhNodes[child_node_index + 2], n3 = cwbvhNodes[child_node_index + 3];
 				float4 n4 = cwbvhNodes[child_node_index + 4];
 			#endif
-				const char4 e = as_char4( n0.w );
+				// n0.w packs three 127-biased quantization exponents plus imask, so each
+				// byte is already an IEEE-754 exponent field: (b << 23) is 2^e directly.
+				const uint e4 = as_uint( n0.w );
 				ngroup.x = as_uint( n1.x ), tgroup = (uint2)(as_uint( n1.y ), 0);
 				unsigned hitmask = 0;
 			#ifdef SIMD_AABBTEST
-				const float4 idir4 = (float4)( as_float( (e.x + 127) << 23 ) * rD.x, 
-					as_float( (e.y + 127) << 23 ) * rD.y, as_float( (e.z + 127) << 23 ) * rD.z, 1 );
-				const float4 orig4 = (n0 - O) * rD;
+				const float4 idir4 = (float4)( as_float( (e4 & 255) << 23 ) * rDs.x, 
+					as_float( ((e4 >> 8) & 255) << 23 ) * rDs.y, as_float( ((e4 >> 16) & 255) << 23 ) * rDs.z, 1 );
+				const float4 orig4 = (n0 - O) * rD - QUNPACK_BIAS * idir4;
 			#else
-				const float idirx = as_float( (e.x + 127) << 23 ) * rD.x;
-				const float idiry = as_float( (e.y + 127) << 23 ) * rD.y;
-				const float idirz = as_float( (e.z + 127) << 23 ) * rD.z;
-				const float origx = (n0.x - O.x) * rD.x;
-				const float origy = (n0.y - O.y) * rD.y;
-				const float origz = (n0.z - O.z) * rD.z;
+				const float idirx = as_float( (e4 & 255) << 23 ) * rDs.x;
+				const float idiry = as_float( ((e4 >> 8) & 255) << 23 ) * rDs.y;
+				const float idirz = as_float( ((e4 >> 16) & 255) << 23 ) * rDs.z;
+				const float origx = (n0.x - O.x) * rD.x - QUNPACK_BIAS * idirx;
+				const float origy = (n0.y - O.y) * rD.y - QUNPACK_BIAS * idiry;
+				const float origz = (n0.z - O.z) * rD.z - QUNPACK_BIAS * idirz;
 			#endif
 				{	// first 4
 					const unsigned meta4 = as_uint( n1.z ), is_inner4 = (meta4 & (meta4 << 1)) & 0x10101010;
-					const unsigned inner_mask4 = sign_extend_s8x4( is_inner4 << 3 );
+					const unsigned inner_mask4 = (is_inner4 << 4) - (is_inner4 >> 4);
 					const unsigned bit_index4 = (meta4 ^ (octinv4 & inner_mask4)) & 0x1F1F1F1F;
 					const unsigned child_bits4 = (meta4 >> 5) & 0x07070707;
-					const float4 lox4 = convert_float4( as_uchar4( rD.x < 0 ? n3.z : n2.x ) ), hix4 = convert_float4( as_uchar4( rD.x < 0 ? n2.x : n3.z ) );
-					const float4 loy4 = convert_float4( as_uchar4( rD.y < 0 ? n4.x : n2.z ) ), hiy4 = convert_float4( as_uchar4( rD.y < 0 ? n2.z : n4.x ) );
-					const float4 loz4 = convert_float4( as_uchar4( rD.z < 0 ? n4.z : n3.x ) ), hiz4 = convert_float4( as_uchar4( rD.z < 0 ? n3.x : n4.z ) );
+					const float4 lox4 = unpack_q8x4( as_uint( rD.x < 0 ? n3.z : n2.x ) ), hix4 = unpack_q8x4( as_uint( rD.x < 0 ? n2.x : n3.z ) );
+					const float4 loy4 = unpack_q8x4( as_uint( rD.y < 0 ? n4.x : n2.z ) ), hiy4 = unpack_q8x4( as_uint( rD.y < 0 ? n2.z : n4.x ) );
+					const float4 loz4 = unpack_q8x4( as_uint( rD.z < 0 ? n4.z : n3.x ) ), hiz4 = unpack_q8x4( as_uint( rD.z < 0 ? n3.x : n4.z ) );
 					{
 					#ifdef SIMD_AABBTEST
 						const float4 tminx4 = lox4 * idir4.xxxx + orig4.xxxx, tmaxx4 = hix4 * idir4.xxxx + orig4.xxxx;
@@ -229,12 +218,12 @@ float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwb
 				}
 				{	// second 4
 					const unsigned meta4 = as_uint( n1.w ), is_inner4 = (meta4 & (meta4 << 1)) & 0x10101010;
-					const unsigned inner_mask4 = sign_extend_s8x4( is_inner4 << 3 );
+					const unsigned inner_mask4 = (is_inner4 << 4) - (is_inner4 >> 4);
 					const unsigned bit_index4 = (meta4 ^ (octinv4 & inner_mask4)) & 0x1F1F1F1F;
 					const unsigned child_bits4 = (meta4 >> 5) & 0x07070707;
-					const float4 lox4 = convert_float4( as_uchar4( rD.x < 0 ? n3.w : n2.y ) ), hix4 = convert_float4( as_uchar4( rD.x < 0 ? n2.y : n3.w ) );
-					const float4 loy4 = convert_float4( as_uchar4( rD.y < 0 ? n4.y : n2.w ) ), hiy4 = convert_float4( as_uchar4( rD.y < 0 ? n2.w : n4.y ) );
-					const float4 loz4 = convert_float4( as_uchar4( rD.z < 0 ? n4.w : n3.y ) ), hiz4 = convert_float4( as_uchar4( rD.z < 0 ? n3.y : n4.w ) );
+					const float4 lox4 = unpack_q8x4( as_uint( rD.x < 0 ? n3.w : n2.y ) ), hix4 = unpack_q8x4( as_uint( rD.x < 0 ? n2.y : n3.w ) );
+					const float4 loy4 = unpack_q8x4( as_uint( rD.y < 0 ? n4.y : n2.w ) ), hiy4 = unpack_q8x4( as_uint( rD.y < 0 ? n2.w : n4.y ) );
+					const float4 loz4 = unpack_q8x4( as_uint( rD.z < 0 ? n4.w : n3.y ) ), hiz4 = unpack_q8x4( as_uint( rD.z < 0 ? n3.y : n4.w ) );
 					{
 					#ifdef SIMD_AABBTEST
 						const float4 tminx4 = lox4 * idir4.xxxx + orig4.xxxx, tmaxx4 = hix4 * idir4.xxxx + orig4.xxxx;
@@ -280,7 +269,7 @@ float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwb
 					#endif
 					}
 				}
-				ngroup.y = (hitmask & 0xFF000000) | (as_uint( n0.w ) >> 24), tgroup.y = hitmask & 0x00FFFFFF;
+				ngroup.y = (hitmask & 0xFF000000) | (e4 >> 24), tgroup.y = hitmask & 0x00FFFFFF;
 			}
 		}
 		else tgroup = ngroup, ngroup = (uint2)(0);
@@ -336,7 +325,6 @@ float4 traverse_cwbvh( global const float4* cwbvhNodes, global const float4* cwb
 			}
 		}
 	} while (true);
-	if (stepCount) *stepCount += steps;
 	return hit;
 }
 
@@ -346,13 +334,12 @@ bool isoccluded_cwbvh( global const float4* cwbvhNodes, global const float4* cwb
 bool isoccluded_cwbvh( global const float4* cwbvhNodes, global const float4* cwbvhTris, const float3 O, const float3 D, const float3 rD, const float t )
 #endif
 {
-	// initialize ray
-	const unsigned threadId = get_global_id( 0 );
 	// prepare traversal
-	uint2 stack[STACK_SIZE];
+	uint2 stack[CWBVH_STACK];
 	uint stackPtr = 0;
 	float tmax = t;
 	const uint octinv4 = (7 - ((D.x < 0 ? 4 : 0) | (D.y < 0 ? 2 : 0) | (D.z < 0 ? 1 : 0))) * 0x1010101;
+	const float3or4 rDs = rD * QUNPACK_SCALE; // per-ray, hoisted out of the node loop.
 	uint2 ngroup = (uint2)(0, 0b10000000000000000000000000000000), tgroup = (uint2)(0);
 	do
 	{
@@ -376,32 +363,34 @@ bool isoccluded_cwbvh( global const float4* cwbvhNodes, global const float4* cwb
 				float4 n2 = cwbvhNodes[child_node_index + 2], n3 = cwbvhNodes[child_node_index + 3];
 				float4 n4 = cwbvhNodes[child_node_index + 4];
 			#endif
-				const char4 e = as_char4( n0.w );
+				// n0.w packs three 127-biased quantization exponents plus imask, so each
+				// byte is already an IEEE-754 exponent field: (b << 23) is 2^e directly.
+				const uint e4 = as_uint( n0.w );
 				ngroup.x = as_uint( n1.x ), tgroup = (uint2)(as_uint( n1.y ), 0);
 				unsigned hitmask = 0;
 			#ifdef SIMD_AABBTEST
 				const float4 idir4 = (float4)(
-					as_float( (e.x + 127) << 23 ) * rD.x, 
-					as_float( (e.y + 127) << 23 ) * rD.y,
-					as_float( (e.z + 127) << 23 ) * rD.z, 1
+					as_float( (e4 & 255) << 23 ) * rDs.x, 
+					as_float( ((e4 >> 8) & 255) << 23 ) * rDs.y,
+					as_float( ((e4 >> 16) & 255) << 23 ) * rDs.z, 1
 				);
-				const float4 orig4 = (n0 - O) * rD;
+				const float4 orig4 = (n0 - O) * rD - QUNPACK_BIAS * idir4;
 			#else
-				const float idirx = as_float( (e.x + 127) << 23 ) * rD.x;
-				const float idiry = as_float( (e.y + 127) << 23 ) * rD.y;
-				const float idirz = as_float( (e.z + 127) << 23 ) * rD.z;
-				const float origx = (n0.x - O.x) * rD.x;
-				const float origy = (n0.y - O.y) * rD.y;
-				const float origz = (n0.z - O.z) * rD.z;
+				const float idirx = as_float( (e4 & 255) << 23 ) * rDs.x;
+				const float idiry = as_float( ((e4 >> 8) & 255) << 23 ) * rDs.y;
+				const float idirz = as_float( ((e4 >> 16) & 255) << 23 ) * rDs.z;
+				const float origx = (n0.x - O.x) * rD.x - QUNPACK_BIAS * idirx;
+				const float origy = (n0.y - O.y) * rD.y - QUNPACK_BIAS * idiry;
+				const float origz = (n0.z - O.z) * rD.z - QUNPACK_BIAS * idirz;
 			#endif
 				{	// first 4
 					const unsigned meta4 = as_uint( n1.z ), is_inner4 = (meta4 & (meta4 << 1)) & 0x10101010;
-					const unsigned inner_mask4 = sign_extend_s8x4( is_inner4 << 3 );
+					const unsigned inner_mask4 = (is_inner4 << 4) - (is_inner4 >> 4);
 					const unsigned bit_index4 = (meta4 ^ (octinv4 & inner_mask4)) & 0x1F1F1F1F;
 					const unsigned child_bits4 = (meta4 >> 5) & 0x07070707;
-					const float4 lox4 = convert_float4( as_uchar4( rD.x < 0 ? n3.z : n2.x ) ), hix4 = convert_float4( as_uchar4( rD.x < 0 ? n2.x : n3.z ) );
-					const float4 loy4 = convert_float4( as_uchar4( rD.y < 0 ? n4.x : n2.z ) ), hiy4 = convert_float4( as_uchar4( rD.y < 0 ? n2.z : n4.x ) );
-					const float4 loz4 = convert_float4( as_uchar4( rD.z < 0 ? n4.z : n3.x ) ), hiz4 = convert_float4( as_uchar4( rD.z < 0 ? n3.x : n4.z ) );
+					const float4 lox4 = unpack_q8x4( as_uint( rD.x < 0 ? n3.z : n2.x ) ), hix4 = unpack_q8x4( as_uint( rD.x < 0 ? n2.x : n3.z ) );
+					const float4 loy4 = unpack_q8x4( as_uint( rD.y < 0 ? n4.x : n2.z ) ), hiy4 = unpack_q8x4( as_uint( rD.y < 0 ? n2.z : n4.x ) );
+					const float4 loz4 = unpack_q8x4( as_uint( rD.z < 0 ? n4.z : n3.x ) ), hiz4 = unpack_q8x4( as_uint( rD.z < 0 ? n3.x : n4.z ) );
 					{
 					#ifdef SIMD_AABBTEST
 						const float4 tminx4 = lox4 * idir4.xxxx + orig4.xxxx, tmaxx4 = hix4 * idir4.xxxx + orig4.xxxx;
@@ -449,12 +438,12 @@ bool isoccluded_cwbvh( global const float4* cwbvhNodes, global const float4* cwb
 				}
 				{	// second 4
 					const unsigned meta4 = as_uint( n1.w ), is_inner4 = (meta4 & (meta4 << 1)) & 0x10101010;
-					const unsigned inner_mask4 = sign_extend_s8x4( is_inner4 << 3 );
+					const unsigned inner_mask4 = (is_inner4 << 4) - (is_inner4 >> 4);
 					const unsigned bit_index4 = (meta4 ^ (octinv4 & inner_mask4)) & 0x1F1F1F1F;
 					const unsigned child_bits4 = (meta4 >> 5) & 0x07070707;
-					const float4 lox4 = convert_float4( as_uchar4( rD.x < 0 ? n3.w : n2.y ) ), hix4 = convert_float4( as_uchar4( rD.x < 0 ? n2.y : n3.w ) );
-					const float4 loy4 = convert_float4( as_uchar4( rD.y < 0 ? n4.y : n2.w ) ), hiy4 = convert_float4( as_uchar4( rD.y < 0 ? n2.w : n4.y ) );
-					const float4 loz4 = convert_float4( as_uchar4( rD.z < 0 ? n4.w : n3.y ) ), hiz4 = convert_float4( as_uchar4( rD.z < 0 ? n3.y : n4.w ) );
+					const float4 lox4 = unpack_q8x4( as_uint( rD.x < 0 ? n3.w : n2.y ) ), hix4 = unpack_q8x4( as_uint( rD.x < 0 ? n2.y : n3.w ) );
+					const float4 loy4 = unpack_q8x4( as_uint( rD.y < 0 ? n4.y : n2.w ) ), hiy4 = unpack_q8x4( as_uint( rD.y < 0 ? n2.w : n4.y ) );
+					const float4 loz4 = unpack_q8x4( as_uint( rD.z < 0 ? n4.w : n3.y ) ), hiz4 = unpack_q8x4( as_uint( rD.z < 0 ? n3.y : n4.w ) );
 					{
 					#ifdef SIMD_AABBTEST
 						const float4 tminx4 = lox4 * idir4.xxxx + orig4.xxxx, tmaxx4 = hix4 * idir4.xxxx + orig4.xxxx;
@@ -500,7 +489,7 @@ bool isoccluded_cwbvh( global const float4* cwbvhNodes, global const float4* cwb
 					#endif
 					}
 				}
-				ngroup.y = (hitmask & 0xFF000000) | (as_uint( n0.w ) >> 24), tgroup.y = hitmask & 0x00FFFFFF;
+				ngroup.y = (hitmask & 0xFF000000) | (e4 >> 24), tgroup.y = hitmask & 0x00FFFFFF;
 			}
 		}
 		else tgroup = ngroup, ngroup = (uint2)(0);
@@ -559,12 +548,12 @@ void kernel batch_cwbvh( global const float4* cwbvhNodes, global const float4* c
 	float4 O4 = rayData[threadId].O; O4.w = 1;
 	float4 D4 = rayData[threadId].D; D4.w = 0;
 	float4 rD4 = rayData[threadId].rD; rD4.w = 1;
-	float4 hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4, D4, rD4, 1e30f, 0 );
+	float4 hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4, D4, rD4, 1e30f );
 #else
 	const float4 O4 = rayData[threadId].O;
 	const float4 D4 = rayData[threadId].D;
 	const float4 rD4 = rayData[threadId].rD;
-	float4 hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4.xyz, D4.xyz, rD4.xyz, 1e30f, 0 );
+	float4 hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4.xyz, D4.xyz, rD4.xyz, 1e30f );
 #endif
 	rayData[threadId].hit = hit;
 }
@@ -584,6 +573,10 @@ void kernel batch_cwbvh_any( global const float4* cwbvhNodes, global const float
 #endif
 	float tmax = 1e30f;
 	float4 hit = 0;
+#ifdef SIMD_AABBTEST
+	if (isoccluded_cwbvh( cwbvhNodes, cwbvhTris, O4, D4, rD4, tmax )) hit.w = 1;
+#else
 	if (isoccluded_cwbvh( cwbvhNodes, cwbvhTris, O4.xyz, D4.xyz, rD4.xyz, tmax )) hit.w = 1;
+#endif
 	rayData[threadId].hit = hit;
 }

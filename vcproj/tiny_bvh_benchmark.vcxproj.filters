@@ -20,7 +20,6 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\tiny_bvh.h" />
     <ClInclude Include="..\tiny_ocl.h">
       <Filter>opencl</Filter>
     </ClInclude>
@@ -38,6 +37,24 @@
     </ClInclude>
     <ClInclude Include="..\benchmark\headers.h">
       <Filter>tool</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_double.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_float.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_base.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_double.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_float.h">
+      <Filter>tinybvh</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -60,6 +77,9 @@
     </Filter>
     <Filter Include="tool">
       <UniqueIdentifier>{69dbfbf6-ab2a-48e4-b6b4-9d0de31f3576}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tinybvh">
+      <UniqueIdentifier>{85eeee5a-db4b-446e-8517-de38c06308c1}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

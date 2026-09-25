@@ -4,10 +4,30 @@
     <ClCompile Include="..\examples\tiny_bvh_speedtest.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\tiny_bvh.h" />
     <ClInclude Include="..\tiny_ocl.h" />
+    <ClInclude Include="..\tiny_bvh.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_double.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_float.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_base.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_double.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_float.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <Filter Include="tinybvh">
+      <UniqueIdentifier>{0ad79705-138e-4ebe-b6b2-9354dfb50bb6}</UniqueIdentifier>
+    </Filter>
     <Filter Include="opencl">
       <UniqueIdentifier>{5e95863e-4015-4bdd-9678-c83209e41984}</UniqueIdentifier>
     </Filter>

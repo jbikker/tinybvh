@@ -1,0 +1,17 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="program.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <FxCompile Include="shader.hlsl" />
+    <FxCompile Include="tiny.hlsl" />
+    <FxCompile Include="tiny4.hlsl" />
+    <FxCompile Include="tiny8.hlsl" />
+    <FxCompile Include="tinyrq.hlsl" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\tiny_bvh.h" />
+    <ClInclude Include="presplit.h" />
+  </ItemGroup>
+</Project>

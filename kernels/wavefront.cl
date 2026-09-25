@@ -15,8 +15,9 @@
 // rendering parameters
 float4 eye, C, p0, p1, p2;
 uint frameIdx, width, height, dummy3;
-global float4* cwbvhNodes;
-global float4* cwbvhTris;
+global float4* bvhNodes;
+global uint* bvhIndices;
+global float4* bvhTris;
 global uint* blueNoise;
 global volatile int extendTasks, shadeTasks, connectTasks; // atomic counters
 const float3 lightColor = (float3)(25,25,22);
@@ -51,7 +52,7 @@ struct Potential
 // atomic counter management - prepare for primary ray wavefront
 void kernel SetRenderData( int _primaryRayCount,
 	float4 _eye, float4 _p0, float4 _p1, float4 _p2, uint _frameIdx, uint _width, uint _height,
-	global float4* _cwbvhNodes, global float4* _cwbvhTris, global uint* _blueNoise
+	global float4* _bvhNodes, global uint* _bvhIndices, global float4* _bvhTris, global uint* _blueNoise
 )
 {
 	if (get_global_id( 0 ) != 0) return;
@@ -59,8 +60,9 @@ void kernel SetRenderData( int _primaryRayCount,
 	eye = _eye, p0 = _p0, p1 = _p1, p2 = _p2;
 	frameIdx = _frameIdx, width = _width, height = _height;
 	// set BVH pointers
-	cwbvhNodes = _cwbvhNodes;
-	cwbvhTris = _cwbvhTris;
+	bvhNodes = _bvhNodes;
+	bvhIndices = _bvhIndices;
+	bvhTris = _bvhTris;
 	blueNoise = _blueNoise;
 	// initialize atomic counters
 	extendTasks = shadeTasks = _primaryRayCount;
@@ -101,15 +103,10 @@ void kernel Extend( global struct PathState* raysIn )
 		if (extendTasks < 1) break;
 		const int pathId = atomic_dec( &extendTasks ) - 1;
 		if (pathId < 0) break; // someone else could have decreased it before us.
-		const float4 O4 = raysIn[pathId].O;
-		const float4 D4 = raysIn[pathId].D;
-	#ifdef SIMD_AABBTEST
-		const float4 rD4 = native_recip( D4 );
-		raysIn[pathId].hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4, D4, rD4, 1e30f, 0 );
-	#else
-		const float3 rD = native_recip( D4.xyz );
-		raysIn[pathId].hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4.xyz, D4.xyz, rD, 1e30f, 0 );
-	#endif
+		const float3 O = raysIn[pathId].O.xyz;
+		const float3 D = raysIn[pathId].D.xyz;
+		const float3 rD = native_recip( D );
+		raysIn[pathId].hit = traverse( bvhNodes, bvhTris, 0, O, D, rD, 1e30f, 0 );
 	}
 }
 
@@ -157,6 +154,8 @@ void kernel Shade( global float4* accumulator,
 		// fetch geometry at intersection point
 		uint vertIdx = as_uint( hit.w ) * 3;
 		float4 v0 = verts[vertIdx];
+		float4 v1 = verts[vertIdx + 1];
+		float4 v2 = verts[vertIdx + 2];
 		uint materialType = as_uint( v0.w ) >> 24;
 		float brdfPDF = T4.w;
 		float3 D = D4.xyz;
@@ -195,7 +194,7 @@ void kernel Shade( global float4* accumulator,
 			r2 = RandomFloat( &seed ), r3 = RandomFloat( &seed );
 		}
 		// prepare data for bounce
-		float3 vert0 = v0.xyz, vert1 = verts[vertIdx + 1].xyz, vert2 = verts[vertIdx + 2].xyz;
+		float3 vert0 = v0.xyz, vert1 = v1.xyz, vert2 = v2.xyz;
 		float3 I = O4.xyz + t * D;
 		float3 N = fast_normalize( cross( vert1 - vert0, vert2 - vert0 ) );
 		if (dot( N, D ) > 0) N *= -1;
@@ -261,14 +260,11 @@ void kernel Connect( global float4* accumulator, global struct Potential* shadow
 		if (connectTasks < 1) break;
 		const int rayId = atomic_dec( &connectTasks ) - 1;
 		if (rayId < 0) break;
-		const float4 T4 = shadowIn[rayId].T, O4 = shadowIn[rayId].O, D4 = shadowIn[rayId].D;
-	#ifdef SIMD_AABBTEST
-		const float4 rD4 = native_recip( D4 );
-		if (isoccluded_cwbvh( cwbvhNodes, cwbvhTris, O4, D4, rD4, D4.w )) continue;
-	#else
+		const float4 T4 = shadowIn[rayId].T;
+		const float4 O4 = shadowIn[rayId].O;
+		const float4 D4 = shadowIn[rayId].D;
 		const float3 rD = native_recip( D4.xyz );
-		if (isoccluded_cwbvh( cwbvhNodes, cwbvhTris, O4.xyz, D4.xyz, rD, D4.w )) continue;
-	#endif
+		if (isoccluded( bvhNodes, bvhTris, 0, O4.xyz, D4.xyz, rD, D4.w )) continue;
 		accumulator[as_uint( O4.w )] += T4;
 	}
 }

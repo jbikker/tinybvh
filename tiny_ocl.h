@@ -1,4 +1,4 @@
-/*
+﻿/*
 The MIT License (MIT)
 
 Copyright (c) 2024-2026, Jacco Bikker / Breda University of Applied Sciences.
@@ -22,6 +22,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
+// Aug 31, '26: version 0.3.4 : Dead code removal; include and version fixes.
+// Aug 31, '26: version 0.3.3 : Interop detection, buffer cleanup, leak fixes.
+// Aug 29, '26: version 0.3.2 : Device query and teardown fixes.
+// Aug 29, '26: version 0.3.1 : Stability fixes; synced aligned alloc with tinybvh.
 // Jun 07, '26: version 0.3.0 : Upgraded to latest OpenCL version.
 // Mar 03, '25: version 0.2.0 : MacOS support, by wuyakuma.
 // Nov 18, '24: version 0.1.1 : Added custom alloc/free.
@@ -40,64 +44,72 @@ THE SOFTWARE.
 #ifndef TINY_OCL_H_
 #define TINY_OCL_H_
 
-#define CL_TARGET_OPENCL_VERSION 310
+#ifndef CL_TARGET_OPENCL_VERSION
+// note: valid values are 100, 110, 120, 200, 210, 220 and 300.
+#define CL_TARGET_OPENCL_VERSION 300
+#endif
+#if CL_TARGET_OPENCL_VERSION < 200
+// tiny_ocl uses clCreateCommandQueueWithProperties.
+#error "tiny_ocl requires CL_TARGET_OPENCL_VERSION >= 200."
+#endif
 #ifdef __APPLE__
 #include <OpenCL/cl.h>  // use with -framework OpenCL
 #else
 #include <cl.h>
 #endif
 #include <vector>
+#include <stdlib.h> // for posix_memalign / free
+#include <stdint.h> // for SIZE_MAX
+#ifdef _WIN32 // MSVC / MinGW / clang-cl: _aligned_malloc lives here.
+#include <malloc.h>
+#endif
 
 // aligned memory allocation
-// note: formally, size needs to be a multiple of 'alignment', see:
-// https://en.cppreference.com/w/c/memory/aligned_alloc.
-// EMSCRIPTEN enforces this.
-// Copy of the same construct in tinybvh, in a different namespace.
-namespace tinyocl {
-inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alignment - 1)) & ~(alignment - 1); }
-#ifndef _ALIGNED_ALLOC
-#ifdef _MSC_VER // Visual Studio / C11
+#if defined(TINYOCL_ALIGNED_ALLOC) != defined(TINYOCL_ALIGNED_FREE)
+#error "Define both TINYOCL_ALIGNED_ALLOC and TINYOCL_ALIGNED_FREE, or neither."
+#endif
+#ifndef ALIGNED
+#ifdef _MSC_VER
 #define ALIGNED( x ) __declspec( align( x ) )
-#define _ALIGNED_ALLOC(alignment,size) _aligned_malloc( make_multiple_of( size, alignment ), alignment )
-#define _ALIGNED_FREE(ptr) _aligned_free( ptr )
-#else // EMSCRIPTEN / gcc / clang / Android
+#else
 #define ALIGNED( x ) __attribute__( ( aligned( x ) ) )
-#if !defined TINYBVH_NO_SIMD && (defined __x86_64__ || defined _M_X64 || defined __wasm_simd128__ || defined __wasm_relaxed_simd__)
-#include <xmmintrin.h>
-#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment )
-#define _ALIGNED_FREE(ptr) _mm_free( ptr )
-#elif defined(__ANDROID__)
-#include <malloc.h>
-#include <android/api-level.h>
-// Android API 28+ supports aligned_alloc, but older versions (like API 24) 
-// require memalign for aligned memory.
-#if defined(__ANDROID_API__) && (__ANDROID_API__ >= 28) // Modern Android (9.0+)
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
-#else // Legacy Android
-#define _ALIGNED_ALLOC(alignment,size) memalign( alignment, make_multiple_of( size, alignment ) )
 #endif
-#define _ALIGNED_FREE(ptr) free( ptr )
-#elif defined(__EMSCRIPTEN__) || defined(__APPLE__) || defined(__aarch64__)
-// Emscripten and Apple strictly follow C11 aligned_alloc
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
-#define _ALIGNED_FREE(ptr) free( ptr )
-#elif defined(__GNUC__)
-#ifdef __linux__
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
+#endif
+#define TINYOCL_ALIGNED( x ) ALIGNED( x ) // prefixed alias; 'ALIGNED' may collide.
+namespace tinyocl {
+// Round 'x' up to a multiple of 'alignment', which must be a power of two.
+inline size_t make_multiple_of( size_t x, size_t alignment )
+{
+	if (x > SIZE_MAX - (alignment - 1)) return 0; // would overflow
+	return (x + (alignment - 1)) & ~(alignment - 1);
+}
+inline void* malloc64( size_t size, void* = nullptr )
+{
+	if (size == 0) return nullptr;
+	size = make_multiple_of( size, 64 );
+	if (size == 0) return nullptr; // overflowed in make_multiple_of
+#ifdef TINYOCL_ALIGNED_ALLOC
+	return TINYOCL_ALIGNED_ALLOC( 64, size );
+#elif defined _WIN32 // MSVC / MinGW / clang-cl: the CRT provides _aligned_malloc.
+	return _aligned_malloc( size, 64 );
+#else // Linux, Apple, Android, Emscripten, other Unices; 32-bit and 64-bit.
+	// posix_memalign rather than C11 aligned_alloc: the latter isn't declared by
+	// glibc < 2.27 in strict C++ mode and is macOS 10.15+ / iOS 13+ only.
+	void* ptr = nullptr;
+	return posix_memalign( &ptr, 64, size ) == 0 ? ptr : nullptr;
+#endif
+}
+inline void free64( void* ptr, void* = nullptr )
+{
+#ifdef TINYOCL_ALIGNED_FREE
+	TINYOCL_ALIGNED_FREE( ptr );
+#elif defined _WIN32
+	_aligned_free( ptr );
 #else
-#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment );
+	free( ptr );
 #endif
-#define _ALIGNED_FREE(ptr) free( ptr )
-#else
-// Fallback
-#define _ALIGNED_ALLOC(alignment,size) malloc( size )
-#define _ALIGNED_FREE(ptr) free( ptr )
-#endif
-#endif
-#endif
-inline void* malloc64( size_t size, void* = nullptr ) { return size == 0 ? 0 : _ALIGNED_ALLOC( 64, size ); }
-inline void free64( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
-}; // namespace tiyocl
+}
+}; // namespace tinyocl
 
 namespace tinyocl {
 
@@ -146,9 +158,11 @@ class Buffer
 public:
 	enum { DEFAULT = 0, TEXTURE = 8, TARGET = 16, READONLY = 1, WRITEONLY = 2 };
 	// constructor / destructor
-	Buffer() : hostBuffer( 0 ) {}
+	Buffer() = default;
 	Buffer( unsigned int N, void* ptr = 0, unsigned int t = DEFAULT );
 	~Buffer();
+	Buffer( const Buffer& ) = delete;
+	Buffer& operator=( const Buffer& ) = delete;
 	cl_mem* GetDevicePtr() { return &deviceBuffer; }
 	unsigned int* GetHostPtr();
 	void CopyToDevice( const bool blocking = true );
@@ -161,10 +175,12 @@ public:
 private:
 	// data members
 public:
-	unsigned int* hostBuffer;
+	// note: all members are initialized here; a default-constructed Buffer used
+	// to leave size/type/ownData indeterminate, which the destructor then read.
+	unsigned int* hostBuffer = 0;
 	cl_mem deviceBuffer = 0;
-	unsigned int type, size /* in bytes */, textureID;
-	bool ownData, aligned;
+	unsigned int type = DEFAULT, size = 0 /* in bytes */, textureID = 0;
+	bool ownData = false;
 };
 
 // OpenCL kernel
@@ -176,6 +192,8 @@ public:
 	Kernel( const char* file, const char* entryPoint );
 	Kernel( cl_program& existingProgram, char* entryPoint );
 	~Kernel();
+	Kernel( const Kernel& ) = delete;
+	Kernel& operator=( const Kernel& ) = delete;
 	// get / set
 	cl_kernel& GetKernel() { return kernel; }
 	cl_program& GetProgram() { return program; }
@@ -183,7 +201,6 @@ public:
 	static cl_command_queue& GetQueue2() { return queue2; }
 	static cl_context& GetContext() { return context; }
 	static cl_device_id& GetDevice() { return device; }
-	static OpenCL ocl;
 	// run methods
 #if 1
 	void Run( cl_event* eventToWaitFor = 0, cl_event* eventToSet = 0 );
@@ -353,7 +370,7 @@ private:
 			// probably int3 / float3; pad to 16 bytes
 			unsigned tmp[4] = {};
 			memcpy( tmp, &value, 12 );
-			clSetKernelArg( kernel, idx, 16, &value );
+			clSetKernelArg( kernel, idx, 16, &tmp );
 		}
 		else
 		{
@@ -370,9 +387,8 @@ private:
 	// data members
 	char* sourceFile = 0;
 	Buffer* acqBuffer = 0;
-	cl_kernel kernel;
-	cl_mem vbo_cl;
-	cl_program program;
+	cl_kernel kernel = 0;
+	cl_program program = 0;
 	inline static cl_device_id device;
 	inline static cl_context context; // simplifies some things, but limits us to one device
 	inline static cl_command_queue queue, queue2;
@@ -386,7 +402,7 @@ public:
 	inline static bool candoInterop = false, clStarted = false;
 };
 
-} // namespace tinybvh
+} // namespace tinyocl
 
 #endif // TINY_OCL_H_
 
@@ -411,6 +427,8 @@ using namespace std;
 using namespace tinyocl;
 
 #include <stdarg.h>
+#include <stdlib.h> // EXIT_FAILURE
+#include <string.h> // memset, strlen, strstr
 #ifdef _MSC_VER
 #include <direct.h>
 #define getcwd _getcwd
@@ -432,9 +450,10 @@ void FatalError( const char* fmt, ... )
 #if defined _WINDOWS_ && !defined SKIP_MESSAGEBOXA // i.e., windows.h has been included.
 	MessageBoxA( NULL, t, "Fatal error", MB_OK );
 #else
-	fprintf( stderr, t );
+	fprintf( stderr, "%s\n", t );
+	fflush( stderr );
 #endif
-	while (1) exit( 0 );
+	exit( EXIT_FAILURE );
 }
 
 static string ReadTextFile( const char* _File )
@@ -590,7 +609,6 @@ Buffer::Buffer( unsigned int N, void* ptr, unsigned int t )
 	int rwFlags = CL_MEM_READ_WRITE;
 	if (t & READONLY) rwFlags = CL_MEM_READ_ONLY;
 	if (t & WRITEONLY) rwFlags = CL_MEM_WRITE_ONLY;
-	aligned = false;
 	if ((t & (TEXTURE | TARGET)) == 0)
 	{
 		size = N;
@@ -600,11 +618,12 @@ Buffer::Buffer( unsigned int N, void* ptr, unsigned int t )
 	}
 	else
 	{
+		size = 0; // a texture buffer has no host-side byte count
 		textureID = N; // representing texture N
-		if (!Kernel::candoInterop) FatalError( "didn't expect to get here." );
+		if (!Kernel::candoInterop) FatalError( "Texture/target buffers require OpenGL interop;\nbuild with TINY_OCL_GLINTEROP defined." );
 		int error = 0;
 	#ifdef TINY_OCL_GLINTEROP
-		if (t == TARGET) deviceBuffer = clCreateFromGLTexture( Kernel::GetContext(), CL_MEM_WRITE_ONLY, GL_TEXTURE_2D, 0, N, &error );
+		if (t & TARGET) deviceBuffer = clCreateFromGLTexture( Kernel::GetContext(), CL_MEM_WRITE_ONLY, GL_TEXTURE_2D, 0, N, &error );
 		else deviceBuffer = clCreateFromGLTexture( Kernel::GetContext(), CL_MEM_READ_ONLY, GL_TEXTURE_2D, 0, N, &error );
 	#endif
 		CHECKCL( error );
@@ -616,14 +635,15 @@ Buffer::Buffer( unsigned int N, void* ptr, unsigned int t )
 // ----------------------------------------------------------------------------
 Buffer::~Buffer()
 {
-	if (size > 0)
-	{
 		if (ownData)
 		{
 			OpenCL::GetInstance()->AlignedFree( hostBuffer );
 			hostBuffer = 0;
 		}
-		if ((type & (TEXTURE | TARGET)) == 0) clReleaseMemObject( deviceBuffer );
+	if (deviceBuffer)
+	{
+		clReleaseMemObject( deviceBuffer );
+		deviceBuffer = 0;
 	}
 }
 
@@ -636,7 +656,6 @@ unsigned int* Buffer::GetHostPtr()
 	{
 		hostBuffer = (unsigned*)OpenCL::GetInstance()->AlignedAlloc( size );
 		ownData = true;
-		aligned = true;
 	}
 	return hostBuffer;
 }
@@ -651,7 +670,6 @@ void Buffer::CopyToDevice( const bool blocking )
 	{
 		hostBuffer = (unsigned*)OpenCL::GetInstance()->AlignedAlloc( size );
 		ownData = true;
-		aligned = true;
 	}
 	CHECKCL( error = clEnqueueWriteBuffer( Kernel::GetQueue(), deviceBuffer, blocking, 0, size, hostBuffer, 0, 0, 0 ) );
 }
@@ -663,7 +681,6 @@ void Buffer::CopyToDevice( const int offset, const int byteCount, const bool blo
 	{
 		hostBuffer = (unsigned*)OpenCL::GetInstance()->AlignedAlloc( size );
 		ownData = true;
-		aligned = true;
 	}
 	CHECKCL( error = clEnqueueWriteBuffer( Kernel::GetQueue(), deviceBuffer, blocking, offset, byteCount, hostBuffer, 0, 0, 0 ) );
 }
@@ -674,6 +691,11 @@ void Buffer::CopyToDevice2( const bool blocking, cl_event* eventToSet, const siz
 {
 	if (size == 0) return;
 	cl_int error;
+	if (!hostBuffer)
+	{
+		hostBuffer = (unsigned*)OpenCL::GetInstance()->AlignedAlloc( size );
+		ownData = true;
+	}
 	CHECKCL( error = clEnqueueWriteBuffer( Kernel::GetQueue2(), deviceBuffer, blocking ? CL_TRUE : CL_FALSE, 0, s == 0 ? size : s, hostBuffer, 0, 0, eventToSet ) );
 }
 
@@ -687,7 +709,6 @@ void Buffer::CopyFromDevice( const bool blocking )
 	{
 		hostBuffer = (unsigned*)OpenCL::GetInstance()->AlignedAlloc( size );
 		ownData = true;
-		aligned = true;
 	}
 	CHECKCL( error = clEnqueueReadBuffer( Kernel::GetQueue(), deviceBuffer, blocking, 0, size, hostBuffer, 0, 0, 0 ) );
 }
@@ -699,7 +720,6 @@ void Buffer::CopyFromDevice( const int offset, const int byteCount, const bool b
 	{
 		hostBuffer = (unsigned*)OpenCL::GetInstance()->AlignedAlloc( size );
 		ownData = true;
-		aligned = true;
 	}
 	CHECKCL( error = clEnqueueReadBuffer( Kernel::GetQueue(), deviceBuffer, blocking, offset, byteCount, hostBuffer, 0, 0, 0 ) );
 }
@@ -767,6 +787,7 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 	sourceFile = new char[strlen( file ) + 1];
 	strcpy( sourceFile, file );
 	string csText = ReadTextFile( fileName );
+	delete[] dir; // note: fileName points into dir; neither is valid past here
 	if (csText.size() == 0) FatalError( "File %s not found", file );
 	// add vendor defines
 	vendorLines = 0;
@@ -840,49 +861,66 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 	// handle errors
 	if (error == CL_SUCCESS)
 	{
+	#ifdef TINY_OCL_DUMP_BINARIES
 		// dump PTX via: https://forums.developer.nvidia.com/t/pre-compiling-opencl-kernels-tutorial/17089
 		// and: https://stackoverflow.com/questions/12868889/clgetprograminfo-cl-program-binary-sizes-incorrect-results
-		cl_uint devCount;
+		cl_uint devCount = 0;
 		CHECKCL( clGetProgramInfo( program, CL_PROGRAM_NUM_DEVICES, sizeof( cl_uint ), &devCount, NULL ) );
-		size_t* sizes = new size_t[devCount];
-		sizes[0] = 0;
-		size_t received;
-		CHECKCL( clGetProgramInfo( program, CL_PROGRAM_BINARY_SIZES /* wrong data... */, devCount * sizeof( size_t ), sizes, &received ) );
-		char** binaries = new char* [devCount];
-		for (unsigned i = 0; i < devCount; i++)
-			binaries[i] = new char[sizes[i] + 1];
-		CHECKCL( clGetProgramInfo( program, CL_PROGRAM_BINARIES, devCount * sizeof( size_t ), binaries, NULL ) );
-		FILE* f = fopen( "buildlog.txt", "wb" );
-		for (unsigned i = 0; i < devCount; i++)
-			fwrite( binaries[i], 1, sizes[i] + 1, f );
-		fclose( f );
+		if (devCount > 0)
+		{
+			size_t* sizes = new size_t[devCount]();
+			CHECKCL( clGetProgramInfo( program, CL_PROGRAM_BINARY_SIZES, devCount * sizeof( size_t ), sizes, NULL ) );
+			unsigned char** binaries = new unsigned char* [devCount]();
+			for (cl_uint i = 0; i < devCount; i++) binaries[i] = new unsigned char[sizes[i] + 1]();
+			// note: CL_PROGRAM_BINARIES receives an array of *pointers*.
+			CHECKCL( clGetProgramInfo( program, CL_PROGRAM_BINARIES, devCount * sizeof( unsigned char* ), binaries, NULL ) );
+			FILE* f = fopen( "binaries.bin", "wb" );
+			if (f) // may fail: we chdir'ed into the kernel folder, which can be read-only.
+			{
+				// note: sizes[i], not sizes[i] + 1; the driver fills exactly sizes[i] bytes.
+				for (cl_uint i = 0; i < devCount; i++) fwrite( binaries[i], 1, sizes[i], f );
+				fclose( f );
+			}
+			for (cl_uint i = 0; i < devCount; i++) delete[] binaries[i];
+			delete[] binaries;
+			delete[] sizes;
+		}
+	#endif
 	}
 	else
 	{
 		// obtain the error log from the cl compiler
-		if (!log) log = new char[256 * 1024]; // can be quite large
-		log[0] = 0;
-		clGetProgramBuildInfo( program, getFirstDevice( context ), CL_PROGRAM_BUILD_LOG, 256 * 1024, log, &size );
+		size_t logSize = 0;
+		clGetProgramBuildInfo( program, getFirstDevice( context ), CL_PROGRAM_BUILD_LOG, 0, 0, &logSize );
+		delete[] log;
+		log = new char[logSize + 4096];
+		memset( log, 0, logSize + 4096 );
+		if (logSize > 0)
+			clGetProgramBuildInfo( program, getFirstDevice( context ), CL_PROGRAM_BUILD_LOG, logSize, log, 0 );
+		log[logSize] = 0;
 		// save error log for closer inspection
 		FILE* f = fopen( "errorlog.txt", "wb" );
-		fwrite( log, 1, size, f );
-		fclose( f );
+		if (f) // may fail: we chdir'ed into the kernel folder, which can be read-only.
+		{
+			fwrite( log, 1, strlen( log ), f );
+			fclose( f );
+		}
 	#if 0
 		// find and display the first errormat; just dump it to a window
 		log[2048] = 0; // truncate very long logs
-		FatalError( log, "Build error" );
+		FatalError( "%s", log );
 	#else
 		// find and display the first error. Note: platform specific sadly; code below is for NVIDIA
 		char* errorString = strstr( log, ": error:" );
 		if (errorString)
 		{
-			int errorPos = (int)(errorString - log);
+			size_t errorPos = (size_t)(errorString - log);
 			while (errorPos > 0) if (log[errorPos - 1] == '\n') break; else errorPos--;
 			// translate file and line number of error and report
 			log[errorPos + 2048] = 0;
 			int lineNr = 0, linePos = 0;
 			char* lns = strstr( log + errorPos, ">:" ), * eol;
-			if (!lns) FatalError( log + errorPos ); else
+			if (!lns) FatalError( "%s", log + errorPos ); else
 			{
 				lns += 2;
 				while (*lns >= '0' && *lns <= '9') lineNr = lineNr * 10 + (*lns++ - '0');
@@ -890,7 +928,7 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 				while (*lns >= '0' && *lns <= '9') linePos = linePos * 10 + (*lns++ - '0');
 				lns += 9; // proceed to error message
 				eol = lns;
-				while (*eol != '\n' && *eol > 0) eol++;
+				while (*eol != '\n' && *eol != 0) eol++;
 				*eol = 0;
 				lineNr--; // we count from 0 instead of 1
 				// adjust file and linenr based on include file data
@@ -915,15 +953,15 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 				// present error message
 				char t[1024];
 				snprintf( t, 1024, "file %s, line %i, pos %i:\n%s", errorFile.c_str(), lineNr + 1, linePos, lns );
-				FatalError( t, "Build error" );
+				FatalError( "%s", t );
 			}
 		}
 		else
 		{
 			// error string has unknown format; just dump it to a window
 			log[2048] = 0; // truncate very long logs
-			if (!log[0]) snprintf( log, 2048, "Failed to build entry point %s in %s", entryPoint, file ); 
-			FatalError( log, "Build error" );
+			if (!log[0]) snprintf( log, 2048, "Failed to build entry point %s in %s", entryPoint, file );
+			FatalError( "%s", log );
 		}
 	#endif
 	}
@@ -949,10 +987,16 @@ Kernel::Kernel( cl_program& existingProgram, char* entryPoint )
 // ----------------------------------------------------------------------------
 Kernel::~Kernel()
 {
+	// remove ourselves from the source file cache before dying
+	for (int s = (int)loadedKernels.size(), i = 0; i < s; i++) if (loadedKernels[i] == this)
+	{
+		loadedKernels.erase( loadedKernels.begin() + i );
+		break;
+	}
 	if (kernel) clReleaseKernel( kernel );
-	// if (program) clReleaseProgram( program ); // NOTE: may be shared with other kernels
 	kernel = 0;
-	// program = 0;
+	delete[] sourceFile;
+	sourceFile = 0;
 }
 
 // InitCL method
@@ -981,9 +1025,10 @@ bool Kernel::InitCL()
 		{
 			char* extensions = (char*)malloc( extensionSize );
 			CHECKCL( error = clGetDeviceInfo( devices[i], CL_DEVICE_EXTENSIONS, extensionSize, extensions, &extensionSize ) );
-			string deviceList( extensions );
+			// pad with spaces so the first and last name in the list match too
+			string deviceList = " " + string( extensions ) + " ";
 			free( extensions );
-			string mustHave[] = {
+			const string mustHave[] = {
 #if defined(__APPLE__) && defined(__MACH__)
 				"cl_APPLE_gl_sharing",
 #else
@@ -992,18 +1037,8 @@ bool Kernel::InitCL()
 				"cl_khr_global_int32_base_atomics"
 			};
 			bool hasAll = true;
-			for (int j = 0; j < 2; j++)
-			{
-				size_t o = 0, s = deviceList.find( ' ', o );
-				bool hasFeature = false;
-				while (s != deviceList.npos)
-				{
-					string subs = deviceList.substr( o, s - o );
-					if (strcmp( mustHave[j].c_str(), subs.c_str() ) == 0) hasFeature = true;
-					do { o = s + 1, s = deviceList.find( ' ', o ); } while (s == o);
-				}
-				if (!hasFeature) hasAll = false;
-			}
+			for (size_t j = 0; j < sizeof( mustHave ) / sizeof( mustHave[0] ); j++)
+				if (deviceList.find( " " + mustHave[j] + " " ) == string::npos) hasAll = false;
 			if (hasAll)
 			{
 				cl_context_properties props[] =
@@ -1018,7 +1053,9 @@ bool Kernel::InitCL()
 				context = clCreateContext( props, 1, &devices[i], NULL, NULL, &error );
 				if (error == CL_SUCCESS)
 				{
+				#ifdef TINY_OCL_GLINTEROP
 					candoInterop = true;
+				#endif
 					deviceUsed = i;
 					break;
 				}
@@ -1032,15 +1069,15 @@ bool Kernel::InitCL()
 	// print device name
 	clGetDeviceInfo( devices[deviceUsed], CL_DEVICE_NAME, 1024, &device_string, NULL );
 	clGetDeviceInfo( devices[deviceUsed], CL_DEVICE_VERSION, 1024, &device_platform, NULL );
-	printf( "Device # %u, %s (%s)\n", deviceUsed, device_string, device_platform );
+	printf( "Device # %i, %s (%s)\n", deviceUsed, device_string, device_platform );
 	// print compute unit count
-	size_t computeUnits;
-	clGetDeviceInfo( devices[deviceUsed], CL_DEVICE_MAX_COMPUTE_UNITS, sizeof( size_t ), &computeUnits, NULL );
-	printf( "Compute units / SM count: %iKB\n", (int)computeUnits );
+	cl_uint computeUnits = 0;
+	clGetDeviceInfo( devices[deviceUsed], CL_DEVICE_MAX_COMPUTE_UNITS, sizeof( cl_uint ), &computeUnits, NULL );
+	printf( "Compute units / SM count: %u\n", computeUnits );
 	// print local memory size
-	size_t localMem;
-	clGetDeviceInfo( devices[deviceUsed], CL_DEVICE_LOCAL_MEM_SIZE, sizeof( size_t ), &localMem, NULL );
-	printf( "Local memory size: %iKB\n", (int)localMem >> 10 );
+	cl_ulong localMem = 0;
+	clGetDeviceInfo( devices[deviceUsed], CL_DEVICE_LOCAL_MEM_SIZE, sizeof( cl_ulong ), &localMem, NULL );
+	printf( "Local memory size: %uKB\n", (unsigned)(localMem >> 10) );
 	// digest device string
 	char* d = device_string;
 	for (int l = (int)strlen( d ), i = 0; i < l; i++) if (d[i] >= 'A' && d[i] <= 'Z') d[i] -= 'A' - 'a';
@@ -1084,7 +1121,8 @@ bool Kernel::InitCL()
 			if (strstr( d, "titan x" )) isPascal = true;
 		}
 	}
-	else if (strstr( d, "amd" ) || strstr( d, "ellesmere" ) || strstr( d, "AMD" ) || strstr( d, "RDNA" ) ||
+	// note: d has been lowercased above.
+	else if (strstr( d, "amd" ) || strstr( d, "ellesmere" ) || strstr( d, "rdna" ) ||
 		strstr( d, "gfx11" ) || strstr( d, "gfx10" ) || strstr( d, "gfx9" ) || strstr( d, "gfx8" ))
 	{
 		isAMD = true;
@@ -1158,9 +1196,21 @@ bool Kernel::InitCL()
 void Kernel::KillCL()
 {
 	if (!clStarted) return;
+	// release the cached programs
+	for (int s = (int)loadedKernels.size(), i = 0; i < s; i++) clReleaseProgram( loadedKernels[i]->program );
+	loadedKernels.clear();
 	clReleaseCommandQueue( queue2 );
 	clReleaseCommandQueue( queue );
 	clReleaseContext( context );
+	queue = 0, queue2 = 0, context = 0, device = 0;
+	delete[] log;
+	log = 0;
+	// reset detection state so a subsequent InitCL starts from scratch
+	isNVidia = isAMD = isIntel = isApple = isOther = false;
+	isAmpere = isTuring = isPascal = false;
+	isAda = isBlackwell = isRubin = isHopper = false;
+	candoInterop = false, vendorLines = 0;
+	clStarted = false;
 }
 
 // CheckCLStarted method

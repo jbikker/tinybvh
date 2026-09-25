@@ -4,8 +4,8 @@
 #include "windows.h"
 
 #ifdef ENABLE_OPENCL
-extern tinyocl::Kernel* ailalaine_kernel;
-extern tinyocl::Kernel* ailalaine_kernel_any;
+extern tinyocl::Kernel* kernel_nearest;
+extern tinyocl::Kernel* kernel_any;
 extern tinyocl::Kernel* gpu4way_kernel;
 extern tinyocl::Kernel* gpu4way_kernel_any;
 extern tinyocl::Kernel* cwbvh_kernel;
@@ -15,6 +15,8 @@ cl_ulong startTime, endTime;
 tinyocl::Buffer* gpuRayData = 0;
 #endif
 
+void InitDXR();
+
 extern FILE* csv;
 
 namespace tinybvh
@@ -22,7 +24,7 @@ namespace tinybvh
 
 extern RTCScene embreeScene;
 
-Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays, ExperimentFlags expFlags, const char* view )
+Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays, ExperimentFlags expFlags, const char* view, const char* rayFile )
 {
 	if (rays == RaySet::UNSPECIFIED)
 	{
@@ -50,9 +52,12 @@ Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, Ra
 		bvh = new AccStruc( layout, buildFlags ); // actual construction is postponed until ::Run.
 		// Create description.
 		title = new char[1024];
-		snprintf( title, 1024, "BVH TRACE%s - %s - %s (%ik tris) - %s",
-			(flags & MULTICORE) ? " (MT)" : ((flags & USE_GPU) ? " (GPU)" : ""),
-			bvh->GetDescription(),
+		char features[128] = "";
+		if (flags & MULTICORE) if (flags & PACKETS) strncpy( features, " (MT/packets)", 100 ); else strncpy( features, " (MT)", 100 );
+		else if (flags & USE_GPU) strncpy( features, " (GPU)", 100 ); 
+		else if (flags & PACKETS) strncpy( features, " (packets)", 100 ); 
+		snprintf( title, 1024, "BVH TRACE%s - %s - %s (%ik tris) - %s", 
+			features, bvh->GetDescription(),
 			cachedPrimSet[primSet]->GetDescription(),
 			cachedPrimSet[primSet]->primCount / 1000,
 			cachedRaySet[raySet]->GetDescription() );
@@ -62,6 +67,11 @@ Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, Ra
 		{
 			tgaFile = new char[512];
 			strncpy( tgaFile, view, 512 );
+		}
+		// Save the set of rays if requested.
+		if (rayFile)
+		{
+			cachedRaySet[raySet]->WriteToFile( rayFile );
 		}
 	}
 }
@@ -98,7 +108,9 @@ void Experiment::RunTraceExperiment()
 	// write experiment settings to csv
 	if (csv)
 	{
-		if (flags & USE_GPU) fprintf( csv, "gpu," ); else if (flags & MULTICORE) fprintf( csv, "cpu (MT)," ); else fprintf( csv, "cpu," );
+		if (flags & USE_GPU) fprintf( csv, "gpu," ); 
+		else if (flags & MULTICORE) fprintf( csv, (flags & PACKETS) ? "cpu (MT/packets)" : "cpu (MT)" ); 
+		else fprintf( csv, (flags & PACKETS) ? "cpu (packets)" : "cpu," );
 		fprintf( csv, "%s,%i,", cachedPrimSet[primSet]->shrt, cachedPrimSet[primSet]->primCount );
 		fprintf( csv, "%s,%s,", bvh->shrt, bvh->flagShrt );
 		fprintf( csv, "%s,", cachedRaySet[raySet]->shrt );
@@ -115,7 +127,7 @@ void Experiment::RunTraceExperiment()
 		Ray r( O[i] + D[i] * tmin[i], D[i], tmax[i] - tmin[i] );
 		Ray s( O[i] + D[i] * tmin[i], D[i], tmax[i] - tmin[i] );
 		memcpy( extensionRays + 64 * i, &r, 64 );
-		memcpy( shadowRays + 64 * i, &r, 64 );
+		memcpy( shadowRays + 64 * i, &s, 64 );
 	}
 	// trace extension rays
 	float traceTime, raysPerSecond;
@@ -184,7 +196,16 @@ void Experiment::RunTraceExperiment()
 			t.reset();
 			while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
 			{
-				if (flags & MULTICORE) bvh->IntersectBatchMT( extensionRays, N ); else bvh->IntersectBatch( extensionRays, N );
+				if (flags & MULTICORE) 
+				{
+					if (flags & PACKETS) bvh->IntersectBatchMTPackets( extensionRays, N ); 
+					else bvh->IntersectBatchMT( extensionRays, N ); 
+				}
+				else 
+				{
+					if (flags & PACKETS) bvh->IntersectBatchPackets( extensionRays, N );
+					else bvh->IntersectBatch( extensionRays, N );
+				}
 				runs++;
 			}
 			traceTime = t.elapsed() * (1.0f / runs); // average of runs.
@@ -267,7 +288,16 @@ void Experiment::RunTraceExperiment()
 				t.reset();
 				while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
 				{
-					if (flags & MULTICORE) bvh->OcclusionBatchMT( extensionRays, N ); else bvh->OcclusionBatch( shadowRays, N );
+					if (flags & MULTICORE) 
+					{
+						if (flags & PACKETS) bvh->OcclusionBatchMTPackets( shadowRays, N ); 
+						else bvh->OcclusionBatchMT( shadowRays, N ); 
+					}
+					else 
+					{
+						if (flags & PACKETS) bvh->OcclusionBatchPackets( shadowRays, N );
+						else bvh->OcclusionBatch( shadowRays, N );
+					}
 					runs++;
 				}
 				traceTime = t.elapsed() * (1.0f / runs); // average of runs.
@@ -369,10 +399,8 @@ float Experiment::RunGPU_BVH2( char* raySet, const int N, const char* tgaFile )
 	BVH_GPU* bvh_gpu = (BVH_GPU*)bvh->GetBVH();
 	// create OpenCL buffers for the BVH data calculated by tiny_bvh.h
 	tinyocl::Buffer gpuNodes( bvh_gpu->usedNodes * sizeof( BVH_GPU::BVHNode ), bvh_gpu->bvhNode );
-	tinyocl::Buffer idxData( bvh_gpu->idxCount * sizeof( unsigned ), bvh_gpu->bvh.primIdx );
-	tinyocl::Buffer triData( cachedPrimSet[primSet]->primCount * sizeof( tinybvh::bvhvec4 ) * 3, cachedPrimSet[primSet]->verts );
+	tinyocl::Buffer triData( bvh_gpu->idxCount * sizeof( tinybvh::bvhvec4 ) * 3, (bvhvec4*)bvh_gpu->orderedVerts.data );
 	gpuNodes.CopyToDevice();
-	idxData.CopyToDevice();
 	triData.CopyToDevice();
 	// create rays and send them to the gpu side
 	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
@@ -380,12 +408,12 @@ float Experiment::RunGPU_BVH2( char* raySet, const int N, const char* tgaFile )
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
-	ailalaine_kernel->SetArguments( &gpuNodes, &idxData, &triData, gpuRayData );
+	kernel_nearest->SetArguments( &gpuNodes, &triData, gpuRayData );
 	int runs = 0;
 	for (int pass = 0; pass < 50; pass++)
 	{
 		gpuRayData->CopyToDevice();
-		ailalaine_kernel->Run( N * 8, 64, 0, &event );
+		kernel_nearest->Run( N * 8, 64, 0, &event );
 		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );
@@ -403,10 +431,8 @@ float Experiment::RunGPU_BVH2_Any( char* raySet, const int N )
 	BVH_GPU* bvh_gpu = (BVH_GPU*)bvh->GetBVH();
 	// create OpenCL buffers for the BVH data calculated by tiny_bvh.h
 	tinyocl::Buffer gpuNodes( bvh_gpu->usedNodes * sizeof( BVH_GPU::BVHNode ), bvh_gpu->bvhNode );
-	tinyocl::Buffer idxData( bvh_gpu->idxCount * sizeof( unsigned ), bvh_gpu->bvh.primIdx );
-	tinyocl::Buffer triData( cachedPrimSet[primSet]->primCount * 3 * sizeof( tinybvh::bvhvec4 ), cachedPrimSet[primSet]->verts );
+	tinyocl::Buffer triData( bvh_gpu->idxCount *  3 * sizeof( tinybvh::bvhvec4 ), (bvhvec4*)bvh_gpu->orderedVerts.data );
 	gpuNodes.CopyToDevice();
-	idxData.CopyToDevice();
 	triData.CopyToDevice();
 	// create rays and send them to the gpu side
 	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
@@ -414,12 +440,12 @@ float Experiment::RunGPU_BVH2_Any( char* raySet, const int N )
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
-	ailalaine_kernel_any->SetArguments( &gpuNodes, &idxData, &triData, gpuRayData );
+	kernel_any->SetArguments( &gpuNodes, &triData, gpuRayData );
 	int runs = 0;
 	for (int pass = 0; pass < 50; pass++)
 	{
 		gpuRayData->CopyToDevice();
-		ailalaine_kernel_any->Run( N * 8, 64, 0, &event );
+		kernel_any->Run( N * 8, 64, 0, &event );
 		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );

@@ -32,8 +32,9 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		bvh->settings.useFullSweep = false;
 		bvh->settings.useSIMDifavailable = false;
 		if (flags & BuildFlags::FULLSWEEP) bvh->settings.useFullSweep = true;
+		// if (flags & BuildFlags::LBVH) bvh->settings.useLBVH = true;
 		if (flags & BuildFlags::PRESPLIT) bvh->settings.usePresplitting = true;
-		if (flags & BuildFlags::AVXBUILD) bvh->settings.useSIMDifavailable = true;
+		if (flags & BuildFlags::SIMDBUILD) bvh->settings.useSIMDifavailable = true;
 		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
 	}
 	// fix flags for Embree / Madmann91
@@ -111,9 +112,10 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 	while (f != BuildFlags::NO_FLAGS)
 	{
 		if (first) strncat( desc, " (", 100 ); else { strncat( desc, " + ", 100 ); strncat( flagShrt, "+", 32 ); }
-		if (f & BuildFlags::AVXBUILD) { strncat( desc, "AVX builder", 100 ); strncat( flagShrt, "A", 32 ); f -= BuildFlags::AVXBUILD; }
+		if (f & BuildFlags::SIMDBUILD) { strncat( desc, "SIMD builder", 100 ); strncat( flagShrt, "A", 32 ); f -= BuildFlags::SIMDBUILD; }
 		else if (f & BuildFlags::INDEXED) { strncat( desc, "indexed", 100 ); strncat( flagShrt, "I", 32 ); f -= BuildFlags::INDEXED; }
 		else if (f & BuildFlags::FULLSWEEP) { strncat( desc, "full-sweep", 100 ); strncat( flagShrt, "F", 32 ); f -= BuildFlags::FULLSWEEP; }
+		else if (f & BuildFlags::LBVH) { strncat( desc, "LBVH", 100 ); strncat( flagShrt, "L", 32 ); f -= BuildFlags::LBVH; }
 		else if (f & BuildFlags::SPATIALSPLITS) { strncat( desc, "SBVH", 100 ); strncat( flagShrt, "S", 32 ); f -= BuildFlags::SPATIALSPLITS; }
 		else if (f & BuildFlags::PRESPLIT) { strncat( desc, "presplit", 100 ); strncat( flagShrt, "P", 32 ); f -= BuildFlags::PRESPLIT; }
 		else if (f & BuildFlags::OPTIMIZE) { strncat( desc, "optimize", 100 ); strncat( flagShrt, "O", 32 ); f -= BuildFlags::OPTIMIZE; }
@@ -148,10 +150,10 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	if (bvh)
 	{
 		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
-		if (flags & BuildFlags::AVXBUILD) bvh->settings.useSIMDifavailable = true;
+		if (flags & BuildFlags::SIMDBUILD) bvh->settings.useSIMDifavailable = true;
 		if (flags & BuildFlags::PRESPLIT) bvh->settings.usePresplitting = true;
 		if (flags & BuildFlags::FULLSWEEP) bvh->settings.useFullSweep = true;
-		if (flags & BuildFlags::OPTIMIZE) bvh->settings.postOptimize = true, bvh->settings.optimizeIterations = 50;
+		if (flags & BuildFlags::OPTIMIZE) bvh->settings.postOptimize = true, bvh->settings.optimizeIterations = 100;
 	}
 	switch (layout)
 	{
@@ -326,6 +328,19 @@ void AccStruc::IntersectBatchMT( char* rayData, int rayCount )
 	tinybvh_parallel_for( context, slices, &IntersectBatchSlice, &args );
 }
 
+static void IntersectBatchPacketsSlice( uint32_t i, void* payload )
+{
+	BatchIntersectArgs* a = (BatchIntersectArgs*)payload;
+	a->accstruc->IntersectBatchPackets( a->rayData + a->sliceSize * i * 64, a->sliceSize );
+}
+void AccStruc::IntersectBatchMTPackets( char* rayData, int rayCount )
+{
+	constexpr int slices = 64; // intentional power of 2 so we always get bundles of 64N.
+	int sliceSize = rayCount / slices;
+	BatchIntersectArgs args = { this, rayData, rayCount, slices, sliceSize };
+	tinybvh_parallel_for( context, slices, &IntersectBatchPacketsSlice, &args );
+}
+
 float AccStruc::IntersectBatch( char* rayData, int rayCount )
 {
 	float origDist = ((Ray*)rayData)[0].hit.t;
@@ -469,6 +484,30 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 	return dist;
 }
 
+float AccStruc::IntersectBatchPackets( char* rayData, int rayCount )
+{
+	float origDist = ((Ray*)rayData)[0].hit.t;
+	float dist = origDist;
+	Ray batch[TINYBVH_BUNDLE_RAYS];
+	switch (layout)
+	{
+	case BVH4_WIVE:
+	{
+		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
+		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
+		{
+			char* rd = rayData + i * 64;
+			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( batch + j, rd, 64 );
+			accstruc->IntersectBundle( batch );
+		}
+		break;
+	}
+	default: // unsupported layout. Packets require BVH4_WIVE.
+		break;
+	}
+	return dist;
+}
+
 struct BatchOcclusionArgs { AccStruc* accstruc; char* rayData; int rayCount; int sliceSize; };
 static void OcclusionBatchSlice( uint32_t i, void* payload )
 {
@@ -477,10 +516,22 @@ static void OcclusionBatchSlice( uint32_t i, void* payload )
 }
 void AccStruc::OcclusionBatchMT( char* rayData, int rayCount )
 {
-	constexpr int slices = 64;
+	int slices = std::thread::hardware_concurrency() * 4;
 	int sliceSize = rayCount / slices;
 	BatchIntersectArgs args = { this, rayData, rayCount, sliceSize };
 	tinybvh_parallel_for( context, slices, &OcclusionBatchSlice, &args );
+}
+static void OcclusionBatchPacketsSlice( uint32_t i, void* payload )
+{
+	BatchOcclusionArgs* a = (BatchOcclusionArgs*)payload;
+	a->accstruc->OcclusionBatchPackets( a->rayData + a->sliceSize * i * 64, a->sliceSize );
+}
+void AccStruc::OcclusionBatchMTPackets( char* rayData, int rayCount )
+{
+	constexpr int slices = 64; // intentional power of 2 so we always get bundles of 64N.
+	int sliceSize = rayCount / slices;
+	BatchIntersectArgs args = { this, rayData, rayCount, sliceSize };
+	tinybvh_parallel_for( context, slices, &OcclusionBatchPacketsSlice, &args );
 }
 
 void AccStruc::OcclusionBatch( char* rayData, int rayCount )
@@ -559,6 +610,28 @@ void AccStruc::OcclusionBatch( char* rayData, int rayCount )
 		break;
 	}
 	default: // unsupported layout. See note in constructor.
+		break;
+	}
+}
+
+void AccStruc::OcclusionBatchPackets( char* rayData, int rayCount )
+{
+	Ray batch[TINYBVH_BUNDLE_RAYS];
+	bool occluded[TINYBVH_BUNDLE_RAYS];
+	switch (layout)
+	{
+	case BVH4_WIVE:
+	{
+		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
+		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
+		{
+			char* rd = rayData + i * 64;
+			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( batch + j, rd, 64 );
+			accstruc->IsOccludedBundle( batch, occluded );
+		}
+		break;
+	}
+	default: // unsupported layout, must be BVH4_WIVE.
 		break;
 	}
 }

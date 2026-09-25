@@ -25,6 +25,11 @@
     <ClInclude Include="..\benchmark\primitive_set.h" />
     <ClInclude Include="..\benchmark\ray_distribution.h" />
     <ClInclude Include="..\tiny_bvh.h" />
+    <ClInclude Include="..\tiny_bvh_arm_double.h" />
+    <ClInclude Include="..\tiny_bvh_arm_float.h" />
+    <ClInclude Include="..\tiny_bvh_base.h" />
+    <ClInclude Include="..\tiny_bvh_x86_double.h" />
+    <ClInclude Include="..\tiny_bvh_x86_float.h" />
     <ClInclude Include="..\tiny_ocl.h" />
   </ItemGroup>
   <ItemGroup>

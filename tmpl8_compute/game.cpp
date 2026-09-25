@@ -83,7 +83,7 @@ void Game::Init()
 	glBufferStorage( GL_SHADER_STORAGE_BUFFER, bvh.idxCount * sizeof( uint32_t ), bvh.bvh.primIdx, GL_MAP_PERSISTENT_BIT|GL_MAP_COHERENT_BIT|GL_MAP_WRITE_BIT );
 	glBindBuffer( GL_SHADER_STORAGE_BUFFER, triData );
 	glBindBufferBase( GL_SHADER_STORAGE_BUFFER, 2, triData );
-	glBufferStorage( GL_SHADER_STORAGE_BUFFER, bvh.triCount * sizeof( tinybvh::bvhvec4 ) * 3, bvh.bvh.verts.data, GL_MAP_PERSISTENT_BIT|GL_MAP_COHERENT_BIT|GL_MAP_WRITE_BIT );
+	glBufferStorage( GL_SHADER_STORAGE_BUFFER, bvh.idxCount * sizeof( tinybvh::bvhvec4 ) * 3, bvh.orderedVerts.data, GL_MAP_PERSISTENT_BIT|GL_MAP_COHERENT_BIT|GL_MAP_WRITE_BIT );
 	glBindBuffer( GL_SHADER_STORAGE_BUFFER, hitData );
 	glBindBufferBase( GL_SHADER_STORAGE_BUFFER, 3, hitData );
 	hits = (float4*)MALLOC64( SCRWIDTH * SCRHEIGHT * sizeof( float4 ) );

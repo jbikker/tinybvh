@@ -2,9 +2,9 @@ name: tinybvh CI
 
 on:
   push:
-    branches: [ main, dev ]
+    branches: [ main, dev, dev_split ]
   pull_request:
-    branches: [ main, dev ]
+    branches: [ main, dev, dev_split ]
 
 jobs:
   build:
