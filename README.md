@@ -133,7 +133,7 @@ Besides basic examples demonstrating usage of the library, these more advanced e
 
 Advanced / exotic features of the library include:
 * BVH optimizer: reduces SAH cost and improves ray tracing performance ([Bittner et al., 2013](https://dspace.cvut.cz/bitstream/handle/10467/15603/2013-Fast-Insertion-Based-Optimization-of-Bounding-Volume-Hierarchies.pdf))
-* BVH pre-splitting (implementing ideas from [a paper](https://research.nvidia.com/sites/default/files/pubs/2013-07_Fast-Parallel-Construction/karras2013hpg_paper.pdf) by Karras and Aila and [explanation](https://github.com/BoyBaykiller/IDKEngine) by BoyBayKiller)
+* BVH pre-splitting (implementing ideas from [a paper](https://research.nvidia.com/sites/default/files/pubs/2013-07_Fast-Parallel-Construction/karras2013hpg_paper.pdf) by Karras and Aila and [explanation](https://github.com/BoyBaykiller/IDKEngine) by BoyBaykiller)
 * Full-Sweep SAH BVH (with support from [BoyBaykiller](https://github.com/BoyBaykiller))
 * Opacity Micro Map support (as proposed [by Gruen et al.](https://dl.acm.org/doi/10.1145/3406180) in 2020)
 * Sphere/BVH collision detection via BVH::IntersectSphere(..)
