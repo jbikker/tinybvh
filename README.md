@@ -70,9 +70,9 @@ The **performance measurement tool** can be compiled with:
 
 ````c++ --std=c++17 -framework OpenCL -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on macOS)
 
-Note: A new, more advanced benchmark tool is now available. See [build.bat](https://github.com/jbikker/tinybvh/blob/main/build.bat) and [build_debug.bat](https://github.com/jbikker/tinybvh/blob/main/build_debug.bat) for an example of a command line to compile it using gcc.
+Note: A new, more advanced benchmark tool is now available. See [build.bat](https://github.com/jbikker/tinybvh/tree/main/build.bat) and [build_debug.bat](https://github.com/jbikker/tinybvh/tree/main/build_debug.bat) for an example of a command line to compile it using gcc.
 
-Many [additional demos](https://github.com/jbikker/tinybvh/blob/main/examples) are provided, demonstrating features of the library in small source files.
+Many [additional demos](https://github.com/jbikker/tinybvh/tree/main/examples) are provided, demonstrating features of the library in small source files.
 
 # Version 1.9.0
 
