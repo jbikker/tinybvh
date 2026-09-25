@@ -642,7 +642,7 @@ struct BVHBuildSettings
 {
 	bool usePresplitting = false;	// pre-split triangles before building the BVH.
 	bool useSpatialSplits = false;	// consider spatial splits during construction (SBVH).
-	bool presplitPostPass = true;	// attempt to un-split primitives in leafs after a presplit build.
+	bool presplitPostPass = true;	// attempt to un-split primitives in leaves after a presplit build.
 	float presplitFactor = 0.3f;	// presplit budget relative to input data size.
 	bool useFullSweep = false;		// for experiments only; full-sweep SAH builder.
 	bool postOptimize = false;		// optimize generated BVH using tree rotations.
@@ -3324,7 +3324,7 @@ template <typename Float, typename Vec3> Float tinybvh_clipped_tri_area( const V
 	return area;
 }
 
-// Area of the primitives in the leafs below nodeIdx that lies inside the subtree's box.
+// Area of the primitives in the leaves below nodeIdx that lies inside the subtree's box.
 // tiny_bvh_x86_float.h overloads the two box tests with SSE versions for float.
 template <typename Float, typename Index> Float BVH<Float, Index>::EPOArea( const Index subtreeRoot, const Index nodeIdx ) const
 {
@@ -3512,7 +3512,7 @@ template <typename Float, typename Index> Index BVH<Float, Index>::Presplit()
 
 template <typename Float, typename Index> void BVH<Float, Index>::PresplitPostPass()
 {
-	// see if we have any leafs that reference the same primitive multiple times
+	// see if we have any leaves that reference the same primitive multiple times
 	for (Index i = 2; i < usedNodes; i++) if (bvhNode[i].isLeaf())
 	{
 		Index first = bvhNode[i].leftFirst, & count = bvhNode[i].triCount;
@@ -4399,9 +4399,9 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::Optimi
 	AlignedFree( sortList );
 }
 
-// Single-primitive leafs: Prepare the BVH for optimization. While it is not strictly
+// Single-primitive leaves: Prepare the BVH for optimization. While it is not strictly
 // necessary to have a single primitive per leaf, it will yield a slightly better
-// optimized BVH. The leafs of the optimized BVH should be collapsed ('MergeLeafs')
+// optimized BVH. The leaves of the optimized BVH should be collapsed ('MergeLeafs')
 // to obtain the final tree.
 template <typename Float, typename Index> void BVH_Verbose<Float, Index>::SplitLeafs( const Index maxPrims )
 {
@@ -4439,7 +4439,7 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::SplitL
 	}
 }
 
-// MergeLeafs: After optimizing a BVH, single-primitive leafs should be merged whenever
+// MergeLeafs: After optimizing a BVH, single-primitive leaves should be merged whenever
 // SAH indicates this is an improvement.
 template <typename Float, typename Index> void BVH_Verbose<Float, Index>::MergeLeafs()
 {
@@ -4623,7 +4623,7 @@ template <typename Float, typename Index> void BVH_GPU<Float, Index>::ConvertFro
 		BVHNode& node = this->bvhNode[slot];
 		node.lmin = left.aabbMin, node.lmax = left.aabbMax;
 		node.rmin = right.aabbMin, node.rmax = right.aabbMax;
-		node.triCount = 0, node.firstTri = 0; // unused: leafs live in left / right
+		node.triCount = 0, node.firstTri = 0; // unused: leaves live in left / right
 		const bool leftLeaf = left.isLeaf(), rightLeaf = right.isLeaf();
 		uint32_t leftSlot = 0, rightSlot = 0;
 		if (leftLeaf) node.left = CompactLeafRef( left ); else node.left = leftSlot = newNodePtr++;
@@ -5209,25 +5209,25 @@ template <typename Float, typename Index> int32_t BVH4_GPU<Float, Index>::Inters
 		if (dist1 < dist2) SWAP( dist1, dist2, c1info, c2info );
 		// process results, starting with farthest child, so nearest ends on top of stack
 		uint32_t nextNode = 0;
-		uint32_t leaf[4] = { 0, 0, 0, 0 }, leafs = 0;
+		uint32_t leaf[4] = { 0, 0, 0, 0 }, leaves = 0;
 		if (dist0 < bvh_far<Float>)
 		{
-			if (c0info & 0x80000000) leaf[leafs++] = c0info; else if (c0info) stack[stackPtr++] = c0info;
+			if (c0info & 0x80000000) leaf[leaves++] = c0info; else if (c0info) stack[stackPtr++] = c0info;
 		}
 		if (dist1 < bvh_far<Float>)
 		{
-			if (c1info & 0x80000000) leaf[leafs++] = c1info; else if (c1info) stack[stackPtr++] = c1info;
+			if (c1info & 0x80000000) leaf[leaves++] = c1info; else if (c1info) stack[stackPtr++] = c1info;
 		}
 		if (dist2 < bvh_far<Float>)
 		{
-			if (c2info & 0x80000000) leaf[leafs++] = c2info; else if (c2info) stack[stackPtr++] = c2info;
+			if (c2info & 0x80000000) leaf[leaves++] = c2info; else if (c2info) stack[stackPtr++] = c2info;
 		}
 		if (dist3 < bvh_far<Float>)
 		{
-			if (c3info & 0x80000000) leaf[leafs++] = c3info; else if (c3info) stack[stackPtr++] = c3info;
+			if (c3info & 0x80000000) leaf[leaves++] = c3info; else if (c3info) stack[stackPtr++] = c3info;
 		}
-		// process encountered leafs, if any
-		for (uint32_t i = 0; i < leafs; i++)
+		// process encountered leaves, if any
+		for (uint32_t i = 0; i < leaves; i++)
 		{
 			const uint32_t N = (leaf[i] >> 16) & 0x7fff;
 			uint32_t triStart = offset + (leaf[i] & 0xffff);
@@ -5359,12 +5359,12 @@ template <typename Float, typename Index> void BVH4_CPU<Float, Index>::ConvertFr
 	Index firstIdx = 0;
 	bvh4.bvh.CombineLeafs( 4, firstIdx, 0 );
 	bvh4.bvh.SplitLeafs( 4 );
-	bvh4.leafPrimLimit = 4, bvh4.l_quads = l_quads; // leafs in this layout hold 4 prims
+	bvh4.leafPrimLimit = 4, bvh4.l_quads = l_quads; // leaves in this layout hold 4 prims
 	bvh4.c_int = c_int, bvh4.c_trav = c_trav;
 	bvh4.ConvertFrom( bvh4.bvh, true );
 	// allocate if needed
-	const Index nodesNeeded = bvh4.usedNodes, leafsNeeded = bvh4.LeafCount();
-	const Index blocksNeeded = nodesNeeded * (sizeof( BVHNode ) / 64) + leafsNeeded * (sizeof( BVHTri4Leaf ) / 64); // here, block = cacheline.
+	const Index nodesNeeded = bvh4.usedNodes, leavesNeeded = bvh4.LeafCount();
+	const Index blocksNeeded = nodesNeeded * (sizeof( BVHNode ) / 64) + leavesNeeded * (sizeof( BVHTri4Leaf ) / 64); // here, block = cacheline.
 	// Child slots store the block index in 29 bits; refuse to build beyond that.
 	BVH_FATAL_ERROR_IF( blocksNeeded > 0x1fffffff, "BVH4_CPU::ConvertFrom, BVH does not fit in 29-bit block indices." );
 	if (allocatedBlocks < blocksNeeded)
@@ -5550,12 +5550,12 @@ template <typename Float, typename Index> void BVH8_CPU<Float, Index>::ConvertFr
 	Index firstIdx = 0;
 	bvh8.bvh.CombineLeafs( 4, firstIdx, 0 );
 	bvh8.bvh.SplitLeafs( 4 );
-	bvh8.leafPrimLimit = 4, bvh8.l_quads = l_quads; // leafs in this layout hold 4 prims
+	bvh8.leafPrimLimit = 4, bvh8.l_quads = l_quads; // leaves in this layout hold 4 prims
 	bvh8.c_int = c_int, bvh8.c_trav = c_trav;
 	bvh8.ConvertFrom( bvh8.bvh, true );
 	// allocate if needed
-	const Index nodesNeeded = bvh8.usedNodes, leafsNeeded = bvh8.LeafCount();
-	Index blocksNeeded = nodesNeeded * (sizeof( BVHNode ) / 64) + leafsNeeded * (sizeof( BVHTri4Leaf ) / 64); // here, block = cacheline.
+	const Index nodesNeeded = bvh8.usedNodes, leavesNeeded = bvh8.LeafCount();
+	Index blocksNeeded = nodesNeeded * (sizeof( BVHNode ) / 64) + leavesNeeded * (sizeof( BVHTri4Leaf ) / 64); // here, block = cacheline.
 	// reserve one extra leaf at the end; a degenerate 'null leaf' that unused child slots point to.
 	const uint32_t nullLeafBlock = (uint32_t)blocksNeeded;
 	blocksNeeded += sizeof( BVHTri4Leaf ) / 64;
