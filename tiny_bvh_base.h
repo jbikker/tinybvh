@@ -824,11 +824,11 @@ protected:
 	using Base::IntersectTri;
 	using Base::TriOccludes;
 public:
-	TEMPLATED friend class BVH_GPU;
-	TEMPLATED friend class BVH4_CPU;
-	TEMPLATED friend class BVH8_CPU;
-	TEMPLATED friend class BVH8_CWBVH;
-	TEMPLATED_M friend class MBVH;
+	template <typename, typename> friend class BVH_GPU;
+	template <typename, typename> friend class BVH4_CPU;
+	template <typename, typename> friend class BVH8_CPU;
+	template <typename, typename> friend class BVH8_CWBVH;
+	template <int, typename, typename> friend class MBVH;
 	struct SubdivTask { Index node, sliceStart, sliceEnd; uint32_t depth; };
 	struct BVHNode
 	{
@@ -913,9 +913,9 @@ private:
 	void BuildSIMDBinTask( const Index first, const Index last, void* binbox,
 		uint32_t* count, const Float* nmin4, const Float* rpd4 );
 	static void MetricTask( const uint32_t task, void* payload );
-	TEMPLATED friend void BVHBuildSubtree( void* payload );
-	TEMPLATED friend void BVHBuildFullSweepSubtree( void* payload );
-	TEMPLATED friend void BVHBuildHQSubtree( void* payload );
+	template <typename, typename> friend void BVHBuildSubtree( void* payload );
+	template <typename, typename> friend void BVHBuildFullSweepSubtree( void* payload );
+	template <typename, typename> friend void BVHBuildHQSubtree( void* payload );
 	friend void BVHBuildAVXSubtree( void* payload );
 	friend void BuildAVXFragSlice( uint32_t i, void* payload );
 	friend void BVHBuildAVXBinSlice( uint32_t i, void* payload );
@@ -1179,10 +1179,10 @@ public:
 	void ReleaseOwnership();
 	// reset to a pristine empty object, freeing nothing, with 'ctx' installed.
 	void DropReference( BVHContext ctx = {} );
-	TEMPLATED friend class BVH4_GPU;
-	TEMPLATED friend class BVH4_CPU;
-	TEMPLATED friend class BVH8_CPU;
-	TEMPLATED friend class BVH8_CWBVH;
+	template <typename, typename> friend class BVH4_GPU;
+	template <typename, typename> friend class BVH4_CPU;
+	template <typename, typename> friend class BVH8_CPU;
+	template <typename, typename> friend class BVH8_CWBVH;
 	void Build( const Vertex* vertices, const Index primCount );
 	void Build( const Slice& vertices );
 	void Build( const Vertex* vertices, const uint32_t* indices, const Index primCount );
