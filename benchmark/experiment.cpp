@@ -344,11 +344,13 @@ void Experiment::RunBuildExperiment()
 	}
 	bvh->PrepareBuild();
 	Timer t;
+	int minruns = 5;
 	int runs = 0;
-	while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
+	while (runs < minruns || t.elapsed() < 1.5f /* at least 'minruns', or whatever fits in a 1.5 seconds. */)
 	{
 		bvh->Build( cachedPrimSet[primSet] );
 		runs++;
+		if (t.elapsed() > 5.0f) break; // let's stop if builds take very long.
 	}
 	buildTime = t.elapsed() * (1.0f / runs); // average of runs.
 	bvh->PostBuild();
