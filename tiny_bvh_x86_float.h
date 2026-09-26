@@ -32,8 +32,8 @@ TINYBVH_FORCEINLINE void tinybvh_store8i( void* p, const __m256i v ) { memcpy( p
 #ifdef BVH_USESSE
 template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const;
 template <> bool impl::BVH<float, uint32_t>::ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, const uint32_t axis ) const;
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
+template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
+template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
 template <> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectBundle( Ray* rays ) const;
 template <> int32_t impl::BVH<float, uint32_t>::IntersectBundle( Ray* rays ) const;
 template <> int32_t impl::BVH4_CPU<float, uint32_t>::IsOccludedBundle( Ray* rays, bool* occluded ) const;
@@ -48,8 +48,8 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize();
 #endif
 #ifdef BVH_USEAVX2
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
+template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
+template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
 #endif
 
 } // namespace tinybvh
@@ -218,7 +218,7 @@ inline bool tinybvh_tri_inside_box( const bvhvec4& v0, const bvhvec4& v1, const 
 #define SSE_HIT( s ) ((m >> s) & 1)
 #define SSE_PUSH( c, s ) { nodeStack[stackPtr] = c; distStack[stackPtr] = tminSorted[s]; stackPtr++; }
 
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
+template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	ALIGNED( 64 ) float distStack[TINYBVH_STACK_SIZE * 2];
@@ -396,7 +396,7 @@ the_end:
 
 #undef SSE_PUSH
 
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const
+template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	int32_t stackPtr = 0;
@@ -954,7 +954,7 @@ ALIGNED( 64 ) static const uint32_t idxLUT256[256][8] = {
 
 #if 0
 
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
+template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 4 /* wide trees push more nodes per step */ + 8];
 	ALIGNED( 64 ) float distStack[TINYBVH_STACK_SIZE * 4 + 8];
@@ -1124,7 +1124,7 @@ the_end:
 
 #else
 
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
+template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 4 /* wide trees push more nodes per step */ + 8];
 	ALIGNED( 64 ) float distStack[TINYBVH_STACK_SIZE * 4 + 8];
@@ -1366,7 +1366,7 @@ the_end:
 
 #endif
 
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const
+template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 4 /* wide trees push more nodes per step */ + 8];
 	int32_t stackPtr = 0;
@@ -1567,8 +1567,7 @@ struct ALIGNED( 64 ) RayBundle
 
 static int32_t tinybvh_trace_packets( const BVHBase* bvh, RayBundle& b, const uint32_t* pk, const uint32_t n );
 
-template <bool posX, bool posY, bool posZ>
-static TINYBVH_FORCEINLINE float tinybvh_interval_slab( const bvhvec3& bmin, const bvhvec3& bmax,
+PER_OCTANT static TINYBVH_FORCEINLINE float tinybvh_interval_slab( const bvhvec3& bmin, const bvhvec3& bmax,
 	const float* rdMin, const float* rdMax, const float* roMin, const float* roMax, const float tfar )
 {
 	const float ex = posX ? bmin.x : bmax.x, ey = posY ? bmin.y : bmax.y, ez = posZ ? bmin.z : bmax.z;
@@ -1712,8 +1711,7 @@ static TINYBVH_FORCEINLINE uint32_t tinybvh_leaftris( const uint32_t* primIdx )
 		_mm256_and_ps( _mm256_cmp_ps( _mm256_add_ps( bu8, bv8 ), one8, _CMP_LE_OQ ), \
 		_mm256_and_ps( _mm256_cmp_ps( bt8, zero8, _CMP_GT_OQ ), _mm256_cmp_ps( bt8, tcur8, _CMP_LT_OQ ) ) ) );
 
-template <bool posX, bool posY, bool posZ>
-static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
+PER_OCTANT static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
 {
 	using BVHNode = BVH4_CPU::BVHNode;
 	// an opacity map needs a per-lane gather in the leaf; not worth vectorizing.
@@ -1839,8 +1837,7 @@ static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uin
 }
 
 // Ray bundle traversal - TLAS level.
-template <bool posX, bool posY, bool posZ>
-static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
+PER_OCTANT static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
 {
 	using BVHNode = BVH::BVHNode;
 	uint32_t nodeStack[TINYBVH_STACK_SIZE], fpiStack[TINYBVH_STACK_SIZE];
@@ -2088,8 +2085,7 @@ static TINYBVH_FORCEINLINE __m256 tinybvh_lanemask8( const uint32_t m )
 			rzMin = _mm256_min_ps( rzMin, qz ), rzMax = _mm256_max_ps( rzMax, qz ); \
 		tmax8 = _mm256_max_ps( tmax8, tcur[i] ); }
 
-template <bool posX, bool posY, bool posZ>
-static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
+PER_OCTANT static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
 {
 	using BVHNode = BVH4_CPU::BVHNode;
 	if (bvh.opmap) ISUNLIKELY return tinybvh_packets_occluded_per_ray( &bvh, b, pk, n );
@@ -2200,8 +2196,7 @@ static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle& b, const u
 	}
 }
 
-template <bool posX, bool posY, bool posZ>
-static int32_t tinybvh_occluded_tlas( const BVH& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
+PER_OCTANT static int32_t tinybvh_occluded_tlas( const BVH& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
 {
 	using BVHNode = BVH::BVHNode;
 	uint32_t nodeStack[TINYBVH_STACK_SIZE], fpiStack[TINYBVH_STACK_SIZE];

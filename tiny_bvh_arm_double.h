@@ -13,8 +13,8 @@
 namespace tinybvh {
 
 // Specializations provided by this header.
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const;
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const;
+template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const;
+template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const;
 
 } // namespace tinybvh
 
@@ -54,7 +54,7 @@ TINYBVH_FORCEINLINE int32x4_t neon_cvt4_s32_f64( const float64x2_t a, const floa
 #define NEON_HIT( s ) ((m64 >> (16 * s)) & 1)
 #define NEON_PUSH( c, l ) { nodeStack[stackPtr] = c; distStack[stackPtr] = tmin4[l]; stackPtr++; }
 
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const
+template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	ALIGNED( 64 ) double distStack[TINYBVH_STACK_SIZE * 2];
@@ -215,7 +215,7 @@ the_end:
 #undef NEON_HIT
 #define NEON_HIT( l ) ((m64 >> (16 * l)) & 1)
 
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const
+template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	int32_t stackPtr = 0;

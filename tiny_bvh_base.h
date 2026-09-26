@@ -497,10 +497,15 @@ template <typename Index> constexpr int bvh_inst_shift = bvh_packed_inst<Index> 
 template <typename Index, bool packed = bvh_packed_inst<Index>> struct IntersectionInst { Index inst; };
 template <typename Index> struct IntersectionInst<Index, true> { };
 
+// Commonly used template - macro to improve code readability.
+#define TEMPLATED template <typename Float, typename Index>
+#define TEMPLATED_M template <int M, typename Float, typename Index>
+#define PER_OCTANT template <bool posX, bool posY, bool posZ>
+
 #if defined _MSC_VER || defined __GNUC__
 #pragma pack(push, 4) // is there a good alternative for Clang / EMSCRIPTEN?
 #endif
-template <typename Float, typename Index> struct Intersection : IntersectionInst<Index>
+TEMPLATED struct Intersection : IntersectionInst<Index>
 {
 	// An intersection result is designed to fit in 16 bytes / four 32-bit values. 
 	// Beyond t, u, v, and prim, the obvious missing result is an instance id; consider
@@ -529,7 +534,7 @@ template <typename Float, typename Index> struct Intersection : IntersectionInst
 // By default the mask will be initialized to intersect all instances.
 #define RAY_MASK_INTERSECT_ALL 0xFFFF
 
-template <typename Float, typename Index> struct ALIGNED( 64 ) Ray
+TEMPLATED struct ALIGNED( 64 ) Ray
 {
 	// Basic ray class. Note: For single blas traversal it is expected that Ray::rD is
 	// properly initialized. For tlas/blas traversal this is typically updated for each blas.
@@ -669,17 +674,17 @@ enum BVHType : uint32_t
 
 namespace impl {
 
-template <typename Float, typename Index> class BVHBase;
-template <typename Float, typename Index> class BVH;
-template <typename Float, typename Index> class BVH_Verbose;
-template <typename Float, typename Index> class BVH_GPU;
-template <int M, typename Float, typename Index> class MBVH;
-template <typename Float, typename Index> class BVH4_GPU;
-template <typename Float, typename Index> class BVH4_CPU;
-template <typename Float, typename Index> class BVH8_CWBVH;
-template <typename Float, typename Index> class BVH8_CPU;
-template <typename Float, typename Index> class BLASInstance;
-template <typename Float, typename Index> struct BVHTri4Leaf;
+TEMPLATED class BVHBase;
+TEMPLATED class BVH;
+TEMPLATED class BVH_Verbose;
+TEMPLATED class BVH_GPU;
+TEMPLATED_M class MBVH;
+TEMPLATED class BVH4_GPU;
+TEMPLATED class BVH4_CPU;
+TEMPLATED class BVH8_CWBVH;
+TEMPLATED class BVH8_CPU;
+TEMPLATED class BLASInstance;
+TEMPLATED struct BVHTri4Leaf;
 
 // Task trampolines of the SIMD builders in the platform headers; friends of BVH.
 void BVHBuildAVXSubtree( void* payload );
@@ -690,9 +695,9 @@ void BuildNEONFragSlice( uint32_t i, void* payload );
 void BVHBuildNEONBinSlice( uint32_t i, void* payload );
 
 // Set by the platform headers for the instantiations that have a SIMD builder.
-template <typename Float, typename Index> struct BVHSIMDBuilders { static constexpr bool available = false; };
+TEMPLATED struct BVHSIMDBuilders { static constexpr bool available = false; };
 
-template <typename Float, typename Index> class BVHBase
+TEMPLATED class BVHBase
 {
 public:
 	using Traits = bvh_traits<Float>;
@@ -776,7 +781,7 @@ protected:
 	static Float SA( const Vec3& aabbMin, const Vec3& aabbMax );
 };
 
-template <typename Float, typename Index> class BVH : public BVHBase<Float, Index>
+TEMPLATED class BVH : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
@@ -819,11 +824,11 @@ protected:
 	using Base::IntersectTri;
 	using Base::TriOccludes;
 public:
-	template <typename, typename> friend class BVH_GPU;
-	template <typename, typename> friend class BVH4_CPU;
-	template <typename, typename> friend class BVH8_CPU;
-	template <typename, typename> friend class BVH8_CWBVH;
-	template <int, typename, typename> friend class MBVH;
+	TEMPLATED friend class BVH_GPU;
+	TEMPLATED friend class BVH4_CPU;
+	TEMPLATED friend class BVH8_CPU;
+	TEMPLATED friend class BVH8_CWBVH;
+	TEMPLATED_M friend class MBVH;
 	struct SubdivTask { Index node, sliceStart, sliceEnd; uint32_t depth; };
 	struct BVHNode
 	{
@@ -908,9 +913,9 @@ private:
 	void BuildSIMDBinTask( const Index first, const Index last, void* binbox,
 		uint32_t* count, const Float* nmin4, const Float* rpd4 );
 	static void MetricTask( const uint32_t task, void* payload );
-	template <typename F, typename I> friend void BVHBuildSubtree( void* payload );
-	template <typename F, typename I> friend void BVHBuildFullSweepSubtree( void* payload );
-	template <typename F, typename I> friend void BVHBuildHQSubtree( void* payload );
+	TEMPLATED friend void BVHBuildSubtree( void* payload );
+	TEMPLATED friend void BVHBuildFullSweepSubtree( void* payload );
+	TEMPLATED friend void BVHBuildHQSubtree( void* payload );
 	friend void BVHBuildAVXSubtree( void* payload );
 	friend void BuildAVXFragSlice( uint32_t i, void* payload );
 	friend void BVHBuildAVXBinSlice( uint32_t i, void* payload );
@@ -936,10 +941,10 @@ private:
 	Float TriArea( const Index triIdx ) const;
 	Float PrimArea( const Index slot ) const;
 protected:
-	template <bool posX, bool posY, bool posZ> int32_t IntersectOctant( Ray& ray ) const;
-	template <bool posX, bool posY, bool posZ> int32_t IntersectTLASOctant( Ray& ray ) const;
-	template <bool posX, bool posY, bool posZ> bool IsOccludedOctant( const Ray& ray ) const;
-	template <bool posX, bool posY, bool posZ> bool IsOccludedTLASOctant( const Ray& ray ) const;
+	PER_OCTANT int32_t IntersectOctant( Ray& ray ) const;
+	PER_OCTANT int32_t IntersectTLASOctant( Ray& ray ) const;
+	PER_OCTANT bool IsOccludedOctant( const Ray& ray ) const;
+	PER_OCTANT bool IsOccludedTLASOctant( const Ray& ray ) const;
 public:
 	// WiVeC bundle traversal over the TLAS: TINYBVH_BUNDLE_RAYS rays at a time.
 	int32_t IntersectBundle( Ray* rays ) const;
@@ -983,7 +988,7 @@ private:
 	static void SweepGatherTask( uint32_t axis, void* payload );
 };
 
-template <typename Float, typename Index> class BVH_GPU : public BVHBase<Float, Index>
+TEMPLATED class BVH_GPU : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
@@ -1052,7 +1057,7 @@ private:
 	BVH_GPU& operator=( const BVH_GPU& ) = default;
 };
 
-template <typename Float, typename Index> class BVH_Verbose : public BVHBase<Float, Index>
+TEMPLATED class BVH_Verbose : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
@@ -1125,7 +1130,7 @@ private:
 	BVH_Verbose& operator=( const BVH_Verbose& ) = default;
 };
 
-template <int M, typename Float, typename Index> class MBVH : public BVHBase<Float, Index>
+TEMPLATED_M class MBVH : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
@@ -1174,10 +1179,10 @@ public:
 	void ReleaseOwnership();
 	// reset to a pristine empty object, freeing nothing, with 'ctx' installed.
 	void DropReference( BVHContext ctx = {} );
-	template <typename, typename> friend class BVH4_GPU;
-	template <typename, typename> friend class BVH4_CPU;
-	template <typename, typename> friend class BVH8_CPU;
-	template <typename, typename> friend class BVH8_CWBVH;
+	TEMPLATED friend class BVH4_GPU;
+	TEMPLATED friend class BVH4_CPU;
+	TEMPLATED friend class BVH8_CPU;
+	TEMPLATED friend class BVH8_CWBVH;
 	void Build( const Vertex* vertices, const Index primCount );
 	void Build( const Slice& vertices );
 	void Build( const Vertex* vertices, const uint32_t* indices, const Index primCount );
@@ -1201,7 +1206,7 @@ private:
 	MBVH& operator=( const MBVH& ) = default;
 };
 
-template <typename Float, typename Index> class BVH4_GPU : public BVHBase<Float, Index>
+TEMPLATED class BVH4_GPU : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
@@ -1270,7 +1275,7 @@ private:
 	BVH4_GPU& operator=( const BVH4_GPU& ) = default;
 };
 
-template <typename Float, typename Index> class BVH4_CPU : public BVHBase<Float, Index>
+TEMPLATED class BVH4_CPU : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
@@ -1328,8 +1333,8 @@ public:
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// Traversal kernels specialized for the ray octant; the platform headers provide these.
-	template <bool posX, bool posY, bool posZ> int32_t IntersectOctant( Ray& ray ) const;
-	template <bool posX, bool posY, bool posZ> bool IsOccludedOctant( const Ray& ray ) const;
+	PER_OCTANT int32_t IntersectOctant( Ray& ray ) const;
+	PER_OCTANT bool IsOccludedOctant( const Ray& ray ) const;
 	// WiVeC bundle traversal: TINYBVH_BUNDLE_RAYS rays at a time, closest hit.
 	int32_t IntersectBundle( Ray* rays ) const;
 	int32_t IsOccludedBundle( Ray* rays, bool* occluded ) const;
@@ -1343,7 +1348,7 @@ private:
 	BVH4_CPU& operator=( const BVH4_CPU& ) = default;
 };
 
-template <typename Float, typename Index> class BVH8_CWBVH : public BVHBase<Float, Index>
+TEMPLATED class BVH8_CWBVH : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
@@ -1402,7 +1407,7 @@ private:
 #pragma warning ( push )
 #pragma warning ( disable: 4324 /* structure was padded due to alignment specifier */ )
 #endif
-template <typename Float, typename Index> struct ALIGNED( 64 ) BVHTri4Leaf
+TEMPLATED struct ALIGNED( 64 ) BVHTri4Leaf
 {
 	using Vec3 = typename bvh_traits<Float>::vec3;
 	Float v0x[4], v0y[4], v0z[4];
@@ -1448,14 +1453,14 @@ template <typename Float, typename Index> struct ALIGNED( 64 ) BVHTri4Leaf
 #endif
 
 // Storage for a single triangle, for BVH8_CPU.
-template <typename Float, typename Index> struct BVHTri1Leaf
+TEMPLATED struct BVHTri1Leaf
 {
 	using Vec3 = typename bvh_traits<Float>::vec3;
 	Vec3 v0, e1, e2;
 	Index primIdx;				// total: 40 bytes
 };
 
-template <typename Float, typename Index> class BVH8_CPU : public BVHBase<Float, Index>
+TEMPLATED class BVH8_CPU : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
@@ -1521,8 +1526,8 @@ public:
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// Traversal kernels specialized for the ray octant; the platform headers provide these.
-	template <bool posX, bool posY, bool posZ> int32_t IntersectOctant( Ray& ray ) const;
-	template <bool posX, bool posY, bool posZ> bool IsOccludedOctant( const Ray& ray ) const;
+	PER_OCTANT int32_t IntersectOctant( Ray& ray ) const;
+	PER_OCTANT bool IsOccludedOctant( const Ray& ray ) const;
 	// BVH8 data
 	CacheLine* bvh8Data = 0;		// Interleaved interior (256b) and leaf (192b) data.
 	MBVH<8, Float, Index> bvh8;		// BVH8_CPU is created from BVH8 and uses its data.
@@ -1536,7 +1541,7 @@ private:
 // BLASInstance: A TLAS is built over BLAS instances, where a single BLAS can be
 // used with multiple transforms, and multiple BLASses can be combined in a complex
 // scene. The TLAS is built over the world-space AABBs of the BLAS root nodes.
-template <typename Float, typename Index> class ALIGNED( 64 ) BLASInstance
+TEMPLATED class ALIGNED( 64 ) BLASInstance
 {
 public:
 	using Vec3 = typename bvh_traits<Float>::vec3;
@@ -1601,8 +1606,8 @@ public:
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// A VoxelSet can only be a BLAS in a single precision TLAS.
-	template <typename F, typename I> int32_t Intersect( impl::Ray<F, I>& ) const;
-	template <typename F, typename I> bool IsOccluded( const impl::Ray<F, I>& ) const;
+	TEMPLATED int32_t Intersect( impl::Ray<Float, Index>& ) const;
+	TEMPLATED bool IsOccluded( const impl::Ray<Float, Index>& ) const;
 private:
 	bool Setup3DDDA( const Ray& ray, const bvhvec3& Dsign, DDAState& state, const bvhint3& step, bvhvec3& tdelta, float& t ) const;
 	// lowest level: 1 32-bit value per voxel
@@ -1828,18 +1833,18 @@ namespace impl {
 // BVHBase implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> void* BVHBase<Float, Index>::AlignedAlloc( size_t size ) const
+TEMPLATED void* BVHBase<Float, Index>::AlignedAlloc( size_t size ) const
 {
 	return context.malloc ? context.malloc( size, context.userdata ) : nullptr;
 }
 
-template <typename Float, typename Index> void BVHBase<Float, Index>::AlignedFree( void* ptr ) const
+TEMPLATED void BVHBase<Float, Index>::AlignedFree( void* ptr ) const
 {
 	if (context.free && ptr)
 		context.free( ptr, context.userdata );
 }
 
-template <typename Float, typename Index> void BVHBase<Float, Index>::CopyBasePropertiesFrom( const BVHBase& original )
+TEMPLATED void BVHBase<Float, Index>::CopyBasePropertiesFrom( const BVHBase& original )
 {
 	this->rebuildable = original.rebuildable;
 	this->refittable = original.refittable;
@@ -1857,7 +1862,7 @@ template <typename Float, typename Index> void BVHBase<Float, Index>::CopyBasePr
 // BVH implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH<Float, Index>::BVH( BVH&& other ) noexcept
+TEMPLATED BVH<Float, Index>::BVH( BVH&& other ) noexcept
 {
 	// shallow copy of parameters, options, and pointers
 	*this = other;
@@ -1866,25 +1871,25 @@ template <typename Float, typename Index> BVH<Float, Index>::BVH( BVH&& other ) 
 }
 
 // move assignment: release what we hold, then take over 'other'.
-template <typename Float, typename Index> BVH<Float, Index>& BVH<Float, Index>::operator=( BVH&& other ) noexcept
+TEMPLATED BVH<Float, Index>& BVH<Float, Index>::operator=( BVH&& other ) noexcept
 {
 	if (this != &other) this->~BVH(), new (this) BVH( tinybvh_move( other ) );
 	return *this;
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::ReleaseOwnership()
+TEMPLATED void BVH<Float, Index>::ReleaseOwnership()
 {
 	bvhNode = 0, primIdx = 0, fragment = 0;
 	allocatedNodes = usedNodes = triCount = idxCount = 0;
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::DropReference( BVHContext ctx )
+TEMPLATED void BVH<Float, Index>::DropReference( BVHContext ctx )
 {
 	// Deliberately no destructor call: the buffers are not ours to release.
 	new (this) BVH( ctx ); // 'placement new': Call constructor on existing data (here: this).
 }
 
-template <typename Float, typename Index> BVH<Float, Index>::~BVH()
+TEMPLATED BVH<Float, Index>::~BVH()
 {
 	AlignedFree( bvhNode );
 	bvhNode = 0;
@@ -1894,7 +1899,7 @@ template <typename Float, typename Index> BVH<Float, Index>::~BVH()
 	fragment = 0;
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::Save( const char* fileName )
+TEMPLATED void BVH<Float, Index>::Save( const char* fileName )
 {
 	// saving is easy, it's the loadingn that will be complex.
 	std::fstream s{ fileName, s.binary | s.out };
@@ -1906,9 +1911,9 @@ template <typename Float, typename Index> void BVH<Float, Index>::Save( const ch
 	s.write( (char*)primIdx, idxCount * sizeof( Index ) );
 }
 
-template <typename Float, typename Index> bool BVH<Float, Index>::Load( const char* f, const Vertex* v, const Index p ) { return Load( f, Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <typename Float, typename Index> bool BVH<Float, Index>::Load( const char* f, const Vertex* v, const uint32_t* i, const Index p ) { return Load( f, Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-template <typename Float, typename Index> bool BVH<Float, Index>::Load( const char* fileName, const Slice& vertices, const uint32_t* indices, const Index primCount )
+TEMPLATED bool BVH<Float, Index>::Load( const char* f, const Vertex* v, const Index p ) { return Load( f, Slice( v, p * 3, sizeof( Vertex ) ) ); }
+TEMPLATED bool BVH<Float, Index>::Load( const char* f, const Vertex* v, const uint32_t* i, const Index p ) { return Load( f, Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
+TEMPLATED bool BVH<Float, Index>::Load( const char* fileName, const Slice& vertices, const uint32_t* indices, const Index primCount )
 {
 	// open file and check contents
 	std::fstream s{ fileName, s.binary | s.in };
@@ -1960,10 +1965,10 @@ template <typename Float, typename Index> bool BVH<Float, Index>::Load( const ch
 
 // BVH builder for triangle geometry.
 // This code uses no SIMD instructions. Faster code, using SSE/AVX, is available for x64 CPUs.
-template <typename Float, typename Index> void BVH<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-template <typename Float, typename Index> void BVH<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <typename Float, typename Index> void BVH<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
+TEMPLATED void BVH<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
+TEMPLATED void BVH<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
+TEMPLATED void BVH<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
+TEMPLATED void BVH<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
 {
 #ifdef SLICEDUMP
 	// this code dumps the passed geometry data to a file - for debugging only.
@@ -1999,7 +2004,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::Build( const S
 	if (settings.postOptimize) Optimize( settings.optimizeIterations );
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::BuildAABB( const Vertex* aabbs, const Index aabbCount )
+TEMPLATED void BVH<Float, Index>::BuildAABB( const Vertex* aabbs, const Index aabbCount )
 {
 	// BVH builder for a list of AABBs.
 	BVH_FATAL_ERROR_IF( aabbCount == 0, "BVH::BuildAABB( .. ), aabbCount == 0." );
@@ -2031,7 +2036,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildAABB( con
 	Build();
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::Build( void (*customGetAABB)(const Index, Vec3&, Vec3&, void*), const Index primCount )
+TEMPLATED void BVH<Float, Index>::Build( void (*customGetAABB)(const Index, Vec3&, Vec3&, void*), const Index primCount )
 {
 	// BVH builder for custom geometry; AABBs are obtained via a function pointer in context.
 	BVH_FATAL_ERROR_IF( primCount == 0, "BVH::Build( void (*customGetAABB)( .. ), instCount ), instCount == 0." );
@@ -2063,7 +2068,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::Build( void (*
 	Build();
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::Build( BLASInstance* instances, const Index instCount, BVHBase<Float, Index>** blasses, const Index bCount )
+TEMPLATED void BVH<Float, Index>::Build( BLASInstance* instances, const Index instCount, BVHBase<Float, Index>** blasses, const Index bCount )
 {
 	// TLAS builder. Build a BVH over a list of BLAS instances.
 	BVH_FATAL_ERROR_IF( instCount == 0, "BVH::Build( BLASInstance*, instCount ), instCount == 0." );
@@ -2099,13 +2104,13 @@ template <typename Float, typename Index> void BVH<Float, Index>::Build( BLASIns
 }
 
 // TLAS over BLASses of the same layout. BVH derives from BVHBase without offset, which makes the cast of the array safe.
-template <typename Float, typename Index> void BVH<Float, Index>::Build( BLASInstance* instances, const Index instCount, BVH** blasses, const Index bCount )
+TEMPLATED void BVH<Float, Index>::Build( BLASInstance* instances, const Index instCount, BVH** blasses, const Index bCount )
 {
 	Build( instances, instCount, (BVHBase<Float, Index>**)blasses, bCount );
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::BuildQuick( const Vertex* v, const Index p ) { BuildQuick( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildQuick( const Slice& vertices )
+TEMPLATED void BVH<Float, Index>::BuildQuick( const Vertex* v, const Index p ) { BuildQuick( Slice( v, p * 3, sizeof( Vertex ) ) ); }
+TEMPLATED void BVH<Float, Index>::BuildQuick( const Slice& vertices )
 {
 	// Basic single-function BVH builder, using mid-point splits.
 	BVH_FATAL_ERROR_IF( vertices.count < 3, "BVH::BuildQuick( .. ), primCount == 0." );
@@ -2187,7 +2192,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildQuick( co
 	may_have_holes = false; // the reference builder produces a continuous list of nodes
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::PrepareBuild( const Slice& vertices, const uint32_t* indices, const Index prims )
+TEMPLATED void BVH<Float, Index>::PrepareBuild( const Slice& vertices, const uint32_t* indices, const Index prims )
 {
 	// Allocate memory and prepare a list of fragments to build a BVH over.
 	const Index primCount = prims > 0 ? prims : vertices.count / 3;
@@ -2254,13 +2259,13 @@ template <typename Float, typename Index> void BVH<Float, Index>::PrepareBuild( 
 }
 
 // Helper function to build a subtree via the thread pool
-template <typename Float, typename Index> struct BVHBuildSubtreeArgs { BVH<Float, Index>* bvh; Index node; uint32_t depth; };
-template <typename Float, typename Index> void BVHBuildSubtree( void* payload )
+TEMPLATED struct BVHBuildSubtreeArgs { BVH<Float, Index>* bvh; Index node; uint32_t depth; };
+TEMPLATED void BVHBuildSubtree( void* payload )
 {
 	BVHBuildSubtreeArgs<Float, Index>* a = (BVHBuildSubtreeArgs<Float, Index>*)payload;
 	a->bvh->Build( a->node, a->depth );
 }
-template <typename Float, typename Index> void BVH<Float, Index>::Build( Index nodeIdx, uint32_t depth )
+TEMPLATED void BVH<Float, Index>::Build( Index nodeIdx, uint32_t depth )
 {
 	// Reference builder: Binned, threaded SAH BVH builder. Not using SIMD.
 	if (depth == 0)
@@ -2456,7 +2461,7 @@ template <typename Index> static void RadixSort( Index* input, Index* output, co
 }
 
 // static helper function to build a subtree via the thread pool
-template <typename Float, typename Index> void BVHBuildFullSweepSubtree( void* payload )
+TEMPLATED void BVHBuildFullSweepSubtree( void* payload )
 {
 	BVHBuildSubtreeArgs<Float, Index>* a = (BVHBuildSubtreeArgs<Float, Index>*)payload;
 	a->bvh->BuildFullSweep( a->node, a->depth );
@@ -2471,8 +2476,8 @@ template <typename Index> static void BVHRadixSortAxis( uint32_t a, void* payloa
 }
 #endif
 // Gather the fragment bounds for one axis into sorted order. Scheduled via parallel_for.
-template <typename Float, typename Index> void BVH<Float, Index>::SweepGatherTask( uint32_t axis, void* payload ) { ((BVH*)payload)->GatherSweepBounds( axis ); }
-template <typename Float, typename Index> void BVH<Float, Index>::GatherSweepBounds( uint32_t axis )
+TEMPLATED void BVH<Float, Index>::SweepGatherTask( uint32_t axis, void* payload ) { ((BVH*)payload)->GatherSweepBounds( axis ); }
+TEMPLATED void BVH<Float, Index>::GatherSweepBounds( uint32_t axis )
 {
 	const Index* idx = sortedIdx[axis];
 	SweepBounds* bnd = sortedBnds[axis];
@@ -2482,7 +2487,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::GatherSweepBou
 		bnd[i].bmin = f.bmin, bnd[i].bmax = f.bmax;
 	}
 }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildFullSweep( Index nodeIdx, uint32_t depth )
+TEMPLATED void BVH<Float, Index>::BuildFullSweep( Index nodeIdx, uint32_t depth )
 {
 	// Full-sweep SAH builder. Instead of using binning, this builder evaluates all possible split
 	// plane candidates for each axis. Works well with triangle presplitting.
@@ -2699,11 +2704,11 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildFullSweep
 
 // SBVH builder. This builder introduces spatial splits during construction,
 // improving tree quality at the expense of construction time.
-template <typename Float, typename Index> void BVH<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildHQ( const Slice& v ) { PrepareHQBuild( v, 0, 0 ); BuildHQ(); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { PrepareHQBuild( v, i, p ); BuildHQ(); }
-template <typename Float, typename Index> void BVH<Float, Index>::PrepareHQBuild( const Slice& vertices, const uint32_t* indices, const Index prims )
+TEMPLATED void BVH<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
+TEMPLATED void BVH<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
+TEMPLATED void BVH<Float, Index>::BuildHQ( const Slice& v ) { PrepareHQBuild( v, 0, 0 ); BuildHQ(); }
+TEMPLATED void BVH<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { PrepareHQBuild( v, i, p ); BuildHQ(); }
+TEMPLATED void BVH<Float, Index>::PrepareHQBuild( const Slice& vertices, const uint32_t* indices, const Index prims )
 {
 	BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH::PrepareHQBuild( .. ), zero primitives." );
 	Index primCount = prims > 0 ? prims : vertices.count / 3;
@@ -2772,7 +2777,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::PrepareHQBuild
 	// all set; actual build happens in BVH::BuildHQ.
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::BuildHQ()
+TEMPLATED void BVH<Float, Index>::BuildHQ()
 {
 	// Threaded SBVH builder entry point.
 	const Index slack = triCount >> 1; // for split prims
@@ -2804,13 +2809,13 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildHQ()
 }
 
 // Helper function to build a subtree via the thread pool
-template <typename Float, typename Index> struct BVHBuildHQArgs { BVH<Float, Index>* bvh; Index node; uint32_t depth; Index sliceStart, sliceEnd; Index* idxTmp; };
-template <typename Float, typename Index> void BVHBuildHQSubtree( void* payload )
+TEMPLATED struct BVHBuildHQArgs { BVH<Float, Index>* bvh; Index node; uint32_t depth; Index sliceStart, sliceEnd; Index* idxTmp; };
+TEMPLATED void BVHBuildHQSubtree( void* payload )
 {
 	BVHBuildHQArgs<Float, Index>* a = (BVHBuildHQArgs<Float, Index>*)payload;
 	a->bvh->BuildHQTask( a->node, a->depth, a->sliceStart, a->sliceEnd, a->idxTmp );
 }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, Index sliceStart, Index sliceEnd, Index* idxTmp )
+TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, Index sliceStart, Index sliceEnd, Index* idxTmp )
 {
 	// prepare subdivision
 	ALIGNED( 64 ) SubdivTask localTask[TINYBVH_STACK_SIZE];
@@ -3093,14 +3098,14 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildHQTask( I
 	if (depth == 0 && threadedBuild) tinybvh_barrier( context );
 }
 
-template <typename Float, typename Index> Float BVH<Float, Index>::SplitCostSAH( const Float rAparent, const Float Aleft, const Index Nleft, const Float Aright, const Index Nright ) const
+TEMPLATED Float BVH<Float, Index>::SplitCostSAH( const Float rAparent, const Float Aleft, const Index Nleft, const Float Aright, const Index Nright ) const
 {
 	const Index lN = l_quads ? (((Nleft + 3) >> 2) * 4) : Nleft;
 	const Index rN = l_quads ? (((Nright + 3) >> 2) * 4) : Nright;
 	return c_trav + c_int * rAparent * (Aleft * (Float)lN + Aright * (Float)rN);
 }
 
-template <typename Float, typename Index> Float BVH<Float, Index>::NoSplitCostSAH( const Index Nparent ) const
+TEMPLATED Float BVH<Float, Index>::NoSplitCostSAH( const Index Nparent ) const
 {
 	return (Float)(l_quads ? (((Nparent + 3) >> 2) * 4) : Nparent) * c_int;
 }
@@ -3109,7 +3114,7 @@ template <typename Float, typename Index> Float BVH<Float, Index>::NoSplitCostSA
 
 #define BVH_METRIC_TASKS 256 // reduction tasks for tree quality metrics.
 
-template <typename Float, typename Index> struct BVHMetricArgs
+TEMPLATED struct BVHMetricArgs
 {
 	const BVH<Float, Index>* bvh;
 	const Index* node;		// node indices to score
@@ -3121,14 +3126,14 @@ template <typename Float, typename Index> struct BVHMetricArgs
 	Index primCount;
 };
 
-template <typename Float, typename Index> Index BVH<Float, Index>::PrimCount( const Index nodeIdx ) const
+TEMPLATED Index BVH<Float, Index>::PrimCount( const Index nodeIdx ) const
 {
 	// determine the total number of primitives / fragments in leaf nodes.
 	const BVHNode& n = bvhNode[nodeIdx];
 	return n.isLeaf() ? n.triCount : (PrimCount( n.leftFirst ) + PrimCount( n.leftFirst + 1 ));
 }
 
-template <typename Float, typename Index> Index BVH<Float, Index>::CollectNodes( const Index root, Index* list, const Index cap ) const
+TEMPLATED Index BVH<Float, Index>::CollectNodes( const Index root, Index* list, const Index cap ) const
 {
 	// iterative pre-order walk, storing the indices of the nodes reachable from 'root'.
 	Index count = 0, nodeIdx = root, stack[TINYBVH_STACK_SIZE], stackPtr = 0;
@@ -3149,7 +3154,7 @@ template <typename Float, typename Index> Index BVH<Float, Index>::CollectNodes(
 	return count;
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::MetricTask( const uint32_t task, void* payload )
+TEMPLATED void BVH<Float, Index>::MetricTask( const uint32_t task, void* payload )
 {
 	// score a contiguous slice of the node list
 	const BVHMetricArgs<Float, Index>* a = (const BVHMetricArgs<Float, Index>*)payload;
@@ -3177,7 +3182,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::MetricTask( co
 	}
 }
 
-template <typename Float, typename Index> Float BVH<Float, Index>::SAHCost( const Index nodeIdx, uint32_t ) const
+TEMPLATED Float BVH<Float, Index>::SAHCost( const Index nodeIdx, uint32_t ) const
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::SAHCost( .. ), bvhNode == 0." );
 	const BVHNode& root = bvhNode[nodeIdx];
@@ -3203,7 +3208,7 @@ template <typename Float, typename Index> Float BVH<Float, Index>::SAHCost( cons
 	return rootArea > 0 ? (Float)(cost / rootArea) : 0.0f;
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::ConvertFrom( const BVH_Verbose& original, bool compact )
+TEMPLATED void BVH<Float, Index>::ConvertFrom( const BVH_Verbose& original, bool compact )
 {
 	// allocate space
 	const Index spaceNeeded = compact ? original.usedNodes : original.allocatedNodes;
@@ -3257,7 +3262,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::ConvertFrom( c
 	usedNodes = original.usedNodes;
 }
 
-template <typename Float, typename Index> Float BVH<Float, Index>::TriArea( const Index triIdx ) const
+TEMPLATED Float BVH<Float, Index>::TriArea( const Index triIdx ) const
 {
 	const Index vidx = triIdx * 3;
 	Vec3 v0, v1, v2;
@@ -3266,7 +3271,7 @@ template <typename Float, typename Index> Float BVH<Float, Index>::TriArea( cons
 	return 0.5f * tinybvh_length( tinybvh_cross( v1 - v0, v2 - v0 ) );
 }
 
-template <typename Float, typename Index> Float BVH<Float, Index>::PrimArea( const Index slot ) const
+TEMPLATED Float BVH<Float, Index>::PrimArea( const Index slot ) const
 {
 	return TriArea( primIdx[slot] );
 }
@@ -3326,7 +3331,7 @@ template <typename Float, typename Vec3> Float tinybvh_clipped_tri_area( const V
 
 // Area of the primitives in the leaves below nodeIdx that lies inside the subtree's box.
 // tiny_bvh_x86_float.h overloads the two box tests with SSE versions for float.
-template <typename Float, typename Index> Float BVH<Float, Index>::EPOArea( const Index subtreeRoot, const Index nodeIdx ) const
+TEMPLATED Float BVH<Float, Index>::EPOArea( const Index subtreeRoot, const Index nodeIdx ) const
 {
 	// abort if we reached the subtree
 	if (nodeIdx == subtreeRoot) return 0;
@@ -3356,7 +3361,7 @@ template <typename Float, typename Index> Float BVH<Float, Index>::EPOArea( cons
 	return area;
 }
 
-template <typename Float, typename Index> Float BVH<Float, Index>::EPOCost( const Index nodeIdx, uint32_t ) const
+TEMPLATED Float BVH<Float, Index>::EPOCost( const Index nodeIdx, uint32_t ) const
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::EPOCost( .. ), bvhNode == 0." );
 	BVH_FATAL_ERROR_IF( verts == 0, "BVH::EPOCost( .. ), bvh has no vertex data." );
@@ -3380,7 +3385,7 @@ template <typename Float, typename Index> Float BVH<Float, Index>::EPOCost( cons
 	return (1.0f - W_EPO) * sahCost + W_EPO * (Float)(epoSum / areaSum);
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::SplitLeafs( const Index maxPrims )
+TEMPLATED void BVH<Float, Index>::SplitLeafs( const Index maxPrims )
 {
 	Index stack[64], stackPtr = 0, nodeIdx = 0;
 	while (1)
@@ -3411,7 +3416,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::SplitLeafs( co
 	usedNodes = newNodePtr;
 }
 
-template <typename Float, typename Index> Float BVH<Float, Index>::SplitPriority( const Fragment& f ) const
+TEMPLATED Float BVH<Float, Index>::SplitPriority( const Fragment& f ) const
 {
 	auto fastCbrt = []( float x ) {
 		uint32_t i;
@@ -3429,7 +3434,7 @@ template <typename Float, typename Index> Float BVH<Float, Index>::SplitPriority
 	return fastCbrt( (float)(extentPrio * emptyAreaPrio) );
 }
 
-template <typename Float, typename Index> Float BVH<Float, Index>::GetNodeSize( const Float extent, const Float globalSize )
+TEMPLATED Float BVH<Float, Index>::GetNodeSize( const Float extent, const Float globalSize )
 {
 	// transform into [0.0, 1.0]
 	const float alpha = (float)(extent / globalSize);
@@ -3444,7 +3449,7 @@ template <typename Float, typename Index> Float BVH<Float, Index>::GetNodeSize( 
 	return scaled > 0 ? scaled : extent * (Float)0.5;
 }
 
-template <typename Float, typename Index> Index BVH<Float, Index>::Presplit()
+TEMPLATED Index BVH<Float, Index>::Presplit()
 {
 	// Based on Section 5 of "Fast Parallel Construction of High-Quality Bounding 
 	// Volume Hierarchies", Karras and Aila, 2013, and BoyBaykiller's implementation,
@@ -3510,7 +3515,7 @@ template <typename Float, typename Index> Index BVH<Float, Index>::Presplit()
 	return fragCount;
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::PresplitPostPass()
+TEMPLATED void BVH<Float, Index>::PresplitPostPass()
 {
 	// see if we have any leaves that reference the same primitive multiple times
 	for (Index i = 2; i < usedNodes; i++) if (bvhNode[i].isLeaf())
@@ -3524,7 +3529,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::PresplitPostPa
 	}
 }
 
-template <typename Float, typename Index> void BVH<Float, Index>::Optimize( const uint32_t iterations, bool extreme, bool stochastic )
+TEMPLATED void BVH<Float, Index>::Optimize( const uint32_t iterations, bool extreme, bool stochastic )
 {
 	BVH_Verbose* verbose = new BVH_Verbose();
 	verbose->ConvertFrom( *this );
@@ -3538,7 +3543,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::Optimize( cons
 // includes trees waving in the wind, or subsequent frames for skinned
 // animations. Repeated refitting tends to lead to deteriorated BVHs and
 // slower ray tracing. Rebuild when this happens.
-template <typename Float, typename Index> void BVH<Float, Index>::Refit( const Index /* unused */ )
+TEMPLATED void BVH<Float, Index>::Refit( const Index /* unused */ )
 {
 	BVH_FATAL_ERROR_IF( !refittable, "BVH::Refit( .. ), refitting an SBVH or pre-splitted BVH." );
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::Refit( .. ), bvhNode == 0." );
@@ -3581,7 +3586,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::Refit( const I
 
 // CombineLeafs: Collapse subtrees if the summed leaf prim count does not
 // exceed the specified number. For BVH8_CPU construction.
-template <typename Float, typename Index> Index BVH<Float, Index>::CombineLeafs( const Index primCount, Index& firstIdx, Index nodeIdx )
+TEMPLATED Index BVH<Float, Index>::CombineLeafs( const Index primCount, Index& firstIdx, Index nodeIdx )
 {
 	BVHNode& node = bvhNode[nodeIdx];
 	if (node.isLeaf()) { firstIdx = node.leftFirst; return node.triCount; }
@@ -3594,7 +3599,7 @@ template <typename Float, typename Index> Index BVH<Float, Index>::CombineLeafs(
 }
 
 // CombineLeafs: Combine leaf nodes if this improves tree SAH cost. For HPLOC postprocessing.
-template <typename Float, typename Index> void BVH<Float, Index>::CombineLeafs( const Index nodeIdx )
+TEMPLATED void BVH<Float, Index>::CombineLeafs( const Index nodeIdx )
 {
 	BVHNode& node = bvhNode[nodeIdx];
 	if (node.isLeaf()) return;
@@ -3616,7 +3621,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::CombineLeafs( 
 	CombineLeafs( node.leftFirst + 1 );
 }
 
-template <typename Float, typename Index> bool BVH<Float, Index>::IntersectSphere( const Vec3& pos, const Float r ) const
+TEMPLATED bool BVH<Float, Index>::IntersectSphere( const Vec3& pos, const Float r ) const
 {
 	const Vec3 bmin = pos - Vec3( r ), bmax = pos + Vec3( r );
 	BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
@@ -3711,14 +3716,14 @@ template <typename Float, typename Index> bool BVH<Float, Index>::IntersectSpher
 		return posZ ? kernel<false, false, true>( ray ) : kernel<false, false, false>( ray ); \
 	}
 
-template <typename Float, typename Index> int32_t BVH<Float, Index>::Intersect( Ray& ray ) const
+TEMPLATED int32_t BVH<Float, Index>::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
 	if (isTLAS()) OCTANT_DISPATCH( IntersectTLASOctant, ray )
 	else OCTANT_DISPATCH( IntersectOctant, ray )
 }
 
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> int32_t BVH<Float, Index>::IntersectOctant( Ray& ray ) const
+TEMPLATED PER_OCTANT int32_t BVH<Float, Index>::IntersectOctant( Ray& ray ) const
 {
 	BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
 	Index stackPtr = 0;
@@ -3780,7 +3785,7 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 	return (int32_t)cost; // cast to not break interface.
 }
 
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> int32_t BVH<Float, Index>::IntersectTLASOctant( Ray& ray ) const
+TEMPLATED PER_OCTANT int32_t BVH<Float, Index>::IntersectTLASOctant( Ray& ray ) const
 {
 	BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
 	Index stackPtr = 0;
@@ -3855,14 +3860,14 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 	return (int32_t)cost;
 }
 
-template <typename Float, typename Index> bool BVH<Float, Index>::IsOccluded( const Ray& ray ) const
+TEMPLATED bool BVH<Float, Index>::IsOccluded( const Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
 	if (isTLAS()) OCTANT_DISPATCH( IsOccludedTLASOctant, ray )
 	else OCTANT_DISPATCH( IsOccludedOctant, ray )
 }
 
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> bool BVH<Float, Index>::IsOccludedOctant( const Ray& ray ) const
+TEMPLATED PER_OCTANT bool BVH<Float, Index>::IsOccludedOctant( const Ray& ray ) const
 {
 	BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
 	Index stackPtr = 0;
@@ -3920,7 +3925,7 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 	return false;
 }
 
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> bool BVH<Float, Index>::IsOccludedTLASOctant( const Ray& ray ) const
+TEMPLATED PER_OCTANT bool BVH<Float, Index>::IsOccludedTLASOctant( const Ray& ray ) const
 {
 	BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
 	Index stackPtr = 0;
@@ -3982,7 +3987,7 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 	return false;
 }
 
-template <typename Float, typename Index> Index BVH<Float, Index>::NodeCount() const
+TEMPLATED Index BVH<Float, Index>::NodeCount() const
 {
 	// Determine the number of nodes in the tree. Typically the result should
 	// be usedNodes - 1 (second node is always unused), but some builders may
@@ -3998,7 +4003,7 @@ template <typename Float, typename Index> Index BVH<Float, Index>::NodeCount() c
 	return retVal;
 }
 
-template <typename Float, typename Index> Index BVH<Float, Index>::LeafCount() const
+TEMPLATED Index BVH<Float, Index>::LeafCount() const
 {
 	// Determine the number of nodes in the tree. Typically the result should
 	// be usedNodes - 1 (second node is always unused), but some builders may
@@ -4017,7 +4022,7 @@ template <typename Float, typename Index> Index BVH<Float, Index>::LeafCount() c
 // This is useful after an SBVH build or multi-threaded build, but also after
 // calling MergeLeafs. Some operations, such as Optimize, *require* a
 // compacted tree to work correctly.
-template <typename Float, typename Index> void BVH<Float, Index>::Compact()
+TEMPLATED void BVH<Float, Index>::Compact()
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::Compact(), bvhNode == 0." );
 	if (bvhNode[0].isLeaf()) return; // nothing to compact.
@@ -4055,7 +4060,7 @@ template <typename Float, typename Index> void BVH<Float, Index>::Compact()
 // BVH_Verbose implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH_Verbose<Float, Index>::BVH_Verbose( BVH_Verbose&& other ) noexcept
+TEMPLATED BVH_Verbose<Float, Index>::BVH_Verbose( BVH_Verbose&& other ) noexcept
 {
 	*this = other;
 	// bvhNode is the only buffer we own; verts / fragment / primIdx are borrowed
@@ -4065,18 +4070,18 @@ template <typename Float, typename Index> BVH_Verbose<Float, Index>::BVH_Verbose
 }
 
 // move assignment: release what we hold, then take over 'other'.
-template <typename Float, typename Index> BVH_Verbose<Float, Index>& BVH_Verbose<Float, Index>::operator=( BVH_Verbose&& other ) noexcept
+TEMPLATED BVH_Verbose<Float, Index>& BVH_Verbose<Float, Index>::operator=( BVH_Verbose&& other ) noexcept
 {
 	if (this != &other) this->~BVH_Verbose(), new (this) BVH_Verbose( tinybvh_move( other ) );
 	return *this;
 }
 
-template <typename Float, typename Index> BVH_Verbose<Float, Index>::~BVH_Verbose()
+TEMPLATED BVH_Verbose<Float, Index>::~BVH_Verbose()
 {
 	AlignedFree( bvhNode );
 }
 
-template <typename Float, typename Index> void BVH_Verbose<Float, Index>::ConvertFrom( const BVH& original, bool /* unused here */ )
+TEMPLATED void BVH_Verbose<Float, Index>::ConvertFrom( const BVH& original, bool /* unused here */ )
 {
 	// allocate space
 	Index spaceNeeded = original.triCount * (original.isRefittable() ? 2 : 3);
@@ -4119,7 +4124,7 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::Conver
 	usedNodes = original.usedNodes;
 }
 
-template <typename Float, typename Index> int32_t BVH_Verbose<Float, Index>::NodeCount() const
+TEMPLATED int32_t BVH_Verbose<Float, Index>::NodeCount() const
 {
 	Index retVal = 0, nodeIdx = 0, stack[64], stackPtr = 0;
 	while (1)
@@ -4132,7 +4137,7 @@ template <typename Float, typename Index> int32_t BVH_Verbose<Float, Index>::Nod
 	return (int32_t)retVal;
 }
 
-template <typename Float, typename Index> Float BVH_Verbose<Float, Index>::SAHCost( const Index nodeIdx ) const
+TEMPLATED Float BVH_Verbose<Float, Index>::SAHCost( const Index nodeIdx ) const
 {
 	const BVHNode& n = bvhNode[nodeIdx];
 	const Float SAn = SA( n.aabbMin, n.aabbMax );
@@ -4141,7 +4146,7 @@ template <typename Float, typename Index> Float BVH_Verbose<Float, Index>::SAHCo
 	return nodeIdx == 0 ? (cost / SAn) : cost;
 }
 
-template <typename Float, typename Index> void BVH_Verbose<Float, Index>::Refit( const Index nodeIdx, bool skipLeafs )
+TEMPLATED void BVH_Verbose<Float, Index>::Refit( const Index nodeIdx, bool skipLeafs )
 {
 	BVH_FATAL_ERROR_IF( !refittable && !skipLeafs, "BVH_Verbose::Refit( .. ), refitting an SBVH." );
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH_Verbose::Refit( .. ), bvhNode == 0." );
@@ -4173,7 +4178,7 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::Refit(
 	if (nodeIdx == 0) aabbMin = node.aabbMin, aabbMax = node.aabbMax;
 }
 
-template <typename Float, typename Index> void BVH_Verbose<Float, Index>::CheckFit( const Index nodeIdx, bool skipLeafs )
+TEMPLATED void BVH_Verbose<Float, Index>::CheckFit( const Index nodeIdx, bool skipLeafs )
 {
 	BVHNode& node = bvhNode[nodeIdx];
 	Vec3 bmin( bvh_far<Float> ), bmax( -bvh_far<Float> );
@@ -4200,7 +4205,7 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::CheckF
 	}
 }
 
-template <typename Float, typename Index> void BVH_Verbose<Float, Index>::Compact()
+TEMPLATED void BVH_Verbose<Float, Index>::Compact()
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH_Verbose::Compact(), bvhNode == 0." );
 	if (bvhNode[0].isLeaf()) return; // nothing to compact.
@@ -4236,7 +4241,7 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::Compac
 	may_have_holes = false; // the relocated node list is contiguous again.
 }
 
-template <typename Float, typename Index> void BVH_Verbose<Float, Index>::SortIndices()
+TEMPLATED void BVH_Verbose<Float, Index>::SortIndices()
 {
 	// create a new primIdx array which has the primitive indices sorted by depth-first traversal order.
 	if (bvhNode == 0 || idxCount == 0) return;
@@ -4262,7 +4267,7 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::SortIn
 	AlignedFree( tmp );
 }
 
-template <typename Float, typename Index> void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, const bool extreme, bool stochastic )
+TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, const bool extreme, bool stochastic )
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH_Verbose::Optimize( .. ), bvhNode == 0." );
 	BVH_FATAL_ERROR_IF( may_have_holes, "BVH_Verbose::Optimize( .. ), bvh may have holes; Compact() first." );
@@ -4403,7 +4408,7 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::Optimi
 // necessary to have a single primitive per leaf, it will yield a slightly better
 // optimized BVH. The leaves of the optimized BVH should be collapsed ('MergeLeafs')
 // to obtain the final tree.
-template <typename Float, typename Index> void BVH_Verbose<Float, Index>::SplitLeafs( const Index maxPrims )
+TEMPLATED void BVH_Verbose<Float, Index>::SplitLeafs( const Index maxPrims )
 {
 	Index nodeIdx = 0, stack[TINYBVH_STACK_SIZE], stackPtr = 0;
 	while (1)
@@ -4441,7 +4446,7 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::SplitL
 
 // MergeLeafs: After optimizing a BVH, single-primitive leaves should be merged whenever
 // SAH indicates this is an improvement.
-template <typename Float, typename Index> void BVH_Verbose<Float, Index>::MergeLeafs()
+TEMPLATED void BVH_Verbose<Float, Index>::MergeLeafs()
 {
 	// allocate some working space
 	if (bvhNode == 0 || idxCount == 0) return;
@@ -4497,7 +4502,7 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::MergeL
 // BVH_GPU implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH_GPU<Float, Index>::BVH_GPU( BVH_GPU&& other ) noexcept
+TEMPLATED BVH_GPU<Float, Index>::BVH_GPU( BVH_GPU&& other ) noexcept
 {
 	*this = other;
 	// The embedded bvh must let go too: owned or not, this object now refers to
@@ -4508,13 +4513,13 @@ template <typename Float, typename Index> BVH_GPU<Float, Index>::BVH_GPU( BVH_GP
 }
 
 // move assignment: release what we hold, then take over 'other'.
-template <typename Float, typename Index> BVH_GPU<Float, Index>& BVH_GPU<Float, Index>::operator=( BVH_GPU&& other ) noexcept
+TEMPLATED BVH_GPU<Float, Index>& BVH_GPU<Float, Index>::operator=( BVH_GPU&& other ) noexcept
 {
 	if (this != &other) this->~BVH_GPU(), new (this) BVH_GPU( tinybvh_move( other ) );
 	return *this;
 }
 
-template <typename Float, typename Index> BVH_GPU<Float, Index>::~BVH_GPU()
+TEMPLATED BVH_GPU<Float, Index>::~BVH_GPU()
 {
 	if (!ownBVH) bvh.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvhNode );
@@ -4524,15 +4529,15 @@ template <typename Float, typename Index> BVH_GPU<Float, Index>::~BVH_GPU()
 }
 
 // forwarders
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::Build( const bvhvec4* v, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::BuildHQ( const Slice& v ) { settings.useSpatialSplits = true; Build( v ); }
+TEMPLATED void BVH_GPU<Float, Index>::Build( const bvhvec4* v, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
+TEMPLATED void BVH_GPU<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
+TEMPLATED void BVH_GPU<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
+TEMPLATED void BVH_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
+TEMPLATED void BVH_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
+TEMPLATED void BVH_GPU<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED void BVH_GPU<Float, Index>::BuildHQ( const Slice& v ) { settings.useSpatialSplits = true; Build( v ); }
 
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
+TEMPLATED void BVH_GPU<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
 {
 	// propagate settings for this layout to the underlying layout
 	bvh.context = context, bvh.settings = settings;
@@ -4543,7 +4548,7 @@ template <typename Float, typename Index> void BVH_GPU<Float, Index>::Build( con
 	ConvertFrom( bvh, false );
 }
 
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::BuildAABB( const bvhvec4* aabbs, const Index primCount )
+TEMPLATED void BVH_GPU<Float, Index>::BuildAABB( const bvhvec4* aabbs, const Index primCount )
 {
 	// build a TLAS based on the array of BLASInstance records.
 	bvh.context = context, bvh.settings = settings;
@@ -4554,7 +4559,7 @@ template <typename Float, typename Index> void BVH_GPU<Float, Index>::BuildAABB(
 	ConvertFrom( bvh );
 }
 
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::Build( BLASInstance* instances, const Index instCount, BVHBase<Float, Index>** blasses, const Index blasCount )
+TEMPLATED void BVH_GPU<Float, Index>::Build( BLASInstance* instances, const Index instCount, BVHBase<Float, Index>** blasses, const Index blasCount )
 {
 	// build a TLAS based on the array of BLASInstance records.
 	bvh.context = context, bvh.settings = settings;
@@ -4565,7 +4570,7 @@ template <typename Float, typename Index> void BVH_GPU<Float, Index>::Build( BLA
 	ConvertFrom( bvh, false );
 }
 
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::Optimize( const uint32_t iterations, bool extreme )
+TEMPLATED void BVH_GPU<Float, Index>::Optimize( const uint32_t iterations, bool extreme )
 {
 	bvh.Optimize( iterations, extreme );
 	ConvertFrom( bvh, false );
@@ -4578,7 +4583,7 @@ template <typename Node> static uint32_t CompactLeafRef( const Node& leaf )
 	return 0x80000000u | (tinybvh_min( 127u, (uint32_t)leaf.triCount ) << 24) | ((uint32_t)leaf.leftFirst & 0xffffff);
 }
 
-template <typename Float, typename Index> void BVH_GPU<Float, Index>::ConvertFrom( const BVH& original, bool compact )
+TEMPLATED void BVH_GPU<Float, Index>::ConvertFrom( const BVH& original, bool compact )
 {
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
@@ -4656,7 +4661,7 @@ template <typename Float, typename Index> void BVH_GPU<Float, Index>::ConvertFro
 	}
 }
 
-template <typename Float, typename Index> int32_t BVH_GPU<Float, Index>::Intersect( Ray& ray ) const
+TEMPLATED int32_t BVH_GPU<Float, Index>::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
 	uint32_t nodeIdx = 0, stack[TINYBVH_STACK_SIZE], stackPtr = 0;
@@ -4713,49 +4718,49 @@ template <typename Float, typename Index> int32_t BVH_GPU<Float, Index>::Interse
 // Generic (templated) MBVH implementation
 // ----------------------------------------------------------------------------
 
-template <int M, typename Float, typename Index> MBVH<M, Float, Index>::MBVH( MBVH<M, Float, Index>&& other ) noexcept
+TEMPLATED_M MBVH<M, Float, Index>::MBVH( MBVH<M, Float, Index>&& other ) noexcept
 {
 	*this = other;
 	other.ReleaseOwnership();
 }
 
 // move assignment: release what we hold, then take over 'other'.
-template <int M, typename Float, typename Index> MBVH<M, Float, Index>& MBVH<M, Float, Index>::operator=( MBVH&& other ) noexcept
+TEMPLATED_M MBVH<M, Float, Index>& MBVH<M, Float, Index>::operator=( MBVH&& other ) noexcept
 {
 	if (this != &other) this->~MBVH(), new (this) MBVH( tinybvh_move( other ) );
 	return *this;
 }
 
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::ReleaseOwnership()
+TEMPLATED_M void MBVH<M, Float, Index>::ReleaseOwnership()
 {
 	mbvhNode = 0;
 	allocatedNodes = usedNodes = triCount = this->idxCount = 0;
 	bvh.ReleaseOwnership(); // cascade: the source BVH may be ours as well
 }
 
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::DropReference( BVHContext ctx )
+TEMPLATED_M void MBVH<M, Float, Index>::DropReference( BVHContext ctx )
 {
 	// deliberately no destructor call: the buffers are not ours to release.
 	new (this) MBVH( ctx ); // 'placement new': call constructor on this.
 	bvh.DropReference( ctx ); // the nested tree gets the same context
 }
 
-template <int M, typename Float, typename Index> MBVH<M, Float, Index>::~MBVH()
+TEMPLATED_M MBVH<M, Float, Index>::~MBVH()
 {
 	if (!ownBVH) bvh.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( mbvhNode );
 }
 
 // forwarders
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::BuildHQ( const Vertex* v, const uint32_t* indices, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), indices, p ); }
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED_M void MBVH<M, Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
+TEMPLATED_M void MBVH<M, Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
+TEMPLATED_M void MBVH<M, Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
+TEMPLATED_M void MBVH<M, Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
+TEMPLATED_M void MBVH<M, Float, Index>::BuildHQ( const Vertex* v, const uint32_t* indices, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), indices, p ); }
+TEMPLATED_M void MBVH<M, Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
+TEMPLATED_M void MBVH<M, Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
+TEMPLATED_M void MBVH<M, Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
 {
 	// propagate settings for this layout to the underlying layout
 	bvh.context = context, bvh.settings = settings;
@@ -4766,13 +4771,13 @@ template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Bui
 	ConvertFrom( bvh, true );
 }
 
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Optimize( const uint32_t iterations, bool extreme )
+TEMPLATED_M void MBVH<M, Float, Index>::Optimize( const uint32_t iterations, bool extreme )
 {
 	bvh.Optimize( iterations, extreme );
 	ConvertFrom( bvh, true );
 }
 
-template <int M, typename Float, typename Index> Index MBVH<M, Float, Index>::LeafCount( const Index nodeIdx ) const
+TEMPLATED_M Index MBVH<M, Float, Index>::LeafCount( const Index nodeIdx ) const
 {
 	MBVHNode& node = mbvhNode[nodeIdx];
 	if (node.isLeaf()) return 1;
@@ -4781,7 +4786,7 @@ template <int M, typename Float, typename Index> Index MBVH<M, Float, Index>::Le
 	return count;
 }
 
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Refit( const Index nodeIdx )
+TEMPLATED_M void MBVH<M, Float, Index>::Refit( const Index nodeIdx )
 {
 	MBVHNode& node = mbvhNode[nodeIdx];
 	if (node.isLeaf())
@@ -4820,7 +4825,7 @@ template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Ref
 	if (nodeIdx == 0) aabbMin = node.aabbMin, aabbMax = node.aabbMax;
 }
 
-template <int M, typename Float, typename Index> Float MBVH<M, Float, Index>::SAHCost( const Index nodeIdx ) const
+TEMPLATED_M Float MBVH<M, Float, Index>::SAHCost( const Index nodeIdx ) const
 {
 	// Determine the SAH cost of the tree. This provides an indication
 	// of the quality of the BVH: Lower is better.
@@ -4835,7 +4840,7 @@ template <int M, typename Float, typename Index> Float MBVH<M, Float, Index>::SA
 // Collapse a BVH2 into an M-wide BVH. Based on "Efficient Incoherent Ray Traversal on GPUs 
 // Through Compressed Wide BVHs", Ylitie et al. 2017, section 4.2.
 static constexpr float c_leaf = C_INT * 0.8f;
-template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::ConvertFrom( const BVH& original, bool compact )
+TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( const BVH& original, bool compact )
 {
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
@@ -4974,7 +4979,7 @@ template <int M, typename Float, typename Index> void MBVH<M, Float, Index>::Con
 // BVH4_GPU implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH4_GPU<Float, Index>::BVH4_GPU( BVH4_GPU&& other ) noexcept
+TEMPLATED BVH4_GPU<Float, Index>::BVH4_GPU( BVH4_GPU&& other ) noexcept
 {
 	*this = other;
 	// The embedded bvh4 must let go too: owned or not, this object now refers to
@@ -4984,28 +4989,28 @@ template <typename Float, typename Index> BVH4_GPU<Float, Index>::BVH4_GPU( BVH4
 }
 
 // move assignment: release what we hold, then take over 'other'.
-template <typename Float, typename Index> BVH4_GPU<Float, Index>& BVH4_GPU<Float, Index>::operator=( BVH4_GPU&& other ) noexcept
+TEMPLATED BVH4_GPU<Float, Index>& BVH4_GPU<Float, Index>::operator=( BVH4_GPU&& other ) noexcept
 {
 	if (this != &other) this->~BVH4_GPU(), new (this) BVH4_GPU( tinybvh_move( other ) );
 	return *this;
 }
 
-template <typename Float, typename Index> BVH4_GPU<Float, Index>::~BVH4_GPU()
+TEMPLATED BVH4_GPU<Float, Index>::~BVH4_GPU()
 {
 	if (!ownBVH4) bvh4.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvh4Data );
 }
 
 // forwarders
-template <typename Float, typename Index> void BVH4_GPU<Float, Index>::Build( const bvhvec4* v, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
-template <typename Float, typename Index> void BVH4_GPU<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
-template <typename Float, typename Index> void BVH4_GPU<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH4_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
-template <typename Float, typename Index> void BVH4_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
-template <typename Float, typename Index> void BVH4_GPU<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH4_GPU<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED void BVH4_GPU<Float, Index>::Build( const bvhvec4* v, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
+TEMPLATED void BVH4_GPU<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
+TEMPLATED void BVH4_GPU<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
+TEMPLATED void BVH4_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
+TEMPLATED void BVH4_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
+TEMPLATED void BVH4_GPU<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
+TEMPLATED void BVH4_GPU<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
-template <typename Float, typename Index> void BVH4_GPU<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
+TEMPLATED void BVH4_GPU<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
 {
 	// propagate settings for this layout to the underlying layout
 	bvh4.context = bvh4.bvh.context = context, bvh4.settings = bvh4.bvh.settings = settings;
@@ -5016,13 +5021,13 @@ template <typename Float, typename Index> void BVH4_GPU<Float, Index>::Build( co
 	ConvertFrom( bvh4, true );
 }
 
-template <typename Float, typename Index> void BVH4_GPU<Float, Index>::Optimize( const uint32_t iterations, bool extreme )
+TEMPLATED void BVH4_GPU<Float, Index>::Optimize( const uint32_t iterations, bool extreme )
 {
 	bvh4.Optimize( iterations, extreme );
 	ConvertFrom( bvh4, true );
 }
 
-template <typename Float, typename Index> void BVH4_GPU<Float, Index>::ConvertFrom( const MBVH<4, Float, Index>& original, bool compact )
+TEMPLATED void BVH4_GPU<Float, Index>::ConvertFrom( const MBVH<4, Float, Index>& original, bool compact )
 {
 	// get a copy of the original bvh4
 	if (&original != &bvh4) ownBVH4 = false; // bvh isn't ours; don't delete in destructor.
@@ -5159,7 +5164,7 @@ template <typename Float, typename Index> void BVH4_GPU<Float, Index>::ConvertFr
 struct uchar4 { uint8_t x, y, z, w; };
 static uchar4 as_uchar4( const float v ) { return tinybvh_bitcast<uchar4>( v ); }
 static uint32_t as_uint( const float v ) { uint32_t t; memcpy( &t, &v, sizeof( t ) ); return t; }
-template <typename Float, typename Index> int32_t BVH4_GPU<Float, Index>::Intersect( Ray& ray ) const
+TEMPLATED int32_t BVH4_GPU<Float, Index>::Intersect( Ray& ray ) const
 {
 	// traverse a blas
 	VALIDATE_RAY( ray );
@@ -5255,7 +5260,7 @@ template <typename Float, typename Index> int32_t BVH4_GPU<Float, Index>::Inters
 // BVH4_CPU implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH4_CPU<Float, Index>::BVH4_CPU( BVH4_CPU&& other ) noexcept
+TEMPLATED BVH4_CPU<Float, Index>::BVH4_CPU( BVH4_CPU&& other ) noexcept
 {
 	*this = other;
 	// The embedded bvh4 must let go too: owned or not, this object now refers to
@@ -5265,28 +5270,28 @@ template <typename Float, typename Index> BVH4_CPU<Float, Index>::BVH4_CPU( BVH4
 }
 
 // move assignment: release what we hold, then take over 'other'.
-template <typename Float, typename Index> BVH4_CPU<Float, Index>& BVH4_CPU<Float, Index>::operator=( BVH4_CPU&& other ) noexcept
+TEMPLATED BVH4_CPU<Float, Index>& BVH4_CPU<Float, Index>::operator=( BVH4_CPU&& other ) noexcept
 {
 	if (this != &other) this->~BVH4_CPU(), new (this) BVH4_CPU( tinybvh_move( other ) );
 	return *this;
 }
 
-template <typename Float, typename Index> BVH4_CPU<Float, Index>::~BVH4_CPU()
+TEMPLATED BVH4_CPU<Float, Index>::~BVH4_CPU()
 {
 	if (!ownBVH4) bvh4.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvh4Data );
 }
 
 // forwarders
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED void BVH4_CPU<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
+TEMPLATED void BVH4_CPU<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
+TEMPLATED void BVH4_CPU<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
+TEMPLATED void BVH4_CPU<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
+TEMPLATED void BVH4_CPU<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
+TEMPLATED void BVH4_CPU<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
+TEMPLATED void BVH4_CPU<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
+TEMPLATED void BVH4_CPU<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
 {
 	// propagate settings for this layout to the underlying layout
 	bvh4.bvh.context = bvh4.context = context, bvh4.bvh.settings = bvh4.settings = settings;
@@ -5297,7 +5302,7 @@ template <typename Float, typename Index> void BVH4_CPU<Float, Index>::Build( co
 	ConvertFrom( bvh4 );
 }
 
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::Save( const char* fileName )
+TEMPLATED void BVH4_CPU<Float, Index>::Save( const char* fileName )
 {
 	std::fstream s{ fileName, s.binary | s.out };
 	const uint32_t header = this->CacheHeader();
@@ -5307,7 +5312,7 @@ template <typename Float, typename Index> void BVH4_CPU<Float, Index>::Save( con
 	s.write( (char*)bvh4Data, usedBlocks * 64 );
 }
 
-template <typename Float, typename Index> bool BVH4_CPU<Float, Index>::Load( const char* fileName, const Index expectedTris )
+TEMPLATED bool BVH4_CPU<Float, Index>::Load( const char* fileName, const Index expectedTris )
 {
 	// open file and check contents
 	std::fstream s{ fileName, s.binary | s.in };
@@ -5329,19 +5334,19 @@ template <typename Float, typename Index> bool BVH4_CPU<Float, Index>::Load( con
 	return true;
 }
 
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::Optimize( const uint32_t iterations, bool extreme )
+TEMPLATED void BVH4_CPU<Float, Index>::Optimize( const uint32_t iterations, bool extreme )
 {
 	bvh4.Optimize( iterations, extreme );
 	ConvertFrom( bvh4 );
 }
 
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::Refit()
+TEMPLATED void BVH4_CPU<Float, Index>::Refit()
 {
 	bvh4.Refit();
 	ConvertFrom( bvh4 );
 }
 
-template <typename Float, typename Index> Float BVH4_CPU<Float, Index>::SAHCost( const Index nodeIdx ) const
+TEMPLATED Float BVH4_CPU<Float, Index>::SAHCost( const Index nodeIdx ) const
 {
 	return bvh4.SAHCost( nodeIdx );
 }
@@ -5349,7 +5354,7 @@ template <typename Float, typename Index> Float BVH4_CPU<Float, Index>::SAHCost(
 #define SORT(a,b) { if (tinybvh_as_float( idist[a] ) < tinybvh_as_float( idist[b] )) \
 	{ const uint32_t h = idist[a]; idist[a] = idist[b], idist[b] = h; } }
 
-template <typename Float, typename Index> void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& original )
+TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& original )
 {
 	// Note: identical to BVH8_CPU version, just with fewer lanes.
 	// get a copy of the input bvh4
@@ -5449,7 +5454,7 @@ template <typename Float, typename Index> void BVH4_CPU<Float, Index>::ConvertFr
 // BVH8_CPU implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH8_CPU<Float, Index>::BVH8_CPU( BVH8_CPU&& other ) noexcept
+TEMPLATED BVH8_CPU<Float, Index>::BVH8_CPU( BVH8_CPU&& other ) noexcept
 {
 	*this = other;
 	// The embedded bvh8 must let go too: owned or not, this object now refers to
@@ -5459,28 +5464,28 @@ template <typename Float, typename Index> BVH8_CPU<Float, Index>::BVH8_CPU( BVH8
 }
 
 // move assignment: release what we hold, then take over 'other'.
-template <typename Float, typename Index> BVH8_CPU<Float, Index>& BVH8_CPU<Float, Index>::operator=( BVH8_CPU&& other ) noexcept
+TEMPLATED BVH8_CPU<Float, Index>& BVH8_CPU<Float, Index>::operator=( BVH8_CPU&& other ) noexcept
 {
 	if (this != &other) this->~BVH8_CPU(), new (this) BVH8_CPU( tinybvh_move( other ) );
 	return *this;
 }
 
-template <typename Float, typename Index> BVH8_CPU<Float, Index>::~BVH8_CPU()
+TEMPLATED BVH8_CPU<Float, Index>::~BVH8_CPU()
 {
 	if (!ownBVH8) bvh8.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvh8Data );
 }
 
 // forwarders
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Build( const Slice& vertices ) { Build( vertices, 0, 0 ); }
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::BuildHQ( const Slice& vertices ) { BuildHQ( vertices, 0, 0 ); }
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED void BVH8_CPU<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
+TEMPLATED void BVH8_CPU<Float, Index>::Build( const Slice& vertices ) { Build( vertices, 0, 0 ); }
+TEMPLATED void BVH8_CPU<Float, Index>::Build( const Vertex* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
+TEMPLATED void BVH8_CPU<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
+TEMPLATED void BVH8_CPU<Float, Index>::BuildHQ( const Slice& vertices ) { BuildHQ( vertices, 0, 0 ); }
+TEMPLATED void BVH8_CPU<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
+TEMPLATED void BVH8_CPU<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
+TEMPLATED void BVH8_CPU<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
 {
 	// propagate settings for this layout to the underlying layout
 	bvh8.bvh.context = bvh8.context = context, bvh8.bvh.settings = bvh8.settings = settings;
@@ -5492,7 +5497,7 @@ template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Build( co
 	ConvertFrom( bvh8 );
 }
 
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Save( const char* fileName )
+TEMPLATED void BVH8_CPU<Float, Index>::Save( const char* fileName )
 {
 	std::fstream s{ fileName, s.binary | s.out };
 	const uint32_t header = this->CacheHeader();
@@ -5502,7 +5507,7 @@ template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Save( con
 	s.write( (char*)bvh8Data, usedBlocks * 64 );
 }
 
-template <typename Float, typename Index> bool BVH8_CPU<Float, Index>::Load( const char* fileName, const Index expectedTris )
+TEMPLATED bool BVH8_CPU<Float, Index>::Load( const char* fileName, const Index expectedTris )
 {
 	// open file and check contents
 	std::fstream s{ fileName, s.binary | s.in };
@@ -5524,24 +5529,24 @@ template <typename Float, typename Index> bool BVH8_CPU<Float, Index>::Load( con
 	return true;
 }
 
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Optimize( const uint32_t iterations, bool extreme )
+TEMPLATED void BVH8_CPU<Float, Index>::Optimize( const uint32_t iterations, bool extreme )
 {
 	bvh8.Optimize( iterations, extreme );
 	ConvertFrom( bvh8 );
 }
 
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::Refit()
+TEMPLATED void BVH8_CPU<Float, Index>::Refit()
 {
 	bvh8.Refit();
 	ConvertFrom( bvh8 );
 }
 
-template <typename Float, typename Index> Float BVH8_CPU<Float, Index>::SAHCost( const Index nodeIdx ) const
+TEMPLATED Float BVH8_CPU<Float, Index>::SAHCost( const Index nodeIdx ) const
 {
 	return bvh8.SAHCost( nodeIdx );
 }
 
-template <typename Float, typename Index> void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& original )
+TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& original )
 {
 	// get a copy of the input bvh8
 	if (&original != &bvh8) ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
@@ -5650,7 +5655,7 @@ template <typename Float, typename Index> void BVH8_CPU<Float, Index>::ConvertFr
 // BVH8_CWBVH implementation
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> BVH8_CWBVH<Float, Index>::BVH8_CWBVH( BVH8_CWBVH&& other ) noexcept
+TEMPLATED BVH8_CWBVH<Float, Index>::BVH8_CWBVH( BVH8_CWBVH&& other ) noexcept
 {
 	*this = other;
 	// The embedded bvh8 must let go too: owned or not, this object now refers to
@@ -5661,13 +5666,13 @@ template <typename Float, typename Index> BVH8_CWBVH<Float, Index>::BVH8_CWBVH( 
 }
 
 // move assignment: release what we hold, then take over 'other'.
-template <typename Float, typename Index> BVH8_CWBVH<Float, Index>& BVH8_CWBVH<Float, Index>::operator=( BVH8_CWBVH&& other ) noexcept
+TEMPLATED BVH8_CWBVH<Float, Index>& BVH8_CWBVH<Float, Index>::operator=( BVH8_CWBVH&& other ) noexcept
 {
 	if (this != &other) this->~BVH8_CWBVH(), new (this) BVH8_CWBVH( tinybvh_move( other ) );
 	return *this;
 }
 
-template <typename Float, typename Index> BVH8_CWBVH<Float, Index>::~BVH8_CWBVH()
+TEMPLATED BVH8_CWBVH<Float, Index>::~BVH8_CWBVH()
 {
 	if (!ownBVH8) bvh8.ReleaseOwnership(); // clear out pointers we don't own.
 	AlignedFree( bvh8Data );
@@ -5675,15 +5680,15 @@ template <typename Float, typename Index> BVH8_CWBVH<Float, Index>::~BVH8_CWBVH(
 }
 
 // forwarders
-template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Build( const bvhvec4* v, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
-template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
-template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
-template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::BuildHQ( const Slice& vertices ) { BuildHQ( vertices, 0, 0 ); }
-template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
-template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED void BVH8_CWBVH<Float, Index>::Build( const bvhvec4* v, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
+TEMPLATED void BVH8_CWBVH<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
+TEMPLATED void BVH8_CWBVH<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
+TEMPLATED void BVH8_CWBVH<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
+TEMPLATED void BVH8_CWBVH<Float, Index>::BuildHQ( const Slice& vertices ) { BuildHQ( vertices, 0, 0 ); }
+TEMPLATED void BVH8_CWBVH<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
+TEMPLATED void BVH8_CWBVH<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 
-template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
+TEMPLATED void BVH8_CWBVH<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
 {
 	// propagate settings for this layout to the underlying layout
 	bvh8.bvh.context = bvh8.context = context;
@@ -5701,18 +5706,18 @@ template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Build( 
 	ConvertFrom( bvh8, true );
 }
 
-template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Optimize( const uint32_t iterations, bool extreme )
+TEMPLATED void BVH8_CWBVH<Float, Index>::Optimize( const uint32_t iterations, bool extreme )
 {
 	bvh8.Optimize( iterations, extreme );
 	ConvertFrom( bvh8, true );
 }
 
-template <typename Float, typename Index> Float BVH8_CWBVH<Float, Index>::SAHCost( const Index nodeIdx ) const
+TEMPLATED Float BVH8_CWBVH<Float, Index>::SAHCost( const Index nodeIdx ) const
 {
 	return bvh8.SAHCost( nodeIdx );
 }
 
-template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Save( const char* fileName )
+TEMPLATED void BVH8_CWBVH<Float, Index>::Save( const char* fileName )
 {
 	std::fstream s{ fileName, s.binary | s.out };
 	const uint32_t header = this->CacheHeader();
@@ -5723,7 +5728,7 @@ template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Save( c
 	s.write( (char*)bvh8Tris, usedTriBlocks * 16 );
 }
 
-template <typename Float, typename Index> bool BVH8_CWBVH<Float, Index>::Load( const char* fileName, const Index expectedTris )
+TEMPLATED bool BVH8_CWBVH<Float, Index>::Load( const char* fileName, const Index expectedTris )
 {
 	// open file and check contents
 	std::fstream s{ fileName, s.binary | s.in };
@@ -5757,7 +5762,7 @@ static int32_t CWBVHQuantExp( const float extent )
 
 // Convert a BVH8 to the format specified in: "Efficient Incoherent Ray Traversal on GPUs Through
 // Compressed Wide BVHs", Ylitie et al. 2017. Adapted from code by "AlanWBFT".
-template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::ConvertFrom( const MBVH<8, Float, Index>& original, bool compact )
+TEMPLATED void BVH8_CWBVH<Float, Index>::ConvertFrom( const MBVH<8, Float, Index>& original, bool compact )
 {
 	// get a copy of the original bvh8
 	if (&original != &bvh8) ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
@@ -5934,25 +5939,25 @@ template <typename Float, typename Index> void BVH8_CWBVH<Float, Index>::Convert
 #endif
 }
 
-template <typename Float, typename Index> int32_t BVH4_CPU<Float, Index>::Intersect( Ray& ray ) const
+TEMPLATED int32_t BVH4_CPU<Float, Index>::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
 	OCTANT_DISPATCH( IntersectOctant, ray )
 }
 
-template <typename Float, typename Index> bool BVH4_CPU<Float, Index>::IsOccluded( const Ray& ray ) const
+TEMPLATED bool BVH4_CPU<Float, Index>::IsOccluded( const Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
 	OCTANT_DISPATCH( IsOccludedOctant, ray )
 }
 
-template <typename Float, typename Index> int32_t BVH8_CPU<Float, Index>::Intersect( Ray& ray ) const
+TEMPLATED int32_t BVH8_CPU<Float, Index>::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
 	OCTANT_DISPATCH( IntersectOctant, ray )
 }
 
-template <typename Float, typename Index> bool BVH8_CPU<Float, Index>::IsOccluded( const Ray& ray ) const
+TEMPLATED bool BVH8_CPU<Float, Index>::IsOccluded( const Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
 	OCTANT_DISPATCH( IsOccludedOctant, ray )
@@ -5974,7 +5979,7 @@ TINYBVH_FORCEINLINE uint32_t sign_extend_s8x4( const uint32_t i )
 	uint32_t b3 = (i & 0b00000000000000000000000010000000) ? 0x000000ff : 0;
 	return b0 + b1 + b2 + b3; // probably can do better than this.
 }
-template <typename Float, typename Index> int32_t BVH8_CWBVH<Float, Index>::Intersect( Ray& ray ) const
+TEMPLATED int32_t BVH8_CWBVH<Float, Index>::Intersect( Ray& ray ) const
 {
 	bvhuint2 traversalStack[TINYBVH_STACK_SIZE * 4 /* wide trees push more nodes per step */];
 	uint32_t hitAddr = 0, stackPtr = 0;
@@ -6108,10 +6113,10 @@ template <typename Float, typename Index> int32_t BVH8_CWBVH<Float, Index>::Inte
 // Generic definitions of the members that the platform headers specialize.
 // ----------------------------------------------------------------------------
 
-template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMD( const Vertex* v, const Index p ) { BuildSIMD( Slice( v, p * 3, sizeof( Vertex ) ), 0, 0 ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMD( const Vertex* v, const uint32_t* i, const Index p ) { BuildSIMD( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMD( const Slice& v ) { BuildSIMD( v, 0, 0 ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMD( const Slice& v, const uint32_t* i, const Index p )
+TEMPLATED void BVH<Float, Index>::BuildSIMD( const Vertex* v, const Index p ) { BuildSIMD( Slice( v, p * 3, sizeof( Vertex ) ), 0, 0 ); }
+TEMPLATED void BVH<Float, Index>::BuildSIMD( const Vertex* v, const uint32_t* i, const Index p ) { BuildSIMD( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
+TEMPLATED void BVH<Float, Index>::BuildSIMD( const Slice& v ) { BuildSIMD( v, 0, 0 ); }
+TEMPLATED void BVH<Float, Index>::BuildSIMD( const Slice& v, const uint32_t* i, const Index p )
 {
 	// The three steps below are specialized in the platform headers for the
 	// instantiations that have a SIMD builder; the generic versions trap.
@@ -6119,15 +6124,15 @@ template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMD( con
 	BuildSIMDSubtree( 0u, 0u );
 	BuildSIMDFinalize();
 }
-template <typename Float, typename Index> void BVH<Float, Index>::PrepareSIMDBuild( const Slice&, const uint32_t*, const Index )
+TEMPLATED void BVH<Float, Index>::PrepareSIMDBuild( const Slice&, const uint32_t*, const Index )
 { BVH_FATAL_ERROR( "BVH::PrepareSIMDBuild requires a SIMD builder; see BVHSIMDBuilders." ); }
-template <typename Float, typename Index> void BVH<Float, Index>::PrepareSIMDBuildFragSlice( const Index, const Index, const uint32_t*, const int8_t*, const uint32_t, void*, Float*, Float* )
+TEMPLATED void BVH<Float, Index>::PrepareSIMDBuildFragSlice( const Index, const Index, const uint32_t*, const int8_t*, const uint32_t, void*, Float*, Float* )
 { BVH_FATAL_ERROR( "BVH::PrepareSIMDBuildFragSlice requires a SIMD builder; see BVHSIMDBuilders." ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMDBinTask( const Index, const Index, void*, uint32_t*, const Float*, const Float* )
+TEMPLATED void BVH<Float, Index>::BuildSIMDBinTask( const Index, const Index, void*, uint32_t*, const Float*, const Float* )
 { BVH_FATAL_ERROR( "BVH::BuildSIMDBinTask requires a SIMD builder; see BVHSIMDBuilders." ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMDSubtree( Index, uint32_t )
+TEMPLATED void BVH<Float, Index>::BuildSIMDSubtree( Index, uint32_t )
 { BVH_FATAL_ERROR( "BVH::BuildSIMDSubtree requires a SIMD builder; see BVHSIMDBuilders." ); }
-template <typename Float, typename Index> void BVH<Float, Index>::BuildSIMDFinalize()
+TEMPLATED void BVH<Float, Index>::BuildSIMDFinalize()
 { BVH_FATAL_ERROR( "BVH::BuildSIMDFinalize requires a SIMD builder; see BVHSIMDBuilders." ); }
 
 // Scalar reference for the BVH4_CPU and BVH8_CPU kernels in tiny_bvh_x86_float.h and
@@ -6228,19 +6233,19 @@ bool tinybvh_wide_occluded( const typename Layout::CacheLine* data, const Ray<Fl
 
 #undef WIDE_SLAB_TEST
 
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> int32_t BVH4_CPU<Float, Index>::IntersectOctant( Ray& ray ) const
+TEMPLATED PER_OCTANT int32_t BVH4_CPU<Float, Index>::IntersectOctant( Ray& ray ) const
 {
 	return tinybvh_wide_intersect<BVH4_CPU, 4, posX, posY, posZ>( bvh4Data, ray, opmap, opmapN );
 }
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> bool BVH4_CPU<Float, Index>::IsOccludedOctant( const Ray& ray ) const
+TEMPLATED PER_OCTANT bool BVH4_CPU<Float, Index>::IsOccludedOctant( const Ray& ray ) const
 {
 	return tinybvh_wide_occluded<BVH4_CPU, 4, posX, posY, posZ>( bvh4Data, ray, opmap, opmapN );
 }
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> int32_t BVH8_CPU<Float, Index>::IntersectOctant( Ray& ray ) const
+TEMPLATED PER_OCTANT int32_t BVH8_CPU<Float, Index>::IntersectOctant( Ray& ray ) const
 {
 	return tinybvh_wide_intersect<BVH8_CPU, 8, posX, posY, posZ>( bvh8Data, ray, opmap, opmapN );
 }
-template <typename Float, typename Index> template <bool posX, bool posY, bool posZ> bool BVH8_CPU<Float, Index>::IsOccludedOctant( const Ray& ray ) const
+TEMPLATED PER_OCTANT bool BVH8_CPU<Float, Index>::IsOccludedOctant( const Ray& ray ) const
 {
 	return tinybvh_wide_occluded<BVH8_CPU, 8, posX, posY, posZ>( bvh8Data, ray, opmap, opmapN );
 }
@@ -6252,7 +6257,7 @@ template <typename Float, typename Index> template <bool posX, bool posY, bool p
 // ============================================================================
 
 // Update
-template <typename Float, typename Index> void BLASInstance<Float, Index>::Update( BVHBase<Float, Index>* blas )
+TEMPLATED void BLASInstance<Float, Index>::Update( BVHBase<Float, Index>* blas )
 {
 	InvertTransform(); // TODO: done unconditionally; for a big TLAS this may be wasteful. Detect changes automatically?
 	// transform the eight corners of the root node aabb using the
@@ -6268,7 +6273,7 @@ template <typename Float, typename Index> void BLASInstance<Float, Index>::Updat
 }
 
 // InvertTransform - calculate the inverse of the matrix stored in 'transform'
-template <typename Float, typename Index> void BLASInstance<Float, Index>::InvertTransform()
+TEMPLATED void BLASInstance<Float, Index>::InvertTransform()
 {
 	// math from MESA, via http://stackoverflow.com/questions/1148309/inverting-a-4x4-matrix
 	const Mat4& T = this->transform; // Mat4 indexes its 16 cells directly.
@@ -6296,14 +6301,14 @@ template <typename Float, typename Index> void BLASInstance<Float, Index>::Inver
 }
 
 // SA
-template <typename Float, typename Index> Float BVHBase<Float, Index>::SA( const Vec3& aabbMin, const Vec3& aabbMax )
+TEMPLATED Float BVHBase<Float, Index>::SA( const Vec3& aabbMin, const Vec3& aabbMax )
 {
 	Vec3 e = aabbMax - aabbMin; // extent of the node
 	return e.x * e.y + e.y * e.z + e.z * e.x;
 }
 
 // IntersectTri
-template <typename Float, typename Index> void BVHBase<Float, Index>::IntersectTri( Ray& ray, const Index triIdx, const Slice& verts, const Index i0, const Index i1, const Index i2 ) const
+TEMPLATED void BVHBase<Float, Index>::IntersectTri( Ray& ray, const Index triIdx, const Slice& verts, const Index i0, const Index i1, const Index i2 ) const
 {
 #ifdef WATERTIGHT_TRITEST
 	// Woop et al.'s Watertight intersection algorithm.
@@ -6348,7 +6353,7 @@ template <typename Float, typename Index> void BVHBase<Float, Index>::IntersectT
 }
 
 // TriOccludes
-template <typename Float, typename Index> bool BVHBase<Float, Index>::TriOccludes( const Ray& ray, const Slice& verts, const Index triIdx, const Index i0, const Index i1, const Index i2 ) const
+TEMPLATED bool BVHBase<Float, Index>::TriOccludes( const Ray& ray, const Slice& verts, const Index triIdx, const Index i0, const Index i1, const Index i2 ) const
 {
 #ifdef WATERTIGHT_TRITEST
 	// Woop et al.'s Watertight intersection algorithm.
@@ -6393,7 +6398,7 @@ template <typename Float, typename Index> bool BVHBase<Float, Index>::TriOcclude
 
 // PrecomputeTriangle (helper), transforms a triangle to the format used in:
 // Fast Ray-Triangle Intersections by Coordinate Transformation. Baldwin & Weber, 2016.
-template <typename Float, typename Index> void BVHBase<Float, Index>::PrecomputeTriangle( const Slice& vert, const uint32_t ti0, const uint32_t ti1, const uint32_t ti2, void* dst )
+TEMPLATED void BVHBase<Float, Index>::PrecomputeTriangle( const Slice& vert, const uint32_t ti0, const uint32_t ti1, const uint32_t ti2, void* dst )
 {
 	Float T[12];
 	Vec3 v0 = vert[ti0], v1 = vert[ti1], v2 = vert[ti2];
@@ -6425,7 +6430,7 @@ template <typename Float, typename Index> void BVHBase<Float, Index>::Precompute
 }
 
 // Intersect: check overlap between a node AABB and the specified box.
-template <typename Float, typename Index> bool BVH<Float, Index>::BVHNode::Intersect( const Vec3& bmin, const Vec3& bmax ) const
+TEMPLATED bool BVH<Float, Index>::BVHNode::Intersect( const Vec3& bmin, const Vec3& bmax ) const
 {
 	return bmin.x < aabbMax.x && bmax.x > aabbMin.x &&
 		bmin.y < aabbMax.y && bmax.y > aabbMin.y &&
@@ -6433,7 +6438,7 @@ template <typename Float, typename Index> bool BVH<Float, Index>::BVHNode::Inter
 }
 
 // SplitFrag: cut a fragment in two new fragments. Based on madmann91 code.
-template <typename Float, typename Index> bool BVH<Float, Index>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const Float pos ) const
+TEMPLATED bool BVH<Float, Index>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const Float pos ) const
 {
 	left.bmin = Vec3( bvh_far<Float> ), left.bmax = Vec3( -bvh_far<Float> );
 	left.primIdx = orig.primIdx, left.clipped = true, right = left;
@@ -6460,7 +6465,7 @@ template <typename Float, typename Index> bool BVH<Float, Index>::SplitFrag( con
 }
 
 // ClipFrag: clip a fragment for binning.
-template <typename Float, typename Index> bool BVH<Float, Index>::ClipFrag( const Fragment& orig, Fragment& newFrag, Vec3 bmin, Vec3 bmax, const uint32_t axis ) const
+TEMPLATED bool BVH<Float, Index>::ClipFrag( const Fragment& orig, Fragment& newFrag, Vec3 bmin, Vec3 bmax, const uint32_t axis ) const
 {
 	Fragment tmp1, tmp2;
 	tmp1.bmin = Vec3( bvh_far<Float> ), tmp1.bmax = Vec3( -bvh_far<Float> );
@@ -6500,7 +6505,7 @@ template <typename Float, typename Index> bool BVH<Float, Index>::ClipFrag( cons
 
 // RefitUp: Update bounding boxes of ancestors of the specified node.
 // Returns the change in the summed surface area of the nodes it updated.
-template <typename Float, typename Index> double BVH_Verbose<Float, Index>::RefitUp( Index nodeIdx, RefitRecord* journal, uint32_t& journalPtr, const uint32_t journalCap )
+TEMPLATED double BVH_Verbose<Float, Index>::RefitUp( Index nodeIdx, RefitRecord* journal, uint32_t& journalPtr, const uint32_t journalCap )
 {
 	double deltaArea = 0;
 	bool first = true;
@@ -6532,7 +6537,7 @@ template <typename Float, typename Index> double BVH_Verbose<Float, Index>::Refi
 }
 
 // SAHCostUp: Calculate the SAH cost of a node and its ancestry
-template <typename Float, typename Index> Float BVH_Verbose<Float, Index>::SAHCostUp( Index nodeIdx ) const
+TEMPLATED Float BVH_Verbose<Float, Index>::SAHCostUp( Index nodeIdx ) const
 {
 	Float sum = 0;
 	while (nodeIdx != (Index)-1)
@@ -6546,7 +6551,7 @@ template <typename Float, typename Index> Float BVH_Verbose<Float, Index>::SAHCo
 
 // FindBestNewPosition
 // Part of "Fast Insertion-Based Optimization of Bounding Volume Hierarchies"
-template <typename Float, typename Index> Index BVH_Verbose<Float, Index>::FindBestNewPosition( const Index Lid, Float& bestCost ) const
+TEMPLATED Index BVH_Verbose<Float, Index>::FindBestNewPosition( const Index Lid, Float& bestCost ) const
 {
 	struct Task { Float ci; Index node; };
 	static const int maxTasks = TINYBVH_STACK_SIZE;
@@ -6602,7 +6607,7 @@ template <typename Float, typename Index> Index BVH_Verbose<Float, Index>::FindB
 
 // Determine for each node in the tree the number of primitives
 // stored in that subtree. Helper function for MergeLeafs.
-template <typename Float, typename Index> Index BVH_Verbose<Float, Index>::CountSubtreeTris( const Index nodeIdx, Index* counters )
+TEMPLATED Index BVH_Verbose<Float, Index>::CountSubtreeTris( const Index nodeIdx, Index* counters )
 {
 	BVHNode& node = bvhNode[nodeIdx];
 	Index result = node.triCount;
@@ -6613,7 +6618,7 @@ template <typename Float, typename Index> Index BVH_Verbose<Float, Index>::Count
 
 // Write the triangle indices stored in a subtree to a continuous
 // slice in the 'newIdx' array. Helper function for MergeLeafs.
-template <typename Float, typename Index> void BVH_Verbose<Float, Index>::MergeSubtree( const Index nodeIdx, Index* newIdx, Index& newIdxPtr )
+TEMPLATED void BVH_Verbose<Float, Index>::MergeSubtree( const Index nodeIdx, Index* newIdx, Index& newIdxPtr )
 {
 	BVHNode& node = bvhNode[nodeIdx];
 	if (node.isLeaf())
@@ -6626,16 +6631,15 @@ template <typename Float, typename Index> void BVH_Verbose<Float, Index>::MergeS
 	MergeSubtree( node.right, newIdx, newIdxPtr );
 }
 
-
 // Bundle traversal - scalar fallback.
-template <typename Float, typename Index> int32_t BVH4_CPU<Float, Index>::IntersectBundle( Ray* rays ) const
+TEMPLATED int32_t BVH4_CPU<Float, Index>::IntersectBundle( Ray* rays ) const
 {
 	int32_t cost = 0;
 	for (uint32_t i = 0; i < TINYBVH_BUNDLE_RAYS; i++) cost += Intersect( rays[i] );
 	return cost;
 }
 
-template <typename Float, typename Index> int32_t BVH<Float, Index>::IntersectBundle( Ray* rays ) const
+TEMPLATED int32_t BVH<Float, Index>::IntersectBundle( Ray* rays ) const
 {
 	BVH_FATAL_ERROR_IF( !isTLAS(), "BVH::IntersectBundle, not a TLAS." );
 	int32_t cost = 0;
@@ -6643,14 +6647,14 @@ template <typename Float, typename Index> int32_t BVH<Float, Index>::IntersectBu
 	return cost;
 }
 
-template <typename Float, typename Index> int32_t BVH4_CPU<Float, Index>::IsOccludedBundle( Ray* rays, bool* occluded ) const
+TEMPLATED int32_t BVH4_CPU<Float, Index>::IsOccludedBundle( Ray* rays, bool* occluded ) const
 {
 	int32_t cost = 0;
 	for (uint32_t i = 0; i < TINYBVH_BUNDLE_RAYS; i++) occluded[i] = IsOccluded( rays[i] ), cost++;
 	return cost;
 }
 
-template <typename Float, typename Index> int32_t BVH<Float, Index>::IsOccludedBundle( Ray* rays, bool* occluded ) const
+TEMPLATED int32_t BVH<Float, Index>::IsOccludedBundle( Ray* rays, bool* occluded ) const
 {
 	BVH_FATAL_ERROR_IF( !isTLAS(), "BVH::IsOccludedBundle, not a TLAS." );
 	int32_t cost = 0;
@@ -6665,9 +6669,9 @@ template <typename Float, typename Index> int32_t BVH<Float, Index>::IsOccludedB
 // VoxelSet implementation
 // ----------------------------------------------------------------------------
 
-template <typename F, typename I> int32_t VoxelSet::Intersect( impl::Ray<F, I>& ) const
+TEMPLATED int32_t VoxelSet::Intersect( impl::Ray<Float, Index>& ) const
 { BVH_FATAL_ERROR( "VoxelSet::Intersect, a VoxelSet can only be traversed with a single precision ray." ); }
-template <typename F, typename I> bool VoxelSet::IsOccluded( const impl::Ray<F, I>& ) const
+TEMPLATED bool VoxelSet::IsOccluded( const impl::Ray<Float, Index>& ) const
 { BVH_FATAL_ERROR( "VoxelSet::IsOccluded, a VoxelSet can only be traversed with a single precision ray." ); }
 
 VoxelSet::VoxelSet()

@@ -37,8 +37,8 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const ui
 template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t first, const uint32_t last, void* binbox, uint32_t* count, const float* nmin4, const float* rpd4 );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize();
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
+template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
+template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
 
 } // namespace tinybvh
 
@@ -469,7 +469,7 @@ TINYBVH_FORCEINLINE uint32_t neon_movemask_popc( const uint32x4_t mask )
 #define NEON_HIT( s ) ((m64 >> (16 * s)) & 1)
 #define NEON_PUSH( c, s ) { nodeStack[stackPtr] = c; vst1q_lane_f32( distStack + stackPtr, tminSorted, s ); stackPtr++; }
 
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
+template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	ALIGNED( 64 ) float distStack[TINYBVH_STACK_SIZE * 2];
@@ -614,7 +614,7 @@ the_end:
 #undef NEON_HIT
 #define NEON_HIT( l ) ((m64 >> (16 * l)) & 1)
 
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const
+template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	int32_t stackPtr = 0;
