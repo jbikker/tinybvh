@@ -36,6 +36,7 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		if (flags & BuildFlags::PRESPLIT) bvh->settings.usePresplitting = true;
 		if (flags & BuildFlags::SIMDBUILD) bvh->settings.useSIMDifavailable = true;
 		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
+		if (flags & BuildFlags::OPTIMIZE) bvh->settings.postOptimize = true;
 	}
 	// fix flags for Embree / Madmann91
 	if (layout == EMBREE || layout == MADMANN91)
@@ -147,14 +148,6 @@ void AccStruc::PrepareBuild()
 BVHBase* AccStruc::Build( PrimitiveSet* prims )
 {
 	primSet = prims;
-	if (bvh)
-	{
-		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
-		if (flags & BuildFlags::SIMDBUILD) bvh->settings.useSIMDifavailable = true;
-		if (flags & BuildFlags::PRESPLIT) bvh->settings.usePresplitting = true;
-		if (flags & BuildFlags::FULLSWEEP) bvh->settings.useFullSweep = true;
-		if (flags & BuildFlags::OPTIMIZE) bvh->settings.postOptimize = true, bvh->settings.optimizeIterations = 100;
-	}
 	switch (layout)
 	{
 	case BVH2:
