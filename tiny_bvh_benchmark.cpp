@@ -27,7 +27,7 @@ int main()
 	InitOpenCL(); // does nothing if disabled; see tools.cpp
 	vector<Experiment*> experiment;
 	// construct list of experiments
-	Scene scene = SAN_MIGUEL;
+	Scene scene = CRYTEK_SPONZA; // SAN_MIGUEL;
 
 #if 0
 

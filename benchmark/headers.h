@@ -4,9 +4,7 @@
 #include "tiny_bvh.h"
 
 // Settings
-#ifdef _WIN32
 #define ENABLE_OPENCL // required for GPU traversal experiments.
-#endif
 
 using namespace std;
 using namespace tinybvh;
