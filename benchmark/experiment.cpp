@@ -66,7 +66,7 @@ Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, Ra
 		if (view)
 		{
 			tgaFile = new char[512];
-			strncpy( tgaFile, view, 512 );
+			strncpy( tgaFile, view, 500 );
 		}
 		// Save the set of rays if requested.
 		if (rayFile)

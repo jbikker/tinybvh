@@ -27,7 +27,7 @@ void PrintHeader()
 	if (csv) fprintf( csv, "\ntinybvh,v %i.%i.%i\n", major, minor, sub );
 	std::time_t time = std::time({});
 	char buffer[128];
-    std::strftime( std::data( buffer ), 128, "time:,%T,%F", std::gmtime( &time ) );
+    std::strftime( std::data( buffer ), 128, "%a %b %d %H:%M:%S %Y", std::gmtime( &time ) );
 	if (csv) fprintf( csv, "%s\n", buffer );
 	if (csv) fflush( csv );
 

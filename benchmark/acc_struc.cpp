@@ -310,7 +310,7 @@ static void IntersectBatchSlice( uint32_t i, void* payload )
 {
 	BatchIntersectArgs* a = (BatchIntersectArgs*)payload;
 	int size = a->sliceSize;
-	if (i == a->slices - 1) size = a->rayCount - (a->slices - 1) * a->sliceSize;
+	if ((int)i == a->slices - 1) size = a->rayCount - (a->slices - 1) * a->sliceSize;
 	a->accstruc->IntersectBatch( a->rayData + a->sliceSize * i * 64, size );
 }
 void AccStruc::IntersectBatchMT( char* rayData, int rayCount )
@@ -447,7 +447,10 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 			madmannbvh.intersect<false, false>( ray, madmannbvh.get_root().index, stack, [&]( size_t begin, size_t end )
 				{
 					for (size_t i = begin; i < end; ++i)
-						if (hit = precomputed_tris[i].intersect( ray )) prim_id = i, std::tie( ray.tmax, u, v ) = *hit;
+					{
+						hit = precomputed_tris[i].intersect( ray );
+						if (hit) prim_id = i, std::tie( ray.tmax, u, v ) = *hit;
+					}
 					return prim_id != invalid_id;
 				} );
 		}
@@ -490,7 +493,7 @@ float AccStruc::IntersectBatchPackets( char* rayData, int rayCount )
 		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
 		{
 			char* rd = rayData + i * 64;
-			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( batch + j, rd, 64 );
+			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( (char*)(batch + j), rd, 64 );
 			accstruc->IntersectBundle( batch );
 		}
 		break;
@@ -619,7 +622,7 @@ void AccStruc::OcclusionBatchPackets( char* rayData, int rayCount )
 		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
 		{
 			char* rd = rayData + i * 64;
-			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( batch + j, rd, 64 );
+			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( (char*)(batch + j), rd, 64 );
 			accstruc->IsOccludedBundle( batch, occluded );
 		}
 		break;

@@ -27,9 +27,23 @@ int main()
 	InitOpenCL(); // does nothing if disabled; see tools.cpp
 	vector<Experiment*> experiment;
 	// construct list of experiments
-	Scene scene = CRYTEK_SPONZA;
+	Scene scene = SAN_MIGUEL;
 
-#if 0 // run one block at a time to reduce throttling effects.
+#if 0
+
+	// profiling the spatial split builder
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+
+#endif
+
+#if 1 // run one block at a time to reduce throttling effects.
 
 	// 1. BVH construction
 	// PART 1 - TinyBVH, from ultra-fast to ultra-quality
@@ -168,7 +182,7 @@ int main()
 #endif
 
 	// run experiments
-	for( int i = 0; i < experiment.size(); i++ ) experiment[i]->Run();
+	for( size_t i = 0; i < experiment.size(); i++ ) experiment[i]->Run();
 	// all done.
 	return 0;
 }
