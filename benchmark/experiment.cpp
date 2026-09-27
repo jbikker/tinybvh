@@ -1,7 +1,11 @@
 #include "headers.h"
 
+#if defined _WIN32 && defined _MSC_VER
+
 #define WIN32_LEAN_AND_MEAN
 #include "windows.h"
+
+#endif
 
 #ifdef ENABLE_OPENCL
 extern tinyocl::Kernel* kernel_nearest;
