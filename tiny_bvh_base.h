@@ -3539,10 +3539,7 @@ TEMPLATED void BVH<Float, Index>::Optimize( const uint32_t iterations, bool extr
 	delete verbose; // safe: ~BVH_Verbose only releases its own node pool.
 }
 
-// Refitting: For animated meshes, where the topology remains intact. This
-// includes trees waving in the wind, or subsequent frames for skinned
-// animations. Repeated refitting tends to lead to deteriorated BVHs and
-// slower ray tracing. Rebuild when this happens.
+// Refitting -For animated meshes, where the topology remains unchanged.
 TEMPLATED void BVH<Float, Index>::Refit( const Index /* unused */ )
 {
 	BVH_FATAL_ERROR_IF( !refittable, "BVH::Refit( .. ), refitting an SBVH or pre-splitted BVH." );
@@ -3989,9 +3986,6 @@ TEMPLATED PER_OCTANT bool BVH<Float, Index>::IsOccludedTLASOctant( const Ray& ra
 
 TEMPLATED Index BVH<Float, Index>::NodeCount() const
 {
-	// Determine the number of nodes in the tree. Typically the result should
-	// be usedNodes - 1 (second node is always unused), but some builders may
-	// have unused nodes besides node 1. TODO: Support more layouts.
 	Index retVal = 0, nodeIdx = 0, stack[64], stackPtr = 0;
 	while (1)
 	{
@@ -4005,9 +3999,6 @@ TEMPLATED Index BVH<Float, Index>::NodeCount() const
 
 TEMPLATED Index BVH<Float, Index>::LeafCount() const
 {
-	// Determine the number of nodes in the tree. Typically the result should
-	// be usedNodes - 1 (second node is always unused), but some builders may
-	// have unused nodes besides node 1. TODO: Support more layouts.
 	Index retVal = 0, nodeIdx = 0, stack[64], stackPtr = 0;
 	while (1)
 	{
@@ -4019,9 +4010,8 @@ TEMPLATED Index BVH<Float, Index>::LeafCount() const
 }
 
 // Compact: Reduce the size of a BVH by removing any unused nodes.
-// This is useful after an SBVH build or multi-threaded build, but also after
-// calling MergeLeafs. Some operations, such as Optimize, *require* a
-// compacted tree to work correctly.
+// This is useful after an SBVH build or multi-threaded build, but also after calling MergeLeafs. 
+// Some operations, such as Optimize, *require* a compacted tree to work correctly.
 TEMPLATED void BVH<Float, Index>::Compact()
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::Compact(), bvhNode == 0." );
@@ -4777,64 +4767,121 @@ TEMPLATED_M void MBVH<M, Float, Index>::Optimize( const uint32_t iterations, boo
 	ConvertFrom( bvh, true );
 }
 
+#define MBVH_WALK_STACK ((M - 1) * TINYBVH_STACK_SIZE + M)
+
 TEMPLATED_M Index MBVH<M, Float, Index>::LeafCount( const Index nodeIdx ) const
 {
-	MBVHNode& node = mbvhNode[nodeIdx];
-	if (node.isLeaf()) return 1;
+	BVH_FATAL_ERROR_IF( mbvhNode == 0, "MBVH::LeafCount( .. ), mbvhNode == 0." );
+	if (nodeIdx == 0 && !may_have_holes)
+	{
 	Index count = 0;
-	for (Index i = 0; i < node.childCount; i++) count += LeafCount( node.child[i] );
+		for (Index i = 0; i < usedNodes; i++)
+		{
+			const MBVHNode& node = mbvhNode[i];
+			if (node.isLeaf()) { count++; continue; }
+			BVH_FATAL_ERROR_IF( node.childCount > M, "MBVH::LeafCount( .. ), corrupt node: childCount > M." );
+			for (uint32_t j = 0; j < node.childCount; j++)
+				BVH_FATAL_ERROR_IF( node.child[j] <= i || node.child[j] >= usedNodes,
+					"MBVH::LeafCount( .. ), corrupt node: child index out of range." );
+		}
+		return count;
+	}
+	// A subtree, or a node pool with holes: walk it with an explicit stack.
+	Index stack[MBVH_WALK_STACK], stackPtr = 0, count = 0, n = nodeIdx;
+	while (1)
+	{
+		const MBVHNode& node = mbvhNode[n];
+		if (node.isLeaf()) count++; else
+		{
+			BVH_FATAL_ERROR_IF( node.childCount > M, "MBVH::LeafCount( .. ), corrupt node: childCount > M." );
+			BVH_FATAL_ERROR_IF( stackPtr + node.childCount > MBVH_WALK_STACK, "MBVH::LeafCount( .. ), tree too deep." );
+			for (uint32_t j = 0; j < node.childCount; j++)
+			{
+				BVH_FATAL_ERROR_IF( node.child[j] >= usedNodes, "MBVH::LeafCount( .. ), corrupt node: child index out of range." );
+				stack[stackPtr++] = node.child[j];
+			}
+		}
+		if (!stackPtr) break;
+		n = stack[--stackPtr];
+	}
 	return count;
 }
 
-TEMPLATED_M void MBVH<M, Float, Index>::Refit( const Index nodeIdx )
+TEMPLATED_M void MBVH<M, Float, Index>::Refit( const Index /* unused */ )
 {
-	MBVHNode& node = mbvhNode[nodeIdx];
-	if (node.isLeaf())
+	BVH_FATAL_ERROR_IF( mbvhNode == 0, "MBVH::Refit( .. ), mbvhNode == 0." );
+	BVH_FATAL_ERROR_IF( may_have_holes, "MBVH::Refit( .. ), mbvh may have holes." );
+	BVH_FATAL_ERROR_IF( !bvh.verts, "MBVH::Refit( .. ), mbvh has no vertex data." );
+	for (Index i = usedNodes; i-- > 0; )
 	{
-		Vec3 bmin( bvh_far<Float> ), bmax( -bvh_far<Float> );
-		if (bvh.vertIdx) for (Index first = node.firstTri, j = 0; j < node.triCount; j++)
+		MBVHNode& node = mbvhNode[i];
+		if (node.isLeaf())
 		{
-			const Index vidx = bvh.primIdx[first + j] * 3;
-			const uint32_t i0 = bvh.vertIdx[vidx], i1 = bvh.vertIdx[vidx + 1], i2 = bvh.vertIdx[vidx + 2];
-			const Vec3 v0 = bvh.verts[i0], v1 = bvh.verts[i1], v2 = bvh.verts[i2];
-			bmin = tinybvh_min( bmin, tinybvh_min( tinybvh_min( v0, v1 ), v2 ) );
-			bmax = tinybvh_max( bmax, tinybvh_max( tinybvh_max( v0, v1 ), v2 ) );
+			Vec3 bmin( bvh_far<Float> ), bmax( -bvh_far<Float> );
+			if (bvh.vertIdx) for (Index first = node.firstTri, j = 0; j < node.triCount; j++)
+			{
+				const Index vidx = bvh.primIdx[first + j] * 3;
+				const uint32_t i0 = bvh.vertIdx[vidx], i1 = bvh.vertIdx[vidx + 1], i2 = bvh.vertIdx[vidx + 2];
+				const Vec3 v0 = bvh.verts[i0], v1 = bvh.verts[i1], v2 = bvh.verts[i2];
+				bmin = tinybvh_min( bmin, tinybvh_min( tinybvh_min( v0, v1 ), v2 ) );
+				bmax = tinybvh_max( bmax, tinybvh_max( tinybvh_max( v0, v1 ), v2 ) );
+			}
+			else for (Index first = node.firstTri, j = 0; j < node.triCount; j++)
+			{
+				const Index vidx = bvh.primIdx[first + j] * 3;
+				const Vec3 v0 = bvh.verts[vidx], v1 = bvh.verts[vidx + 1], v2 = bvh.verts[vidx + 2];
+				bmin = tinybvh_min( bmin, tinybvh_min( tinybvh_min( v0, v1 ), v2 ) );
+				bmax = tinybvh_max( bmax, tinybvh_max( tinybvh_max( v0, v1 ), v2 ) );
+			}
+			node.aabbMin = bmin, node.aabbMax = bmax;
+				continue;
 		}
-		else for (Index first = node.firstTri, j = 0; j < node.triCount; j++)
-		{
-			const Index vidx = bvh.primIdx[first + j] * 3;
-			const Vec3 v0 = bvh.verts[vidx], v1 = bvh.verts[vidx + 1], v2 = bvh.verts[vidx + 2];
-			bmin = tinybvh_min( bmin, tinybvh_min( tinybvh_min( v0, v1 ), v2 ) );
-			bmax = tinybvh_max( bmax, tinybvh_max( tinybvh_max( v0, v1 ), v2 ) );
-		}
-		node.aabbMin = bmin, node.aabbMax = bmax;
-	}
-	else
-	{
-		for (Index i = 0; i < node.childCount; i++) Refit( node.child[i] );
-		MBVHNode& firstChild = mbvhNode[node.child[0]];
+		// interior node: adjust to child bounds, which this sweep already did.
+		BVH_FATAL_ERROR_IF( node.childCount == 0 || node.childCount > M, "MBVH::Refit( .. ), corrupt node: childCount." );
+		BVH_FATAL_ERROR_IF( node.child[0] <= i || node.child[0] >= usedNodes, "MBVH::Refit( .. ), corrupt node: child index." );
+		const MBVHNode& firstChild = mbvhNode[node.child[0]];
 		Vec3 bmin = firstChild.aabbMin, bmax = firstChild.aabbMax;
-		for (Index i = 1; i < node.childCount; i++)
+		for (uint32_t j = 1; j < node.childCount; j++)
 		{
-			MBVHNode& child = mbvhNode[node.child[i]];
+			BVH_FATAL_ERROR_IF( node.child[j] <= i || node.child[j] >= usedNodes, "MBVH::Refit( .. ), corrupt node: child index." );
+			const MBVHNode& child = mbvhNode[node.child[j]];
 			bmin = tinybvh_min( bmin, child.aabbMin );
 			bmax = tinybvh_max( bmax, child.aabbMax );
 		}
 		node.aabbMin = bmin, node.aabbMax = bmax;
 	}
-	if (nodeIdx == 0) aabbMin = node.aabbMin, aabbMax = node.aabbMax;
+	aabbMin = mbvhNode[0].aabbMin, aabbMax = mbvhNode[0].aabbMax;
 }
 
 TEMPLATED_M Float MBVH<M, Float, Index>::SAHCost( const Index nodeIdx ) const
 {
-	// Determine the SAH cost of the tree. This provides an indication
-	// of the quality of the BVH: Lower is better.
-	const MBVHNode& n = mbvhNode[nodeIdx];
-	const Float sa = BVH::SA( n.aabbMin, n.aabbMax );
-	if (n.isLeaf()) return c_int * sa * n.triCount;
-	Float cost = c_trav * sa;
-	for (Index i = 0; i < M; i++) if (n.child[i] != 0) cost += SAHCost( n.child[i] );
-	return nodeIdx == 0 ? (cost / sa) : cost;
+	BVH_FATAL_ERROR_IF( mbvhNode == 0, "MBVH::SAHCost( .. ), mbvhNode == 0." );
+	double cost = 0;
+	if (nodeIdx == 0 && !may_have_holes) // flat scan if done for root node.
+	{
+		for (Index i = 0; i < usedNodes; i++)
+		{
+			const MBVHNode& n = mbvhNode[i];
+			const double sa = (double)BVH::SA( n.aabbMin, n.aabbMax );
+			cost += n.isLeaf() ? ((double)c_int * sa * (double)n.triCount) : ((double)c_trav * sa);
+		}
+		return (Float)(cost / (double)BVH::SA( mbvhNode[0].aabbMin, mbvhNode[0].aabbMax ));
+	}
+	// subtree SAH: walk tree.
+	Index stack[MBVH_WALK_STACK], stackPtr = 0, n = nodeIdx;
+	while (1)
+	{
+		const MBVHNode& node = mbvhNode[n];
+		const double sa = (double)BVH::SA( node.aabbMin, node.aabbMax );
+		if (node.isLeaf()) cost += (double)c_int * sa * (double)node.triCount; else
+		{
+			cost += (double)c_trav * sa;
+			for (uint32_t j = 0; j < node.childCount; j++) stack[stackPtr++] = node.child[j];
+		}
+		if (!stackPtr) break;
+		n = stack[--stackPtr];
+	}
+	return (Float)(nodeIdx == 0 ? cost / (double)BVH::SA( mbvhNode[0].aabbMin, mbvhNode[0].aabbMax ) : cost);
 }
 
 // Collapse a BVH2 into an M-wide BVH. Based on "Efficient Incoherent Ray Traversal on GPUs 
