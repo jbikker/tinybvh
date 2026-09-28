@@ -913,6 +913,9 @@ private:
 	void BuildSIMDBinTask( const Index first, const Index last, void* binbox,
 		uint32_t* count, const Float* nmin4, const Float* rpd4 );
 	static void MetricTask( const uint32_t task, void* payload );
+	static void PrepareHQFragTask( const uint32_t task, void* payload );
+	static void HQObjectBinTask( const uint32_t slice, void* payload );
+	static void HQSpatialBinTask( const uint32_t task, void* payload );
 	template <typename, typename> friend void BVHBuildSubtree( void* payload );
 	template <typename, typename> friend void BVHBuildFullSweepSubtree( void* payload );
 	template <typename, typename> friend void BVHBuildHQSubtree( void* payload );
@@ -2708,6 +2711,53 @@ TEMPLATED void BVH<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { Bu
 TEMPLATED void BVH<Float, Index>::BuildHQ( const Vertex* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 TEMPLATED void BVH<Float, Index>::BuildHQ( const Slice& v ) { PrepareHQBuild( v, 0, 0 ); BuildHQ(); }
 TEMPLATED void BVH<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { PrepareHQBuild( v, i, p ); BuildHQ(); }
+// Parallel fragment setup for the SBVH builder.
+TEMPLATED struct ALIGNED( 64 ) BVHPrepHQBounds
+{
+	using Vec3 = typename bvh_traits<Float>::vec3;
+	Vec3 bmin, bmax;
+};
+TEMPLATED struct BVHPrepHQFragArgs
+{
+	BVH<Float, Index>* bvh;
+	const uint32_t* indices;
+	uint32_t tasks;
+	BVHPrepHQBounds<Float, Index>* bounds;	// [tasks]
+};
+TEMPLATED void BVH<Float, Index>::PrepareHQFragTask( const uint32_t task, void* payload )
+{
+	const BVHPrepHQFragArgs<Float, Index>* g = (const BVHPrepHQFragArgs<Float, Index>*)payload;
+	BVH* bvh = g->bvh;
+	const uint32_t* indices = g->indices;
+	const Index first = (Index)(((uint64_t)bvh->triCount * task) / g->tasks);
+	const Index last = (Index)(((uint64_t)bvh->triCount * (task + 1)) / g->tasks);
+	Vec3 bmin( bvh_far<Float> ), bmax( -bvh_far<Float> );
+	if (!indices) for (Index i = first; i < last; i++)
+	{
+		// triangles specified as three 16-byte vertices each.
+		const Vertex v0 = bvh->verts[i * 3], v1 = bvh->verts[i * 3 + 1], v2 = bvh->verts[i * 3 + 2];
+		const Vertex fmin = tinybvh_min( v0, tinybvh_min( v1, v2 ) );
+		const Vertex fmax = tinybvh_max( v0, tinybvh_max( v1, v2 ) );
+		bvh->fragment[i].bmin = fmin, bvh->fragment[i].bmax = fmax;
+		bvh->fragment[i].primIdx = i, bvh->fragment[i].clipped = 0;
+		bmin = tinybvh_min( bmin, bvh->fragment[i].bmin );
+		bmax = tinybvh_max( bmax, bvh->fragment[i].bmax ), bvh->primIdx[i] = i;
+	}
+	else for (Index i = first; i < last; i++)
+	{
+		// triangles consisting of vertices indexed by 'indices'.
+		const uint32_t i0 = indices[i * 3], i1 = indices[i * 3 + 1], i2 = indices[i * 3 + 2];
+		const Vertex v0 = bvh->verts[i0], v1 = bvh->verts[i1], v2 = bvh->verts[i2];
+		const Vertex fmin = tinybvh_min( v0, tinybvh_min( v1, v2 ) );
+		const Vertex fmax = tinybvh_max( v0, tinybvh_max( v1, v2 ) );
+		bvh->fragment[i].bmin = fmin, bvh->fragment[i].bmax = fmax;
+		bvh->fragment[i].primIdx = i, bvh->fragment[i].clipped = 0;
+		bmin = tinybvh_min( bmin, bvh->fragment[i].bmin );
+		bmax = tinybvh_max( bmax, bvh->fragment[i].bmax ), bvh->primIdx[i] = i;
+	}
+	g->bounds[task].bmin = bmin, g->bounds[task].bmax = bmax;
+}
+
 TEMPLATED void BVH<Float, Index>::PrepareHQBuild( const Slice& vertices, const uint32_t* indices, const Index prims )
 {
 	BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH::PrepareHQBuild( .. ), zero primitives." );
@@ -2730,6 +2780,13 @@ TEMPLATED void BVH<Float, Index>::PrepareHQBuild( const Slice& vertices, const u
 	}
 	verts = vertices; // note: we're not copying this data; don't delete.
 	idxCount = primCount + slack, triCount = primCount, vertIdx = (uint32_t*)indices;
+	// threading; decided here because fragment setup below is threaded too.
+#ifndef ENABLE_THREADED_BUILDS
+	threadedBuild = false;
+#else
+	// build in parallel when given a sufficiently large input
+	if (primCount < MT_BUILD_THRESHOLD || !context.spawn || !context.barrier) threadedBuild = false;
+#endif
 	// prepare fragments
 	BVHNode& root = bvhNode[0];
 	root.leftFirst = 0, root.triCount = triCount, root.aabbMin = Vec3( bvh_far<Float> ), root.aabbMax = Vec3( -bvh_far<Float> );
@@ -2737,6 +2794,29 @@ TEMPLATED void BVH<Float, Index>::PrepareHQBuild( const Slice& vertices, const u
 	{
 		BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH::PrepareHQBuild( .. ), primCount == 0." );
 		BVH_FATAL_ERROR_IF( prims != 0, "BVH::PrepareHQBuild( .. ), indices == 0." );
+	}
+	else
+	{
+		BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH::PrepareHQBuild( .. ), empty vertex slice." );
+		BVH_FATAL_ERROR_IF( prims == 0, "BVH::PrepareHQBuild( .. ), prims == 0." );
+	}
+	uint32_t tasks = 1;
+#ifdef ENABLE_THREADED_BUILDS
+	if (threadedBuild && context.parallel_for)
+		tasks = (uint32_t)tinybvh_min( (Index)MT_HQ_PREP_MAX_TASKS, triCount / (Index)MT_HQ_PREP_TASK_PRIMS );
+	if (tasks < 2) tasks = 1;
+#endif
+	if (tasks > 1)
+	{
+		ALIGNED( 64 ) BVHPrepHQBounds<Float, Index> bounds[MT_HQ_PREP_MAX_TASKS]; // one cache line each; no false sharing.
+		BVHPrepHQFragArgs<Float, Index> a = { this, indices, tasks, bounds };
+		tinybvh_parallel_for( context, tasks, &BVH::PrepareHQFragTask, &a );
+		for (uint32_t t = 0; t < tasks; t++)
+			root.aabbMin = tinybvh_min( root.aabbMin, bounds[t].bmin ),
+			root.aabbMax = tinybvh_max( root.aabbMax, bounds[t].bmax );
+	}
+	else if (!indices)
+	{
 		// building a BVH over triangles specified as three 16-byte vertices each.
 		for (Index i = 0; i < triCount; i++)
 		{
@@ -2750,8 +2830,6 @@ TEMPLATED void BVH<Float, Index>::PrepareHQBuild( const Slice& vertices, const u
 	}
 	else
 	{
-		BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH::PrepareHQBuild( .. ), empty vertex slice." );
-		BVH_FATAL_ERROR_IF( prims == 0, "BVH::PrepareHQBuild( .. ), prims == 0." );
 		// building a BVH over triangles consisting of vertices indexed by 'indices'.
 		for (Index i = 0; i < triCount; i++)
 		{
@@ -2767,13 +2845,6 @@ TEMPLATED void BVH<Float, Index>::PrepareHQBuild( const Slice& vertices, const u
 	// clear remainder of index array
 	memset( primIdx + triCount, 0, slack * sizeof( Index ) );
 	bvh_over_indices = indices != nullptr;
-	// threading
-#ifndef ENABLE_THREADED_BUILDS
-	threadedBuild = false;
-#else
-	// build in parallel when given a sufficiently large input
-	if (primCount < MT_BUILD_THRESHOLD || !context.spawn || !context.barrier) threadedBuild = false;
-#endif
 	// all set; actual build happens in BVH::BuildHQ.
 }
 
@@ -2815,6 +2886,105 @@ TEMPLATED void BVHBuildHQSubtree( void* payload )
 	BVHBuildHQArgs<Float, Index>* a = (BVHBuildHQArgs<Float, Index>*)payload;
 	a->bvh->BuildHQTask( a->node, a->depth, a->sliceStart, a->sliceEnd, a->idxTmp );
 }
+// Horizontal (in-node) binning for the SBVH builder.
+TEMPLATED struct BVHBuildHQObjBinArgs
+{
+	using Vec3 = typename bvh_traits<Float>::vec3;
+	const BVH<Float, Index>* bvh;
+	Index first, count;					// fragment range: primIdx[first .. first + count)
+	uint32_t slices, binCount;
+	Vec3* binMin; Vec3* binMax;			// [slice][axis][bin], slice-major
+	Index* binCnt;						// [slice][axis][bin]
+	Vec3 nmin3, rpd3;
+};
+TEMPLATED struct BVHBuildHQSpatialBinArgs
+{
+	using Vec3 = typename bvh_traits<Float>::vec3;
+	const BVH<Float, Index>* bvh;
+	Index first, count;					// fragment range: primIdx[first .. first + count)
+	uint32_t slices, binCount, axisMask;	// axisMask: axes wide enough to split on
+	Vec3* binMin; Vec3* binMax;			// [slice][axis][bin], slice-major
+	int32_t* cntIn; int32_t* cntOut;	// [slice][axis][bin]
+	Vec3 nodeMin, nodeMax;
+};
+
+TEMPLATED void BVH<Float, Index>::HQObjectBinTask( const uint32_t slice, void* payload )
+{
+	// Object-bin one slice of a node's fragment range into a private bin set.
+	const BVHBuildHQObjBinArgs<Float, Index>* g = (const BVHBuildHQObjBinArgs<Float, Index>*)payload;
+	const BVH* bvh = g->bvh;
+	const uint32_t binCount = g->binCount;
+	const size_t base = (size_t)slice * 3 * binCount;
+	Vec3* binMin = g->binMin + base;
+	Vec3* binMax = g->binMax + base;
+	Index* count = g->binCnt + base;
+	for (uint32_t i = 0; i < 3 * binCount; i++)
+		binMin[i] = Vec3( bvh_far<Float> ), binMax[i] = Vec3( -bvh_far<Float> ), count[i] = 0;
+	const Index first = g->first + (Index)(((uint64_t)g->count * slice) / g->slices);
+	const Index last = g->first + (Index)(((uint64_t)g->count * (slice + 1)) / g->slices);
+	const Vec3 nmin3 = g->nmin3, rpd3 = g->rpd3;
+	for (Index i = first; i < last; i++) // process all tris for x, y and z at once
+	{
+		const Index fi = bvh->primIdx[i];
+		const Fragment& f = bvh->fragment[fi];
+		const Vec3 fbi = ((f.bmin + f.bmax) * 0.5f - nmin3) * rpd3;
+		bvhint3 bi( (int32_t)fbi.x, (int32_t)fbi.y, (int32_t)fbi.z );
+		bi.x = tinybvh_clamp( bi.x, 0, binCount - 1 );
+		bi.y = tinybvh_clamp( bi.y, 0, binCount - 1 );
+		bi.z = tinybvh_clamp( bi.z, 0, binCount - 1 );
+		const uint32_t b0 = (uint32_t)bi.x, b1 = binCount + (uint32_t)bi.y, b2 = 2 * binCount + (uint32_t)bi.z;
+		binMin[b0] = tinybvh_min( binMin[b0], f.bmin ), binMax[b0] = tinybvh_max( binMax[b0], f.bmax ), count[b0]++;
+		binMin[b1] = tinybvh_min( binMin[b1], f.bmin ), binMax[b1] = tinybvh_max( binMax[b1], f.bmax ), count[b1]++;
+		binMin[b2] = tinybvh_min( binMin[b2], f.bmin ), binMax[b2] = tinybvh_max( binMax[b2], f.bmax ), count[b2]++;
+	}
+}
+
+TEMPLATED void BVH<Float, Index>::HQSpatialBinTask( const uint32_t task, void* payload )
+{
+	// Spatial-bin one (axis, slice) pair.
+	const BVHBuildHQSpatialBinArgs<Float, Index>* g = (const BVHBuildHQSpatialBinArgs<Float, Index>*)payload;
+	const uint32_t binCount = g->binCount, slice = task / 3;
+	const int32_t a = (int32_t)(task % 3);
+	const size_t base = (size_t)task * binCount; // == (slice * 3 + a) * binCount
+	Vec3* sbinMin = g->binMin + base;
+	Vec3* sbinMax = g->binMax + base;
+	int32_t* countIn = g->cntIn + base;
+	int32_t* countOut = g->cntOut + base;
+	for (uint32_t i = 0; i < binCount; i++)
+		sbinMin[i] = Vec3( bvh_far<Float> ), sbinMax[i] = Vec3( -bvh_far<Float> ), countIn[i] = 0, countOut[i] = 0;
+	// axes too thin to split on are still zeroed, so the reduction never reads garbage.
+	if (!(g->axisMask & (1u << a))) return;
+	const BVH* bvh = g->bvh;
+	const Vec3 nodeMin3 = g->nodeMin, nodeMax3 = g->nodeMax;
+	const Float planeDist = (nodeMax3[a] - nodeMin3[a]) / (binCount * 0.9999f);
+	const Float rPlaneDist = 1.0f / planeDist, nodeMin = nodeMin3[a];
+	const Index first = g->first + (Index)(((uint64_t)g->count * slice) / g->slices);
+	const Index last = g->first + (Index)(((uint64_t)g->count * (slice + 1)) / g->slices);
+	for (Index i = first; i < last; i++)
+	{
+		const Index fi = bvh->primIdx[i];
+		const Fragment& f = bvh->fragment[fi];
+		const int bin1 = tinybvh_clamp( (int32_t)((f.bmin[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
+		const int bin2 = tinybvh_clamp( (int32_t)((f.bmax[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
+		countIn[bin1]++, countOut[bin2]++;
+		if (bin2 == bin1) // fragment fits in a single bin
+			sbinMin[bin1] = tinybvh_min( sbinMin[bin1], f.bmin ),
+			sbinMax[bin1] = tinybvh_max( sbinMax[bin1], f.bmax );
+		else for (int j = bin1; j <= bin2; j++)
+		{
+			// clip fragment to each bin it overlaps
+			Vec3 bmin = nodeMin3, bmax = nodeMax3;
+			bmin[a] = nodeMin + planeDist * j;
+			bmax[a] = j == (int)(binCount - 2) ? nodeMax3[a] : (bmin[a] + planeDist);
+			Fragment orig = f;
+			Fragment tmpFrag;
+			if (!bvh->ClipFrag( orig, tmpFrag, bmin, bmax, a )) continue;
+			sbinMin[j] = tinybvh_min( sbinMin[j], tmpFrag.bmin );
+			sbinMax[j] = tinybvh_max( sbinMax[j], tmpFrag.bmax );
+		}
+	}
+}
+
 TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, Index sliceStart, Index sliceEnd, Index* idxTmp )
 {
 	// prepare subdivision
@@ -2824,6 +2994,14 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 	BVHNode& root = bvhNode[0];
 	const Float rootArea = tinybvh_halfarea( root.aabbMax - root.aabbMin );
 	const Vec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f /* don't touch, carefully picked */;
+	// 'depth' now tracks true tree depth and is advanced as this task descends, so
+	// the root task can no longer be identified by its value at the end of the run.
+	const bool rootTask = (depth == 0);
+	// Scratch for horizontal binning, laid out as [slice][axis][bin].
+	const uint32_t maxSliceBins = MT_HQ_MAX_SLICES * 3 * (hqbvhbins + 1);
+	Vec3* sliceMin = 0; Vec3* sliceMax = 0; Index* sliceCnt = 0;
+	int32_t* sliceIn = 0; int32_t* sliceOut = 0;
+	bool noScratch = false;		// set when allocation failed: fall back to serial binning
 	// subdivide
 	uint32_t binCount = hqbvhbins;
 	while (1)
@@ -2841,7 +3019,46 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 			Index count[3][MAXHQBINS];
 			for (uint32_t i = 0; i < 3; i++) memset( count[i], 0, binCount * sizeof( Index ) );
 			const Vec3 rpd3 = Vec3( Vec3( (Float)binCount ) / (node.aabbMax - node.aabbMin) ), nmin3 = node.aabbMin;
-			for (Index i = 0; i < node.triCount; i++) // process all tris for x,y and z at once
+			// Decide whether this node is large enough to bin horizontally.
+			uint32_t slices = 1;
+		#ifdef ENABLE_THREADED_BUILDS
+			if (threadedBuild && context.parallel_for && !noScratch && node.triCount >= (Index)MT_HQ_BIN_THRESHOLD)
+			{
+				slices = (uint32_t)tinybvh_min( (Index)MT_HQ_MAX_SLICES, node.triCount / (Index)MT_HQ_SLICE_PRIMS );
+				if (slices > 1 && !sliceMin)
+				{
+					sliceMin = (Vec3*)AlignedAlloc( maxSliceBins * sizeof( Vec3 ) );
+					sliceMax = (Vec3*)AlignedAlloc( maxSliceBins * sizeof( Vec3 ) );
+					sliceCnt = (Index*)AlignedAlloc( maxSliceBins * sizeof( Index ) );
+					sliceIn = (int32_t*)AlignedAlloc( maxSliceBins * sizeof( int32_t ) );
+					sliceOut = (int32_t*)AlignedAlloc( maxSliceBins * sizeof( int32_t ) );
+					if (!sliceMin || !sliceMax || !sliceCnt || !sliceIn || !sliceOut)
+					{
+						// out of memory; this task falls back to serial binning for good.
+						AlignedFree( sliceMin ), AlignedFree( sliceMax ), AlignedFree( sliceCnt );
+						AlignedFree( sliceIn ), AlignedFree( sliceOut );
+						sliceMin = 0, sliceMax = 0, sliceCnt = 0, sliceIn = 0, sliceOut = 0, noScratch = true;
+					}
+				}
+				if (!sliceMin) slices = 1;
+			}
+		#endif
+			if (slices > 1)
+			{
+				// bin one slice of the fragment range per task, then reduce in slice order.
+				BVHBuildHQObjBinArgs<Float, Index> ba = { this, node.leftFirst, node.triCount,
+					slices, binCount, sliceMin, sliceMax, sliceCnt, nmin3, rpd3 };
+				tinybvh_parallel_for( context, slices, &BVH::HQObjectBinTask, &ba );
+				for (uint32_t s = 0; s < slices; s++)
+				{
+					const size_t base = (size_t)s * 3 * binCount;
+					for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < binCount; i++)
+						binMin[a][i] = tinybvh_min( binMin[a][i], sliceMin[base + a * binCount + i] ),
+						binMax[a][i] = tinybvh_max( binMax[a][i], sliceMax[base + a * binCount + i] ),
+						count[a][i] += sliceCnt[base + a * binCount + i];
+				}
+			}
+			else for (Index i = 0; i < node.triCount; i++) // process all tris for x,y and z at once
 			{
 				const Index fi = primIdx[node.leftFirst + i];
 				const Vec3 fbi = ((fragment[fi].bmin + fragment[fi].bmax) * 0.5f - nmin3) * rpd3;
@@ -2894,7 +3111,19 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 			if (budget > node.triCount && (spatialOverlap > 1e-4f || splitCost >= noSplitCost))
 			{
 				Float minSplitCost = splitCost * 0.985f; // don't accept a spatial split for minimal gain
-				for (int a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
+				uint32_t axisMask = 0;
+				for (int a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a]) axisMask |= 1u << a;
+				if (slices > 1)
+				{
+					// The per-bin fragment clipping below is what makes an SBVH build
+					// expensive, and the three axes are independent, so fan out over
+					// (axis, fragment slice) pairs and reduce per axis further down.
+					BVHBuildHQSpatialBinArgs<Float, Index> sa = { this, node.leftFirst, node.triCount,
+						slices, binCount, axisMask, sliceMin, sliceMax, sliceIn, sliceOut,
+						node.aabbMin, node.aabbMax };
+					tinybvh_parallel_for( context, slices * 3, &BVH::HQSpatialBinTask, &sa );
+				}
+				for (int a = 0; a < 3; a++) if (axisMask & (1u << a))
 				{
 					// setup bins
 					Vec3 sbinMin[MAXHQBINS], sbinMax[MAXHQBINS];
@@ -2902,6 +3131,18 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 					memset( countIn, 0, binCount * 4 );
 					memset( countOut, 0, binCount * 4 );
 					for (uint32_t i = 0; i < binCount; i++) sbinMin[i] = Vec3( bvh_far<Float> ), sbinMax[i] = Vec3( -bvh_far<Float> );
+					if (slices > 1) for (uint32_t s = 0; s < slices; s++)
+					{
+						// gather this axis' slices; min, max and integer adds only, so the
+						// result matches the serial pass bit for bit.
+						const size_t base = ((size_t)s * 3 + a) * binCount;
+						for (uint32_t i = 0; i < binCount; i++)
+							sbinMin[i] = tinybvh_min( sbinMin[i], sliceMin[base + i] ),
+							sbinMax[i] = tinybvh_max( sbinMax[i], sliceMax[base + i] ),
+							countIn[i] += sliceIn[base + i], countOut[i] += sliceOut[base + i];
+					}
+					else
+					{
 					// populate bins with clipped fragments
 					const Float planeDist = (node.aabbMax[a] - node.aabbMin[a]) / (binCount * 0.9999f);
 					const Float rPlaneDist = 1.0f / planeDist, nodeMin = node.aabbMin[a];
@@ -2926,6 +3167,7 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 							sbinMin[j] = tinybvh_min( sbinMin[j], tmpFrag.bmin );
 							sbinMax[j] = tinybvh_max( sbinMax[j], tmpFrag.bmax );
 						}
+					}
 					}
 					// evaluate split candidates
 					Vec3 lBMin[MAXHQBINS - 1], rBMin[MAXHQBINS - 1], l1( bvh_far<Float> ), l2( -bvh_far<Float> );
@@ -3075,27 +3317,41 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 			bvhNode[rightChildIdx].leftFirst = B, bvhNode[rightChildIdx].triCount = rightCount;
 			node.leftFirst = leftChildIdx, node.triCount = 0;
 			// recurse
-			if (depth < MT_SPAWN_DEPTH && threadedBuild)
+			const Index mid = (A + B) >> 1;
+		#ifdef ENABLE_THREADED_BUILDS
+			// Only hand work to the pool if the subtrees are large enough to pay for the task overhead.
+			if (threadedBuild && depth < MT_SPAWN_DEPTH &&
+				tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS)
 			{
-				// spawn both child subtrees and return; the root barrier joins them.
-				BVHBuildHQArgs<Float, Index> a0 = { this, (Index)leftChildIdx, depth + 1, sliceStart, (A + B) >> 1, idxTmp };
-				BVHBuildHQArgs<Float, Index> a1 = { this, (Index)rightChildIdx, depth + 1, (A + B) >> 1, sliceEnd, idxTmp };
-				tinybvh_spawn( context, &BVHBuildHQSubtree<Float, Index>, &a0, sizeof( a0 ) );
-				tinybvh_spawn( context, &BVHBuildHQSubtree<Float, Index>, &a1, sizeof( a1 ) );
-				break;
+				const bool spawnLeft = leftCount > rightCount;
+				BVHBuildHQArgs<Float, Index> a = { this,
+					spawnLeft ? (Index)leftChildIdx : (Index)rightChildIdx, depth + 1,
+					spawnLeft ? sliceStart : mid, spawnLeft ? mid : sliceEnd, idxTmp };
+				tinybvh_spawn( context, &BVHBuildHQSubtree<Float, Index>, &a, sizeof( a ) );
+				// continue with the sibling; the root barrier joins the spawned subtrees.
+				nodeIdx = spawnLeft ? rightChildIdx : leftChildIdx;
+				if (spawnLeft) sliceStart = mid; else sliceEnd = mid;
+				depth++;
+				continue;
 			}
-			// proceed with left child, push right child on local stack
-			localTask[localTasks].node = rightChildIdx, localTask[localTasks].depth = depth;
-			localTask[localTasks].sliceStart = (A + B) >> 1, localTask[localTasks++].sliceEnd = sliceEnd;
-			nodeIdx = leftChildIdx, sliceEnd = (A + B) >> 1;
+		#endif
+			// Proceed with left child, push right child on the local stack.
+			BVH_FATAL_ERROR_IF( localTasks == BVH_NUM_ELEMS( localTask ), "BVH::BuildHQTask( .. ), task stack overflow; tree too deep." );
+			localTask[localTasks].node = rightChildIdx, localTask[localTasks].depth = depth + 1;
+			localTask[localTasks].sliceStart = mid, localTask[localTasks++].sliceEnd = sliceEnd;
+			nodeIdx = leftChildIdx, sliceEnd = mid, depth++;
 		}
 		// pop a local task, if any are left
 		if (localTasks == 0) break;
 		nodeIdx = localTask[--localTasks].node, depth = localTask[localTasks].depth;
 		sliceStart = localTask[localTasks].sliceStart, sliceEnd = localTask[localTasks].sliceEnd;
 	}
-	// all done; wait for all spawned subtrees at the root.
-	if (depth == 0 && threadedBuild) tinybvh_barrier( context );
+	// all done; release the horizontal binning scratch, if this task allocated any.
+	AlignedFree( sliceMin ), AlignedFree( sliceMax ), AlignedFree( sliceCnt );
+	AlignedFree( sliceIn ), AlignedFree( sliceOut );
+	// wait for all spawned subtrees at the root. 'depth' has been advanced by the
+	// descent above, so the entry-depth latch decides this, not depth itself.
+	if (rootTask && threadedBuild) tinybvh_barrier( context );
 }
 
 TEMPLATED Float BVH<Float, Index>::SplitCostSAH( const Float rAparent, const Float Aleft, const Index Nleft, const Float Aright, const Index Nright ) const
@@ -7143,6 +7399,8 @@ bool VoxelSet::IsOccluded( const Ray& ray ) const
 
 // Wicked job system, condensed / modified. https://github.com/turanszkij/WickedEngine
 // Removed: Thread priority, Dispatch, graceful shutdown; not needed in TinyBVH.
+
+static thread_local int32_t tinybvh_tl_queue = -1;
 class JobSystem
 {
 public:
@@ -7182,6 +7440,13 @@ public:
 			queue.pop_front();
 			return true;
 		}
+		TINYBVH_FORCEINLINE bool pop_back( Job& item )
+		{
+			std::scoped_lock lock( locker );
+			if (queue.empty()) return false; else item = std::move( queue.back() );
+			queue.pop_back();
+			return true;
+		}
 	};
 	struct Resources
 	{
@@ -7193,11 +7458,49 @@ public:
 		std::mutex sleepingMutex, waitingMutex;
 		std::atomic_bool alive{ true };
 		std::atomic<uint64_t> pushed{ 0 };
-		TINYBVH_FORCEINLINE void work( uint32_t startingQueue )
+		std::atomic<uint32_t> sleepers{ 0 };	// workers parked on sleepingCondition
+		TINYBVH_FORCEINLINE void runJob( Job& job )
+		{
+			if (job.execute() == 1) { std::unique_lock<std::mutex> lock( waitingMutex ); waitingCondition.notify_all(); }
+		}
+		// 'until' is the group the caller is blocked on, or null for a worker that is
+		// simply looking for something to do.
+		void work( uint32_t victim, const JobGroup* until )
 		{
 			Job job;
-			for (uint32_t i = 0; i < numThreads; ++i) while (jobQueue[startingQueue++ % numThreads].pop_front( job ))
-				if (job.execute() == 1) { std::unique_lock<std::mutex> lock( waitingMutex ); waitingCondition.notify_all(); }
+			// Bounded, not just >= 0: a pool can in principle be torn down and rebuilt
+			// with fewer threads, and a stale id must never index the queue array.
+			const int32_t self = tinybvh_tl_queue < (int32_t)numThreads ? tinybvh_tl_queue : -1;
+			for (;;)
+			{
+				// Read directly rather than via IsBusy: that is a member of the enclosing
+				// class, declared further down, and JobGroup is right here.
+				if (until && until->counter.load( std::memory_order_acquire ) == 0) return;
+				// Own queue first, newest job first. A job run here may push children of
+				// its own, so this is re-checked after every job rather than drained once.
+				if (self >= 0 && jobQueue[self].pop_back( job ) ) { runJob( job ); continue; }
+				// Nothing of our own left: steal, oldest job first, rotating the victim so
+				// thieves do not all converge on the same queue.
+				bool stole = false;
+				for (uint32_t i = 0; i < numThreads; ++i)
+				{
+					const uint32_t v = (victim + i) % numThreads;
+					if ((int32_t)v == self) continue; // already drained above
+					if (!jobQueue[v].pop_front( job )) continue;
+					victim = v + 1, stole = true;
+					runJob( job );
+					break;
+				}
+				if (!stole) return; // every queue was empty when we looked at it
+			}
+		}
+		// Wake a parked worker, if there is one. The mutex is only taken when somebody is
+		// actually asleep, which keeps it off the push path of a busy build.
+		TINYBVH_FORCEINLINE void wake( bool all )
+		{
+			if (sleepers.load() == 0) return;
+			std::scoped_lock lock( sleepingMutex );
+			if (all) sleepingCondition.notify_all(); else sleepingCondition.notify_one();
 		}
 	} res;
 	void Initialize()
@@ -7211,14 +7514,24 @@ public:
 		{
 			std::thread& worker = res.threads.emplace_back( [threadID, &r]
 				{
+					tinybvh_tl_queue = (int32_t)threadID;	// this worker's own queue
 					uint64_t seen = r.pushed.load();
 					for (;;)
 					{
-						r.work( threadID );
+						r.work( threadID, nullptr );
+						// Announce that we are about to park *before* re-reading 'pushed'.
+						// Execute() writes 'pushed' and then reads 'sleepers'; we write
+						// 'sleepers' and then read 'pushed'.
+						r.sleepers.fetch_add( 1 );
+						bool quit;
+						{
 						std::unique_lock<std::mutex> lock( r.sleepingMutex );
-						if (!r.alive.load()) break;
+							if (r.alive.load())
 						r.sleepingCondition.wait( lock, [&r, seen] { return !r.alive.load() || r.pushed.load() != seen; } );
-						if (!r.alive.load()) break;
+							quit = !r.alive.load();
+						}
+						r.sleepers.fetch_sub( 1 );
+						if (quit) break;
 						seen = r.pushed.load();
 					}
 				} );
@@ -7242,30 +7555,34 @@ public:
 		#endif
 		}
 	}
-	void Execute( JobGroup& group, void (*fn)(void*), const void* payload, uint32_t size )
+	// 'local' selects where the job goes, and the two callers want opposite things.
+	void Execute( JobGroup& group, void (*fn)(void*), const void* payload, uint32_t size, bool local )
 	{
 		assert( size <= JOB_PAYLOAD_MAX );
 		group.counter.fetch_add( 1 );
 		Job job;
 		job.fn = fn, job.group = &group;
 		memcpy( job.payload, payload, size );
-		res.jobQueue[res.nextQueue.fetch_add( 1 ) % res.numThreads].push_back( job );
-		{ std::scoped_lock lock( res.sleepingMutex ); res.pushed.fetch_add( 1 ); }
-		res.sleepingCondition.notify_one();
+		const int32_t self = tinybvh_tl_queue;
+		const bool own = local && self >= 0 && self < (int32_t)res.numThreads;
+		const uint32_t q = own ? (uint32_t)self : (res.nextQueue.fetch_add( 1 ) % res.numThreads);
+		res.jobQueue[q].push_back( job );
+		res.pushed.fetch_add( 1 );
+		res.wake( false );
 	}
 	void Wait( JobGroup& group )
 	{
 		while (IsBusy( group ))
 		{
-			res.sleepingCondition.notify_all(); // wake any sleeping threads
-			res.work( res.nextQueue.fetch_add( 1 ) % res.numThreads );
+			res.wake( true ); // wake any sleeping threads
+			res.work( res.nextQueue.fetch_add( 1 ) % res.numThreads, &group );
 			if (!IsBusy( group )) break;
 			std::unique_lock<std::mutex> lock( res.waitingMutex );
 			if (IsBusy( group ))
 				res.waitingCondition.wait( lock, [&group] { return group.counter.load( std::memory_order_relaxed ) == 0; } );
 		}
 	}
-	static bool IsBusy( const JobGroup& group ) { return group.counter.load( std::memory_order_relaxed ) > 0; }
+	static bool IsBusy( const JobGroup& group ) { return group.counter.load( std::memory_order_acquire ) > 0; }
 };
 
 static std::atomic<JobSystem*> tinybvh_poolPtr{ nullptr };
@@ -7310,7 +7627,8 @@ void tinybvh_builtin_spawn( void (*fn)(void*), const void* payload, uint32_t pay
 	BVHSpawnEnvelope* e = (BVHSpawnEnvelope*)blob;
 	e->group = &group, e->fn = fn;
 	memcpy( blob + sizeof( BVHSpawnEnvelope ), payload, payload_size );
-	tinybvh_pool().Execute( group, &tinybvh_spawn_task, blob, sizeof( BVHSpawnEnvelope ) + payload_size );
+	// recursive work: keep it on this thread's own queue.
+	tinybvh_pool().Execute( group, &tinybvh_spawn_task, blob, sizeof( BVHSpawnEnvelope ) + payload_size, true );
 }
 
 void tinybvh_builtin_barrier( void* ) { tinybvh_pool().Wait( tinybvh_build_group() ); }
@@ -7329,7 +7647,8 @@ void tinybvh_builtin_parallel_for( uint32_t n, void (*fn)(uint32_t, void*), void
 	for (uint32_t i = 0; i < n; i++)
 	{
 		BVHParallelForArgs a = { fn, i, payload };
-		jobs.Execute( group, &tinybvh_parallel_for_task, &a, sizeof( a ) );
+		// flat fan-out: spread it across the queues, not onto ours.
+		jobs.Execute( group, &tinybvh_parallel_for_task, &a, sizeof( a ), false );
 	}
 	jobs.Wait( group );
 }

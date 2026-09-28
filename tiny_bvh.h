@@ -193,7 +193,7 @@ THE SOFTWARE.
 
 // Threaded builds: spawn subtree tasks down to this depth (up to 2^N tasks).
 #ifndef MT_SPAWN_DEPTH
-#define MT_SPAWN_DEPTH 9
+#define MT_SPAWN_DEPTH 10
 #endif
 // Threaded builds: only spawn a task if the larger child has at least this many primitives.
 #ifndef MT_SPAWN_MIN_PRIMS
@@ -201,6 +201,26 @@ THE SOFTWARE.
 #endif
 #ifndef MT_BUILD_THRESHOLD
 #define MT_BUILD_THRESHOLD 50000 // single-threaded builds below this triangle count
+#endif
+// Threaded builds: bin a single node in parallel ("horizontal" parallelism) once it
+// holds at least this many primitives.
+#ifndef MT_HQ_BIN_THRESHOLD
+#define MT_HQ_BIN_THRESHOLD 50000
+#endif
+// Threaded builds: target number of primitives per horizontal binning slice.
+#ifndef MT_HQ_SLICE_PRIMS
+#define MT_HQ_SLICE_PRIMS 8192
+#endif
+// Threaded builds: upper bound on the number of horizontal binning slices per node.
+#ifndef MT_HQ_MAX_SLICES
+#define MT_HQ_MAX_SLICES 32
+#endif
+// Threaded builds: target number of primitives per fragment-setup task.
+#ifndef MT_HQ_PREP_TASK_PRIMS
+#define MT_HQ_PREP_TASK_PRIMS 16384
+#endif
+#ifndef MT_HQ_PREP_MAX_TASKS
+#define MT_HQ_PREP_MAX_TASKS 32
 #endif
 
 // Experimental / WIP features
