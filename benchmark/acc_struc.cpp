@@ -48,62 +48,62 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 	{
 	case BVH2: 
 	{
-		strncpy( desc, "2-wide BVH", 128 ); 
-		strncpy( shrt, "BVH2", 128 ); 
+		strncpy( desc, "2-wide BVH", sizeof( desc ) ); 
+		strncpy( shrt, "BVH2", 60 ); 
 		break;
 	}
 	case BVH4: 
 	{
-		strncpy( desc, "4-wide BVH", 128 ); 
-		strncpy( shrt, "BVH4", 128 ); 
+		strncpy( desc, "4-wide BVH", sizeof( desc ) ); 
+		strncpy( shrt, "BVH4", sizeof( shrt ) ); 
 		break;
 	}
 	case BVH4_WIVE: 
 	{
-		strncpy( desc, "SSE 4-wide CPU BVH", 128 ); 
-		strncpy( shrt, "WiVe4", 128 ); 
+		strncpy( desc, "SSE 4-wide CPU BVH", sizeof( desc ) ); 
+		strncpy( shrt, "WiVe4", sizeof( shrt ) ); 
 		break;
 	}
 	case BVH8_WIVE: 
 	{
-		strncpy( desc, "AVX2 8-wide CPU BVH", 128 ); 
-		strncpy( shrt, "Wive8", 128 ); 
+		strncpy( desc, "AVX2 8-wide CPU BVH", sizeof( desc ) ); 
+		strncpy( shrt, "Wive8", sizeof( shrt ) ); 
 		break;
 	}
 	case GPU_BVH: 
 	{
-		strncpy( desc, "2-wide GPU BVH", 128 ); 
-		strncpy( shrt, "GPUBVH2", 128 ); 
+		strncpy( desc, "2-wide GPU BVH", sizeof( desc ) ); 
+		strncpy( shrt, "GPUBVH2", sizeof( shrt ) ); 
 		break;
 	}
 	case GPU_BVH4: 
 	{
-		strncpy( desc, "4-wide GPU BVH", 128 ); 
-		strncpy( shrt, "GPUBVH4", 128 ); 
+		strncpy( desc, "4-wide GPU BVH", sizeof( desc ) ); 
+		strncpy( shrt, "GPUBVH4", sizeof( shrt ) ); 
 		break;
 	}
 	case CWBVH: 
 	{
-		strncpy( desc, "8-wide CWBVH", 128 ); 
-		strncpy( shrt, "CWBVH", 128 ); 
+		strncpy( desc, "8-wide CWBVH", sizeof( desc ) ); 
+		strncpy( shrt, "CWBVH", sizeof( shrt ) ); 
 		break;
 	}
 	case MADMANN91: 
 	{
-		strncpy( desc, "madmann91 BVH", 128 ); 
-		strncpy( shrt, "MM'91", 128 ); 
+		strncpy( desc, "madmann91 BVH", sizeof( desc ) ); 
+		strncpy( shrt, "MM'91", sizeof( shrt ) ); 
 		break;
 	}
 	case EMBREE:
 	{
-		strncpy( desc, "embree4 BVH", 128 ); 
-		strncpy( shrt, "Embree", 128 ); 
+		strncpy( desc, "embree4 BVH", sizeof( desc ) ); 
+		strncpy( shrt, "Embree", sizeof( shrt ) ); 
 		break;
 	}
 	default: 
 	{
-		strncpy( desc, "UNKNOWN LAYOUT", 128 );
-		strncpy( shrt, "Unkown", 128 ); 
+		strncpy( desc, "UNKNOWN LAYOUT", sizeof( desc ) );
+		strncpy( shrt, "Unkown", sizeof( shrt ) ); 
 		break;
 	}
 	}
