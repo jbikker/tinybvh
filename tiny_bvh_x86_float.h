@@ -1706,6 +1706,11 @@ static TINYBVH_FORCEINLINE uint32_t tinybvh_leaftris( const uint32_t* primIdx )
 		_mm256_and_ps( _mm256_cmp_ps( _mm256_add_ps( bu8, bv8 ), one8, _CMP_LE_OQ ), \
 		_mm256_and_ps( _mm256_cmp_ps( bt8, zero8, _CMP_GT_OQ ), _mm256_cmp_ps( bt8, tcur8, _CMP_LT_OQ ) ) ) );
 
+#if defined __GNUC__ && !defined __clang__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+
 PER_OCTANT static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
 {
 	using BVHNode = BVH4_CPU::BVHNode;
@@ -1921,6 +1926,10 @@ PER_OCTANT static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, con
 		}
 	}
 }
+
+#if defined __GNUC__ && !defined __clang__
+#pragma GCC diagnostic pop
+#endif
 
 // Octant dispatch for the bundle kernels.
 #define OCTANT_DISPATCH_BUNDLE( kernel, o, ... ) \
