@@ -3,12 +3,14 @@
 #ifdef ENABLE_OPENCL
 #define TINY_OCL_IMPLEMENTATION
 #include "tiny_ocl.h"
-tinyocl::Kernel* kernel_nearest = 0;
-tinyocl::Kernel* kernel_any = 0;
-tinyocl::Kernel* gpu4way_kernel = 0;
-tinyocl::Kernel* gpu4way_kernel_any = 0;
-tinyocl::Kernel* cwbvh_kernel = 0;
-tinyocl::Kernel* cwbvh_kernel_any = 0;
+tinyocl::Kernel* kernel_nearest = nullptr;
+tinyocl::Kernel* kernel_any = nullptr;
+tinyocl::Kernel* gpu4way_kernel = nullptr;
+tinyocl::Kernel* gpu4way_kernel_any = nullptr;
+tinyocl::Kernel* amd4way_kernel = nullptr;
+tinyocl::Kernel* amd4way_kernel_any = nullptr;
+tinyocl::Kernel* cwbvh_kernel = nullptr;
+tinyocl::Kernel* cwbvh_kernel_any = nullptr;
 #endif
 
 FILE* csv = 0;
@@ -69,8 +71,10 @@ void PrintHeader()
 	if (csv) fflush( csv );
 }
 
-void InitOpenCL()
+bool InitOpenCL()
 {
+	static bool clInitialized = false;
+	if (clInitialized) return true;
 #ifdef ENABLE_OPENCL
 	// load and compile the OpenCL kernel code
 	kernel_nearest = new tinyocl::Kernel( "kernels/traverse.cl", "batch_nearest" );
@@ -87,7 +91,12 @@ void InitOpenCL()
 		else if (Kernel::isNVidia) fprintf( csv, "gpu:,NVIDIA\n" );
 		else if (Kernel::isApple) fprintf( csv, "gpu:,APPLE\n" );
 		else fprintf( csv, "gpu:,UNKOWN\n" );	
+		fflush( csv );
 	}
-#endif
+	clInitialized = true;
+	return true;
+#else
 	if (csv) fflush( csv );
+	return false;
+#endif
 }

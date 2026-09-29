@@ -70,6 +70,12 @@
     <None Include="..\traverse_cwbvh.cl">
       <Filter>opencl</Filter>
     </None>
+    <None Include="..\kernels\traverse_amd_hw.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\kernels\traverse_amd_hw_bvh4.cl">
+      <Filter>opencl</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="opencl">

@@ -42,6 +42,8 @@ private:
 	float RunGPU_BVH4_Any( char* raySet, const int N );
 	float RunGPU_CWBVH( char* raySet, const int N, const char* tgaFile );
 	float RunGPU_CWBVH_Any( char* raySet, const int N );
+	float RunGPU_AMD4( char* raySet, const int N, const char* tgaFile );
+	float RunGPU_AMD4_Any( char* raySet, const int N );
 	RaySet raySet = UNSPECIFIED;
 	Scene primSet = (Scene)0;
 	AccStruc* bvh = 0;

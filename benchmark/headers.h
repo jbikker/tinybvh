@@ -62,4 +62,4 @@ using PrecomputedTri = bvh::v2::PrecomputedTri<float>;
 
 // Forward declarations
 void PrintHeader();
-void InitOpenCL();
+bool InitOpenCL();

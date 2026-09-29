@@ -48,6 +48,8 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <None Include="..\kernels\traverse_amd_hw.cl" />
+    <None Include="..\kernels\traverse_amd_hw_bvh4.cl" />
     <None Include="..\traverse.cl" />
     <None Include="..\traverse_bvh2.cl" />
     <None Include="..\traverse_bvh4.cl" />
