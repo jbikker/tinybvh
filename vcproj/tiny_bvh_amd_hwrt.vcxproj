@@ -38,8 +38,8 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{4B0A219D-68D0-41EA-A0C4-8EB9E6171218}</ProjectGuid>
-    <RootNamespace>tinybvhgpu</RootNamespace>
+    <ProjectGuid>{86C4FED7-4DBE-49D9-BBA4-95A57B795585}</ProjectGuid>
+    <RootNamespace>tinybvhamdhwrt</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
