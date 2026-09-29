@@ -249,8 +249,9 @@ void kernel UpdateCounters2()
 
 // connect: trace shadow rays and deposit their potential contribution to the pixels
 // if not occluded.
-void kernel Connect( global float4* accumulator, global struct Potential* shadowIn )
+__attribute__(( reqd_work_group_size( HW_BVH_WORKGROUP_SIZE, 1, 1 ) )) void kernel Connect( global float4* accumulator, global struct Potential* shadowIn )
 {
+	__local uint hwStack[HW_BVH_WORKGROUP_SIZE * HW_BVH_STACK_ENTRIES];
 	while (1)
 	{
 		// obtain task - see note on worker threads in Extend
@@ -261,7 +262,7 @@ void kernel Connect( global float4* accumulator, global struct Potential* shadow
 		const float4 O4 = shadowIn[rayId].O;
 		const float4 D4 = shadowIn[rayId].D;
 		const float4 rD = native_recip( D4 );
-		if (isoccluded_gpu4wayHW( bvhNodes, O4, D4, rD, D4.w )) continue;
+		if (isoccluded_gpu4wayHW( bvhNodes, O4, D4, rD, D4.w, hwStack )) continue;
 		accumulator[as_uint( O4.w )] += T4;
 	}
 }

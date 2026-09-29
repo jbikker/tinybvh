@@ -7,9 +7,6 @@ struct Ray
 	float4 hit;
 };
 
-// BVH traversal stack size
-#define STACK_SIZE 32
-
 // Includes for hardware traversal kernel implementations:
 // Minimum required for this to work. Does not check for
 // compiler compatability
