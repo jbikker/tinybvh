@@ -193,7 +193,7 @@ THE SOFTWARE.
 
 // Threaded builds: spawn subtree tasks down to this depth (up to 2^N tasks).
 #ifndef MT_SPAWN_DEPTH
-#define MT_SPAWN_DEPTH 10
+#define MT_SPAWN_DEPTH 9
 #endif
 // Threaded builds: only spawn a task if the larger child has at least this many primitives.
 #ifndef MT_SPAWN_MIN_PRIMS
@@ -216,11 +216,11 @@ THE SOFTWARE.
 #define MT_HQ_MAX_SLICES 32
 #endif
 // Threaded builds: target number of primitives per fragment-setup task.
-#ifndef MT_HQ_PREP_TASK_PRIMS
-#define MT_HQ_PREP_TASK_PRIMS 16384
+#ifndef MT_PREP_TASK_PRIMS
+#define MT_PREP_TASK_PRIMS 16384
 #endif
-#ifndef MT_HQ_PREP_MAX_TASKS
-#define MT_HQ_PREP_MAX_TASKS 32
+#ifndef MT_PREP_MAX_TASKS
+#define MT_PREP_MAX_TASKS 32
 #endif
 
 // Experimental / WIP features

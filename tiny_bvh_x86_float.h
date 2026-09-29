@@ -641,12 +641,14 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	// build the BVH over indexed triangles
 	if (threadedBuild)
 	{
-		constexpr int slices = 4;
-		ALIGNED( 64 ) SliceBounds slice[slices]; // one cache line per slice; no false sharing.
+		uint32_t slices = triCount / MT_PREP_TASK_PRIMS;
+		slices = tinybvh_min( slices, (uint32_t)MT_PREP_MAX_TASKS );
+		if (slices < 2) slices = 2;
+		ALIGNED( 64 ) SliceBounds slice[MT_PREP_MAX_TASKS]; // one cache line per slice; no false sharing.
 		BuildAVXFragSliceArgs args = { this, triCount, triCount / slices, slices, indices, stride4, vertData, slice, fragment };
 		tinybvh_parallel_for( context, slices, &BuildAVXFragSlice, &args );
 		rootMin = tinybvh_load4( slice[0].bmin ), rootMax = tinybvh_load4( slice[0].bmax );
-		for (int i = 1; i < slices; i++)
+		for (uint32_t i = 1; i < slices; i++)
 			rootMin = _mm_min_ps( rootMin, tinybvh_load4( slice[i].bmin ) ), rootMax = _mm_max_ps( rootMax, tinybvh_load4( slice[i].bmax ) );
 	}
 	else
@@ -737,14 +739,13 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 {
 	// aligned data
 	constexpr uint32_t maxSlices = 24;
-	const uint32_t slices = maxSlices - 2 * depth;
 	ALIGNED( 64 ) __m256 slicebinbox[maxSlices][3 * AVXBINS];
 	ALIGNED( 64 ) uint32_t slicecount[maxSlices][AVXCOUNTSTRIDE]; // padded: see AVXCOUNTSTRIDE
 	ALIGNED( 64 ) __m256 bestLBox, bestRBox;			// 64 bytes
 	__m256* binbox = slicebinbox[0];					// slot 0 doubles as the reduce target
 	uint32_t* count = slicecount[0];
 	// subdivide recursively
-	ALIGNED( 64 ) uint32_t task[TINYBVH_STACK_SIZE], taskCount = 0;
+	ALIGNED( 64 ) uint32_t task[TINYBVH_STACK_SIZE], taskDepth[TINYBVH_STACK_SIZE], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f;
 	while (1)
@@ -752,6 +753,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 		while (1)
 		{
 			BVHNode& node = bvhNode[nodeIdx];
+			const uint32_t slices = maxSlices > 2 * depth ? maxSlices - 2 * depth : 1;
 			const float SAV = node.SurfaceArea();
 			if (SAV == 0) break; // can't split an infinitely small node.
 			const __m128 nodeMin4 = tinybvh_load4( &bvhNode[nodeIdx].aabbMin );
@@ -762,7 +764,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( bvhc_binmul3(), d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
-			if (threadedBuild && node.triCount > MT_BUILD_THRESHOLD)
+			if (threadedBuild && slices > 1 && node.triCount > MT_BUILD_THRESHOLD)
 			{
 				const uint32_t sliceSize = node.triCount / slices;
 				BVHBuildAVXBinSliceArgs args = { this, node.leftFirst, node.triCount, sliceSize, slices,
@@ -840,17 +842,18 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			tinybvh_store8( &bvhNode[n + 1], _mm256_xor_ps( bestRBox, bvhc_signFlip8() ) );
 			bvhNode[n + 1].leftFirst = i, bvhNode[n + 1].triCount = rightCount;
 			const bool spawnThreads = tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS && depth < MT_SPAWN_DEPTH && threadedBuild;
-			if (!spawnThreads) task[taskCount++] = n + 1, nodeIdx = n; else
+			if (!spawnThreads) task[taskCount] = n + 1, taskDepth[taskCount++] = depth + 1, nodeIdx = n; else
 			{
 				// spawn the larger subtree, continue with the small one; root barrier joins.
 				impl::BVHBuildSubtreeArgs<float, uint32_t> a = { this, leftCount > rightCount ? n : (n + 1), depth + 1 };
 				tinybvh_spawn( context, &BVHBuildAVXSubtree, &a, sizeof( a ) );
 				nodeIdx = leftCount > rightCount ? (n + 1) : n;
 			}
+			depth++; // both children sit one level below the node just split
 		}
 		// fetch subdivision task from stack
 		if (taskCount == 0) break;
-		nodeIdx = task[--taskCount];
+		nodeIdx = task[--taskCount], depth = taskDepth[taskCount];
 	}
 }
 

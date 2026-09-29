@@ -2893,12 +2893,12 @@ TEMPLATED void BVH<Float, Index>::PrepareHQBuild( const Slice& vertices, const u
 	uint32_t tasks = 1;
 #ifdef ENABLE_THREADED_BUILDS
 	if (threadedBuild && context.parallel_for)
-		tasks = (uint32_t)tinybvh_min( (Index)MT_HQ_PREP_MAX_TASKS, triCount / (Index)MT_HQ_PREP_TASK_PRIMS );
+		tasks = (uint32_t)tinybvh_min( (Index)MT_PREP_MAX_TASKS, triCount / (Index)MT_PREP_TASK_PRIMS );
 	if (tasks < 2) tasks = 1;
 #endif
 	if (tasks > 1)
 	{
-		ALIGNED( 64 ) BVHPrepHQBounds<Float, Index> bounds[MT_HQ_PREP_MAX_TASKS]; // one cache line each; no false sharing.
+		ALIGNED( 64 ) BVHPrepHQBounds<Float, Index> bounds[MT_PREP_MAX_TASKS]; // one cache line each; no false sharing.
 		BVHPrepHQFragArgs<Float, Index> a = { this, indices, tasks, bounds };
 		tinybvh_parallel_for( context, tasks, &BVH::PrepareHQFragTask, &a );
 		for (uint32_t t = 0; t < tasks; t++)
@@ -5697,12 +5697,10 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::Build( const Slice& vertices, const ui
 	bvh4.c_int = bvh4.bvh.c_int = c_int, bvh4.c_trav = bvh4.bvh.c_trav = c_trav;
 	// build underlying layout
 	bvh4.bvh.Build( vertices, indices, prims );
-
 	// Force 1 triangle per leaf for HW
 	bvh4.bvh.SplitLeafs( 1 );
 	bvh4.leafPrimLimit = 0;
 	bvh4.ConvertFrom( bvh4.bvh ); // Convert to 4 Wide
-
 	// convert to AMD format
 	ConvertFrom( bvh4 );
 }
@@ -5725,14 +5723,10 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::ConvertFrom( const MBVH<4, Float, Inde
 	// get a copy of the original bvh4
 	if (&original != &bvh4)
 	{
-		if (ownBVH4)
-			bvh4 = MBVH<4, Float, Index>( context );
-		else
-			bvh4.DropReference( context );
+		if (ownBVH4) bvh4 = MBVH<4, Float, Index>( context ); else bvh4.DropReference( context );
 		ownBVH4 = false; // bvh isn't ours; don't delete in destructor.
 	}
 	bvh4.ReferenceFrom( original );
-
 	uint32_t blocksNeeded = bvh4.usedNodes * 8; // here, a 'block' is 16 bytes. 8 blocks for interior 128B.
 	blocksNeeded += 4 * bvh4.triCount; // 4 blocks need for 64B leaf nodes w/ 1 triangle per leaf.
 	if (allocatedBlocks < blocksNeeded)
@@ -5755,22 +5749,18 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::ConvertFrom( const MBVH<4, Float, Inde
 		bvhvec4* nodeBase = bvh4Data + newAlt4Ptr;
 		uint32_t baseAlt4Ptr = newAlt4Ptr;
 		newAlt4Ptr += 8; // 8 since HW interiors are 128B
-
 		// Store the parent ID for stack overflow recovery in the traversal kernel.
 		uint32_t parentID = retValPos == UINT32_MAX ? UINT32_MAX : PackNodeID( (retValPos & ~3u) * 4u, NODE_BOX32 );
-
 		// Box flags and reserved words are zero; the last word holds the parent ID.
 		nodeBase[7] = bvhvec4( 0, 0, 0, tinybvh_as_float( parentID ) );
 		typename MBVH<4, Float, Index>::MBVHNode* childNode[4] = {
 			&bvh4.mbvhNode[orig.child[0]], &bvh4.mbvhNode[orig.child[1]],
 			&bvh4.mbvhNode[orig.child[2]], &bvh4.mbvhNode[orig.child[3]] };
-
 		// start with leaf child node conversion - assuming 1 triangle per leaf
 		uint32_t childInfo[4] = { 0, 0, 0, 0 };
 		for (int32_t i = 0; i < 4; i++) if (childNode[i]->isLeaf())
 		{
 			BVH_FATAL_ERROR_IF( childNode[i]->triCount != 1, "BVH4_AMD_HW::ConvertFrom expected one triangle per leaf." );
-
 			childInfo[i] = PackNodeID( newAlt4Ptr * 16, NODE_TRIANGLE );
 			uint32_t t = bvh4.bvh.primIdx[childNode[i]->firstTri];
 			uint32_t ti0, ti1, ti2;
@@ -5779,34 +5769,25 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::ConvertFrom( const MBVH<4, Float, Inde
 				ti2 = bvh4.bvh.vertIdx[t * 3 + 2];
 			else
 				ti0 = t * 3, ti1 = t * 3 + 1, ti2 = t * 3 + 2;
-
 			bvh4Data[newAlt4Ptr + 0] = bvh4.bvh.verts[ti0]; // Vertex 0
-
 			bvh4Data[newAlt4Ptr + 0].w = bvh4.bvh.verts[ti1].x; // Vertex 1
 			bvh4Data[newAlt4Ptr + 1].x = bvh4.bvh.verts[ti1].y;
 			bvh4Data[newAlt4Ptr + 1].y = bvh4.bvh.verts[ti1].z;
-
 			bvh4Data[newAlt4Ptr + 1].z = bvh4.bvh.verts[ti2].x; // Vertex 2
 			bvh4Data[newAlt4Ptr + 1].w = bvh4.bvh.verts[ti2].y;
 			bvh4Data[newAlt4Ptr + 2].x = bvh4.bvh.verts[ti2].z;
-
 			bvh4Data[newAlt4Ptr + 2].y = 0; // Reserved
 			bvh4Data[newAlt4Ptr + 2].z = 0;
 			bvh4Data[newAlt4Ptr + 2].w = 0;
-
 			bvh4Data[newAlt4Ptr + 3].x = tinybvh_as_float( t ); // Triangle ID
 			bvh4Data[newAlt4Ptr + 3].y = 0;						// Geo and Opaque flags
 			bvh4Data[newAlt4Ptr + 3].z = tinybvh_as_float( PackNodeID( baseAlt4Ptr * 16, NODE_BOX32 ) ); // Parent ID
 			bvh4Data[newAlt4Ptr + 3].w = tinybvh_as_float( 9 ); // Hardware ID.
-
 			newAlt4Ptr += 4;
 		}
-
 		for (int32_t i = 0; i < 4; i++) if (!childNode[i]->isLeaf())
 		{
-			if (orig.child[i] == 0)
-				childInfo[i] = 0xFFFFFFFFu; // Invalid value for HW.
-			else
+			if (orig.child[i] == 0) childInfo[i] = 0xFFFFFFFFu; /* Invalid value for HW. */ else
 			{
 				stack[stackPtr++] = (uint32_t)(((const char*)&nodeBase[0] - (const char*)bvh4Data) / 4 + i);
 				stack[stackPtr++] = orig.child[i];
@@ -5819,7 +5800,6 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::ConvertFrom( const MBVH<4, Float, Inde
 			const Vec3 min = valid ? childNode[i]->aabbMin : Vec3( NAN ); // NAN bounds for HW
 			const Vec3 max = valid ? childNode[i]->aabbMax : Vec3( NAN );
 			const size_t lane = 4 + 6 * i;
-
 			tinybvh_setlane_f( nodeBase, lane + 0, min.x );
 			tinybvh_setlane_f( nodeBase, lane + 1, min.y );
 			tinybvh_setlane_f( nodeBase, lane + 2, min.z );
@@ -5828,15 +5808,12 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::ConvertFrom( const MBVH<4, Float, Inde
 			tinybvh_setlane_f( nodeBase, lane + 5, max.z );
 		}
 		// finalize node
-		nodeBase[0] =
-			bvhvec4( tinybvh_as_float( childInfo[0] ), tinybvh_as_float( childInfo[1] ),
-					 tinybvh_as_float( childInfo[2] ), tinybvh_as_float( childInfo[3] ) );
-
+		nodeBase[0] = bvhvec4( tinybvh_as_float( childInfo[0] ), tinybvh_as_float( childInfo[1] ),
+			tinybvh_as_float( childInfo[2] ), tinybvh_as_float( childInfo[3] ) );
 		// pop new work from the stack
 		if (retValPos != UINT32_MAX)
 			tinybvh_setlane_u( bvh4Data, retValPos, PackNodeID( baseAlt4Ptr * 16, NODE_BOX32 ) );
-		if (stackPtr == 0)
-			break;
+		if (stackPtr == 0) break;
 		nodeIdx = stack[--stackPtr];
 		retValPos = stack[--stackPtr];
 	}
