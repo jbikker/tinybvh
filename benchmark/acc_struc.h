@@ -26,6 +26,7 @@ enum BVHLayout
 	GPU_BVH,	// BVH2 optimized for GPU traversal
 	GPU_BVH4,	// BVH4 optimized for GPU traversal
 	CWBVH,		// 'Compressed Wide BVH'
+	AMD_HWRT,	// Native AMD format
 	MADMANN91,	// for reference: latest madmann91 BVH lib
 	EMBREE		// for reference: latest Embree lib.
 };
