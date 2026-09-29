@@ -670,6 +670,7 @@ enum BVHType : uint32_t
 	LAYOUT_CWBVH,
 	LAYOUT_BVH8_AVX2,
 	LAYOUT_VOXELSET,
+	LAYOUT_BVH4_AMD_HW,
 };
 
 namespace impl {
@@ -681,6 +682,7 @@ TEMPLATED class BVH_GPU;
 TEMPLATED_M class MBVH;
 TEMPLATED class BVH4_GPU;
 TEMPLATED class BVH4_CPU;
+TEMPLATED class BVH4_AMD_HW;
 TEMPLATED class BVH8_CWBVH;
 TEMPLATED class BVH8_CPU;
 TEMPLATED class BLASInstance;
@@ -1183,6 +1185,7 @@ public:
 	// reset to a pristine empty object, freeing nothing, with 'ctx' installed.
 	void DropReference( BVHContext ctx = {} );
 	template <typename, typename> friend class BVH4_GPU;
+	template <typename, typename> friend class BVH4_AMD_HW;
 	template <typename, typename> friend class BVH4_CPU;
 	template <typename, typename> friend class BVH8_CPU;
 	template <typename, typename> friend class BVH8_CWBVH;
@@ -1276,6 +1279,92 @@ public:
 	bool ownBVH4 = true;			// False when ConvertFrom receives an external bvh.
 private:
 	BVH4_GPU& operator=( const BVH4_GPU& ) = default;
+};
+
+TEMPLATED class BVH4_AMD_HW : public BVHBase<Float, Index>
+{
+public:
+	using Base = BVHBase<Float, Index>;
+	using Base::allocatedNodes;
+	using Base::c_int;
+	using Base::c_trav;
+	using Base::context;
+	using Base::layout;
+	using Base::settings;
+	using Base::triCount;
+	using Base::usedNodes;
+	using typename Base::Ray;
+	using typename Base::Slice;
+	using typename Base::Vec3;
+
+protected:
+	using Base::AlignedAlloc;
+	using Base::AlignedFree;
+	using Base::CopyBasePropertiesFrom;
+
+public:
+	// Layout reference: Mesa, src/amd/vulkan/bvh/bvh.h (legacy BOX32 and triangle nodes).
+	// These structs document the packed buffer; ConvertFrom writes bvhvec4 blocks.
+	struct AMDBox32Node
+	{
+		struct aabb32
+		{
+			float xmin, ymin, zmin, xmax, ymax, zmax;
+		};
+		// Child ID = (byteOffset >> 3) | type, with 64-byte aligned offsets.
+		// The low three bits hold the type: 0 = triangle, 5 = BOX32.
+		// Empty children use UINT32_MAX and NaN bounds.
+		uint32_t cPointers[4];
+		aabb32 c0bounds, c1bounds, c2bounds, c3bounds; // bounds in child pointer order.
+		// Byte 112: box flags (zero); bytes 116 and 120: reserved (zero).
+		// Byte 124: TinyBVH parent ID for traversal; UINT32_MAX at the root.
+		uint32_t reserved[4];
+	}; // 128 bytes.
+
+	struct AMDTriangleNode
+	{
+		struct vertVec3
+		{
+			float x;
+			float y;
+			float z;
+		};
+		vertVec3 vertices[3]; // bytes 0..35: three uncompressed vertices.
+		uint32_t reserved0[3]; // bytes 36..47: reserved (zero).
+		uint32_t triangle_id; // byte 48: original primitive index.
+		uint32_t geometry_and_opaque_flags; // byte 52: geometry and flags (zero).
+		uint32_t reserved1; // byte 56: TinyBVH parent ID for traversal.
+		uint32_t id; // byte 60: hardware ID field; ConvertFrom writes 9.
+	}; // 64 bytes.
+	BVH4_AMD_HW( BVHContext ctx = {} ) { layout = LAYOUT_BVH4_AMD_HW; context = ctx; }
+	BVH4_AMD_HW( const MBVH<4, Float, Index>& bvh4 ) { /* DEPRECATED */ layout = LAYOUT_BVH4_AMD_HW; ConvertFrom( bvh4 ); }
+	BVH4_AMD_HW( const BVH4_AMD_HW& ) = delete; // owns its allocations, so it cannot be copied
+	BVH4_AMD_HW( BVH4_AMD_HW&& ) noexcept;
+	BVH4_AMD_HW& operator=( BVH4_AMD_HW&& ) noexcept;
+	~BVH4_AMD_HW();
+	void Build( const bvhvec4* vertices, const Index primCount );
+	void Build( const Slice& vertices );
+	void Build( const bvhvec4* vertices, const uint32_t* indices, const Index primCount );
+	void Build( const Slice& vertices, const uint32_t* indices, const Index primCount );
+	void BuildHQ( const bvhvec4* vertices, const Index primCount );
+	void BuildHQ( const Slice& vertices );
+	void BuildHQ( const bvhvec4* vertices, const uint32_t* indices, const Index primCount );
+	void BuildHQ( const Slice& vertices, const uint32_t* indices, const Index primCount );
+	void Optimize( const uint32_t iterations = 25, bool extreme = false );
+	void ConvertFrom( const MBVH<4, Float, Index>& original );
+	Float SAHCost( const Index nodeIdx = 0 ) const { return bvh4.SAHCost( nodeIdx ); }
+	// GPU traversal only; the underlying bvh4.bvh remains available for CPU queries.
+	// BVH data in 16-byte blocks; all nodes are 64-byte aligned.
+	// The kernel uses a zero descriptor base and encodes the device address in the node pointer.
+	bvhvec4* bvh4Data = 0;
+	uint32_t allocatedBlocks = 0; // node data and triangles are stored in 16-byte blocks.
+	uint32_t usedBlocks = 0; // actually used storage.
+	MBVH<4, Float, Index> bvh4; // BVH4_AMD_HW is created from BVH4 and uses its data.
+	bool ownBVH4 = true; // False when ConvertFrom receives an external bvh.
+private:
+	static constexpr uint32_t NODE_TRIANGLE = 0, NODE_BOX32 = 5;
+	static uint32_t PackNodeID( uint32_t offset, uint32_t type ) { return (offset >> 3) | type; }
+	BVH4_AMD_HW& operator=( const BVH4_AMD_HW& ) = default;
 };
 
 TEMPLATED class BVH4_CPU : public BVHBase<Float, Index>
@@ -1572,6 +1661,7 @@ using BVH_Verbose = impl::BVH_Verbose<float, uint32_t>;
 using BVH_GPU = impl::BVH_GPU<float, uint32_t>;
 template <int M> using MBVH = impl::MBVH<M, float, uint32_t>;
 using BVH4_GPU = impl::BVH4_GPU<float, uint32_t>;
+using BVH4_AMD_HW = impl::BVH4_AMD_HW<float, uint32_t>;
 using BVH4_CPU = impl::BVH4_CPU<float, uint32_t>;
 using BVH8_CWBVH = impl::BVH8_CWBVH<float, uint32_t>;
 using BVH8_CPU = impl::BVH8_CPU<float, uint32_t>;
@@ -5558,6 +5648,199 @@ TEMPLATED int32_t BVH4_GPU<Float, Index>::Intersect( Ray& ray ) const
 		}
 	}
 	return (int32_t)cost; // cast to not break interface.
+}
+
+// BVH4_AMD_HW implementation
+// ----------------------------------------------------------------------------
+
+TEMPLATED BVH4_AMD_HW<Float, Index>::BVH4_AMD_HW( BVH4_AMD_HW&& other ) noexcept
+{
+	*this = other;
+	// The embedded bvh4 must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh4.ReleaseOwnership();
+	other.bvh4Data = 0;
+	other.allocatedBlocks = other.usedBlocks = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+TEMPLATED BVH4_AMD_HW<Float, Index>& BVH4_AMD_HW<Float, Index>::operator=( BVH4_AMD_HW&& other ) noexcept
+{
+	if (this != &other) this->~BVH4_AMD_HW(), new (this) BVH4_AMD_HW( tinybvh_move( other ) );
+	return *this;
+}
+
+TEMPLATED BVH4_AMD_HW<Float, Index>::~BVH4_AMD_HW()
+{
+	if (!ownBVH4) bvh4.ReleaseOwnership(); // clear out pointers we don't own.
+	AlignedFree( bvh4Data );
+}
+
+// forwarders
+TEMPLATED void BVH4_AMD_HW<Float, Index>::Build( const bvhvec4* v, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
+TEMPLATED void BVH4_AMD_HW<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
+TEMPLATED void BVH4_AMD_HW<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
+TEMPLATED void BVH4_AMD_HW<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
+TEMPLATED void BVH4_AMD_HW<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
+TEMPLATED void BVH4_AMD_HW<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
+TEMPLATED void BVH4_AMD_HW<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+
+TEMPLATED void BVH4_AMD_HW<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
+{
+	if (!ownBVH4)
+	{
+		bvh4.DropReference( context );
+		ownBVH4 = true;
+	}
+	// propagate settings for this layout to the underlying layout
+	bvh4.context = bvh4.bvh.context = context, bvh4.settings = bvh4.bvh.settings = settings;
+	bvh4.c_int = bvh4.bvh.c_int = c_int, bvh4.c_trav = bvh4.bvh.c_trav = c_trav;
+	// build underlying layout
+	bvh4.bvh.Build( vertices, indices, prims );
+
+	// Force 1 triangle per leaf for HW
+	bvh4.bvh.SplitLeafs( 1 );
+	bvh4.leafPrimLimit = 0;
+	bvh4.ConvertFrom( bvh4.bvh ); // Convert to 4 Wide
+
+	// convert to AMD format
+	ConvertFrom( bvh4 );
+}
+
+TEMPLATED void BVH4_AMD_HW<Float, Index>::Optimize( const uint32_t iterations, bool extreme )
+{
+	if (!ownBVH4)
+	{
+		const Slice vertices = bvh4.bvh.verts;
+		const uint32_t* indices = bvh4.bvh.vertIdx;
+		const Index prims = bvh4.bvh.triCount;
+		Build( vertices, indices, prims );
+	}
+	bvh4.Optimize( iterations, extreme );
+	ConvertFrom( bvh4 );
+}
+
+TEMPLATED void BVH4_AMD_HW<Float, Index>::ConvertFrom( const MBVH<4, Float, Index>& original )
+{
+	// get a copy of the original bvh4
+	if (&original != &bvh4)
+	{
+		if (ownBVH4)
+			bvh4 = MBVH<4, Float, Index>( context );
+		else
+			bvh4.DropReference( context );
+		ownBVH4 = false; // bvh isn't ours; don't delete in destructor.
+	}
+	bvh4.ReferenceFrom( original );
+
+	uint32_t blocksNeeded = bvh4.usedNodes * 8; // here, a 'block' is 16 bytes. 8 blocks for interior 128B.
+	blocksNeeded += 4 * bvh4.triCount; // 4 blocks need for 64B leaf nodes w/ 1 triangle per leaf.
+	if (allocatedBlocks < blocksNeeded)
+	{
+		AlignedFree( bvh4Data );
+		bvh4Data = (bvhvec4*)AlignedAlloc( blocksNeeded * 16 );
+		allocatedBlocks = blocksNeeded;
+	}
+	memset( bvh4Data, 0, 16 * blocksNeeded );
+	const BVHContext ctx = context;
+	CopyBasePropertiesFrom( bvh4 );
+	context = ctx; // keep the allocator paired with our hardware buffer.
+	// start conversion
+	uint32_t nodeIdx = 0, newAlt4Ptr = 0, stack[TINYBVH_STACK_SIZE], stackPtr = 0, retValPos = UINT32_MAX;
+	while (1)
+	{
+		const typename MBVH<4, Float, Index>::MBVHNode& orig = bvh4.mbvhNode[nodeIdx];
+		// convert BVH4 node - must be an interior node. For HW this is 128 B
+		assert( !orig.isLeaf() );
+		bvhvec4* nodeBase = bvh4Data + newAlt4Ptr;
+		uint32_t baseAlt4Ptr = newAlt4Ptr;
+		newAlt4Ptr += 8; // 8 since HW interiors are 128B
+
+		// Store the parent ID for stack overflow recovery in the traversal kernel.
+		uint32_t parentID = retValPos == UINT32_MAX ? UINT32_MAX : PackNodeID( (retValPos & ~3u) * 4u, NODE_BOX32 );
+
+		// Box flags and reserved words are zero; the last word holds the parent ID.
+		nodeBase[7] = bvhvec4( 0, 0, 0, tinybvh_as_float( parentID ) );
+		typename MBVH<4, Float, Index>::MBVHNode* childNode[4] = {
+			&bvh4.mbvhNode[orig.child[0]], &bvh4.mbvhNode[orig.child[1]],
+			&bvh4.mbvhNode[orig.child[2]], &bvh4.mbvhNode[orig.child[3]] };
+
+		// start with leaf child node conversion - assuming 1 triangle per leaf
+		uint32_t childInfo[4] = { 0, 0, 0, 0 };
+		for (int32_t i = 0; i < 4; i++) if (childNode[i]->isLeaf())
+		{
+			BVH_FATAL_ERROR_IF( childNode[i]->triCount != 1, "BVH4_AMD_HW::ConvertFrom expected one triangle per leaf." );
+
+			childInfo[i] = PackNodeID( newAlt4Ptr * 16, NODE_TRIANGLE );
+			uint32_t t = bvh4.bvh.primIdx[childNode[i]->firstTri];
+			uint32_t ti0, ti1, ti2;
+			if (bvh4.bvh.vertIdx)
+				ti0 = bvh4.bvh.vertIdx[t * 3], ti1 = bvh4.bvh.vertIdx[t * 3 + 1],
+				ti2 = bvh4.bvh.vertIdx[t * 3 + 2];
+			else
+				ti0 = t * 3, ti1 = t * 3 + 1, ti2 = t * 3 + 2;
+
+			bvh4Data[newAlt4Ptr + 0] = bvh4.bvh.verts[ti0]; // Vertex 0
+
+			bvh4Data[newAlt4Ptr + 0].w = bvh4.bvh.verts[ti1].x; // Vertex 1
+			bvh4Data[newAlt4Ptr + 1].x = bvh4.bvh.verts[ti1].y;
+			bvh4Data[newAlt4Ptr + 1].y = bvh4.bvh.verts[ti1].z;
+
+			bvh4Data[newAlt4Ptr + 1].z = bvh4.bvh.verts[ti2].x; // Vertex 2
+			bvh4Data[newAlt4Ptr + 1].w = bvh4.bvh.verts[ti2].y;
+			bvh4Data[newAlt4Ptr + 2].x = bvh4.bvh.verts[ti2].z;
+
+			bvh4Data[newAlt4Ptr + 2].y = 0; // Reserved
+			bvh4Data[newAlt4Ptr + 2].z = 0;
+			bvh4Data[newAlt4Ptr + 2].w = 0;
+
+			bvh4Data[newAlt4Ptr + 3].x = tinybvh_as_float( t ); // Triangle ID
+			bvh4Data[newAlt4Ptr + 3].y = 0;						// Geo and Opaque flags
+			bvh4Data[newAlt4Ptr + 3].z = tinybvh_as_float( PackNodeID( baseAlt4Ptr * 16, NODE_BOX32 ) ); // Parent ID
+			bvh4Data[newAlt4Ptr + 3].w = tinybvh_as_float( 9 ); // Hardware ID.
+
+			newAlt4Ptr += 4;
+		}
+
+		for (int32_t i = 0; i < 4; i++) if (!childNode[i]->isLeaf())
+		{
+			if (orig.child[i] == 0)
+				childInfo[i] = 0xFFFFFFFFu; // Invalid value for HW.
+			else
+			{
+				stack[stackPtr++] = (uint32_t)(((const char*)&nodeBase[0] - (const char*)bvh4Data) / 4 + i);
+				stack[stackPtr++] = orig.child[i];
+			}
+		}
+		// store child node bounds
+		for (uint32_t i = 0; i < 4; i++)
+		{
+			const bool valid = orig.child[i] != 0;
+			const Vec3 min = valid ? childNode[i]->aabbMin : Vec3( NAN ); // NAN bounds for HW
+			const Vec3 max = valid ? childNode[i]->aabbMax : Vec3( NAN );
+			const size_t lane = 4 + 6 * i;
+
+			tinybvh_setlane_f( nodeBase, lane + 0, min.x );
+			tinybvh_setlane_f( nodeBase, lane + 1, min.y );
+			tinybvh_setlane_f( nodeBase, lane + 2, min.z );
+			tinybvh_setlane_f( nodeBase, lane + 3, max.x );
+			tinybvh_setlane_f( nodeBase, lane + 4, max.y );
+			tinybvh_setlane_f( nodeBase, lane + 5, max.z );
+		}
+		// finalize node
+		nodeBase[0] =
+			bvhvec4( tinybvh_as_float( childInfo[0] ), tinybvh_as_float( childInfo[1] ),
+					 tinybvh_as_float( childInfo[2] ), tinybvh_as_float( childInfo[3] ) );
+
+		// pop new work from the stack
+		if (retValPos != UINT32_MAX)
+			tinybvh_setlane_u( bvh4Data, retValPos, PackNodeID( baseAlt4Ptr * 16, NODE_BOX32 ) );
+		if (stackPtr == 0)
+			break;
+		nodeIdx = stack[--stackPtr];
+		retValPos = stack[--stackPtr];
+	}
+	usedBlocks = newAlt4Ptr;
 }
 
 // BVH4_CPU implementation
