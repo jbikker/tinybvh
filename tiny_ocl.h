@@ -54,6 +54,8 @@ THE SOFTWARE.
 #endif
 #ifdef __APPLE__
 #include <OpenCL/cl.h>  // use with -framework OpenCL
+#elif __unix__
+#include <CL/cl.h>
 #else
 #include <cl.h>
 #endif
@@ -399,6 +401,8 @@ public:
 	inline static bool isNVidia = false, isAMD = false, isIntel = false, isApple = false, isOther = false;
 	inline static bool isAmpere = false, isTuring = false, isPascal = false;
 	inline static bool isAda = false, isBlackwell = false, isRubin = false, isHopper = false;
+	inline static bool isGCN = false, isCDNA = false, isRDNA1 = false;
+	inline static bool isRDNA2 = false, isRDNA3 = false, isRDNA35 = false, isRDNA4 = false;
 	inline static bool candoInterop = false, clStarted = false;
 };
 
@@ -800,6 +804,13 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 	if (isTuring) csText = "#define ISTURING\n" + csText, vendorLines++;
 	if (isPascal) csText = "#define ISPASCAL\n" + csText, vendorLines++;
 	if (isAda) csText = "#define ISADA\n" + csText, vendorLines++;
+	if (isGCN) csText = "#define ISGCN\n" + csText, vendorLines++;
+	if (isCDNA) csText = "#define ISCDNA\n" + csText, vendorLines++;
+	if (isRDNA1) csText = "#define ISRDNA1\n" + csText, vendorLines++;
+	if (isRDNA2) csText = "#define ISRDNA2\n" + csText, vendorLines++;
+	if (isRDNA3) csText = "#define ISRDNA3\n" + csText, vendorLines++;
+	if (isRDNA35) csText = "#define ISRDNA35\n" + csText, vendorLines++;
+	if (isRDNA4) csText = "#define ISRDNA4\n" + csText, vendorLines++;
 	// expand #include directives: cl compiler doesn't support these natively
 	// warning: this simple system does not handle nested includes.
 	struct Include { int start, end; string file; } includes[64];
@@ -1122,10 +1133,86 @@ bool Kernel::InitCL()
 		}
 	}
 	// note: d has been lowercased above.
-	else if (strstr( d, "amd" ) || strstr( d, "ellesmere" ) || strstr( d, "rdna" ) ||
-		strstr( d, "gfx11" ) || strstr( d, "gfx10" ) || strstr( d, "gfx9" ) || strstr( d, "gfx8" ))
+	else if (strstr( d, "amd" ) || strstr( d, "radeon" ) || strstr( d, "ellesmere" ) || strstr( d, "rdna" ) ||
+			 strstr( d, "gfx" ) || strstr( d, "instinct" ) || strstr( d, "polaris" ) ||
+			 strstr( d, "baffin" ) || strstr( d, "lexa" ) || strstr( d, "vega" ))
 	{
 		isAMD = true;
+		if (strstr( d, "gfx" ))
+		{
+			// GFX11.0 is RDNA3; GFX11.5 is RDNA3.5. Other GFX11 targets stay unknown.
+			isRDNA1 = strstr( d, "gfx101" );
+			isRDNA2 = strstr( d, "gfx103" );
+			isRDNA3 = strstr( d, "gfx110" );
+			isRDNA35 = strstr( d, "gfx115" );
+			isRDNA4 = strstr( d, "gfx1200" ) || strstr( d, "gfx1201" );
+			isCDNA = strstr( d, "gfx908" ) || strstr( d, "gfx90a" ) || strstr( d, "gfx940" ) ||
+					 strstr( d, "gfx941" ) || strstr( d, "gfx942" ) || strstr( d, "gfx950" );
+			isGCN = strstr( d, "gfx6" ) || strstr( d, "gfx7" ) || strstr( d, "gfx8" ) ||
+					strstr( d, "gfx900" ) || strstr( d, "gfx902" ) || strstr( d, "gfx904" ) ||
+					strstr( d, "gfx906" ) || strstr( d, "gfx909" ) || strstr( d, "gfx90c" );
+		}
+		else if (strstr( d, "rx" ))
+		{
+			// Radeon RX models, including XT, XTX, M and S variants.
+			if (strstr( d, "9050" ) || strstr( d, "9060" ) || strstr( d, "9070" ))
+				isRDNA4 = true;
+			else if (strstr( d, "7400" ) || strstr( d, "7600" ) || strstr( d, "7650" ) || strstr( d, "7700" ) ||
+					 strstr( d, "7800" ) || strstr( d, "7900" ))
+				isRDNA3 = true;
+			else if (strstr( d, "6300" ) || strstr( d, "6400" ) || strstr( d, "6450" ) ||
+					 strstr( d, "6500" ) || strstr( d, "6550" ) || strstr( d, "6600" ) || strstr( d, "6650" ) ||
+					 strstr( d, "6700" ) || strstr( d, "6750" ) || strstr( d, "6800" ) || strstr( d, "6850" ) ||
+					 strstr( d, "6900" ) || strstr( d, "6950" ))
+				isRDNA2 = true;
+			else if (strstr( d, "5300" ) || strstr( d, "5500" ) || strstr( d, "5600" ) ||
+					 strstr( d, "5700" ))
+				isRDNA1 = true;
+			else if (strstr( d, "460" ) || strstr( d, "470" ) || strstr( d, "480" ) ||
+					 strstr( d, "550" ) || strstr( d, "560" ) || strstr( d, "570" ) || strstr( d, "580" ) ||
+					 strstr( d, "590" ) || strstr( d, "vega" ))
+				isGCN = true;
+		}
+		else if (strstr( d, " w" ))
+		{
+			// Radeon PRO workstation models.
+			if (strstr( d, "w7400" ) || strstr( d, "w7500" ) || strstr( d, "w7600" ) || strstr( d, "w7700" ) ||
+				strstr( d, "w7800" ) || strstr( d, "w7900" ))
+				isRDNA3 = true;
+			else if (strstr( d, "w6300" ) || strstr( d, "w6400" ) || strstr( d, "w6600" ) ||
+					 strstr( d, "w6800" ) || strstr( d, "w6900" ))
+				isRDNA2 = true;
+			else if (strstr( d, "w5500" ) || strstr( d, "w5700" ))
+				isRDNA1 = true;
+		}
+		// Fall back to other names if no model matched; an explicit GFX target takes precedence.
+		if (!strstr( d, "gfx" ) && !(isGCN || isCDNA || isRDNA1 || isRDNA2 || isRDNA3 || isRDNA35 || isRDNA4))
+		{
+			if (strstr( d, "890m" ) || strstr( d, "880m" ) || strstr( d, "860m" ) ||
+				 strstr( d, "840m" ) || strstr( d, "820m" ) || strstr( d, "8040s" ) || strstr( d, "8050s" ) ||
+				 strstr( d, "8060s" ) || strstr( d, "8065s" ) || strstr( d, "rdna3.5" ) || strstr( d, "rdna 3.5" ))
+				isRDNA35 = true;
+			else if (strstr( d, "r9700" ) || strstr( d, "r9600d" ) ||
+					 strstr( d, "rdna4" ) || strstr( d, "rdna 4" ))
+				isRDNA4 = !strstr( d, "4m" );
+			else if (strstr( d, "780m" ) || strstr( d, "760m" ) || strstr( d, "740m" ) ||
+					 strstr( d, "rdna3" ) || strstr( d, "rdna 3" ))
+				isRDNA3 = true;
+			else if (strstr( d, "680m" ) || strstr( d, "660m" ) || strstr( d, "610m" ) ||
+					 strstr( d, "rdna2" ) || strstr( d, "rdna 2" ))
+				isRDNA2 = true;
+			else if (strstr( d, "rdna1" ) || strstr( d, "rdna 1" ))
+				isRDNA1 = true;
+			else if (strstr( d, "mi100" ) || strstr( d, "mi210" ) || strstr( d, "mi250" ) ||
+					 strstr( d, "mi300" ) || strstr( d, "mi325" ) || strstr( d, "mi350" ) ||
+					 strstr( d, "mi355" ) || strstr( d, "cdna" ))
+				isCDNA = true;
+			else if (strstr( d, "vega" ) || strstr( d, "radeon vii" ) || strstr( d, "radeon pro vii" ) ||
+					 strstr( d, "polaris" ) || strstr( d, "ellesmere" ) || strstr( d, "baffin" ) ||
+					 strstr( d, "lexa" ) || strstr( d, "mi25" ) || strstr( d, "mi50" ) ||
+					 strstr( d, "mi60" ) || strstr( d, "gcn" ))
+				isGCN = true;
+		}
 	}
 	else if (strstr( d, "intel" ))
 	{
@@ -1154,7 +1241,23 @@ bool Kernel::InitCL()
 	}
 	else if (isAMD)
 	{
-		printf( "AMD.\n" );
+		printf( "AMD, " );
+		if (isRDNA4)
+			printf( "RDNA4 class.\n" );
+		else if (isRDNA35)
+			printf( "RDNA3.5 class.\n" );
+		else if (isRDNA3)
+			printf( "RDNA3 class.\n" );
+		else if (isRDNA2)
+			printf( "RDNA2 class.\n" );
+		else if (isRDNA1)
+			printf( "RDNA1 class.\n" );
+		else if (isCDNA)
+			printf( "CDNA class.\n" );
+		else if (isGCN)
+			printf( "GCN class.\n" );
+		else
+			printf( "unknown architecture.\n" );
 	}
 	else if (isIntel)
 	{
@@ -1209,6 +1312,7 @@ void Kernel::KillCL()
 	isNVidia = isAMD = isIntel = isApple = isOther = false;
 	isAmpere = isTuring = isPascal = false;
 	isAda = isBlackwell = isRubin = isHopper = false;
+	isGCN = isCDNA = isRDNA1 = isRDNA2 = isRDNA3 = isRDNA35 = isRDNA4 = false;
 	candoInterop = false, vendorLines = 0;
 	clStarted = false;
 }
