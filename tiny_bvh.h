@@ -388,6 +388,7 @@ template class impl::BVH_GPU<float, uint32_t>;
 template class impl::MBVH<4, float, uint32_t>;
 template class impl::MBVH<8, float, uint32_t>;
 template class impl::BVH4_GPU<float, uint32_t>;
+template class impl::BVH4_AMD_HW<float, uint32_t>;
 template class impl::BVH4_CPU<float, uint32_t>;
 template class impl::BVH8_CWBVH<float, uint32_t>;
 template class impl::BVH8_CPU<float, uint32_t>;
