@@ -13,13 +13,27 @@ inline uint id_to_type( uint id ) { return id & 7u; }
 #define INVALID_NODE 0xffffffffu
 
 #define BVH_STACK_TERMINAL_NODE 0xfffffffeu
+#ifndef HW_BVH_STACK_ENTRIES
 #define HW_BVH_STACK_ENTRIES 16
+#endif
+#if HW_BVH_STACK_ENTRIES != 8 && HW_BVH_STACK_ENTRIES != 16 &&                 \
+    HW_BVH_STACK_ENTRIES != 32 && HW_BVH_STACK_ENTRIES != 64
+#error "AMD hardware BVH stacks require 8, 16, 32 or 64 entries per ray."
+#endif
 #ifdef ISRDNA4
 // GFX12 stack encoding.
 #define BVH_STACK_CONTROLS HW_BVH_STACK_ENTRIES
 #define HW_BVH_STACK_BASE_SHIFT 15
 #else
+#if HW_BVH_STACK_ENTRIES == 8
+#define BVH_STACK_CONTROLS 0x0000
+#elif HW_BVH_STACK_ENTRIES == 16
+#define BVH_STACK_CONTROLS 0x1000
+#elif HW_BVH_STACK_ENTRIES == 32
 #define BVH_STACK_CONTROLS 0x2000
+#else
+#define BVH_STACK_CONTROLS 0x3000
+#endif
 #define HW_BVH_STACK_BASE_SHIFT 18
 #endif
 // Hardware-stack kernels require 64 work-items and reserve one stack per ray.
