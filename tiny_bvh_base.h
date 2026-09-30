@@ -661,6 +661,11 @@ struct BVHBuildSettings
 	bool postOptimize = false;		// optimize generated BVH using tree rotations.
 	int optimizeIterations = 25;	// default optimization iterations.
 	bool useSIMDifavailable = true;	// set to false to use the scalar reference builder.
+#ifdef ENABLE_THREADED_BUILDS
+	bool enableThreading = true;	// default to threaded builds.
+#else
+	bool enableThreading = false;	// build the BVH on the calling thread.
+#endif
 };
 
 enum BVHType : uint32_t
@@ -2370,7 +2375,7 @@ TEMPLATED void BVH<Float, Index>::Build( Index nodeIdx, uint32_t depth )
 		threadedBuild = false;
 	#ifdef ENABLE_THREADED_BUILDS
 		// build in parallel when given a sufficiently large input
-		if (triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
+		if (settings.enableThreading && triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
 			threadedBuild = true, atomicNewNodePtr = this->template ContextNew<std::atomic<Index>>( newNodePtr );
 	#endif
 	}
@@ -2604,7 +2609,7 @@ TEMPLATED void BVH<Float, Index>::BuildFullSweep( Index nodeIdx, uint32_t depth 
 		threadedBuild = false;
 	#ifdef ENABLE_THREADED_BUILDS
 		// build in parallel when given a sufficiently large input
-		if (triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
+		if (settings.enableThreading && triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
 			threadedBuild = true, atomicNewNodePtr = this->template ContextNew<std::atomic<Index>>( newNodePtr );
 	#endif
 		// create 32-bit integer sorting keys from fragment centroids, normalized to the root box.
@@ -2831,7 +2836,7 @@ TEMPLATED void BVH<Float, Index>::PrepareHQBuild( const Slice& vertices, const u
 	threadedBuild = false;
 #else
 	// build in parallel when given a sufficiently large input
-	if (primCount < MT_BUILD_THRESHOLD || !context.spawn || !context.barrier) threadedBuild = false;
+	if (!settings.enableThreading || primCount < MT_BUILD_THRESHOLD || !context.spawn || !context.barrier) threadedBuild = false;
 #endif
 	// prepare fragments
 	BVHNode& root = bvhNode[0];
@@ -6001,7 +6006,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& origi
 	// the nodes no longer depend on each other and can be written in any order.
 	uint32_t tasks = 1;
 #ifdef ENABLE_THREADED_BUILDS
-	if (context.parallel_for && nodeCount >= (Index)MT_CONVERT_MIN_NODES)
+	if (settings.enableThreading && context.parallel_for && nodeCount >= (Index)MT_CONVERT_MIN_NODES)
 	{
 		tasks = (uint32_t)tinybvh_min( (Index)MT_CONVERT_MAX_TASKS, nodeCount / (Index)MT_CONVERT_TASK_NODES );
 		if (tasks < 2) tasks = 1;

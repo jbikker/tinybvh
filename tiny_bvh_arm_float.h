@@ -1,4 +1,4 @@
-// tiny_bvh_arm_float.h: NEON specializations for the single precision layouts.
+﻿// tiny_bvh_arm_float.h: NEON specializations for the single precision layouts.
 // Included by tiny_bvh.h; do not include directly.
 
 #ifndef TINY_BVH_H_
@@ -182,7 +182,7 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	// prepare threading; the atomic node counter is claimed in BuildSIMDSubtree.
 	threadedBuild = false;
 #ifdef ENABLE_THREADED_BUILDS
-	if (triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier) threadedBuild = true;
+	if (settings.enableThreading && triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier) threadedBuild = true;
 #endif
 	// initialize fragments
 	float32x4_t rootMin = vdupq_n_f32( BVH_FAR ), rootMax = vdupq_n_f32( -BVH_FAR );
@@ -273,7 +273,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 		threadedBuild = false;
 	#ifdef ENABLE_THREADED_BUILDS
 		// build in parallel when given a sufficiently large input
-		if (triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
+		if (settings.enableThreading && triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
 			threadedBuild = true, atomicNewNodePtr = ContextNew<std::atomic<uint32_t>>( newNodePtr );
 	#endif
 	}
