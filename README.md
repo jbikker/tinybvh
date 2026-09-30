@@ -57,23 +57,23 @@ The library consists of ````tiny_bvh.h```` and the ````tiny_bvh_*.h```` headers 
 
 The cross-platform fenster-based single-source **bitmap renderer** can be compiled with
 
-````g++ -mwindows -O3 examples/tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on Linux and Windows)
+````g++ -mwindows -O3 examples/tiny_bvh_fenster.cpp -I. -o tiny_bvh_fenster```` (on Linux and Windows)
 
-````c++ --std=c++17 -framework Cocoa -O3 examples/tiny_bvh_fenster.cpp -o tiny_bvh_fenster```` (on macOS)
+````c++ --std=c++17 -framework Cocoa -O3 examples/tiny_bvh_fenster.cpp -I. -o tiny_bvh_fenster```` (on macOS)
 
 The multi-threaded **path tracing** demo can be compiled with
 
-````g++ -mwindows -O3 examples/tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on Linux and Windows)
+````g++ -mwindows -O3 examples/tiny_bvh_pt.cpp -I. -o tiny_bvh_pt```` (on Linux and Windows)
 
-````c++ --std=c++17 -framework Cocoa -O3 examples/tiny_bvh_pt.cpp -o tiny_bvh_pt```` (on macOS)
+````c++ --std=c++17 -framework Cocoa -O3 examples/tiny_bvh_pt.cpp -I. -o tiny_bvh_pt```` (on macOS)
 
 The **performance measurement tool** can be compiled with:
 
-````g++ -mavx2 -mfma -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on Linux and Windows)
+````g++ -mavx2 -mfma -Ofast tiny_bvh_speedtest.cpp -I. -o tiny_bvh_speedtest```` (on Linux and Windows)
 
-````c++ --std=c++17 -framework OpenCL -Ofast tiny_bvh_speedtest.cpp -o tiny_bvh_speedtest```` (on macOS)
+````c++ --std=c++17 -framework OpenCL -Ofast tiny_bvh_speedtest.cpp -I. -o tiny_bvh_speedtest```` (on macOS)
 
-Note: A new, more advanced benchmark tool is now available. See [build.bat](https://github.com/jbikker/tinybvh/tree/main/build.bat) and [build_debug.bat](https://github.com/jbikker/tinybvh/tree/main/build_debug.bat) for an example of a command line to compile it using gcc.
+Note: A new, more advanced benchmark tool is now available. See [build.bat](https://github.com/jbikker/tinybvh/tree/main/build.bat) / [build.sh](https://github.com/jbikker/tinybvh/tree/main/build.sh) and [build_debug.bat](https://github.com/jbikker/tinybvh/tree/main/build_debug.bat) for an example of a command line to compile it using gcc.
 
 Many [additional demos](https://github.com/jbikker/tinybvh/tree/main/examples) are provided, demonstrating features of the library in small source files.
 
