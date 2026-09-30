@@ -321,33 +321,25 @@ float AccStruc::EPOCost()
 	// We thus have to specialize here for each possible layout.
 }
 
-struct BatchIntersectArgs { AccStruc* accstruc; char* rayData; int rayCount; int slices; int sliceSize; };
-static void IntersectBatchSlice( uint32_t i, void* payload )
-{
-	BatchIntersectArgs* a = (BatchIntersectArgs*)payload;
-	int size = a->sliceSize;
-	if ((int)i == a->slices - 1) size = a->rayCount - (a->slices - 1) * a->sliceSize;
-	a->accstruc->IntersectBatch( a->rayData + a->sliceSize * i * 64, size );
-}
 void AccStruc::IntersectBatchMT( char* rayData, int rayCount )
 {
 	int slices = std::thread::hardware_concurrency() * 4;
 	int sliceSize = rayCount / slices;
-	BatchIntersectArgs args = { this, rayData, rayCount, slices, sliceSize };
-	tinybvh_parallel_for( context, slices, &IntersectBatchSlice, &args );
+	tinybvh_parallel_for( context, slices, [&]( uint32_t i )
+	{
+		// the last slice takes the remainder.
+		int size = sliceSize;
+		if ((int)i == slices - 1) size = rayCount - (slices - 1) * sliceSize;
+		IntersectBatch( rayData + sliceSize * i * 64, size );
+	} );
 }
 
-static void IntersectBatchPacketsSlice( uint32_t i, void* payload )
-{
-	BatchIntersectArgs* a = (BatchIntersectArgs*)payload;
-	a->accstruc->IntersectBatchPackets( a->rayData + a->sliceSize * i * 64, a->sliceSize );
-}
 void AccStruc::IntersectBatchMTPackets( char* rayData, int rayCount )
 {
 	constexpr int slices = 64; // intentional power of 2 so we always get bundles of 64N.
 	int sliceSize = rayCount / slices;
-	BatchIntersectArgs args = { this, rayData, rayCount, slices, sliceSize };
-	tinybvh_parallel_for( context, slices, &IntersectBatchPacketsSlice, &args );
+	tinybvh_parallel_for( context, slices, [&]( uint32_t i )
+		{ IntersectBatchPackets( rayData + sliceSize * i * 64, sliceSize ); } );
 }
 
 float AccStruc::IntersectBatch( char* rayData, int rayCount )
@@ -536,30 +528,19 @@ float AccStruc::IntersectBatchPackets( char* rayData, int rayCount )
 	return dist;
 }
 
-struct BatchOcclusionArgs { AccStruc* accstruc; char* rayData; int rayCount; int sliceSize; };
-static void OcclusionBatchSlice( uint32_t i, void* payload )
-{
-	BatchOcclusionArgs* a = (BatchOcclusionArgs*)payload;
-	a->accstruc->OcclusionBatch( a->rayData + a->sliceSize * i * 64, a->sliceSize );
-}
 void AccStruc::OcclusionBatchMT( char* rayData, int rayCount )
 {
 	int slices = std::thread::hardware_concurrency() * 4;
 	int sliceSize = rayCount / slices;
-	BatchIntersectArgs args = { this, rayData, rayCount, sliceSize };
-	tinybvh_parallel_for( context, slices, &OcclusionBatchSlice, &args );
-}
-static void OcclusionBatchPacketsSlice( uint32_t i, void* payload )
-{
-	BatchOcclusionArgs* a = (BatchOcclusionArgs*)payload;
-	a->accstruc->OcclusionBatchPackets( a->rayData + a->sliceSize * i * 64, a->sliceSize );
+	tinybvh_parallel_for( context, slices, [&]( uint32_t i )
+		{ OcclusionBatch( rayData + sliceSize * i * 64, sliceSize ); } );
 }
 void AccStruc::OcclusionBatchMTPackets( char* rayData, int rayCount )
 {
 	constexpr int slices = 64; // intentional power of 2 so we always get bundles of 64N.
 	int sliceSize = rayCount / slices;
-	BatchIntersectArgs args = { this, rayData, rayCount, sliceSize };
-	tinybvh_parallel_for( context, slices, &OcclusionBatchPacketsSlice, &args );
+	tinybvh_parallel_for( context, slices, [&]( uint32_t i )
+		{ OcclusionBatchPackets( rayData + sliceSize * i * 64, sliceSize ); } );
 }
 
 void AccStruc::OcclusionBatch( char* rayData, int rayCount )

@@ -557,20 +557,6 @@ TINYBVH_FORCEINLINE float halfArea( const __m256& a /* a contains aabb itself, w
 // bin one slice of a node's fragment range; scheduled via the parallel_for hook.
 static constexpr uint32_t AVXCOUNTSTRIDE = 32; // 32 * 4 bytes = 128 bytes.
 struct ALIGNED( 64 ) SliceBounds { float bmin[4], bmax[4]; char pad[32]; };
-struct BuildAVXFragSliceArgs
-{
-	BVH* bvh;
-	const uint32_t triCount, sliceSize, slices, * indices, stride4;
-	const int8_t* vertData;
-	SliceBounds* slice;
-	void* frags;
-};
-void impl::BuildAVXFragSlice( uint32_t i, void* payload )
-{
-	BuildAVXFragSliceArgs* a = (BuildAVXFragSliceArgs*)payload;
-	const uint32_t first = a->sliceSize * i, last = i == (a->slices - 1) ? a->triCount : (first + a->sliceSize);
-	a->bvh->PrepareSIMDBuildFragSlice( first, last, a->indices, a->vertData, a->stride4, a->frags, a->slice[i].bmin, a->slice[i].bmax );
-}
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const uint32_t first, const uint32_t last,
 	const uint32_t* indices, const int8_t* vertData, const uint32_t stride4, void* frags, float* rootMin, float* rootMax )
 {
@@ -645,8 +631,12 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 		slices = tinybvh_min( slices, (uint32_t)MT_PREP_MAX_TASKS );
 		if (slices < 2) slices = 2;
 		ALIGNED( 64 ) SliceBounds slice[MT_PREP_MAX_TASKS]; // one cache line per slice; no false sharing.
-		BuildAVXFragSliceArgs args = { this, triCount, triCount / slices, slices, indices, stride4, vertData, slice, fragment };
-		tinybvh_parallel_for( context, slices, &BuildAVXFragSlice, &args );
+		const uint32_t sliceSize = triCount / slices;
+		tinybvh_parallel_for( context, slices, [&]( uint32_t i )
+		{
+			const uint32_t first = sliceSize * i, last = i == (slices - 1) ? triCount : (first + sliceSize);
+			PrepareSIMDBuildFragSlice( first, last, indices, vertData, stride4, fragment, slice[i].bmin, slice[i].bmax );
+		} );
 		rootMin = tinybvh_load4( slice[0].bmin ), rootMax = tinybvh_load4( slice[0].bmax );
 		for (uint32_t i = 1; i < slices; i++)
 			rootMin = _mm_min_ps( rootMin, tinybvh_load4( slice[i].bmin ) ), rootMax = _mm_max_ps( rootMax, tinybvh_load4( slice[i].bmax ) );
@@ -718,23 +708,6 @@ void impl::BVHBuildAVXSubtree( void* payload )
 	impl::BVHBuildSubtreeArgs<float, uint32_t>* a = (impl::BVHBuildSubtreeArgs<float, uint32_t>*)payload;
 	a->bvh->BuildSIMDSubtree( a->node, a->depth );
 }
-// bin one slice of a node's fragment range; scheduled via the parallel_for hook.
-struct BVHBuildAVXBinSliceArgs
-{
-	BVH* bvh;
-	uint32_t leftFirst, triCount, sliceSize, slices;
-	__m256* slicebinbox;				// base of slices x (3*AVXBINS) bin boxes
-	uint32_t* slicecount;				// base of slices x AVXCOUNTSTRIDE counts
-	__m128 nmin4, rpd4;
-};
-void impl::BVHBuildAVXBinSlice( uint32_t i, void* payload )
-{
-	BVHBuildAVXBinSliceArgs* a = (BVHBuildAVXBinSliceArgs*)payload;
-	const uint32_t first = a->leftFirst + a->sliceSize * i;
-	const uint32_t last = i == (a->slices - 1) ? (a->leftFirst + a->triCount) : (first + a->sliceSize);
-	a->bvh->BuildSIMDBinTask( first, last, a->slicebinbox + i * 3 * AVXBINS,
-		a->slicecount + i * AVXCOUNTSTRIDE, (const float*)&a->nmin4, (const float*)&a->rpd4 );
-}
 template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth )
 {
 	// aligned data
@@ -767,9 +740,14 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			if (threadedBuild && slices > 1 && node.triCount > MT_BUILD_THRESHOLD)
 			{
 				const uint32_t sliceSize = node.triCount / slices;
-				BVHBuildAVXBinSliceArgs args = { this, node.leftFirst, node.triCount, sliceSize, slices,
-					slicebinbox[0], slicecount[0], nmin4, rpd4 };
-				tinybvh_parallel_for( context, slices, &BVHBuildAVXBinSlice, &args );
+				const uint32_t binFirst = node.leftFirst, binPrims = node.triCount;
+				tinybvh_parallel_for( context, slices, [&]( uint32_t i )
+				{
+					const uint32_t first = binFirst + sliceSize * i;
+					const uint32_t last = i == (slices - 1) ? (binFirst + binPrims) : (first + sliceSize);
+					BuildSIMDBinTask( first, last, slicebinbox[0] + i * 3 * AVXBINS,
+						slicecount[0] + i * AVXCOUNTSTRIDE, (const float*)&nmin4, (const float*)&rpd4 );
+				} );
 				// combine results from slices; slice-major, so each slice is a linear sweep.
 				for (uint32_t slice = 1; slice < slices; slice++)
 				{

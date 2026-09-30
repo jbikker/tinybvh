@@ -222,6 +222,16 @@ THE SOFTWARE.
 #ifndef MT_PREP_MAX_TASKS
 #define MT_PREP_MAX_TASKS 32
 #endif
+// Layout conversion (BVH4_CPU / BVH8_CPU) threading settings.
+#ifndef MT_CONVERT_MIN_NODES
+#define MT_CONVERT_MIN_NODES 8192
+#endif
+#ifndef MT_CONVERT_TASK_NODES
+#define MT_CONVERT_TASK_NODES 4096
+#endif
+#ifndef MT_CONVERT_MAX_TASKS
+#define MT_CONVERT_MAX_TASKS 32
+#endif
 
 // Experimental / WIP features
 
