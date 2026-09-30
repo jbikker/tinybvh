@@ -51,24 +51,23 @@ inline uint id_to_type( uint id ) { return id & 7u; }
 float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const float4 D, const float4 rD, const float tmax, __local uint* hwStack )
 {
 	const ulong encoded_base = ( (ulong)alt4Node >> 3 ) & ( ( ( 1UL << 42 ) - 1UL ) << 3 );
-	uint node_id = 5; // root BOX32 node at byte offset zero.
 	uint prevNode = INVALID_NODE;
 	// LDS stack entries have a fixed stride of 32 words, even with wave64.
 	uint lane = get_local_id( 0 );
-	uint baseWord = ( (uint)(size_t)hwStack >> 2 ) + ( lane & 31u ) +
-					( lane >> 5 ) * ( 32u * HW_BVH_STACK_ENTRIES );
-	uint stackAddr = baseWord << HW_BVH_STACK_BASE_SHIFT;
+	uint stackAddr = ( ( (uint)(size_t)hwStack >> 2 ) + ( lane & 31u ) +
+					  ( lane >> 5 ) * ( 32u * HW_BVH_STACK_ENTRIES ) ) << HW_BVH_STACK_BASE_SHIFT;
 	float4 hit = (float4)( tmax, 0.0f, 0.0f, as_float( INVALID_NODE ) );
 
+	uint currentNodeID = 5; // start at root BOX32 node at byte offset zero.
 	while (1)
 	{
-		ulong pointer = encoded_base + (ulong)node_id;
-		uint type = id_to_type( node_id );
-		uint lastVisited = BVH_STACK_TERMINAL_NODE;
-		uint parentID = INVALID_NODE;
-
+		uint2 stackResults;
+		ulong currentPointer = encoded_base + (ulong)currentNodeID;
 		uint4 dst4 = __builtin_amdgcn_image_bvh_intersect_ray_l(
-			pointer, hit.x, O, D, rD, BVH_DESCRIPTOR );
+			currentPointer, hit.x, O, D, rD, BVH_DESCRIPTOR );
+
+		uint lastVisited = BVH_STACK_TERMINAL_NODE;
+		uint type = id_to_type( currentNodeID );
 		if (type == TRIANGLE)
 		{
 			float4 triData = as_float4( dst4 );
@@ -77,7 +76,7 @@ float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 
 			const global uint* triWords =
 				(const global uint*)( (const global uchar*)alt4Node +
-									  id_to_offset( node_id ) );
+									  id_to_offset( currentNodeID ) );
 			uint id = triWords[12];
 
 			if (t >= 0.0f && t <= hit.x)
@@ -90,43 +89,50 @@ float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 			#endif
 				hit = (float4)( t, u, v, as_float( id ) );
 			}
-			dst4 = (uint4)INVALID_NODE;
-			parentID = triWords[14]; // TinyBVH parent ID at byte 56.
+			stackResults = __builtin_amdgcn_ds_bvh_stack_push4_pop1_rtn(
+				stackAddr, BVH_STACK_TERMINAL_NODE, (uint4)INVALID_NODE, BVH_STACK_CONTROLS );
 		}
 		else
 		{
-			lastVisited = prevNode;
-			const global uint* words =
-				(const global uint*)( (const global uchar*)alt4Node +
-									  id_to_offset( node_id ) );
-
-			parentID = words[31]; // TinyBVH parent ID at byte 124.
+			stackResults = __builtin_amdgcn_ds_bvh_stack_push4_pop1_rtn(
+				stackAddr, prevNode, dst4, BVH_STACK_CONTROLS );
 		}
 
-		uint visitedNode = node_id;
-		uint2 stackResults = __builtin_amdgcn_ds_bvh_stack_push4_pop1_rtn(
-			stackAddr, lastVisited, dst4, BVH_STACK_CONTROLS );
-
-		node_id = stackResults.x;
+		uint nextNodeID = stackResults.x;
 		stackAddr = stackResults.y;
 		prevNode = INVALID_NODE;
 
-		// continue with nearest node or first node on the stack
-		if (node_id == INVALID_NODE)
+		if (nextNodeID != INVALID_NODE && nextNodeID != BVH_STACK_TERMINAL_NODE)
 		{
-		#ifndef ISRDNA4
-			// Restore the GFX11 stack index after an empty-stack pop.
-			stackAddr += 1u;
-		#endif
-			prevNode = visitedNode;
-			node_id = parentID;
-
-			if (node_id == INVALID_NODE)
-			{
-				break;
-			}
+			currentNodeID = nextNodeID;
+			continue;
 		}
-		else if (node_id == BVH_STACK_TERMINAL_NODE)
+		else if (nextNodeID == BVH_STACK_TERMINAL_NODE)
+		{
+			break;
+		}
+
+		// continue with nearest node or first node on the stack
+		#ifndef ISRDNA4
+		// Restore the GFX11 stack index after an empty-stack pop.
+		stackAddr += 1u;
+		#endif
+		prevNode = currentNodeID;
+		uint parentID;
+		const global uint* words =
+			(const global uint*)( (const global uchar*)alt4Node +
+								  id_to_offset( currentNodeID ) );
+		if (type == TRIANGLE)
+		{
+			parentID = words[14]; // TinyBVH parent ID at byte 56
+		}
+		else
+		{
+			parentID = words[31]; // TinyBVH parent ID at byte 124.
+		}
+		currentNodeID = parentID;
+
+		if (currentNodeID == INVALID_NODE)
 		{
 			break;
 		}
@@ -137,65 +143,68 @@ float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 bool isoccluded_gpu4wayHW( const global float4* alt4Node, const float4 O, const float4 D, const float4 rD, const float tmax, __local uint* hwStack )
 {
 	const ulong encoded_base = ( (ulong)alt4Node >> 3 ) & ( ( ( 1UL << 42 ) - 1UL ) << 3 );
-	uint node_id = 5; // root BOX32 node at byte offset zero.
 	uint prevNode = INVALID_NODE;
 	// LDS stack entries have a fixed stride of 32 words, even with wave64.
 	uint lane = get_local_id( 0 );
-	uint baseWord = ( (uint)(size_t)hwStack >> 2 ) + ( lane & 31u ) +
-					( lane >> 5 ) * ( 32u * HW_BVH_STACK_ENTRIES );
-	uint stackAddr = baseWord << HW_BVH_STACK_BASE_SHIFT;
+	uint stackAddr = ( ( (uint)(size_t)hwStack >> 2 ) + ( lane & 31u ) +
+					  ( lane >> 5 ) * ( 32u * HW_BVH_STACK_ENTRIES ) ) << HW_BVH_STACK_BASE_SHIFT;
 
+	uint currentNodeID = 5; // start at root BOX32 node at byte offset zero.
 	while (1)
 	{
-		ulong pointer = encoded_base + (ulong)node_id;
-		uint type = id_to_type( node_id );
-		uint lastVisited = BVH_STACK_TERMINAL_NODE;
-		uint parentID = INVALID_NODE;
-
+		uint2 stackResults;
+		ulong currentPointer = encoded_base + (ulong)currentNodeID;
 		uint4 dst4 = __builtin_amdgcn_image_bvh_intersect_ray_l(
-			pointer, tmax, O, D, rD, BVH_DESCRIPTOR_OCCLUSION );
+			currentPointer, tmax, O, D, rD, BVH_DESCRIPTOR_OCCLUSION );
+
+		uint type = id_to_type( currentNodeID );
 		if (type == TRIANGLE)
 		{
 			if (dst4.w != 0u) return true;
-			dst4 = (uint4)INVALID_NODE;
-			const global uint* triWords =
-				(const global uint*)( (const global uchar*)alt4Node +
-									  id_to_offset( node_id ) );
-			parentID = triWords[14]; // TinyBVH parent ID at byte 56.
+			stackResults = __builtin_amdgcn_ds_bvh_stack_push4_pop1_rtn(
+				stackAddr, BVH_STACK_TERMINAL_NODE, (uint4)INVALID_NODE, BVH_STACK_CONTROLS );
 		}
 		else
 		{
-			lastVisited = prevNode;
-			const global uint* words =
-				(const global uint*)( (const global uchar*)alt4Node +
-									  id_to_offset( node_id ) );
-			parentID = words[31]; // TinyBVH parent ID at byte 124.
+			stackResults = __builtin_amdgcn_ds_bvh_stack_push4_pop1_rtn(
+				stackAddr, prevNode, dst4, BVH_STACK_CONTROLS );
 		}
 
-		uint visitedNode = node_id;
-		uint2 stackResults = __builtin_amdgcn_ds_bvh_stack_push4_pop1_rtn(
-			stackAddr, lastVisited, dst4, BVH_STACK_CONTROLS );
-
-		node_id = stackResults.x;
+		uint nextNodeID = stackResults.x;
 		stackAddr = stackResults.y;
 		prevNode = INVALID_NODE;
 
-		// continue with nearest node or first node on the stack
-		if (node_id == INVALID_NODE)
+		if (nextNodeID != INVALID_NODE && nextNodeID != BVH_STACK_TERMINAL_NODE)
 		{
-		#ifndef ISRDNA4
-			// Restore the GFX11 stack index after an empty-stack pop.
-			stackAddr += 1u;
-		#endif
-			prevNode = visitedNode;
-			node_id = parentID;
-
-			if (node_id == INVALID_NODE)
-			{
-				break;
-			}
+			currentNodeID = nextNodeID;
+			continue;
 		}
-		else if (node_id == BVH_STACK_TERMINAL_NODE)
+		else if (nextNodeID == BVH_STACK_TERMINAL_NODE)
+		{
+			break;
+		}
+
+		// continue with nearest node or first node on the stack
+		#ifndef ISRDNA4
+		// Restore the GFX11 stack index after an empty-stack pop.
+		stackAddr += 1u;
+		#endif
+		prevNode = currentNodeID;
+		uint parentID;
+		const global uint* words =
+			(const global uint*)( (const global uchar*)alt4Node +
+								  id_to_offset( currentNodeID ) );
+		if (type == TRIANGLE)
+		{
+			parentID = words[14]; // TinyBVH parent ID at byte 56
+		}
+		else
+		{
+			parentID = words[31]; // TinyBVH parent ID at byte 124.
+		}
+		currentNodeID = parentID;
+
+		if (currentNodeID == INVALID_NODE)
 		{
 			break;
 		}
