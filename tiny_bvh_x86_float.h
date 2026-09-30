@@ -617,7 +617,7 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	// prepare threading
 	threadedBuild = false;
 #ifdef ENABLE_THREADED_BUILDS
-	if (triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
+	if (settings.enableThreading && triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
 		threadedBuild = true, atomicNewNodePtr = ContextNew<std::atomic<uint32_t>>( 2u );
 #endif
 	// initialize fragments
