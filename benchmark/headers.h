@@ -4,7 +4,7 @@
 #include "tiny_bvh.h"
 
 // Settings
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
 #define ENABLE_OPENCL // required for GPU traversal experiments.
 #endif
 
@@ -45,8 +45,8 @@ using PrecomputedTri = bvh::v2::PrecomputedTri<float>;
 // Low-level
 #ifdef _WIN32
 #include <intrin.h>		// for __cpuidex
-#elif defined(__APPLE__) && defined(__MACH__)
-// Keep ENABLE_OPENCL for APPLE
+#elif defined(__linux__) || (defined(__APPLE__) && defined(__MACH__))
+// Keep ENABLE_OPENCL for Linux and Apple.
 #elif defined ENABLE_OPENCL
 #undef ENABLE_OPENCL
 #endif
