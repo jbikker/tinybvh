@@ -58,22 +58,22 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\traverse.cl">
-      <Filter>opencl</Filter>
-    </None>
-    <None Include="..\traverse_bvh2.cl">
-      <Filter>opencl</Filter>
-    </None>
-    <None Include="..\traverse_bvh4.cl">
-      <Filter>opencl</Filter>
-    </None>
-    <None Include="..\traverse_cwbvh.cl">
-      <Filter>opencl</Filter>
-    </None>
     <None Include="..\kernels\traverse_amd_hw.cl">
       <Filter>opencl</Filter>
     </None>
     <None Include="..\kernels\traverse_amd_hw_bvh4.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\kernels\traverse.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\kernels\traverse_bvh2.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\kernels\traverse_bvh4.cl">
+      <Filter>opencl</Filter>
+    </None>
+    <None Include="..\kernels\traverse_cwbvh.cl">
       <Filter>opencl</Filter>
     </None>
   </ItemGroup>
