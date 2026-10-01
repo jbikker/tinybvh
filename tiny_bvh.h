@@ -253,23 +253,23 @@ THE SOFTWARE.
 //
 // ============================================================================
 
-// needful includes
-#ifdef _MSC_VER // Visual Studio / C11
-#include <malloc.h> // for alloc/free
-#include <stdio.h> // for fprintf
-#include <math.h> // for sqrtf, fabs
-#include <string.h> // for memset
-#include <stdlib.h> // for exit(1)
-#else // Emscripten / gcc / clang
-#ifndef _MSC_VER
-#include <cmath> // not needed for MSVC
-#endif
-#include <cstring>
-#ifdef _WIN32 // MinGW / clang-cl: no C11 aligned_alloc in the CRT, use _aligned_malloc
-#include <malloc.h> // for alloc/free
-#endif
-#endif
-#include <atomic> // for SBVH builds
+// needful includes 
+#ifdef _MSC_VER // Visual Studio / C11 
+#include <malloc.h> // for alloc/free 
+#include <stdio.h> // for fprintf 
+#include <math.h> // for sqrtf, fabs 
+#include <string.h> // for memset 
+#include <stdlib.h> // for exit(1) 
+#else // Emscripten / gcc / clang 
+#include <cmath> // for sqrtf, fabs 
+#include <cstring> // for memset 
+#include <stdio.h> // for fprintf, snprintf 
+#include <stdlib.h> // for posix_memalign, free, exit 
+#ifdef _WIN32 // MinGW / clang-cl: no C11 aligned_alloc in the CRT, use _aligned_malloc 
+#include <malloc.h> // for alloc/free 
+#endif 
+#endif 
+#include <atomic> // for SBVH builds 
 #include <new> // for placement new, in BVHBase::ContextNew
 
 // Platform-independent compile-time warnings.
