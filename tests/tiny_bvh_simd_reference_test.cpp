@@ -1,4 +1,4 @@
-// Compare the SIMD kernels and builders against the scalar reference.
+﻿// Compare the SIMD kernels and builders against the scalar reference.
 //
 // This file instantiates SIMD and scalar BVH implementations side by side and
 // compares them against each other. The scalar side uses the fact that the
@@ -45,6 +45,7 @@ struct Scene
 	std::vector<bvhvec4> verts;		// three vertices per triangle, or the shared vertices of the grid
 	std::vector<bvhdbl3> dverts;	// the same vertices in double precision
 	std::vector<uint32_t> indices;	// empty for a triangle soup
+	std::vector<uint64_t> indices64;	// the same indices, for the 64-bit instantiations
 	std::vector<uint32_t> opmap;	// opacity micro maps, opmapN^2 bits per triangle
 	uint32_t triCount = 0, opmapN = 0;
 };
@@ -77,6 +78,7 @@ static Scene MakeGrid( const int res, uint32_t seed )
 	}
 	s.triCount = res * res * 2;
 	for (const bvhvec4& v : s.verts) s.dverts.push_back( bvhdbl3( v ) );
+	for (const uint32_t i : s.indices) s.indices64.push_back( i );
 	return s;
 }
 
@@ -88,12 +90,24 @@ static void AddOpacityMaps( Scene& s, const uint32_t N, uint32_t seed )
 	for (uint32_t& w : s.opmap) w = tinybvh_rnduint( seed );
 }
 
+// The accelerators expose 'Vertex' but not their index type, so recover it from
+// the class template arguments. 'Build' takes the index buffer as 'Index*', which
+// is uint64_t for the <*, uint64_t> instantiations and uint32_t for the rest.
+template <class Acc> struct IndexTypeOf;
+template <template <class, class> class C, class F, class I> struct IndexTypeOf<C<F, I>> { using type = I; };
+template <class Acc> using IndexTypeFor = typename IndexTypeOf<Acc>::type;
+
 template <class Acc> static void Build( Acc& acc, const Scene& s )
 {
+	using Index = IndexTypeFor<Acc>;
 	acc.settings.useSIMDifavailable = false; // the reference builder gives both sides the same tree
 	const auto* verts = [&]() { if constexpr (std::is_same_v<typename Acc::Vertex, bvhvec4>) return s.verts.data(); else return s.dverts.data(); }();
-	if (s.indices.empty()) acc.Build( verts, s.triCount );
-	else acc.Build( verts, s.indices.data(), s.triCount );
+	if (s.indices.empty()) acc.Build( verts, (Index)s.triCount );
+	else
+	{
+		const auto* indices = [&]() { if constexpr (std::is_same_v<Index, uint32_t>) return s.indices.data(); else return s.indices64.data(); }();
+		acc.Build( verts, indices, (Index)s.triCount );
+	}
 	if (s.opmapN) acc.SetOpacityMicroMaps( (uint32_t*)s.opmap.data(), s.opmapN );
 }
 
