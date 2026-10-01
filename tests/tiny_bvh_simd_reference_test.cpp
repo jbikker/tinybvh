@@ -11,7 +11,6 @@
 // own comparison.
 
 #define TINYBVH_IMPLEMENTATION
-// #define USE_DEPRECATED_LAYOUT // enables BVH_SoA
 #include "tiny_bvh.h"
 #include <cstdio>
 #include <type_traits>
@@ -25,9 +24,6 @@ using BVHBaseS = impl::BVHBase<float, uint64_t>;
 using BLASInstanceS = impl::BLASInstance<float, uint64_t>;
 using BVH4_CPUS = impl::BVH4_CPU<float, uint64_t>;
 using BVH8_CPUS = impl::BVH8_CPU<float, uint64_t>;
-#ifdef USE_DEPRECATED_LAYOUT
-using BVH_SoAS = impl::BVH_SoA<float, uint64_t>;
-#endif
 #ifdef DOUBLE_PRECISION_SUPPORT
 using BVH4_CPUDS = impl::BVH4_CPU<double, uint32_t>;
 #endif
@@ -270,10 +266,6 @@ int main()
 	CompareLayouts<BVH8_CPU, BVH8_CPUS>( "BVH8_CPU, indexed grid", grid );
 	CompareLayouts<BVH8_CPU, BVH8_CPUS>( "BVH8_CPU, opacity maps", mapped );
 	CompareTLAS<BVH8_CPU, BVH8_CPUS>( "TLAS over BVH8_CPU", soup );
-#ifdef USE_DEPRECATED_LAYOUT
-	CompareLayouts<BVH_SoA, BVH_SoAS>( "BVH_SoA, soup", soup );
-	CompareLayouts<BVH_SoA, BVH_SoAS>( "BVH_SoA, indexed grid", grid );
-#endif
 #ifdef DOUBLE_PRECISION_SUPPORT
 	CompareLayouts<BVH4_Double, BVH4_CPUDS>( "BVH4_Double, soup", soup );
 	CompareLayouts<BVH4_Double, BVH4_CPUDS>( "BVH4_Double, indexed grid", grid );
