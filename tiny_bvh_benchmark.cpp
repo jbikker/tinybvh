@@ -43,7 +43,7 @@ int main()
 
 #endif
 
-#if 0 // run one block at a time to reduce throttling effects.
+#if 1 // run one block at a time to reduce throttling effects.
 
 	// 1. BVH construction
 	// PART 1 - TinyBVH, from ultra-fast to ultra-quality
@@ -60,6 +60,11 @@ int main()
 	experiment.push_back( new Experiment( MADMANN91, LOW, scene ) );
 	experiment.push_back( new Experiment( MADMANN91, MEDIUM, scene ) );
 	experiment.push_back( new Experiment( MADMANN91, HIGH, scene ) );
+	// PART 4 - Derived layouts
+	experiment.push_back( new Experiment( BVH4_WIVE, SIMDBUILD, scene ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SIMDBUILD, scene ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS, scene ) );
 
 #endif
 
@@ -160,7 +165,7 @@ int main()
 
 #endif
 
-#if 1
+#if 0
 
 	// 4. GPU TRAVERSAL
 	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
