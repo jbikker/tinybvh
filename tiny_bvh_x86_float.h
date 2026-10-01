@@ -31,7 +31,6 @@ TINYBVH_FORCEINLINE void tinybvh_store8i( void* p, const __m256i v ) { memcpy( p
 // Specializations provided by this header.
 #ifdef BVH_USESSE
 template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const;
-template <> bool impl::BVH<float, uint32_t>::ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, const uint32_t axis ) const;
 template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
 template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
 template <> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectBundle( Ray* rays ) const;
@@ -133,68 +132,6 @@ template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fr
 	left.primIdx = right.primIdx = orig.primIdx;
 	left.clipped = right.clipped = true;
 	return tinybvh_halfarea( left.bmax - left.bmin ) > 0 && tinybvh_halfarea( right.bmax - right.bmin ) > 0;
-}
-
-// ClipFrag: clip a fragment for binning.
-template <> bool impl::BVH<float, uint32_t>::ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, const uint32_t axis ) const
-{
-	__m128 t1min4, t1max4, t2min4, t2max4;
-	t1min4 = t2min4 = _mm_set1_ps( BVH_FAR );
-	t1max4 = t2max4 = _mm_set1_ps( -BVH_FAR );
-	bvhvec4 v0, v1, v2;
-	const uint32_t vidx = orig.primIdx * 3;
-	if (!vertIdx) v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
-	else v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
-	const __m128 v0_4 = tinybvh_load4( &v0 ), v1_4 = tinybvh_load4( &v1 ), v2_4 = tinybvh_load4( &v2 );
-	const float left = bmin[axis], right = bmax[axis];
-	// clip against min bounds
-	bool in0 = v0[axis] >= left, in1 = v1[axis] >= left, in2 = v2[axis] >= left;
-	if (in0) t1min4 = _mm_min_ps( t1min4, v0_4 ), t1max4 = _mm_max_ps( t1max4, v0_4 );
-	if (in1) t1min4 = _mm_min_ps( t1min4, v1_4 ), t1max4 = _mm_max_ps( t1max4, v1_4 );
-	if (in2) t1min4 = _mm_min_ps( t1min4, v2_4 ), t1max4 = _mm_max_ps( t1max4, v2_4 );
-	bvhvec4 c; __m128 c4;
-	if (in0 ^ in1)
-		c = v0 + (left - v0[axis]) / (v1[axis] - v0[axis]) * (v1 - v0), c[axis] = left, c4 = tinybvh_load4( &c ),
-		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 ),
-		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 );
-	if (in1 ^ in2)
-		c = v1 + (left - v1[axis]) / (v2[axis] - v1[axis]) * (v2 - v1), c[axis] = left, c4 = tinybvh_load4( &c ),
-		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 ),
-		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 );
-	if (in2 ^ in0)
-		c = v2 + (left - v2[axis]) / (v0[axis] - v2[axis]) * (v0 - v2), c[axis] = left, c4 = tinybvh_load4( &c ),
-		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 ),
-		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 );
-	// clip against max bounds
-	in0 = v0[axis] <= right, in1 = v1[axis] <= right, in2 = v2[axis] <= right;
-	if (in0) t2min4 = _mm_min_ps( t2min4, v0_4 ), t2max4 = _mm_max_ps( t2max4, v0_4 );
-	if (in1) t2min4 = _mm_min_ps( t2min4, v1_4 ), t2max4 = _mm_max_ps( t2max4, v1_4 );
-	if (in2) t2min4 = _mm_min_ps( t2min4, v2_4 ), t2max4 = _mm_max_ps( t2max4, v2_4 );
-	if (in0 ^ in1)
-		c = v0 + (right - v0[axis]) / (v1[axis] - v0[axis]) * (v1 - v0), c[axis] = right, c4 = tinybvh_load4( &c ),
-		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 ),
-		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 );
-	if (in1 ^ in2)
-		c = v1 + (right - v1[axis]) / (v2[axis] - v1[axis]) * (v2 - v1), c[axis] = right, c4 = tinybvh_load4( &c ),
-		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 ),
-		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 );
-	if (in2 ^ in0)
-		c = v2 + (right - v2[axis]) / (v0[axis] - v2[axis]) * (v0 - v2), c[axis] = right, c4 = tinybvh_load4( &c ),
-		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 ),
-		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 );
-	__m128 finalmin4, finalmax4;
-	if (orig.clipped) // clip against orig box
-		finalmin4 = _mm_max_ps( _mm_max_ps( t1min4, t2min4 ), _mm_and_ps( tinybvh_load4( &orig.bmin ), bvhc_mask3() ) ),
-		finalmax4 = _mm_min_ps( _mm_min_ps( t1max4, t2max4 ), _mm_and_ps( tinybvh_load4( &orig.bmax ), bvhc_mask3() ) );
-	else
-		finalmin4 = _mm_max_ps( t1min4, t2min4 ),
-		finalmax4 = _mm_min_ps( t1max4, t2max4 );
-	tinybvh_store4( &newFrag.bmin, finalmin4 );
-	tinybvh_store4( &newFrag.bmax, finalmax4 );
-	newFrag.primIdx = orig.primIdx;
-	newFrag.clipped = true;
-	const float sa = tinybvh_halfarea( newFrag.bmax - newFrag.bmin );
-	return sa > 0;
 }
 
 // SSE box tests for BVH::EPOArea.

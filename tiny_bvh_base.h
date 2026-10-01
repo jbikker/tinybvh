@@ -943,7 +943,8 @@ private:
 	void PrepareHQBuild( const Slice& vertices, const Index* indices, const Index prims );
 	void BuildHQ();
 	void PrepareBuild( const Slice& vertices, const Index* indices, const Index primCount );
-	bool ClipFrag( const Fragment& orig, Fragment& newFrag, Vec3 bmin, Vec3 bmax, const uint32_t splitAxis ) const;
+	void ClipFragToBins( const Fragment& orig, const int32_t bin1, const int32_t bin2, const uint32_t axis,
+		const Float nodeMin, const Float planeDist, Vec3* sbinMin, Vec3* sbinMax ) const;
 	bool SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t splitAxis, const Float splitPos ) const;
 	Index CombineLeafs( const Index primCount, Index& firstIdx, Index nodeIdx = 0 );
 	Float SplitPriority( const Fragment& f ) const;
@@ -2972,6 +2973,60 @@ TEMPLATED void BVHBuildHQSubtree( void* payload )
 	a->bvh->BuildHQTask( a->node, a->depth, a->sliceStart, a->sliceEnd, a->idxTmp );
 }
 // Horizontal (in-node) binning for the SBVH builder.
+// ClipFragToBins: accumulate one fragment's bounds into every bin it spans along one axis.
+TEMPLATED void BVH<Float, Index>::ClipFragToBins( const Fragment& orig, const int32_t bin1,
+	const int32_t bin2, const uint32_t axis, const Float nodeMin, const Float planeDist,
+	Vec3* sbinMin, Vec3* sbinMax ) const
+{
+	Vec3 poly[8], left[8], right[8];
+	uint32_t n = 3, nl = 0, nr = 0;
+	const Index vidx = orig.primIdx * 3;
+	if (!vertIdx) poly[0] = verts[vidx], poly[1] = verts[vidx + 1], poly[2] = verts[vidx + 2];
+	else poly[0] = verts[vertIdx[vidx]], poly[1] = verts[vertIdx[vidx + 1]], poly[2] = verts[vertIdx[vidx + 2]];
+	// split poly[0..pn) at 'pos' into left[0..nl) and right[0..nr).
+	auto split = [&]( const Vec3* p, const uint32_t pn, const Float pos )
+	{
+		nl = nr = 0;
+		for (uint32_t k = 0; k < pn; k++)
+		{
+			const Vec3& a = p[k]; const Vec3& b = p[k + 1 == pn ? 0 : k + 1];
+			const bool ina = a[axis] <= pos, inb = b[axis] <= pos;
+			if (ina) left[nl++] = a; else right[nr++] = a;
+			if (ina != inb)
+			{
+				Vec3 c = a + (pos - a[axis]) / (b[axis] - a[axis]) * (b - a);
+				c[axis] = pos; // exactly on the split plane
+				left[nl++] = c, right[nr++] = c;
+			}
+		}
+	};
+	auto accum = [&]( const Vec3* p, const uint32_t pn, const int32_t bin )
+	{
+		if (pn == 0) return;
+		Vec3 bmin( bvh_far<Float> ), bmax( -bvh_far<Float> );
+		for (uint32_t k = 0; k < pn; k++) bmin = tinybvh_min( bmin, p[k] ), bmax = tinybvh_max( bmax, p[k] );
+		// a fragment that was split earlier is confined to its own box.
+		if (orig.clipped) bmin = tinybvh_max( bmin, orig.bmin ), bmax = tinybvh_min( bmax, orig.bmax );
+		if (tinybvh_halfarea( bmax - bmin ) <= 0) return;
+		sbinMin[bin] = tinybvh_min( sbinMin[bin], bmin ), sbinMax[bin] = tinybvh_max( sbinMax[bin], bmax );
+	};
+	// enter the first bin: drop whatever lies left of its lower plane.
+	split( poly, n, nodeMin + planeDist * bin1 );
+	for (uint32_t k = 0; k < nr; k++) poly[k] = right[k];
+	n = nr;
+	for (int32_t j = bin1; j <= bin2 && n > 0; j++)
+	{
+		// Every bin ends at its own upper plane. The last one ends slightly beyond the
+		// node, since planeDist divides the extent by binCount * 0.9999, which is how it
+		// catches fragments sitting exactly on the far face.
+		split( poly, n, nodeMin + planeDist * (j + 1) );
+		accum( left, nl, j );
+		if (j == bin2) break;
+		for (uint32_t k = 0; k < nr; k++) poly[k] = right[k];
+		n = nr;
+	}
+}
+
 TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, Index sliceStart, Index sliceEnd, Index* idxTmp )
 {
 	// prepare subdivision
@@ -3154,18 +3209,8 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 								if (bin2 == bin1) // fragment fits in a single bin
 									sbMin[bin1] = tinybvh_min( sbMin[bin1], f.bmin ),
 									sbMax[bin1] = tinybvh_max( sbMax[bin1], f.bmax );
-								else for (int j = bin1; j <= bin2; j++)
-								{
-									// clip fragment to each bin it overlaps
-									Vec3 bmin = nodeMin3, bmax = nodeMax3;
-									bmin[a] = nodeMin + planeDist * j;
-									bmax[a] = j == (int)(binCount - 2) ? nodeMax3[a] : (bmin[a] + planeDist);
-									Fragment orig = f;
-									Fragment tmpFrag;
-									if (!ClipFrag( orig, tmpFrag, bmin, bmax, a )) continue;
-									sbMin[j] = tinybvh_min( sbMin[j], tmpFrag.bmin );
-									sbMax[j] = tinybvh_max( sbMax[j], tmpFrag.bmax );
-								}
+								else // clip the fragment across the bins it overlaps, in one walk
+									ClipFragToBins( f, bin1, bin2, a, nodeMin, planeDist, sbMin, sbMax );
 							}
 						} );
 				}
@@ -3201,18 +3246,8 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 							if (bin2 == bin1) // fragment fits in a single bin
 								sbinMin[bin1] = tinybvh_min( sbinMin[bin1], fragment[fi].bmin ),
 								sbinMax[bin1] = tinybvh_max( sbinMax[bin1], fragment[fi].bmax );
-							else for (int j = bin1; j <= bin2; j++)
-							{
-								// clip fragment to each bin it overlaps
-								Vec3 bmin = node.aabbMin, bmax = node.aabbMax;
-								bmin[a] = nodeMin + planeDist * j;
-								bmax[a] = j == (int)(binCount - 2) ? node.aabbMax[a] : (bmin[a] + planeDist);
-								Fragment orig = fragment[fi];
-								Fragment tmpFrag;
-								if (!ClipFrag( orig, tmpFrag, bmin, bmax, a )) continue;
-								sbinMin[j] = tinybvh_min( sbinMin[j], tmpFrag.bmin );
-								sbinMax[j] = tinybvh_max( sbinMax[j], tmpFrag.bmax );
-							}
+							else // clip the fragment across the bins it overlaps, in one walk
+								ClipFragToBins( fragment[fi], bin1, bin2, a, nodeMin, planeDist, sbinMin, sbinMax );
 						}
 					}
 					// evaluate split candidates
@@ -7109,44 +7144,6 @@ TEMPLATED bool BVH<Float, Index>::SplitFrag( const Fragment& orig, Fragment& lef
 	return tinybvh_halfarea( left.bmax - left.bmin ) > 0 && tinybvh_halfarea( right.bmax - right.bmin ) > 0;
 }
 
-// ClipFrag: clip a fragment for binning.
-TEMPLATED bool BVH<Float, Index>::ClipFrag( const Fragment& orig, Fragment& newFrag, Vec3 bmin, Vec3 bmax, const uint32_t axis ) const
-{
-	Fragment tmp1, tmp2;
-	tmp1.bmin = Vec3( bvh_far<Float> ), tmp1.bmax = Vec3( -bvh_far<Float> );
-	tmp1.primIdx = orig.primIdx, tmp1.clipped = true, tmp2 = tmp1;
-	auto split_edge = [=]( const Vec3& a, const Vec3& b, const Float pos ) {
-		Vec3 c = a + (pos - a[axis]) / (b[axis] - a[axis]) * (b - a);
-		c[axis] = pos; /* exactly on split position */ return c; };
-	Vec3 v0, v1, v2;
-	const Index vidx = orig.primIdx * 3;
-	if (!vertIdx) v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
-	else v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
-	const Float left = bmin[axis], right = bmax[axis];
-	// clip against min bounds
-	bool in0 = v0[axis] >= left, in1 = v1[axis] >= left, in2 = v2[axis] >= left;
-	if (in0) tmp1.Extend( v0 );
-	if (in1) tmp1.Extend( v1 );
-	if (in2) tmp1.Extend( v2 );
-	if (in0 ^ in1) { const Vec3 c = split_edge( v0, v1, left ); tmp1.Extend( c ); }
-	if (in1 ^ in2) { const Vec3 c = split_edge( v1, v2, left ); tmp1.Extend( c ); }
-	if (in2 ^ in0) { const Vec3 c = split_edge( v2, v0, left ); tmp1.Extend( c ); }
-	// clip against max bounds
-	in0 = v0[axis] <= right, in1 = v1[axis] <= right, in2 = v2[axis] <= right;
-	if (in0) tmp2.Extend( v0 );
-	if (in1) tmp2.Extend( v1 );
-	if (in2) tmp2.Extend( v2 );
-	if (in0 ^ in1) { const Vec3 c = split_edge( v0, v1, right ); tmp2.Extend( c ); }
-	if (in1 ^ in2) { const Vec3 c = split_edge( v1, v2, right ); tmp2.Extend( c ); }
-	if (in2 ^ in0) { const Vec3 c = split_edge( v2, v0, right ); tmp2.Extend( c ); }
-	newFrag.bmin = tinybvh_max( tmp1.bmin, tmp2.bmin );
-	newFrag.bmax = tinybvh_min( tmp1.bmax, tmp2.bmax );
-	if (orig.clipped) // clip against orig box
-		newFrag.bmin = tinybvh_max( orig.bmin, newFrag.bmin ),
-		newFrag.bmax = tinybvh_min( orig.bmax, newFrag.bmax );
-	const Float sa = tinybvh_halfarea( newFrag.bmax - newFrag.bmin );
-	return sa > 0;
-}
 
 // RefitUp: Update bounding boxes of ancestors of the specified node.
 // Returns the change in the summed surface area of the nodes it updated.
