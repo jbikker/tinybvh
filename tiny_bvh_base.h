@@ -4951,11 +4951,13 @@ TEMPLATED void BVH_GPU<Float, Index>::ConvertFrom( const BVH& original, bool com
 		uint32_t pidx = (uint32_t)bvh.primIdx[i];
 		if (pidx < triCount)
 		{
-			vertexData[i * 3 + 0] = bvh.verts[pidx * 3 + 0];
-			vertexData[i * 3 + 1] = bvh.verts[pidx * 3 + 1] - vertexData[i * 3 + 0];
-			vertexData[i * 3 + 2] = bvh.verts[pidx * 3 + 2] - vertexData[i * 3 + 0];
+			Index i0, i1, i2;
+			GET_PRIM_INDICES_I0_I1_I2( bvh, pidx );
+			vertexData[i * 3 + 0] = bvh.verts[i0];
+			vertexData[i * 3 + 1] = bvh.verts[i1] - vertexData[i * 3 + 0];
+			vertexData[i * 3 + 2] = bvh.verts[i2] - vertexData[i * 3 + 0];
 			vertexData[i * 3 + 0].w = tinybvh_as_float( pidx ); // store original primitive index.
-			vertexData[i * 3 + 1].w = bvh.verts[pidx * 3 + 1].w; // keep; may contain triangle color.
+			vertexData[i * 3 + 1].w = bvh.verts[i1].w; // keep; may contain triangle color.
 		}
 	}
 }
