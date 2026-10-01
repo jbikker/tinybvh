@@ -4712,25 +4712,31 @@ TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, c
 	AlignedFree( sortList );
 }
 
-// Single-primitive leaves: Prepare the BVH for optimization. While it is not strictly
-// necessary to have a single primitive per leaf, it will yield a slightly better
-// optimized BVH. The leaves of the optimized BVH should be collapsed ('MergeLeafs')
-// to obtain the final tree.
+// Single-primitive leaves: Prepare the BVH for optimization. The leaves of the optimized BVH should 
+// be collapsed ('MergeLeafs') to obtain the final tree.
 TEMPLATED void BVH_Verbose<Float, Index>::SplitLeafs( const Index maxPrims )
 {
-	Index nodeIdx = 0, stack[TINYBVH_STACK_SIZE], stackPtr = 0;
+	if (bvhNode == 0 || usedNodes == 0) return;
+	Index nodeIdx = 0;
+	// stackless descent
 	while (1)
 	{
-		BVHNode& node = bvhNode[nodeIdx];
-		if (!node.isLeaf()) nodeIdx = node.left, stack[stackPtr++] = node.right; else
+		if (!bvhNode[nodeIdx].isLeaf()) { nodeIdx = bvhNode[nodeIdx].left; continue; }
+		// Expand one oversized leaf into a subtree of leaves holding at most
+		// 'maxPrims' primitives each. Within that subtree the right child is
+		// visited first, as the previous version did: the resulting node numbering
+		// is what 'Optimize' later sorts on, so the order is not free to change.
+		const Index subRoot = nodeIdx;
+		Index c = subRoot;
+		while (1)
 		{
-			// split this leaf
+			BVHNode& node = bvhNode[c];
 			if (node.triCount > maxPrims)
 			{
 				const Index newIdx1 = usedNodes++, newIdx2 = usedNodes++;
 				BVHNode& new1 = bvhNode[newIdx1], & new2 = bvhNode[newIdx2];
 				new1.firstTri = node.firstTri, new1.triCount = node.triCount / 2;
-				new1.parent = new2.parent = nodeIdx, new1.left = new1.right = 0;
+				new1.parent = new2.parent = c, new1.left = new1.right = 0;
 				new2.firstTri = node.firstTri + new1.triCount;
 				new2.triCount = node.triCount - new1.triCount, new2.left = new2.right = 0;
 				node.left = newIdx1, node.right = newIdx2, node.triCount = 0;
@@ -4743,11 +4749,25 @@ TEMPLATED void BVH_Verbose<Float, Index>::SplitLeafs( const Index maxPrims )
 					fi = primIdx[new2.firstTri + i],
 					new2.aabbMin = tinybvh_min( new2.aabbMin, fragment[fi].bmin ),
 					new2.aabbMax = tinybvh_max( new2.aabbMax, fragment[fi].bmax );
-				// recurse
-				if (new1.triCount > 1) stack[stackPtr++] = newIdx1;
-				if (new2.triCount > 1) stack[stackPtr++] = newIdx2;
+				c = newIdx2; // descend into the right half first
+				continue;
 			}
-			if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr];
+			// this half is small enough; climb to the next unvisited left sibling.
+			while (c != subRoot)
+			{
+				const Index p = bvhNode[c].parent;
+				if (bvhNode[p].right == c) { c = bvhNode[p].left; break; }
+				c = p; // arrived from the left: this subtree is finished
+			}
+			if (c == subRoot) break; // back at the leaf we started from
+		}
+		// climb the tree proper: from a left child, continue into its sibling.
+		while (1)
+		{
+			if (nodeIdx == 0) return; // back at the root; the whole tree is done
+			const Index p = bvhNode[nodeIdx].parent;
+			if (bvhNode[p].left == nodeIdx) { nodeIdx = bvhNode[p].right; break; }
+			nodeIdx = p;
 		}
 	}
 }
