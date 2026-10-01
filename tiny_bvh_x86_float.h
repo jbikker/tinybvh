@@ -633,10 +633,10 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 		ALIGNED( 64 ) SliceBounds slice[MT_PREP_MAX_TASKS]; // one cache line per slice; no false sharing.
 		const uint32_t sliceSize = triCount / slices;
 		tinybvh_parallel_for( context, slices, [&]( uint32_t i )
-		{
-			const uint32_t first = sliceSize * i, last = i == (slices - 1) ? triCount : (first + sliceSize);
-			PrepareSIMDBuildFragSlice( first, last, indices, vertData, stride4, fragment, slice[i].bmin, slice[i].bmax );
-		} );
+			{
+				const uint32_t first = sliceSize * i, last = i == (slices - 1) ? triCount : (first + sliceSize);
+				PrepareSIMDBuildFragSlice( first, last, indices, vertData, stride4, fragment, slice[i].bmin, slice[i].bmax );
+			} );
 		rootMin = tinybvh_load4( slice[0].bmin ), rootMax = tinybvh_load4( slice[0].bmax );
 		for (uint32_t i = 1; i < slices; i++)
 			rootMin = _mm_min_ps( rootMin, tinybvh_load4( slice[i].bmin ) ), rootMax = _mm_max_ps( rootMax, tinybvh_load4( slice[i].bmax ) );
@@ -742,12 +742,12 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 				const uint32_t sliceSize = node.triCount / slices;
 				const uint32_t binFirst = node.leftFirst, binPrims = node.triCount;
 				tinybvh_parallel_for( context, slices, [&]( uint32_t i )
-				{
-					const uint32_t first = binFirst + sliceSize * i;
-					const uint32_t last = i == (slices - 1) ? (binFirst + binPrims) : (first + sliceSize);
-					BuildSIMDBinTask( first, last, slicebinbox[0] + i * 3 * AVXBINS,
-						slicecount[0] + i * AVXCOUNTSTRIDE, (const float*)&nmin4, (const float*)&rpd4 );
-				} );
+					{
+						const uint32_t first = binFirst + sliceSize * i;
+						const uint32_t last = i == (slices - 1) ? (binFirst + binPrims) : (first + sliceSize);
+						BuildSIMDBinTask( first, last, slicebinbox[0] + i * 3 * AVXBINS,
+							slicecount[0] + i * AVXCOUNTSTRIDE, (const float*)&nmin4, (const float*)&rpd4 );
+					} );
 				// combine results from slices; slice-major, so each slice is a linear sweep.
 				for (uint32_t slice = 1; slice < slices; slice++)
 				{
@@ -1005,13 +1005,13 @@ template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant(
 				nodeIdx = nodeStack[--stackPtr];
 			}
 		}
-		if (stackPtr) ISLIKELY
-		{
-			const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
-			_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
-			_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
-		}
-		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
+			if (stackPtr) ISLIKELY
+			{
+				const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
+				_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
+				_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
+			}
+				// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
 		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, _mm_load_ps( leaf->e2z ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
 		const __m128 hy4 = _mm_fmsub_ps( dz4, _mm_load_ps( leaf->e2x ), _mm_mul_ps( dx4, _mm_load_ps( leaf->e2z ) ) );
@@ -1055,42 +1055,42 @@ template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant(
 				combined = _mm_and_ps( combined, tinybvh_load4( omask ) );
 				imask = _mm_movemask_ps( combined );
 			}
-			if (imask)
-			{
-				// compute broadcasted horizontal minimum of dist4
-				const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
-				const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
-				const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
-				const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
-				// update hit record.
-				const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
-				const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
-				ray.hit.t = t;
-				ray.hit.u = _mm_cvtss_f32( _mm_permutevar_ps( u4, lane4 ) );
-				ray.hit.v = _mm_cvtss_f32( _mm_permutevar_ps( v4, lane4 ) );
-			#if INST_IDX_BITS == 32
-				ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
-			#else
-				ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
-			#endif
-				t8 = _mm256_set1_ps( t );
-				// compress stack
-				int32_t outStackPtr = 0;
-				for (int32_t i = 0; i < stackPtr; i += 8)
+				if (imask)
 				{
-					const int32_t numItems = tinybvh_min( 8, stackPtr - i );
-					const __m256i valid8 = _mm256_cmpgt_epi32( _mm256_set1_epi32( numItems ), lane8 );
-					__m256i node8 = _mm256_maskload_epi32( (const int32_t*)(nodeStack + i), valid8 );
-					__m256 dist8 = _mm256_maskload_ps( distStack + i, valid8 );
-					const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) ) & ((1u << numItems) - 1);
-					const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
-					dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
-					_mm256_storeu_ps( distStack + outStackPtr, dist8 );
-					_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
-					outStackPtr += __popc( mask );
+					// compute broadcasted horizontal minimum of dist4
+					const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
+					const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
+					const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+					const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
+					// update hit record.
+					const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
+					const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
+					ray.hit.t = t;
+					ray.hit.u = _mm_cvtss_f32( _mm_permutevar_ps( u4, lane4 ) );
+					ray.hit.v = _mm_cvtss_f32( _mm_permutevar_ps( v4, lane4 ) );
+				#if INST_IDX_BITS == 32
+					ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
+				#else
+					ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
+				#endif
+					t8 = _mm256_set1_ps( t );
+					// compress stack
+					int32_t outStackPtr = 0;
+					for (int32_t i = 0; i < stackPtr; i += 8)
+					{
+						const int32_t numItems = tinybvh_min( 8, stackPtr - i );
+						const __m256i valid8 = _mm256_cmpgt_epi32( _mm256_set1_epi32( numItems ), lane8 );
+						__m256i node8 = _mm256_maskload_epi32( (const int32_t*)(nodeStack + i), valid8 );
+						__m256 dist8 = _mm256_maskload_ps( distStack + i, valid8 );
+						const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) ) & ((1u << numItems) - 1);
+						const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
+						dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
+						_mm256_storeu_ps( distStack + outStackPtr, dist8 );
+						_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
+						outStackPtr += __popc( mask );
+					}
+					stackPtr = outStackPtr;
 				}
-				stackPtr = outStackPtr;
-			}
 		}
 		if (!stackPtr) ISUNLIKELY break;
 		nodeIdx = nodeStack[--stackPtr];
@@ -1233,16 +1233,16 @@ template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant(
 			BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_STACK_SIZE * 4 - 8, "BVH8_CPU::Intersect, traversal stack overflow." );
 		#endif
 		}
-	#ifdef BVH8_USE_PREFETCHING
-		if (stackPtr) ISLIKELY
-		{
-			// prefetch the next node - only divergent rays benefit.
-			const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
-			_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
-			_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
-		}
-	#endif
-		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
+		#ifdef BVH8_USE_PREFETCHING
+			if (stackPtr) ISLIKELY
+			{
+				// prefetch the next node - only divergent rays benefit.
+				const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
+				_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
+				_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
+			}
+			#endif
+				// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
 		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, _mm_load_ps( leaf->e2z ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
 		const __m128 hy4 = _mm_fmsub_ps( dz4, _mm_load_ps( leaf->e2x ), _mm_mul_ps( dx4, _mm_load_ps( leaf->e2z ) ) );
@@ -1292,42 +1292,42 @@ template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant(
 				combined = _mm_and_ps( combined, tinybvh_load4( omask ) );
 				imask = _mm_movemask_ps( combined );
 			}
-			if (imask)
-			{
-				// compute broadcasted horizontal minimum of dist4
-				const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
-				const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
-				const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
-				const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
-				// update hit record.
-				const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
-				const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
-				ray.hit.t = t;
-				ray.hit.u = _mm_cvtss_f32( _mm_permutevar_ps( u4, lane4 ) );
-				ray.hit.v = _mm_cvtss_f32( _mm_permutevar_ps( v4, lane4 ) );
-			#if INST_IDX_BITS == 32
-				ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
-			#else
-				ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
-			#endif
-				t8 = _mm256_set1_ps( t );
-				// compress stack
-				int32_t outStackPtr = 0;
-				for (int32_t i = 0; i < stackPtr; i += 8)
+				if (imask)
 				{
-					const int32_t numItems = tinybvh_min( 8, stackPtr - i );
-					const __m256i valid8 = _mm256_cmpgt_epi32( _mm256_set1_epi32( numItems ), lane8 );
-					__m256i node8 = _mm256_maskload_epi32( (const int32_t*)(nodeStack + i), valid8 );
-					__m256 dist8 = _mm256_maskload_ps( distStack + i, valid8 );
-					const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) ) & ((1u << numItems) - 1);
-					const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
-					dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
-					_mm256_storeu_ps( distStack + outStackPtr, dist8 );
-					_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
-					outStackPtr += __popc( mask );
+					// compute broadcasted horizontal minimum of dist4
+					const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
+					const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
+					const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+					const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
+					// update hit record.
+					const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
+					const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
+					ray.hit.t = t;
+					ray.hit.u = _mm_cvtss_f32( _mm_permutevar_ps( u4, lane4 ) );
+					ray.hit.v = _mm_cvtss_f32( _mm_permutevar_ps( v4, lane4 ) );
+				#if INST_IDX_BITS == 32
+					ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
+				#else
+					ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
+				#endif
+					t8 = _mm256_set1_ps( t );
+					// compress stack
+					int32_t outStackPtr = 0;
+					for (int32_t i = 0; i < stackPtr; i += 8)
+					{
+						const int32_t numItems = tinybvh_min( 8, stackPtr - i );
+						const __m256i valid8 = _mm256_cmpgt_epi32( _mm256_set1_epi32( numItems ), lane8 );
+						__m256i node8 = _mm256_maskload_epi32( (const int32_t*)(nodeStack + i), valid8 );
+						__m256 dist8 = _mm256_maskload_ps( distStack + i, valid8 );
+						const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) ) & ((1u << numItems) - 1);
+						const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
+						dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
+						_mm256_storeu_ps( distStack + outStackPtr, dist8 );
+						_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
+						outStackPtr += __popc( mask );
+					}
+					stackPtr = outStackPtr;
 				}
-				stackPtr = outStackPtr;
-			}
 		}
 		if (!stackPtr) ISUNLIKELY break;
 		nodeIdx = nodeStack[--stackPtr];
@@ -1396,12 +1396,12 @@ template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( c
 				nodeIdx = nodeStack[--stackPtr];
 			}
 		}
-		if (stackPtr) ISLIKELY
-		{
-			const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
-			_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 128, _MM_HINT_T0 );
-		}
-		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles.
+			if (stackPtr) ISLIKELY
+			{
+				const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
+				_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 128, _MM_HINT_T0 );
+			}
+				// Moeller-Trumbore ray/triangle intersection algorithm for four triangles.
 		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, _mm_load_ps( leaf->e2z ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
 		const __m128 hy4 = _mm_fmsub_ps( dz4, _mm_load_ps( leaf->e2x ), _mm_mul_ps( dx4, _mm_load_ps( leaf->e2z ) ) );
@@ -1488,7 +1488,7 @@ struct ALIGNED( 64 ) RayBundle
 			(rdy[l + i] >= 0 ? 2 : 0) + (rdz[l + i] >= 0 ? 4 : 0))) return -1;
 		return o;
 	}
-	void SetRay( const uint32_t s, const Ray& ray )
+	void SetRay( const uint32_t s, const Ray & ray )
 	{
 		ox[s] = ray.O.x, oy[s] = ray.O.y, oz[s] = ray.O.z;
 		dx[s] = ray.D.x, dy[s] = ray.D.y, dz[s] = ray.D.z;
@@ -1500,7 +1500,7 @@ struct ALIGNED( 64 ) RayBundle
 		prim[s] = ray.hit.prim & PRIM_IDX_MASK, inst[s] = ray.hit.prim & ~PRIM_IDX_MASK;
 	#endif
 	}
-	void GetHit( const uint32_t s, Ray& ray ) const
+	void GetHit( const uint32_t s, Ray & ray ) const
 	{
 		ray.hit.t = t[s], ray.hit.u = u[s], ray.hit.v = v[s];
 	#if INST_IDX_BITS == 32
@@ -1510,8 +1510,8 @@ struct ALIGNED( 64 ) RayBundle
 	#endif
 	}
 	// Build the object space counterpart of the listed packets for one instance.
-	void TransformTo( RayBundle& dst, const uint32_t* pk, const uint32_t n,
-		const bvhmat4& inv, const uint32_t instance ) const
+	void TransformTo( RayBundle & dst, const uint32_t * pk, const uint32_t n,
+		const bvhmat4 & inv, const uint32_t instance ) const
 	{
 		for (uint32_t i = 0; i < n; i++) for (uint32_t k = 0; k < 8; k++)
 		{
@@ -1528,7 +1528,7 @@ struct ALIGNED( 64 ) RayBundle
 		dst.packets = n, dst.instIdx = instance, dst.mask = mask;
 	}
 	// Take back whatever the object space bundle found; true if anything moved.
-	bool MergeHits( const RayBundle& o )
+	bool MergeHits( const RayBundle & o )
 	{
 		bool improved = false;
 		for (uint32_t d = 0, e = o.packets * 8; d < e; d++)
@@ -1705,7 +1705,7 @@ PER_OCTANT static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b
 	uint32_t nodeIdx = 0, fpi = 0, active = (1u << n) - 1;
 	const __m256 zero8 = _mm256_setzero_ps(), one8 = _mm256_set1_ps( 1.0f );
 	const __m256i instIdx8 = _mm256_set1_epi32( (int32_t)b.instIdx );
-	TINYBVH_BUNDLE_SETUP
+	TINYBVH_BUNDLE_SETUP;
 	const __m128 rdxMin4 = tinybvh_lo4( tinybvh_hmin8( rdxMin ) ), rdxMax4 = tinybvh_lo4( tinybvh_hmax8( rdxMax ) );
 	const __m128 rdyMin4 = tinybvh_lo4( tinybvh_hmin8( rdyMin ) ), rdyMax4 = tinybvh_lo4( tinybvh_hmax8( rdyMax ) );
 	const __m128 rdzMin4 = tinybvh_lo4( tinybvh_hmin8( rdzMin ) ), rdzMax4 = tinybvh_lo4( tinybvh_hmax8( rdzMax ) );
@@ -1753,7 +1753,7 @@ PER_OCTANT static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b
 				for (uint32_t i = 0; i < triCount; i++)
 				{
 					TINYBVH_PACKET_TRI( i )
-					if (!_mm256_movemask_ps( hit8 )) continue;
+						if (!_mm256_movemask_ps( hit8 )) continue;
 					if (!packetHit)
 					{
 						u8 = _mm256_load_ps( b.u + l ), v8 = _mm256_load_ps( b.v + l );
@@ -1808,8 +1808,7 @@ PER_OCTANT static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b
 					if (!isLeaf) break;
 				}
 				if (++i == n) i = 0;
-			}
-			while (i != first);
+			} while (i != first);
 			if (!entering) continue;
 			nodeIdx = child, fpi = firstHit, active = entering;
 			break;
@@ -1828,7 +1827,7 @@ PER_OCTANT static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, con
 	int32_t stackPtr = 0, steps = 0;
 	uint32_t nodeIdx = 0, fpi = 0, active = (1u << n) - 1;
 	const __m256 zero8 = _mm256_setzero_ps();
-	TINYBVH_BUNDLE_SETUP
+	TINYBVH_BUNDLE_SETUP;
 	// the TLAS node test is scalar, so reduce the interval ray all the way down.
 	float rdMin[3], rdMax[3], roMin[3], roMax[3], tfar;
 	_mm_store_ss( rdMin + 0, tinybvh_lo4( tinybvh_hmin8( rdxMin ) ) ), _mm_store_ss( rdMax + 0, tinybvh_lo4( tinybvh_hmax8( rdxMax ) ) );
@@ -1899,8 +1898,7 @@ PER_OCTANT static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, con
 					if (!isLeaf) break;
 				}
 				if (++i == n) i = 0;
-			}
-			while (i != first);
+			} while (i != first);
 			if (!entering) continue;
 			nodeIdx = entry, fpi = firstHit, active = entering;
 			break;
@@ -2084,7 +2082,7 @@ PER_OCTANT static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle&
 	const __m256 zero8 = _mm256_setzero_ps(), minusOne8 = _mm256_set1_ps( -1.0f );
 	const __m256 sign8 = _mm256_set1_ps( -0.0f );
 	TINYBVH_BUNDLE_SETUP_ANY
-	if (!alive) return 0;
+		if (!alive) return 0;
 	active = alive;
 	const __m128 rdxMin4 = tinybvh_lo4( tinybvh_hmin8( rdxMin ) ), rdxMax4 = tinybvh_lo4( tinybvh_hmax8( rdxMax ) );
 	const __m128 rdyMin4 = tinybvh_lo4( tinybvh_hmin8( rdyMin ) ), rdyMax4 = tinybvh_lo4( tinybvh_hmax8( rdyMax ) );
@@ -2130,7 +2128,7 @@ PER_OCTANT static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle&
 				for (uint32_t j = 0; j < triCount; j++)
 				{
 					TINYBVH_PACKET_TRI_ANY( j )
-					const uint32_t hit = (uint32_t)_mm256_movemask_ps( hit8 );
+						const uint32_t hit = (uint32_t)_mm256_movemask_ps( hit8 );
 					if (!hit) continue;
 					b.occluded[pk[i]] |= (uint8_t)hit, retired = true;
 					tcur8 = _mm256_blendv_ps( tcur8, minusOne8, hit8 );
@@ -2172,8 +2170,7 @@ PER_OCTANT static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle&
 					if (!isLeaf) break;
 				}
 				if (++i == n) i = 0;
-			}
-			while (i != first);
+			} while (i != first);
 			if (!entering) continue;
 			nodeIdx = child, fpi = firstHit, active = entering;
 			break;
@@ -2193,7 +2190,7 @@ PER_OCTANT static int32_t tinybvh_occluded_tlas( const BVH& bvh, RayBundle& b, c
 	uint32_t nodeIdx = 0, fpi = 0, alive = 0, active;
 	const __m256 zero8 = _mm256_setzero_ps(), minusOne8 = _mm256_set1_ps( -1.0f );
 	TINYBVH_BUNDLE_SETUP_ANY
-	if (!alive) return 0;
+		if (!alive) return 0;
 	active = alive;
 	float rdMin[3], rdMax[3], roMin[3], roMax[3], tfar;
 	_mm_store_ss( rdMin + 0, tinybvh_lo4( tinybvh_hmin8( rdxMin ) ) ), _mm_store_ss( rdMax + 0, tinybvh_lo4( tinybvh_hmax8( rdxMax ) ) );
@@ -2277,8 +2274,7 @@ PER_OCTANT static int32_t tinybvh_occluded_tlas( const BVH& bvh, RayBundle& b, c
 					if (!isLeaf) break;
 				}
 				if (++i == n) i = 0;
-			}
-			while (i != first);
+			} while (i != first);
 			if (!entering) continue;
 			nodeIdx = entry, fpi = firstHit, active = entering;
 			break;

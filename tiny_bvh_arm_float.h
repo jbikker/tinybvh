@@ -194,10 +194,10 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 		ALIGNED( 64 ) NEONSliceBounds slice[slices]; // one cache line per slice; no false sharing.
 		const uint32_t sliceSize = triCount / slices;
 		tinybvh_parallel_for( context, slices, [&]( uint32_t i )
-		{
-			const uint32_t first = sliceSize * i, last = i == (uint32_t)(slices - 1) ? triCount : (first + sliceSize);
-			PrepareSIMDBuildFragSlice( first, last, indices, vertData, stride4, fragment, slice[i].bmin, slice[i].bmax );
-		} );
+			{
+				const uint32_t first = sliceSize * i, last = i == (uint32_t)(slices - 1) ? triCount : (first + sliceSize);
+				PrepareSIMDBuildFragSlice( first, last, indices, vertData, stride4, fragment, slice[i].bmin, slice[i].bmax );
+			} );
 		rootMin = vld1q_f32( slice[0].bmin ), rootMax = vld1q_f32( slice[0].bmax );
 		for (int i = 1; i < slices; i++)
 			rootMin = vminq_f32( rootMin, vld1q_f32( slice[i].bmin ) ), rootMax = vmaxq_f32( rootMax, vld1q_f32( slice[i].bmax ) );
@@ -309,12 +309,12 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 				const uint32_t sliceSize = node.triCount / slices;
 				const uint32_t binFirst = node.leftFirst, binPrims = node.triCount;
 				tinybvh_parallel_for( context, slices, [&]( uint32_t i )
-				{
-					const uint32_t first = binFirst + sliceSize * i;
-					const uint32_t last = i == (slices - 1) ? (binFirst + binPrims) : (first + sliceSize);
-					BuildSIMDBinTask( first, last, slicebinbox[0] + i * 3 * AVXBINS,
-						slicecount[0] + i * NEONCOUNTSTRIDE, (const float*)&nmin4, (const float*)&rpd4 );
-				} );
+					{
+						const uint32_t first = binFirst + sliceSize * i;
+						const uint32_t last = i == (slices - 1) ? (binFirst + binPrims) : (first + sliceSize);
+						BuildSIMDBinTask( first, last, slicebinbox[0] + i * 3 * AVXBINS,
+							slicecount[0] + i * NEONCOUNTSTRIDE, (const float*)&nmin4, (const float*)&rpd4 );
+					} );
 				// combine results from slices; slice-major, so each slice is a linear sweep.
 				for (uint32_t slice = 1; slice < slices; slice++)
 				{
