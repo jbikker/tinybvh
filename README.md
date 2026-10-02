@@ -77,7 +77,7 @@ Note: A new, more advanced benchmark tool is now available. See [build.bat](http
 
 Many [additional demos](https://github.com/jbikker/tinybvh/tree/main/examples) are provided, demonstrating features of the library in small source files.
 
-# Version 1.9.0
+# Version 1.9.1
 
 Basic use:
 
