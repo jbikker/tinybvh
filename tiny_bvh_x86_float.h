@@ -31,6 +31,7 @@ TINYBVH_FORCEINLINE void tinybvh_store8i( void* p, const __m256i v ) { memcpy( p
 // Specializations provided by this header.
 #ifdef BVH_USESSE
 template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const;
+template <> void impl::BVH<float, uint32_t>::ClipFragToBins( const Fragment& orig, const int32_t bin1, const int32_t bin2, const uint32_t axis, const float nodeMin, const float planeDist, bvhvec3* sbinMin, bvhvec3* sbinMax ) const;
 template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
 template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
 template <> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectBundle( Ray* rays ) const;
@@ -91,74 +92,62 @@ TINYBVH_FORCEINLINE float halfArea( const __m128 a /* a contains extent of aabb 
 	return LANE( a, 0 ) * LANE( a, 1 ) + LANE( a, 1 ) * LANE( a, 2 ) + LANE( a, 2 ) * LANE( a, 3 );
 }
 
-// ClipFragToBins, SSE.
+// ClipFragToBins, SSE version.
 template <> void impl::BVH<float, uint32_t>::ClipFragToBins( const Fragment& orig, const int32_t bin1,
 	const int32_t bin2, const uint32_t axis, const float nodeMin, const float planeDist,
 	bvhvec3* sbinMin, bvhvec3* sbinMax ) const
 {
-	__m128 poly[8], left[8], right[8];
-	float polyA[8], leftA[8], rightA[8];
-	uint32_t n = 3, nl = 0, nr = 0;
+	__m128 vert4[4], left4[5], right4[4];
+	uint32_t n = 3;
 	const uint32_t vidx = orig.primIdx * 3;
-	const bvhvec4* v0, *v1, *v2;
-	if (!vertIdx) v0 = &verts[vidx], v1 = &verts[vidx + 1], v2 = &verts[vidx + 2];
-	else v0 = &verts[vertIdx[vidx]], v1 = &verts[vertIdx[vidx + 1]], v2 = &verts[vertIdx[vidx + 2]];
-	poly[0] = tinybvh_load4( v0 ), poly[1] = tinybvh_load4( v1 ), poly[2] = tinybvh_load4( v2 );
-	polyA[0] = v0->cell[axis], polyA[1] = v1->cell[axis], polyA[2] = v2->cell[axis];
+	if (!vertIdx) 
+		memcpy( vert4, &verts[vidx], sizeof( __m128 ) ),
+		memcpy( vert4 + 1, &verts[vidx + 1], sizeof( __m128 ) ),
+		memcpy( vert4 + 2, &verts[vidx + 2], sizeof( __m128 ) );
+	else 
+		memcpy( vert4, &verts[vertIdx[vidx]], sizeof( __m128 ) ),
+		memcpy( vert4 + 1, &verts[vertIdx[vidx + 1]], sizeof( __m128 ) ),
+		memcpy( vert4 + 2, &verts[vertIdx[vidx + 2]], sizeof( __m128 ) );
 	// lane selector for 'axis', used to pin a split vertex exactly onto its plane.
-	ALIGNED( 16 ) static const uint32_t laneBits[3][4] = {
-		{ 0xffffffff, 0, 0, 0 }, { 0, 0xffffffff, 0, 0 }, { 0, 0, 0xffffffff, 0 } };
-	const __m128 axisSel = tinybvh_load4( laneBits[axis] );
-	const __m128 origMin = tinybvh_load4( &orig.bmin ), origMax = tinybvh_load4( &orig.bmax );
-	// split poly[0..pn) at 'pos' into left[0..nl) and right[0..nr).
-	auto split = [&]( const __m128* p, const float* pa, const uint32_t pn, const float pos )
+	ALIGNED( 16 ) static const uint32_t laneBits[3][4] = { { 0xffffffff, 0, 0, 0 }, { 0, 0xffffffff, 0, 0 }, { 0, 0, 0xffffffff, 0 } };
+	const __m128 axisSel4 = tinybvh_load4( laneBits[axis] );
+	const __m128 origMin4 = tinybvh_load4( &orig.bmin ), origMax4 = tinybvh_load4( &orig.bmax );
+	for (int32_t j = bin1 - 1; j <= bin2 && n > 0; j++)
 	{
-		nl = nr = 0;
-		const __m128 posV = _mm_set1_ps( pos );
-		for (uint32_t k = 0; k < pn; k++)
+		const float pos = nodeMin + planeDist * (j + 1);
+		const __m128 pos4 = _mm_set1_ps( pos );
+		uint32_t nl = 0, nr = 0;
+		for (uint32_t k = 0; k < n; k++)
 		{
-			const uint32_t k1 = k + 1 == pn ? 0 : k + 1;
-			const float ca = pa[k], cb = pa[k1];
+			const uint32_t k1 = k + 1 == n ? 0 : k + 1;
+			const float ca = tinybvh_getlane_f( &vert4[k], axis );
+			const float cb = tinybvh_getlane_f( &vert4[k1], axis );
 			const bool ina = ca <= pos, inb = cb <= pos;
-			if (ina) left[nl] = p[k], leftA[nl++] = ca; else right[nr] = p[k], rightA[nr++] = ca;
-			if (ina != inb)
-			{
-				const __m128 a = p[k], b = p[k1];
-				const __m128 t = _mm_set1_ps( (pos - ca) / (cb - ca) );
-				__m128 c = _mm_add_ps( a, _mm_mul_ps( t, _mm_sub_ps( b, a ) ) );
-				c = _mm_blendv_ps( c, posV, axisSel ); // exactly on the split plane
-				left[nl] = c, leftA[nl++] = pos;
-				right[nr] = c, rightA[nr++] = pos;
-			}
+			if (ina) left4[nl++] = vert4[k]; else right4[nr++] = vert4[k];
+			if (ina == inb) continue;
+			const __m128 a4 = vert4[k], b4 = vert4[k1];
+			const __m128 t4 = _mm_set1_ps( (pos - ca) / (cb - ca) );
+			__m128 c4 = _mm_add_ps( a4, _mm_mul_ps( t4, _mm_sub_ps( b4, a4 ) ) );
+			c4 = _mm_blendv_ps( c4, pos4, axisSel4 ); // exactly on the split plane
+			left4[nl++] = c4, right4[nr++] = c4;
 		}
-	};
-	auto accum = [&]( const __m128* p, const uint32_t pn, const int32_t bin )
-	{
-		if (pn == 0) return;
-		__m128 bmin = p[0], bmax = p[0];
-		for (uint32_t k = 1; k < pn; k++) bmin = _mm_min_ps( bmin, p[k] ), bmax = _mm_max_ps( bmax, p[k] );
-		// a fragment that was split earlier is confined to its own box.
-		if (orig.clipped) bmin = _mm_max_ps( bmin, origMin ), bmax = _mm_min_ps( bmax, origMax );
-		ALIGNED( 16 ) float bn[4], bx[4];
-		tinybvh_store4( bn, bmin ), tinybvh_store4( bx, bmax );
-		const float ex = bx[0] - bn[0], ey = bx[1] - bn[1], ez = bx[2] - bn[2];
-		if (ex * ey + ey * ez + ez * ex <= 0) return;
-		// The bin arrays are bvhvec3, so the merge is scalar: a 16-byte store here would
-		// reach into the next bin, which in a sliced build belongs to another thread.
-		bvhvec3& dmin = sbinMin[bin]; bvhvec3& dmax = sbinMax[bin];
-		dmin.x = tinybvh_min( dmin.x, bn[0] ), dmin.y = tinybvh_min( dmin.y, bn[1] ), dmin.z = tinybvh_min( dmin.z, bn[2] );
-		dmax.x = tinybvh_max( dmax.x, bx[0] ), dmax.y = tinybvh_max( dmax.y, bx[1] ), dmax.z = tinybvh_max( dmax.z, bx[2] );
-	};
-	// enter the first bin: drop whatever lies left of its lower plane.
-	split( poly, polyA, n, nodeMin + planeDist * bin1 );
-	for (uint32_t k = 0; k < nr; k++) poly[k] = right[k], polyA[k] = rightA[k];
-	n = nr;
-	for (int32_t j = bin1; j <= bin2 && n > 0; j++)
-	{
-		split( poly, polyA, n, nodeMin + planeDist * (j + 1) );
-		accum( left, nl, j );
+		if (j >= bin1 && nl > 0)
+		{
+			// close bin j with the bounds of the part behind the plane.
+			__m128 bmin4 = left4[0], bmax4 = left4[0];
+			for (uint32_t k = 1; k < nl; k++) bmin4 = _mm_min_ps( bmin4, left4[k] ), bmax4 = _mm_max_ps( bmax4, left4[k] );
+			// a fragment that was split earlier is confined to its own box.
+			if (orig.clipped) bmin4 = _mm_max_ps( bmin4, origMin4 ), bmax4 = _mm_min_ps( bmax4, origMax4 );
+			ALIGNED( 16 ) float bn[4], bx[4];
+			tinybvh_store4( bn, bmin4 ), tinybvh_store4( bx, bmax4 );
+			const float ex = bx[0] - bn[0], ey = bx[1] - bn[1], ez = bx[2] - bn[2];
+			if (ex * ey + ey * ez + ez * ex <= 0) continue;
+			bvhvec3& dmin = sbinMin[j]; bvhvec3& dmax = sbinMax[j];
+			dmin.x = tinybvh_min( dmin.x, bn[0] ), dmin.y = tinybvh_min( dmin.y, bn[1] ), dmin.z = tinybvh_min( dmin.z, bn[2] );
+			dmax.x = tinybvh_max( dmax.x, bx[0] ), dmax.y = tinybvh_max( dmax.y, bx[1] ), dmax.z = tinybvh_max( dmax.z, bx[2] );
+		}
 		if (j == bin2) break;
-		for (uint32_t k = 0; k < nr; k++) poly[k] = right[k], polyA[k] = rightA[k];
+		memcpy( vert4, right4, 4 * sizeof( __m128 ) );
 		n = nr;
 	}
 }

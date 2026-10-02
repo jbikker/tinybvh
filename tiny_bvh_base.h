@@ -2972,55 +2972,41 @@ TEMPLATED void BVHBuildHQSubtree( void* payload )
 	BVHBuildHQArgs<Float, Index>* a = (BVHBuildHQArgs<Float, Index>*)payload;
 	a->bvh->BuildHQTask( a->node, a->depth, a->sliceStart, a->sliceEnd, a->idxTmp );
 }
-// Horizontal (in-node) binning for the SBVH builder.
+
 // ClipFragToBins: accumulate one fragment's bounds into every bin it spans along one axis.
-TEMPLATED void BVH<Float, Index>::ClipFragToBins( const Fragment& orig, const int32_t bin1,
-	const int32_t bin2, const uint32_t axis, const Float nodeMin, const Float planeDist,
-	Vec3* sbinMin, Vec3* sbinMax ) const
+TEMPLATED void BVH<Float, Index>::ClipFragToBins( const Fragment& orig, const int32_t bin1, const int32_t bin2,
+	const uint32_t axis, const Float nodeMin, const Float planeDist, Vec3* sbinMin, Vec3* sbinMax ) const
 {
-	Vec3 poly[8], left[8], right[8];
-	uint32_t n = 3, nl = 0, nr = 0;
+	Vec3 poly[4], left[5], right[4];
+	uint32_t n = 3;
 	const Index vidx = orig.primIdx * 3;
 	if (!vertIdx) poly[0] = verts[vidx], poly[1] = verts[vidx + 1], poly[2] = verts[vidx + 2];
 	else poly[0] = verts[vertIdx[vidx]], poly[1] = verts[vertIdx[vidx + 1]], poly[2] = verts[vertIdx[vidx + 2]];
-	// split poly[0..pn) at 'pos' into left[0..nl) and right[0..nr).
-	auto split = [&]( const Vec3* p, const uint32_t pn, const Float pos )
+	for (int32_t j = bin1 - 1; j <= bin2 && n > 0; j++)
 	{
-		nl = nr = 0;
-		for (uint32_t k = 0; k < pn; k++)
+		// split poly[0..n) at 'pos' into left[0..nl) and right[0..nr).
+		const Float pos = nodeMin + planeDist * (j + 1);
+		uint32_t nl = 0, nr = 0;
+		for (uint32_t k = 0; k < n; k++)
 		{
-			const Vec3& a = p[k]; const Vec3& b = p[k + 1 == pn ? 0 : k + 1];
+			const Vec3& a = poly[k]; const Vec3& b = poly[k + 1 == n ? 0 : k + 1];
 			const bool ina = a[axis] <= pos, inb = b[axis] <= pos;
 			if (ina) left[nl++] = a; else right[nr++] = a;
-			if (ina != inb)
-			{
-				Vec3 c = a + (pos - a[axis]) / (b[axis] - a[axis]) * (b - a);
-				c[axis] = pos; // exactly on the split plane
-				left[nl++] = c, right[nr++] = c;
-			}
+			if (ina == inb) continue;
+			Vec3 c = a + (pos - a[axis]) / (b[axis] - a[axis]) * (b - a);
+			c[axis] = pos; // exactly on the split plane
+			left[nl++] = c, right[nr++] = c;
 		}
-	};
-	auto accum = [&]( const Vec3* p, const uint32_t pn, const int32_t bin )
-	{
-		if (pn == 0) return;
-		Vec3 bmin( bvh_far<Float> ), bmax( -bvh_far<Float> );
-		for (uint32_t k = 0; k < pn; k++) bmin = tinybvh_min( bmin, p[k] ), bmax = tinybvh_max( bmax, p[k] );
-		// a fragment that was split earlier is confined to its own box.
-		if (orig.clipped) bmin = tinybvh_max( bmin, orig.bmin ), bmax = tinybvh_min( bmax, orig.bmax );
-		if (tinybvh_halfarea( bmax - bmin ) <= 0) return;
-		sbinMin[bin] = tinybvh_min( sbinMin[bin], bmin ), sbinMax[bin] = tinybvh_max( sbinMax[bin], bmax );
-	};
-	// enter the first bin: drop whatever lies left of its lower plane.
-	split( poly, n, nodeMin + planeDist * bin1 );
-	for (uint32_t k = 0; k < nr; k++) poly[k] = right[k];
-	n = nr;
-	for (int32_t j = bin1; j <= bin2 && n > 0; j++)
-	{
-		// Every bin ends at its own upper plane. The last one ends slightly beyond the
-		// node, since planeDist divides the extent by binCount * 0.9999, which is how it
-		// catches fragments sitting exactly on the far face.
-		split( poly, n, nodeMin + planeDist * (j + 1) );
-		accum( left, nl, j );
+		if (j >= bin1 && nl > 0)
+		{
+			// close bin j with the bounds of the part behind the plane.
+			Vec3 bmin( bvh_far<Float> ), bmax( -bvh_far<Float> );
+			for (uint32_t k = 0; k < nl; k++) bmin = tinybvh_min( bmin, left[k] ), bmax = tinybvh_max( bmax, left[k] );
+			// a fragment that was split earlier is confined to its own box.
+			if (orig.clipped) bmin = tinybvh_max( bmin, orig.bmin ), bmax = tinybvh_min( bmax, orig.bmax );
+			if (tinybvh_halfarea( bmax - bmin ) > 0)
+				sbinMin[j] = tinybvh_min( sbinMin[j], bmin ), sbinMax[j] = tinybvh_max( sbinMax[j], bmax );
+		}
 		if (j == bin2) break;
 		for (uint32_t k = 0; k < nr; k++) poly[k] = right[k];
 		n = nr;
