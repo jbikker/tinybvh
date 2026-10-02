@@ -959,6 +959,12 @@ private:
 	static Vec3 BinBoxMin( const BinBox& b ) { return Vec3( -b.negMin.x, -b.negMin.y, -b.negMin.z ); }
 	static Vec3 BinBoxMax( const BinBox& b ) { return b.bmax; }
 	static Float BinBoxArea( const BinBox& b ) { return tinybvh_halfarea( Vec3( b.bmax.x + b.negMin.x, b.bmax.y + b.negMin.y, b.bmax.z + b.negMin.z ) ); }
+	// Nodes this small are split exactly rather than binned; see SplitSmallExact. The
+	// AVX2 sort in tiny_bvh_x86_float.h covers exactly this many lanes.
+	static constexpr uint32_t HQ_EXACT_PRIMS = 8;
+	bool SplitSmallExact( const BVHNode& node, const Vec3& minDim, Index* idxTmp, Index& A, Index& B,
+		Vec3& bestLMin, Vec3& bestLMax, Vec3& bestRMin, Vec3& bestRMax ) const;
+	void SortByCentroid( const Index* frag, const uint32_t n, const uint32_t axis, uint8_t* order ) const;
 	void ClipFragToBins( const Fragment& orig, const int32_t bin1, const int32_t bin2, const uint32_t axis,
 		const Float nodeMin, const Float planeDist, BinBox* sbinBox ) const;
 	bool SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t splitAxis, const Float splitPos ) const;
@@ -3047,6 +3053,77 @@ TEMPLATED void BVH<Float, Index>::ClipFragToBins( const Fragment& orig, const in
 	}
 }
 
+// Order-preserving integer key for a centroid, with the fragment's slot packed into the
+// low 3 bits. The keys are then unique, so any correct sort - the AVX2 network or the
+// insertion sort below - yields the same permutation, and builds agree across ISAs. The
+// 3 bits come out of the mantissa, which can only reorder centroids that were within a
+// few ulps of each other; that cannot matter for SAH.
+static inline int64_t tinybvh_centroid_key( const float c, const uint32_t slot )
+{
+	int32_t b; memcpy( &b, &c, 4 );
+	b ^= (b >> 31) & 0x7fffffff; // negative floats sort in reverse; flip them
+	return (int64_t)((b & ~7) | (int32_t)slot);
+}
+static inline int64_t tinybvh_centroid_key( const double c, const uint32_t slot )
+{
+	int64_t b; memcpy( &b, &c, 8 );
+	b ^= (b >> 63) & 0x7fffffffffffffffll;
+	return (b & ~(int64_t)7) | (int64_t)slot;
+}
+
+// SortByCentroid: order the n <= HQ_EXACT_PRIMS fragments of a small node by centroid
+// along one axis. tiny_bvh_x86_float.h replaces this with a sorting network for AVX2.
+TEMPLATED void BVH<Float, Index>::SortByCentroid( const Index* frag, const uint32_t n, const uint32_t axis, uint8_t* order ) const
+{
+	int64_t key[HQ_EXACT_PRIMS];
+	for (uint32_t i = 0; i < n; i++)
+	{
+		// twice the centroid: the same order, one multiply fewer.
+		const Fragment& f = fragment[frag[i]];
+		const int64_t k = tinybvh_centroid_key( f.bmin[axis] + f.bmax[axis], i );
+		uint32_t j = i;
+		while (j > 0 && key[j - 1] > k) key[j] = key[j - 1], j--;
+		key[j] = k;
+	}
+	for (uint32_t i = 0; i < n; i++) order[i] = (uint8_t)(key[i] & 7);
+}
+
+// SplitSmallExact: exact SAH object split for a node of at most HQ_EXACT_PRIMS fragments.
+TEMPLATED bool BVH<Float, Index>::SplitSmallExact( const BVHNode& node, const Vec3& minDim, Index* idxTmp,
+	Index& A, Index& B, Vec3& bestLMin, Vec3& bestLMax, Vec3& bestRMin, Vec3& bestRMax ) const
+{
+	const uint32_t n = (uint32_t)node.triCount;
+	const Index* frag = primIdx + node.leftFirst;
+	const Float rSAV = 1.0f / node.SurfaceArea();
+	Float bestCost = NoSplitCostSAH( node.triCount );
+	uint32_t bestK = 0;
+	uint8_t bestOrder[HQ_EXACT_PRIMS];
+	for (uint32_t a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
+	{
+		uint8_t order[HQ_EXACT_PRIMS];
+		SortByCentroid( frag, n, a, order );
+		// right side first, staged; the left side is then scored as it accumulates.
+		BinBox rB[HQ_EXACT_PRIMS], l, r;
+		BinBoxClear( r );
+		for (uint32_t k = n; --k > 0; ) BinBoxAddFrag( r, fragment[frag[order[k]]] ), rB[k] = r;
+		BinBoxClear( l );
+		for (uint32_t k = 1; k < n; k++)
+		{
+			BinBoxAddFrag( l, fragment[frag[order[k - 1]]] );
+			const Float C = SplitCostSAH( rSAV, BinBoxArea( l ), k, BinBoxArea( rB[k] ), n - k );
+			if (C >= bestCost) continue;
+			bestCost = C, bestK = k;
+			bestLMin = BinBoxMin( l ), bestLMax = BinBoxMax( l );
+			bestRMin = BinBoxMin( rB[k] ), bestRMax = BinBoxMax( rB[k] );
+			memcpy( bestOrder, order, n );
+		}
+	}
+	if (bestK == 0) return false;
+	for (uint32_t k = 0; k < bestK; k++) idxTmp[A++] = frag[bestOrder[k]];
+	for (uint32_t k = bestK; k < n; k++) idxTmp[--B] = frag[bestOrder[k]];
+	return true;
+}
+
 TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, Index sliceStart, Index sliceEnd, Index* idxTmp )
 {
 	// prepare subdivision
@@ -3056,8 +3133,6 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 	BVHNode& root = bvhNode[0];
 	const Float rootArea = tinybvh_halfarea( root.aabbMax - root.aabbMin );
 	const Vec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f /* don't touch, carefully picked */;
-	// 'depth' now tracks true tree depth and is advanced as this task descends, so
-	// the root task can no longer be identified by its value at the end of the run.
 	const bool rootTask = (depth == 0);
 	// Scratch for horizontal binning, laid out as [slice][axis][bin].
 	const uint32_t maxSliceBins = MT_HQ_MAX_SLICES * 3 * (hqbvhbins + 1);
@@ -3071,306 +3146,326 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 		{
 			// fetch node to subdivide
 			BVHNode& node = bvhNode[nodeIdx];
-			// alternating bin counts for optimizer.
-			if (hqbvhoddeven) binCount = hqbvhbins + (depth & 1); // odd levels get one more
-			// find optimal object split
-			BinBox binBox[3][MAXHQBINS];
-			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < binCount; i++) BinBoxClear( binBox[a][i] );
-			Index count[3][MAXHQBINS];
-			for (uint32_t i = 0; i < 3; i++) memset( count[i], 0, binCount * sizeof( Index ) );
-			const Vec3 rpd3 = Vec3( Vec3( (Float)binCount ) / (node.aabbMax - node.aabbMin) ), nmin3 = node.aabbMin;
-			// Decide whether this node is large enough to bin horizontally.
-			uint32_t slices = 1;
-		#ifdef ENABLE_THREADED_BUILDS
-			if (threadedBuild && context.parallel_for && node.triCount >= (Index)MT_HQ_BIN_THRESHOLD)
+			// A single fragment cannot be usefully split, so it is a leaf without binning.
+			if (node.triCount == 1)
 			{
-				slices = (uint32_t)tinybvh_min( (Index)MT_HQ_MAX_SLICES, node.triCount / (Index)MT_HQ_SLICE_PRIMS );
-				if (slices > 1 && !sliceBox)
+				primIdx[node.leftFirst] = fragment[primIdx[node.leftFirst]].primIdx;
+				break;
+			}
+			Index A = sliceStart, B = sliceEnd;
+			if (node.triCount <= (Index)HQ_EXACT_PRIMS)
+			{
+				// small node: exact sweep over the sorted fragments instead of bins.
+				if (!SplitSmallExact( node, minDim, idxTmp, A, B, bestLMin, bestLMax, bestRMin, bestRMax ))
 				{
-					sliceBox = (BinBox*)AlignedAlloc( maxSliceBins * sizeof( BinBox ) );
-					sliceCnt = (Index*)AlignedAlloc( maxSliceBins * sizeof( Index ) );
-					sliceIn = (int32_t*)AlignedAlloc( maxSliceBins * sizeof( int32_t ) );
-					sliceOut = (int32_t*)AlignedAlloc( maxSliceBins * sizeof( int32_t ) );
+					for (Index i = 0; i < node.triCount; i++)
+						primIdx[node.leftFirst + i] = fragment[primIdx[node.leftFirst + i]].primIdx;
+					break; // not splitting is better.
 				}
 			}
-		#endif
-			if (slices > 1)
+			else
 			{
-				// bin one slice of the fragment range per task, then reduce in slice order.
-				const Index objFirst = node.leftFirst, objCount = node.triCount;
-				tinybvh_parallel_for( context, slices, [&]( uint32_t slice )
+				// alternating bin counts for optimizer.
+				if (hqbvhoddeven) binCount = hqbvhbins + (depth & 1); // odd levels get one more
+				// find optimal object split
+				BinBox binBox[3][MAXHQBINS];
+				for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < binCount; i++) BinBoxClear( binBox[a][i] );
+				Index count[3][MAXHQBINS];
+				for (uint32_t i = 0; i < 3; i++) memset( count[i], 0, binCount * sizeof( Index ) );
+				const Vec3 rpd3 = Vec3( Vec3( (Float)binCount ) / (node.aabbMax - node.aabbMin) ), nmin3 = node.aabbMin;
+				// Decide whether this node is large enough to bin horizontally.
+				uint32_t slices = 1;
+			#ifdef ENABLE_THREADED_BUILDS
+				if (threadedBuild && context.parallel_for && node.triCount >= (Index)MT_HQ_BIN_THRESHOLD)
 				{
-					const size_t slot = (size_t)slice * 3 * binCount;
-					BinBox* bBox = sliceBox + slot;
-					Index* bCnt = sliceCnt + slot;
-					for (uint32_t i = 0; i < 3 * binCount; i++) BinBoxClear( bBox[i] ), bCnt[i] = 0;
-					const Index from = objFirst + (Index)(((uint64_t)objCount * slice) / slices);
-					const Index to = objFirst + (Index)(((uint64_t)objCount * (slice + 1)) / slices);
-					for (Index i = from; i < to; i++) // process all tris for x, y and z at once
+					slices = (uint32_t)tinybvh_min( (Index)MT_HQ_MAX_SLICES, node.triCount / (Index)MT_HQ_SLICE_PRIMS );
+					if (slices > 1 && !sliceBox)
 					{
-						const Index fi = primIdx[i];
-						const Fragment& f = fragment[fi];
-						const Vec3 fbi = ((f.bmin + f.bmax) * 0.5f - nmin3) * rpd3;
-						bvhint3 bi( (int32_t)fbi.x, (int32_t)fbi.y, (int32_t)fbi.z );
-						bi.x = tinybvh_clamp( bi.x, 0, binCount - 1 );
-						bi.y = tinybvh_clamp( bi.y, 0, binCount - 1 );
-						bi.z = tinybvh_clamp( bi.z, 0, binCount - 1 );
-						const uint32_t b0 = (uint32_t)bi.x, b1 = binCount + (uint32_t)bi.y, b2 = 2 * binCount + (uint32_t)bi.z;
-						BinBoxAddFrag( bBox[b0], f ), bCnt[b0]++;
-						BinBoxAddFrag( bBox[b1], f ), bCnt[b1]++;
-						BinBoxAddFrag( bBox[b2], f ), bCnt[b2]++;
+						sliceBox = (BinBox*)AlignedAlloc( maxSliceBins * sizeof( BinBox ) );
+						sliceCnt = (Index*)AlignedAlloc( maxSliceBins * sizeof( Index ) );
+						sliceIn = (int32_t*)AlignedAlloc( maxSliceBins * sizeof( int32_t ) );
+						sliceOut = (int32_t*)AlignedAlloc( maxSliceBins * sizeof( int32_t ) );
 					}
-				} );
-				for (uint32_t s = 0; s < slices; s++)
-				{
-					const size_t base = (size_t)s * 3 * binCount;
-					for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < binCount; i++)
-						BinBoxMerge( binBox[a][i], sliceBox[base + a * binCount + i] ),
-						count[a][i] += sliceCnt[base + a * binCount + i];
 				}
-			}
-			else for (Index i = 0; i < node.triCount; i++) // process all tris for x,y and z at once
-			{
-				const Index fi = primIdx[node.leftFirst + i];
-				const Vec3 fbi = ((fragment[fi].bmin + fragment[fi].bmax) * 0.5f - nmin3) * rpd3;
-				bvhint3 bi( (int32_t)fbi.x, (int32_t)fbi.y, (int32_t)fbi.z );
-				bi.x = tinybvh_clamp( bi.x, 0, binCount - 1 );
-				bi.y = tinybvh_clamp( bi.y, 0, binCount - 1 );
-				bi.z = tinybvh_clamp( bi.z, 0, binCount - 1 );
-				BinBoxAddFrag( binBox[0][bi.x], fragment[fi] ), count[0][bi.x]++;
-				BinBoxAddFrag( binBox[1][bi.y], fragment[fi] ), count[1][bi.y]++;
-				BinBoxAddFrag( binBox[2][bi.z], fragment[fi] ), count[2][bi.z]++;
-			}
-			// calculate per-split totals
-			Float noSplitCost = NoSplitCostSAH( node.triCount );
-			Float splitCost = noSplitCost, rSAV = 1.0f / node.SurfaceArea();
-			uint32_t bestAxis = 0, bestPos = 0;
-			for (int32_t a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
-			{
-				BinBox rB[MAXHQBINS - 1], l, r;
-				Float AR[MAXHQBINS - 1];		// right area per split plane
-				Index NR[MAXHQBINS - 1];		// summed right tricount
-				BinBoxClear( r );
-				for (Index rN = 0, j = binCount - 1; j-- > 0; )
-				{
-					BinBoxMerge( r, binBox[a][j + 1] ), rB[j] = r;
-					rN += count[a][j + 1], NR[j] = rN;
-					AR[j] = rN == 0 ? bvh_far<Float> : BinBoxArea( r );
-				}
-				BinBoxClear( l );
-				Index lN = 0;
-				for (uint32_t i = 0; i < binCount - 1; i++)
-				{
-					BinBoxMerge( l, binBox[a][i] );
-					lN += count[a][i];
-					const Float AL = lN == 0 ? bvh_far<Float> : BinBoxArea( l );
-					const Float C = SplitCostSAH( rSAV, AL, lN, AR[i], NR[i] );
-					if (C >= splitCost) continue;
-					splitCost = C, bestAxis = a, bestPos = i;
-					bestLMin = BinBoxMin( l ), bestRMin = BinBoxMin( rB[i] );
-					bestLMax = BinBoxMax( l ), bestRMax = BinBoxMax( rB[i] );
-				}
-			}
-			// consider a spatial split
-			bool spatial = false;
-			Index bestNL = 0, bestNR = 0, budget = sliceEnd - sliceStart;
-			Vec3 spatialUnion = bestLMax - bestRMin;
-			Float spatialOverlap = (tinybvh_halfarea( spatialUnion )) / rootArea;
-			if (budget > node.triCount && (spatialOverlap > 1e-3f || splitCost >= noSplitCost))
-			{
-				Float minSplitCost = splitCost * 0.985f; // don't accept a spatial split for minimal gain
-				uint32_t axisMask = 0;
-				for (int a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a]) axisMask |= 1u << a;
+			#endif
 				if (slices > 1)
 				{
-					const Index spatFirst = node.leftFirst, spatCount = node.triCount;
-					const Vec3 nodeMin3 = node.aabbMin, nodeMax3 = node.aabbMax;
-					tinybvh_parallel_for( context, slices * 3, [&]( uint32_t task )
+					// bin one slice of the fragment range per task, then reduce in slice order.
+					const Index objFirst = node.leftFirst, objCount = node.triCount;
+					tinybvh_parallel_for( context, slices, [&]( uint32_t slice )
 					{
-						const uint32_t slice = task / 3;
-						const int32_t a = (int32_t)(task % 3);
-						const size_t slot = (size_t)task * binCount; // == (slice * 3 + a) * binCount
-						BinBox* sbBox = sliceBox + slot;
-						int32_t* cIn = sliceIn + slot; int32_t* cOut = sliceOut + slot;
-						for (uint32_t i = 0; i < binCount; i++)
-							BinBoxClear( sbBox[i] ), cIn[i] = 0, cOut[i] = 0;
-						// axes too thin to split on are still zeroed, so the reduction never reads garbage.
-						if (!(axisMask & (1u << a))) return;
-						const Float planeDist = (nodeMax3[a] - nodeMin3[a]) / (binCount * 0.9999f);
-						const Float rPlaneDist = 1.0f / planeDist, nodeMin = nodeMin3[a];
-						const Index from = spatFirst + (Index)(((uint64_t)spatCount * slice) / slices);
-						const Index to = spatFirst + (Index)(((uint64_t)spatCount * (slice + 1)) / slices);
-						for (Index i = from; i < to; i++)
+						const size_t slot = (size_t)slice * 3 * binCount;
+						BinBox* bBox = sliceBox + slot;
+						Index* bCnt = sliceCnt + slot;
+						for (uint32_t i = 0; i < 3 * binCount; i++) BinBoxClear( bBox[i] ), bCnt[i] = 0;
+						const Index from = objFirst + (Index)(((uint64_t)objCount * slice) / slices);
+						const Index to = objFirst + (Index)(((uint64_t)objCount * (slice + 1)) / slices);
+						for (Index i = from; i < to; i++) // process all tris for x, y and z at once
 						{
 							const Index fi = primIdx[i];
 							const Fragment& f = fragment[fi];
-							const int bin1 = tinybvh_clamp( (int32_t)((f.bmin[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
-							const int bin2 = tinybvh_clamp( (int32_t)((f.bmax[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
-							cIn[bin1]++, cOut[bin2]++;
-							if (bin2 == bin1) // fragment fits in a single bin
-								BinBoxAddFrag( sbBox[bin1], f );
-							else // clip the fragment across the bins it overlaps, in one walk
-								ClipFragToBins( f, bin1, bin2, a, nodeMin, planeDist, sbBox );
+							const Vec3 fbi = ((f.bmin + f.bmax) * 0.5f - nmin3) * rpd3;
+							bvhint3 bi( (int32_t)fbi.x, (int32_t)fbi.y, (int32_t)fbi.z );
+							bi.x = tinybvh_clamp( bi.x, 0, binCount - 1 );
+							bi.y = tinybvh_clamp( bi.y, 0, binCount - 1 );
+							bi.z = tinybvh_clamp( bi.z, 0, binCount - 1 );
+							const uint32_t b0 = (uint32_t)bi.x, b1 = binCount + (uint32_t)bi.y, b2 = 2 * binCount + (uint32_t)bi.z;
+							BinBoxAddFrag( bBox[b0], f ), bCnt[b0]++;
+							BinBoxAddFrag( bBox[b1], f ), bCnt[b1]++;
+							BinBoxAddFrag( bBox[b2], f ), bCnt[b2]++;
 						}
 					} );
+					for (uint32_t s = 0; s < slices; s++)
+					{
+						const size_t base = (size_t)s * 3 * binCount;
+						for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < binCount; i++)
+							BinBoxMerge( binBox[a][i], sliceBox[base + a * binCount + i] ),
+							count[a][i] += sliceCnt[base + a * binCount + i];
+					}
 				}
-				for (int a = 0; a < 3; a++) if (axisMask & (1u << a))
+				else for (Index i = 0; i < node.triCount; i++) // process all tris for x,y and z at once
 				{
-					// setup bins
-					BinBox sbinBox[MAXHQBINS];
-					int countIn[MAXHQBINS], countOut[MAXHQBINS];
-					memset( countIn, 0, binCount * 4 );
-					memset( countOut, 0, binCount * 4 );
-					for (uint32_t i = 0; i < binCount; i++) BinBoxClear( sbinBox[i] );
-					if (slices > 1) for (uint32_t s = 0; s < slices; s++)
-					{
-						// gather this axis' slices; min, max and integer adds only, so the
-						// result matches the serial pass bit for bit.
-						const size_t base = ((size_t)s * 3 + a) * binCount;
-						for (uint32_t i = 0; i < binCount; i++)
-							BinBoxMerge( sbinBox[i], sliceBox[base + i] ),
-							countIn[i] += sliceIn[base + i], countOut[i] += sliceOut[base + i];
-					}
-					else
-					{
-						// populate bins with clipped fragments
-						const Float planeDist = (node.aabbMax[a] - node.aabbMin[a]) / (binCount * 0.9999f);
-						const Float rPlaneDist = 1.0f / planeDist, nodeMin = node.aabbMin[a];
-						for (Index i = 0; i < node.triCount; i++)
-						{
-							const Index fi = primIdx[node.leftFirst + i];
-							const int bin1 = tinybvh_clamp( (int32_t)((fragment[fi].bmin[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
-							const int bin2 = tinybvh_clamp( (int32_t)((fragment[fi].bmax[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
-							countIn[bin1]++, countOut[bin2]++;
-							if (bin2 == bin1) // fragment fits in a single bin
-								BinBoxAddFrag( sbinBox[bin1], fragment[fi] );
-							else // clip the fragment across the bins it overlaps, in one walk
-								ClipFragToBins( fragment[fi], bin1, bin2, a, nodeMin, planeDist, sbinBox );
-						}
-					}
-					// evaluate split candidates
-					// as above: stage the right side, score the left side as it accumulates.
+					const Index fi = primIdx[node.leftFirst + i];
+					const Vec3 fbi = ((fragment[fi].bmin + fragment[fi].bmax) * 0.5f - nmin3) * rpd3;
+					bvhint3 bi( (int32_t)fbi.x, (int32_t)fbi.y, (int32_t)fbi.z );
+					bi.x = tinybvh_clamp( bi.x, 0, binCount - 1 );
+					bi.y = tinybvh_clamp( bi.y, 0, binCount - 1 );
+					bi.z = tinybvh_clamp( bi.z, 0, binCount - 1 );
+					BinBoxAddFrag( binBox[0][bi.x], fragment[fi] ), count[0][bi.x]++;
+					BinBoxAddFrag( binBox[1][bi.y], fragment[fi] ), count[1][bi.y]++;
+					BinBoxAddFrag( binBox[2][bi.z], fragment[fi] ), count[2][bi.z]++;
+				}
+				// calculate per-split totals
+				Float noSplitCost = NoSplitCostSAH( node.triCount );
+				Float splitCost = noSplitCost, rSAV = 1.0f / node.SurfaceArea();
+				uint32_t bestAxis = 0, bestPos = 0;
+				for (int32_t a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
+				{
 					BinBox rB[MAXHQBINS - 1], l, r;
-					Float AR[MAXHQBINS];
-					Index NR[MAXHQBINS];
+					Float AR[MAXHQBINS - 1];		// right area per split plane
+					Index NR[MAXHQBINS - 1];		// summed right tricount
 					BinBoxClear( r );
 					for (Index rN = 0, j = binCount - 1; j-- > 0; )
 					{
-						BinBoxMerge( r, sbinBox[j + 1] ), rB[j] = r;
-						rN += countOut[j + 1], NR[j] = rN;
+						BinBoxMerge( r, binBox[a][j + 1] ), rB[j] = r;
+						rN += count[a][j + 1], NR[j] = rN;
 						AR[j] = rN == 0 ? bvh_far<Float> : BinBoxArea( r );
 					}
 					BinBoxClear( l );
 					Index lN = 0;
 					for (uint32_t i = 0; i < binCount - 1; i++)
 					{
-						BinBoxMerge( l, sbinBox[i] );
-						lN += countIn[i];
+						BinBoxMerge( l, binBox[a][i] );
+						lN += count[a][i];
 						const Float AL = lN == 0 ? bvh_far<Float> : BinBoxArea( l );
-						const Float Cspatial = SplitCostSAH( rSAV, AL, lN, AR[i], NR[i] );
-						if (Cspatial < minSplitCost && lN + NR[i] < budget && lN > 0 && NR[i] > 0)
-						{
-							spatial = true, minSplitCost = splitCost = Cspatial, bestAxis = a, bestPos = i;
-							bestLMin = BinBoxMin( l ), bestLMax = BinBoxMax( l );
-							bestRMin = BinBoxMin( rB[i] ), bestRMax = BinBoxMax( rB[i] );
-							bestNL = lN, bestNR = NR[i]; // for unsplitting
-							bestLMax[a] = bestRMin[a]; // accurate
-						}
+						const Float C = SplitCostSAH( rSAV, AL, lN, AR[i], NR[i] );
+						if (C >= splitCost) continue;
+						splitCost = C, bestAxis = a, bestPos = i;
+						bestLMin = BinBoxMin( l ), bestRMin = BinBoxMin( rB[i] );
+						bestLMax = BinBoxMax( l ), bestRMax = BinBoxMax( rB[i] );
 					}
 				}
-			}
-			// evaluate best split cost
-			if (splitCost >= noSplitCost)
-			{
-				for (Index i = 0; i < node.triCount; i++)
-					primIdx[node.leftFirst + i] = fragment[primIdx[node.leftFirst + i]].primIdx;
-				break; // not splitting is better.
-			}
-			// double-buffered partition
-			Index A = sliceStart, B = sliceEnd, src = node.leftFirst;
-			if (spatial)
-			{
-				// spatial partitioning
-				const Float planeDist = (node.aabbMax[bestAxis] - node.aabbMin[bestAxis]) / (binCount * 0.9999f);
-				const Float rPlaneDist = 1.0f / planeDist, nodeMin = node.aabbMin[bestAxis];
-				for (Index i = 0; i < node.triCount; i++)
+				// consider a spatial split
+				bool spatial = false;
+				Index bestNL = 0, bestNR = 0, budget = sliceEnd - sliceStart;
+				Vec3 spatialUnion = bestLMax - bestRMin;
+				Float spatialOverlap = (tinybvh_halfarea( spatialUnion )) / rootArea;
+				if (budget > node.triCount && (spatialOverlap > 1e-3f || splitCost >= noSplitCost))
 				{
-					const Index fragIdx = primIdx[src++];
-					const uint32_t bin1 = (uint32_t)tinybvh_max( (fragment[fragIdx].bmin[bestAxis] - nodeMin) * rPlaneDist, Float( 0 ) );
-					const uint32_t bin2 = (uint32_t)tinybvh_max( (fragment[fragIdx].bmax[bestAxis] - nodeMin) * rPlaneDist, Float( 0 ) );
-					if (bin2 <= bestPos) idxTmp[A++] = fragIdx; else if (bin1 > bestPos) idxTmp[--B] = fragIdx; else
+					Float minSplitCost = splitCost * 0.985f; // don't accept a spatial split for minimal gain
+					uint32_t axisMask = 0;
+					for (int a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a]) axisMask |= 1u << a;
+					if (slices > 1)
 					{
-					#if defined SBVH_UNSPLITTING
-						// unsplitting: 1. Calculate what happens if we add this primitive entirely to the left side
-						if (bestNR > 1)
+						const Index spatFirst = node.leftFirst, spatCount = node.triCount;
+						const Vec3 nodeMin3 = node.aabbMin, nodeMax3 = node.aabbMax;
+						tinybvh_parallel_for( context, slices * 3, [&]( uint32_t task )
 						{
-							Vec3 unsplitLMin = tinybvh_min( bestLMin, fragment[fragIdx].bmin );
-							Vec3 unsplitLMax = tinybvh_max( bestLMax, fragment[fragIdx].bmax );
-							Float AL = tinybvh_halfarea( unsplitLMax - unsplitLMin );
-							Float AR = tinybvh_halfarea( bestRMax - bestRMin );
-							Float CunsplitLeft = SplitCostSAH( rSAV, AL, bestNL, AR, bestNR - 1 );
-							if (CunsplitLeft <= splitCost)
+							const uint32_t slice = task / 3;
+							const int32_t a = (int32_t)(task % 3);
+							const size_t slot = (size_t)task * binCount; // == (slice * 3 + a) * binCount
+							BinBox* sbBox = sliceBox + slot;
+							int32_t* cIn = sliceIn + slot; int32_t* cOut = sliceOut + slot;
+							for (uint32_t i = 0; i < binCount; i++)
+								BinBoxClear( sbBox[i] ), cIn[i] = 0, cOut[i] = 0;
+							// axes too thin to split on are still zeroed, so the reduction never reads garbage.
+							if (!(axisMask & (1u << a))) return;
+							const Float planeDist = (nodeMax3[a] - nodeMin3[a]) / (binCount * 0.9999f);
+							const Float rPlaneDist = 1.0f / planeDist, nodeMin = nodeMin3[a];
+							const Index from = spatFirst + (Index)(((uint64_t)spatCount * slice) / slices);
+							const Index to = spatFirst + (Index)(((uint64_t)spatCount * (slice + 1)) / slices);
+							for (Index i = from; i < to; i++)
 							{
-								bestNR--, splitCost = CunsplitLeft, idxTmp[A++] = fragIdx;
-								bestLMin = unsplitLMin, bestLMax = unsplitLMax;
-								continue;
+								const Index fi = primIdx[i];
+								const Fragment& f = fragment[fi];
+								const int bin1 = tinybvh_clamp( (int32_t)((f.bmin[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
+								const int bin2 = tinybvh_clamp( (int32_t)((f.bmax[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
+								cIn[bin1]++, cOut[bin2]++;
+								if (bin2 == bin1) // fragment fits in a single bin
+									BinBoxAddFrag( sbBox[bin1], f );
+								else // clip the fragment across the bins it overlaps, in one walk
+									ClipFragToBins( f, bin1, bin2, a, nodeMin, planeDist, sbBox );
+							}
+						} );
+					}
+					for (int a = 0; a < 3; a++) if (axisMask & (1u << a))
+					{
+						// setup bins
+						BinBox sbinBox[MAXHQBINS];
+						int countIn[MAXHQBINS], countOut[MAXHQBINS];
+						memset( countIn, 0, binCount * 4 );
+						memset( countOut, 0, binCount * 4 );
+						for (uint32_t i = 0; i < binCount; i++) BinBoxClear( sbinBox[i] );
+						if (slices > 1) for (uint32_t s = 0; s < slices; s++)
+						{
+							// gather this axis' slices; min, max and integer adds only, so the
+							// result matches the serial pass bit for bit.
+							const size_t base = ((size_t)s * 3 + a) * binCount;
+							for (uint32_t i = 0; i < binCount; i++)
+								BinBoxMerge( sbinBox[i], sliceBox[base + i] ),
+								countIn[i] += sliceIn[base + i], countOut[i] += sliceOut[base + i];
+						}
+						else
+						{
+							// populate bins with clipped fragments
+							const Float planeDist = (node.aabbMax[a] - node.aabbMin[a]) / (binCount * 0.9999f);
+							const Float rPlaneDist = 1.0f / planeDist, nodeMin = node.aabbMin[a];
+							for (Index i = 0; i < node.triCount; i++)
+							{
+								const Index fi = primIdx[node.leftFirst + i];
+								const int bin1 = tinybvh_clamp( (int32_t)((fragment[fi].bmin[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
+								const int bin2 = tinybvh_clamp( (int32_t)((fragment[fi].bmax[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
+								countIn[bin1]++, countOut[bin2]++;
+								if (bin2 == bin1) // fragment fits in a single bin
+									BinBoxAddFrag( sbinBox[bin1], fragment[fi] );
+								else // clip the fragment across the bins it overlaps, in one walk
+									ClipFragToBins( fragment[fi], bin1, bin2, a, nodeMin, planeDist, sbinBox );
 							}
 						}
-						// 2. Calculate what happens if we add this primitive entirely to the right side
-						if (bestNL > 1)
+						// evaluate split candidates
+						// as above: stage the right side, score the left side as it accumulates.
+						BinBox rB[MAXHQBINS - 1], l, r;
+						Float AR[MAXHQBINS];
+						Index NR[MAXHQBINS];
+						BinBoxClear( r );
+						for (Index rN = 0, j = binCount - 1; j-- > 0; )
 						{
-							const Vec3 unsplitRMin = tinybvh_min( bestRMin, fragment[fragIdx].bmin );
-							const Vec3 unsplitRMax = tinybvh_max( bestRMax, fragment[fragIdx].bmax );
-							const Float AL = tinybvh_halfarea( bestLMax - bestLMin );
-							const Float AR = tinybvh_halfarea( unsplitRMax - unsplitRMin );
-							const Float CunsplitRight = SplitCostSAH( rSAV, AL, bestNL - 1, AR, bestNR );
-							if (CunsplitRight <= splitCost)
+							BinBoxMerge( r, sbinBox[j + 1] ), rB[j] = r;
+							rN += countOut[j + 1], NR[j] = rN;
+							AR[j] = rN == 0 ? bvh_far<Float> : BinBoxArea( r );
+						}
+						BinBoxClear( l );
+						Index lN = 0;
+						for (uint32_t i = 0; i < binCount - 1; i++)
+						{
+							BinBoxMerge( l, sbinBox[i] );
+							lN += countIn[i];
+							const Float AL = lN == 0 ? bvh_far<Float> : BinBoxArea( l );
+							const Float Cspatial = SplitCostSAH( rSAV, AL, lN, AR[i], NR[i] );
+							if (Cspatial < minSplitCost && lN + NR[i] < budget && lN > 0 && NR[i] > 0)
 							{
-								bestNL--, splitCost = CunsplitRight, idxTmp[--B] = fragIdx;
-								bestRMin = unsplitRMin, bestRMax = unsplitRMax;
-								continue;
+								spatial = true, minSplitCost = splitCost = Cspatial, bestAxis = a, bestPos = i;
+								bestLMin = BinBoxMin( l ), bestLMax = BinBoxMax( l );
+								bestRMin = BinBoxMin( rB[i] ), bestRMax = BinBoxMax( rB[i] );
+								bestNL = lN, bestNR = NR[i]; // for unsplitting
+								bestLMax[a] = bestRMin[a]; // accurate
 							}
-						}
-					#endif
-						// split straddler
-						ALIGNED( 64 ) Fragment part1, part2; // keep all clipping in a single cacheline.
-						Float splitPos = bestLMax[bestAxis];
-						if (SplitFrag( fragment[fragIdx], part1, part2, bestAxis, splitPos ))
-						{
-						#ifdef ENABLE_THREADED_BUILDS
-							Index newFragIdx = threadedBuild ? atomicNextFrag->fetch_add( 1 ) : nextFrag++;
-						#else
-							Index newFragIdx = nextFrag++;
-						#endif
-							fragment[fragIdx] = part1, idxTmp[A++] = fragIdx;
-							fragment[newFragIdx] = part2, idxTmp[--B] = newFragIdx;
-						}
-						else // didn't work out; see what we can do.
-						{
-							const Float sahLeft = tinybvh_halfarea( part1.bmax - part1.bmin );
-							if (sahLeft > 0) idxTmp[A++] = fragIdx; else idxTmp[--B] = fragIdx;
 						}
 					}
 				}
-				// for spatial splits, we fully refresh the bounds: clipping is never fully stable..
-				bestLMin = bestRMin = Vec3( bvh_far<Float> ), bestLMax = bestRMax = Vec3( -bvh_far<Float> );
-				for (Index i = sliceStart; i < A; i++)
-					bestLMin = tinybvh_min( bestLMin, fragment[idxTmp[i]].bmin ),
-					bestLMax = tinybvh_max( bestLMax, fragment[idxTmp[i]].bmax );
-				for (Index i = B; i < sliceEnd; i++)
-					bestRMin = tinybvh_min( bestRMin, fragment[idxTmp[i]].bmin ),
-					bestRMax = tinybvh_max( bestRMax, fragment[idxTmp[i]].bmax );
-			}
-			else
-			{
-				// object partitioning
-				const Float rpd = rpd3[bestAxis], nmin = nmin3[bestAxis];
-				for (Index i = 0; i < node.triCount; i++)
+				// evaluate best split cost
+				if (splitCost >= noSplitCost)
 				{
-					const Index fr = primIdx[src + i];
-					int32_t bi = (int32_t)(((fragment[fr].bmin[bestAxis] + fragment[fr].bmax[bestAxis]) * 0.5f - nmin) * rpd);
-					bi = tinybvh_clamp( bi, 0, binCount - 1 );
-					if (bi <= (int32_t)bestPos) idxTmp[A++] = fr; else idxTmp[--B] = fr;
+					for (Index i = 0; i < node.triCount; i++)
+						primIdx[node.leftFirst + i] = fragment[primIdx[node.leftFirst + i]].primIdx;
+					break; // not splitting is better.
+				}
+				// double-buffered partition
+				Index src = node.leftFirst;
+				if (spatial)
+				{
+					// spatial partitioning
+					const Float planeDist = (node.aabbMax[bestAxis] - node.aabbMin[bestAxis]) / (binCount * 0.9999f);
+					const Float rPlaneDist = 1.0f / planeDist, nodeMin = node.aabbMin[bestAxis];
+					for (Index i = 0; i < node.triCount; i++)
+					{
+						const Index fragIdx = primIdx[src++];
+						const uint32_t bin1 = (uint32_t)tinybvh_max( (fragment[fragIdx].bmin[bestAxis] - nodeMin) * rPlaneDist, Float( 0 ) );
+						const uint32_t bin2 = (uint32_t)tinybvh_max( (fragment[fragIdx].bmax[bestAxis] - nodeMin) * rPlaneDist, Float( 0 ) );
+						if (bin2 <= bestPos) idxTmp[A++] = fragIdx; else if (bin1 > bestPos) idxTmp[--B] = fragIdx; else
+						{
+						#if defined SBVH_UNSPLITTING
+							// unsplitting: 1. Calculate what happens if we add this primitive entirely to the left side
+							if (bestNR > 1)
+							{
+								Vec3 unsplitLMin = tinybvh_min( bestLMin, fragment[fragIdx].bmin );
+								Vec3 unsplitLMax = tinybvh_max( bestLMax, fragment[fragIdx].bmax );
+								Float AL = tinybvh_halfarea( unsplitLMax - unsplitLMin );
+								Float AR = tinybvh_halfarea( bestRMax - bestRMin );
+								Float CunsplitLeft = SplitCostSAH( rSAV, AL, bestNL, AR, bestNR - 1 );
+								if (CunsplitLeft <= splitCost)
+								{
+									bestNR--, splitCost = CunsplitLeft, idxTmp[A++] = fragIdx;
+									bestLMin = unsplitLMin, bestLMax = unsplitLMax;
+									continue;
+								}
+							}
+							// 2. Calculate what happens if we add this primitive entirely to the right side
+							if (bestNL > 1)
+							{
+								const Vec3 unsplitRMin = tinybvh_min( bestRMin, fragment[fragIdx].bmin );
+								const Vec3 unsplitRMax = tinybvh_max( bestRMax, fragment[fragIdx].bmax );
+								const Float AL = tinybvh_halfarea( bestLMax - bestLMin );
+								const Float AR = tinybvh_halfarea( unsplitRMax - unsplitRMin );
+								const Float CunsplitRight = SplitCostSAH( rSAV, AL, bestNL - 1, AR, bestNR );
+								if (CunsplitRight <= splitCost)
+								{
+									bestNL--, splitCost = CunsplitRight, idxTmp[--B] = fragIdx;
+									bestRMin = unsplitRMin, bestRMax = unsplitRMax;
+									continue;
+								}
+							}
+						#endif
+							// split straddler
+							ALIGNED( 64 ) Fragment part1, part2; // keep all clipping in a single cacheline.
+							Float splitPos = bestLMax[bestAxis];
+							if (SplitFrag( fragment[fragIdx], part1, part2, bestAxis, splitPos ))
+							{
+							#ifdef ENABLE_THREADED_BUILDS
+								Index newFragIdx = threadedBuild ? atomicNextFrag->fetch_add( 1 ) : nextFrag++;
+							#else
+								Index newFragIdx = nextFrag++;
+							#endif
+								fragment[fragIdx] = part1, idxTmp[A++] = fragIdx;
+								fragment[newFragIdx] = part2, idxTmp[--B] = newFragIdx;
+							}
+							else // didn't work out; see what we can do.
+							{
+								const Float sahLeft = tinybvh_halfarea( part1.bmax - part1.bmin );
+								if (sahLeft > 0) idxTmp[A++] = fragIdx; else idxTmp[--B] = fragIdx;
+							}
+						}
+					}
+					// for spatial splits, we fully refresh the bounds: clipping is never fully stable..
+					bestLMin = bestRMin = Vec3( bvh_far<Float> ), bestLMax = bestRMax = Vec3( -bvh_far<Float> );
+					for (Index i = sliceStart; i < A; i++)
+						bestLMin = tinybvh_min( bestLMin, fragment[idxTmp[i]].bmin ),
+						bestLMax = tinybvh_max( bestLMax, fragment[idxTmp[i]].bmax );
+					for (Index i = B; i < sliceEnd; i++)
+						bestRMin = tinybvh_min( bestRMin, fragment[idxTmp[i]].bmin ),
+						bestRMax = tinybvh_max( bestRMax, fragment[idxTmp[i]].bmax );
+				}
+				else
+				{
+					// object partitioning
+					const Float rpd = rpd3[bestAxis], nmin = nmin3[bestAxis];
+					for (Index i = 0; i < node.triCount; i++)
+					{
+						const Index fr = primIdx[src + i];
+						int32_t bi = (int32_t)(((fragment[fr].bmin[bestAxis] + fragment[fr].bmax[bestAxis]) * 0.5f - nmin) * rpd);
+						bi = tinybvh_clamp( bi, 0, binCount - 1 );
+						if (bi <= (int32_t)bestPos) idxTmp[A++] = fr; else idxTmp[--B] = fr;
+					}
 				}
 			}
 			// copy back slice data
@@ -6071,11 +6166,11 @@ TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& origi
 	}
 #endif
 	if (tasks > 1) tinybvh_parallel_for( context, tasks, [&]( uint32_t task )
-		{
-			const Index from = (Index)(((uint64_t)nodeCount * task) / tasks);
-			const Index to = (Index)(((uint64_t)nodeCount * (task + 1)) / tasks);
-			for (Index n = from; n < to; n++) EmitNode( bvh4, blocks, base, n );
-		} );
+	{
+		const Index from = (Index)(((uint64_t)nodeCount * task) / tasks);
+		const Index to = (Index)(((uint64_t)nodeCount * (task + 1)) / tasks);
+		for (Index n = from; n < to; n++) EmitNode( bvh4, blocks, base, n );
+	} );
 	else for (Index n = 0; n < nodeCount; n++) EmitNode( bvh4, blocks, base, n );
 	usedBlocks = blocks[0];
 	AlignedFree( blocks ), AlignedFree( base );

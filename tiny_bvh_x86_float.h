@@ -39,6 +39,9 @@ template <> int32_t impl::BVH<float, uint32_t>::IntersectBundle( Ray* rays ) con
 template <> int32_t impl::BVH4_CPU<float, uint32_t>::IsOccludedBundle( Ray* rays, bool* occluded ) const;
 template <> int32_t impl::BVH<float, uint32_t>::IsOccludedBundle( Ray* rays, bool* occluded ) const;
 #endif
+#ifdef BVH_USEAVX2
+template <> void impl::BVH<float, uint32_t>::SortByCentroid( const uint32_t* frag, const uint32_t n, const uint32_t axis, uint8_t* order ) const;
+#endif
 #ifdef BVH_USEAVX
 template <> void impl::BVH<float, uint32_t>::BinBoxClear( BVHBinBox<float>& b );
 template <> void impl::BVH<float, uint32_t>::BinBoxMerge( BVHBinBox<float>& b, const BVHBinBox<float>& o );
@@ -95,6 +98,36 @@ TINYBVH_FORCEINLINE float halfArea( const __m128 a /* a contains extent of aabb 
 {
 	return LANE( a, 0 ) * LANE( a, 1 ) + LANE( a, 1 ) * LANE( a, 2 ) + LANE( a, 2 ) * LANE( a, 3 );
 }
+
+#ifdef BVH_USEAVX2
+// SortByCentroid, AVX2.
+template <> void impl::BVH<float, uint32_t>::SortByCentroid( const uint32_t* frag, const uint32_t n, const uint32_t axis, uint8_t* order ) const
+{
+	ALIGNED( 32 ) int32_t key[8];
+	for (uint32_t i = 0; i < 8; i++)
+	{
+		if (i >= n) { key[i] = 0x7fffffff; continue; }
+		const Fragment& f = fragment[frag[i]];
+		key[i] = (int32_t)tinybvh_centroid_key( f.bmin[axis] + f.bmax[axis], i );
+	}
+	__m256i v = _mm256_load_si256( (const __m256i*)key ), t;
+	// comparators i^1, i^3, i^1, i^7, i^2, i^1; the blend keeps the max in the upper lane.
+	t = _mm256_shuffle_epi32( v, _MM_SHUFFLE( 2, 3, 0, 1 ) );
+	v = _mm256_blend_epi32( _mm256_min_epi32( v, t ), _mm256_max_epi32( v, t ), 0xAA );
+	t = _mm256_shuffle_epi32( v, _MM_SHUFFLE( 0, 1, 2, 3 ) );
+	v = _mm256_blend_epi32( _mm256_min_epi32( v, t ), _mm256_max_epi32( v, t ), 0xCC );
+	t = _mm256_shuffle_epi32( v, _MM_SHUFFLE( 2, 3, 0, 1 ) );
+	v = _mm256_blend_epi32( _mm256_min_epi32( v, t ), _mm256_max_epi32( v, t ), 0xAA );
+	t = _mm256_permutevar8x32_epi32( v, _mm256_setr_epi32( 7, 6, 5, 4, 3, 2, 1, 0 ) );
+	v = _mm256_blend_epi32( _mm256_min_epi32( v, t ), _mm256_max_epi32( v, t ), 0xF0 );
+	t = _mm256_shuffle_epi32( v, _MM_SHUFFLE( 1, 0, 3, 2 ) );
+	v = _mm256_blend_epi32( _mm256_min_epi32( v, t ), _mm256_max_epi32( v, t ), 0xCC );
+	t = _mm256_shuffle_epi32( v, _MM_SHUFFLE( 2, 3, 0, 1 ) );
+	v = _mm256_blend_epi32( _mm256_min_epi32( v, t ), _mm256_max_epi32( v, t ), 0xAA );
+	_mm256_store_si256( (__m256i*)key, v );
+	for (uint32_t i = 0; i < n; i++) order[i] = (uint8_t)(key[i] & 7);
+}
+#endif
 
 #ifdef BVH_USEAVX
 // BinBox helpers, AVX2.
