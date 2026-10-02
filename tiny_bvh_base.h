@@ -958,6 +958,7 @@ private:
 	static void BinBoxAdd( BinBox& b, const Vec3& mn, const Vec3& mx );
 	static Vec3 BinBoxMin( const BinBox& b ) { return Vec3( -b.negMin.x, -b.negMin.y, -b.negMin.z ); }
 	static Vec3 BinBoxMax( const BinBox& b ) { return b.bmax; }
+	static Float BinBoxArea( const BinBox& b ) { return tinybvh_halfarea( Vec3( b.bmax.x + b.negMin.x, b.bmax.y + b.negMin.y, b.bmax.z + b.negMin.z ) ); }
 	void ClipFragToBins( const Fragment& orig, const int32_t bin1, const int32_t bin2, const uint32_t axis,
 		const Float nodeMin, const Float planeDist, BinBox* sbinBox ) const;
 	bool SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t splitAxis, const Float splitPos ) const;
@@ -3146,20 +3147,21 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 			uint32_t bestAxis = 0, bestPos = 0;
 			for (int32_t a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
 			{
-				Vec3 lBMin[MAXHQBINS - 1], rBMin[MAXHQBINS - 1], l1( bvh_far<Float> ), l2( -bvh_far<Float> );
-				Vec3 lBMax[MAXHQBINS - 1], rBMax[MAXHQBINS - 1], r1( bvh_far<Float> ), r2( -bvh_far<Float> );
+				// The running bounds stay in BinBox form: one max folds a whole box, and the
+				// sweep is a serial chain across bins, so the shorter dependency matters as
+				// much as the instruction count. Unpacking happens only for a winner, below.
+				BinBox lB[MAXHQBINS - 1], rB[MAXHQBINS - 1], l, r;
+				BinBoxClear( l ), BinBoxClear( r );
 				Float AL[MAXHQBINS - 1], AR[MAXHQBINS - 1];		// left and right area per split plane
 				Index NL[MAXHQBINS - 1], NR[MAXHQBINS - 1];	// summed left and right tricount
 				for (Index lN = 0, rN = 0, i = 0; i < binCount - 1; i++)
 				{
-					lBMin[i] = l1 = tinybvh_min( l1, BinBoxMin( binBox[a][i] ) );
-					rBMin[binCount - 2 - i] = r1 = tinybvh_min( r1, BinBoxMin( binBox[a][binCount - 1 - i] ) );
-					lBMax[i] = l2 = tinybvh_max( l2, BinBoxMax( binBox[a][i] ) );
-					rBMax[binCount - 2 - i] = r2 = tinybvh_max( r2, BinBoxMax( binBox[a][binCount - 1 - i] ) );
+					BinBoxMerge( l, binBox[a][i] ), lB[i] = l;
+					BinBoxMerge( r, binBox[a][binCount - 1 - i] ), rB[binCount - 2 - i] = r;
 					lN += count[a][i], rN += count[a][binCount - 1 - i];
 					NL[i] = lN, NR[binCount - 2 - i] = rN;
-					AL[i] = lN == 0 ? bvh_far<Float> : tinybvh_halfarea( l2 - l1 );
-					AR[binCount - 2 - i] = rN == 0 ? bvh_far<Float> : tinybvh_halfarea( r2 - r1 );
+					AL[i] = lN == 0 ? bvh_far<Float> : BinBoxArea( l );
+					AR[binCount - 2 - i] = rN == 0 ? bvh_far<Float> : BinBoxArea( r );
 				}
 				// evaluate bin totals to find best position for object split
 				for (uint32_t i = 0; i < binCount - 1; i++)
@@ -3167,7 +3169,8 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 					const Float C = SplitCostSAH( rSAV, AL[i], NL[i], AR[i], NR[i] );
 					if (C >= splitCost) continue;
 					splitCost = C, bestAxis = a, bestPos = i;
-					bestLMin = lBMin[i], bestRMin = rBMin[i], bestLMax = lBMax[i], bestRMax = rBMax[i];
+					bestLMin = BinBoxMin( lB[i] ), bestRMin = BinBoxMin( rB[i] );
+					bestLMax = BinBoxMax( lB[i] ), bestRMax = BinBoxMax( rB[i] );
 				}
 			}
 			// consider a spatial split
@@ -3182,9 +3185,6 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 				for (int a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a]) axisMask |= 1u << a;
 				if (slices > 1)
 				{
-					// The per-bin fragment clipping below is what makes an SBVH build
-					// expensive, and the three axes are independent, so fan out over
-					// (axis, fragment slice) pairs and reduce per axis further down.
 					const Index spatFirst = node.leftFirst, spatCount = node.triCount;
 					const Vec3 nodeMin3 = node.aabbMin, nodeMax3 = node.aabbMax;
 					tinybvh_parallel_for( context, slices * 3, [&]( uint32_t task )
@@ -3251,17 +3251,17 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 						}
 					}
 					// evaluate split candidates
-					Vec3 lBMin[MAXHQBINS - 1], rBMin[MAXHQBINS - 1], l1( bvh_far<Float> ), l2( -bvh_far<Float> );
-					Vec3 lBMax[MAXHQBINS - 1], rBMax[MAXHQBINS - 1], r1( bvh_far<Float> ), r2( -bvh_far<Float> );
+					BinBox lB[MAXHQBINS - 1], rB[MAXHQBINS - 1], l, r;
+					BinBoxClear( l ), BinBoxClear( r );
 					Float AL[MAXHQBINS], AR[MAXHQBINS];
 					Index NL[MAXHQBINS], NR[MAXHQBINS];
 					for (Index lN = 0, rN = 0, i = 0; i < binCount - 1; i++)
 					{
-						lBMin[i] = l1 = tinybvh_min( l1, BinBoxMin( sbinBox[i] ) ), rBMin[binCount - 2 - i] = r1 = tinybvh_min( r1, BinBoxMin( sbinBox[binCount - 1 - i] ) );
-						lBMax[i] = l2 = tinybvh_max( l2, BinBoxMax( sbinBox[i] ) ), rBMax[binCount - 2 - i] = r2 = tinybvh_max( r2, BinBoxMax( sbinBox[binCount - 1 - i] ) );
+						BinBoxMerge( l, sbinBox[i] ), lB[i] = l;
+						BinBoxMerge( r, sbinBox[binCount - 1 - i] ), rB[binCount - 2 - i] = r;
 						lN += countIn[i], rN += countOut[binCount - 1 - i];
-						AL[i] = lN == 0 ? bvh_far<Float> : tinybvh_halfarea( l2 - l1 );
-						AR[binCount - 2 - i] = rN == 0 ? bvh_far<Float> : tinybvh_halfarea( r2 - r1 );
+						AL[i] = lN == 0 ? bvh_far<Float> : BinBoxArea( l );
+						AR[binCount - 2 - i] = rN == 0 ? bvh_far<Float> : BinBoxArea( r );
 						NL[i] = lN, NR[binCount - 2 - i] = rN;
 					}
 					// find best position for spatial split
@@ -3271,7 +3271,8 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 						if (Cspatial < minSplitCost && NL[i] + NR[i] < budget && NL[i] > 0 && NR[i] > 0)
 						{
 							spatial = true, minSplitCost = splitCost = Cspatial, bestAxis = a, bestPos = i;
-							bestLMin = lBMin[i], bestLMax = lBMax[i], bestRMin = rBMin[i], bestRMax = rBMax[i];
+							bestLMin = BinBoxMin( lB[i] ), bestLMax = BinBoxMax( lB[i] );
+							bestRMin = BinBoxMin( rB[i] ), bestRMax = BinBoxMax( rB[i] );
 							bestNL = NL[i], bestNR = NR[i]; // for unsplitting
 							bestLMax[a] = bestRMin[a]; // accurate
 						}
