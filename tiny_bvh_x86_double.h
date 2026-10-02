@@ -1,4 +1,4 @@
-// tiny_bvh_x86_double.h: AVX2 specializations for the double precision layouts.
+﻿// tiny_bvh_x86_double.h: AVX2 specializations for the double precision layouts.
 // Included by tiny_bvh.h; do not include directly.
 
 #ifndef TINY_BVH_H_
@@ -13,6 +13,10 @@
 namespace tinybvh {
 
 // Specializations provided by this header.
+template <> void impl::BVH<double, uint64_t>::BinBoxClear( BVHBinBox<double>& b );
+template <> void impl::BVH<double, uint64_t>::BinBoxMerge( BVHBinBox<double>& b, const BVHBinBox<double>& o );
+template <> void impl::BVH<double, uint64_t>::BinBoxAddFrag( BVHBinBox<double>& b, const Fragment& f );
+template <> void impl::BVH<double, uint64_t>::BinBoxAdd( BVHBinBox<double>& b, const bvhdbl3& mn, const bvhdbl3& mx );
 template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const;
 template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const;
 
@@ -33,6 +37,31 @@ template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( 
 #define TINY_BVH_X86_DOUBLE_H_IMPL
 
 namespace tinybvh {
+
+// BinBox helpers, AVX2, double precision.
+template <> void impl::BVH<double, uint64_t>::BinBoxClear( BVHBinBox<double>& b )
+{
+	const __m256d far4 = _mm256_set1_pd( -bvh_far<double> );
+	_mm256_store_pd( (double*)&b.negMin, far4 ), _mm256_store_pd( (double*)&b.bmax, far4 );
+}
+template <> void impl::BVH<double, uint64_t>::BinBoxMerge( BVHBinBox<double>& b, const BVHBinBox<double>& o )
+{
+	_mm256_store_pd( (double*)&b.negMin, _mm256_max_pd( _mm256_load_pd( (const double*)&b.negMin ), _mm256_load_pd( (const double*)&o.negMin ) ) );
+	_mm256_store_pd( (double*)&b.bmax, _mm256_max_pd( _mm256_load_pd( (const double*)&b.bmax ), _mm256_load_pd( (const double*)&o.bmax ) ) );
+}
+template <> void impl::BVH<double, uint64_t>::BinBoxAddFrag( BVHBinBox<double>& b, const Fragment& f )
+{
+	const __m256d negMin4 = _mm256_xor_pd( _mm256_load_pd( (const double*)&f.bmin ), _mm256_set1_pd( -0.0 ) );
+	_mm256_store_pd( (double*)&b.negMin, _mm256_max_pd( _mm256_load_pd( (const double*)&b.negMin ), negMin4 ) );
+	_mm256_store_pd( (double*)&b.bmax, _mm256_max_pd( _mm256_load_pd( (const double*)&b.bmax ), _mm256_load_pd( (const double*)&f.bmax ) ) );
+}
+template <> void impl::BVH<double, uint64_t>::BinBoxAdd( BVHBinBox<double>& b, const bvhdbl3& mn, const bvhdbl3& mx )
+{
+	const __m256d negMin4 = _mm256_setr_pd( -mn.x, -mn.y, -mn.z, -bvh_far<double> );
+	const __m256d max4 = _mm256_setr_pd( mx.x, mx.y, mx.z, -bvh_far<double> );
+	_mm256_store_pd( (double*)&b.negMin, _mm256_max_pd( _mm256_load_pd( (const double*)&b.negMin ), negMin4 ) );
+	_mm256_store_pd( (double*)&b.bmax, _mm256_max_pd( _mm256_load_pd( (const double*)&b.bmax ), max4 ) );
+}
 
 // BVH4_CPU<double> traversal, AVX2 version.
 // ----------------------------------------------------------------------------
