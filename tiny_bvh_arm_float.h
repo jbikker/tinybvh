@@ -31,6 +31,10 @@ TINYBVH_FORCEINLINE uint32x4_t SIMD_SETRVECU( uint32_t x, uint32_t y, uint32_t z
 }
 
 // Specializations provided by this header.
+template <> void impl::BVH<float, uint32_t>::BinBoxClear( BVHBinBox<float>& b );
+template <> void impl::BVH<float, uint32_t>::BinBoxMerge( BVHBinBox<float>& b, const BVHBinBox<float>& o );
+template <> void impl::BVH<float, uint32_t>::BinBoxAddFrag( BVHBinBox<float>& b, const Fragment& f );
+template <> void impl::BVH<float, uint32_t>::BinBoxAdd( BVHBinBox<float>& b, const bvhvec3& mn, const bvhvec3& mx );
 template <> struct impl::BVHSIMDBuilders<float, uint32_t> { static constexpr bool available = true; };
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const uint32_t first, const uint32_t last, const uint32_t* indices, const int8_t* vertData, const uint32_t stride4, void* frags, float* rootMin, float* rootMax );
@@ -55,6 +59,37 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 #define TINY_BVH_ARM_FLOAT_H_IMPL
 
 namespace tinybvh {
+
+// BinBox helpers, NEON.
+template <> void impl::BVH<float, uint32_t>::BinBoxClear( BVHBinBox<float>& b )
+{
+	const float32x4_t far4 = vdupq_n_f32( -bvh_far<float> );
+	float32x4x2_t v; v.val[0] = far4, v.val[1] = far4;
+	tinybvh_store8( &b.negMin, v );
+}
+template <> void impl::BVH<float, uint32_t>::BinBoxMerge( BVHBinBox<float>& b, const BVHBinBox<float>& o )
+{
+	const float32x4x2_t cur = tinybvh_load8( &b.negMin ), add = tinybvh_load8( &o.negMin );
+	float32x4x2_t v; v.val[0] = vmaxq_f32( cur.val[0], add.val[0] ), v.val[1] = vmaxq_f32( cur.val[1], add.val[1] );
+	tinybvh_store8( &b.negMin, v );
+}
+template <> void impl::BVH<float, uint32_t>::BinBoxAddFrag( BVHBinBox<float>& b, const Fragment& f )
+{
+	const float32x4x2_t cur = tinybvh_load8( &b.negMin ), frag = tinybvh_load8( &f.bmin );
+	float32x4x2_t v;
+	v.val[0] = vmaxq_f32( cur.val[0], vnegq_f32( frag.val[0] ) );
+	v.val[1] = vmaxq_f32( cur.val[1], frag.val[1] );
+	tinybvh_store8( &b.negMin, v );
+}
+template <> void impl::BVH<float, uint32_t>::BinBoxAdd( BVHBinBox<float>& b, const bvhvec3& mn, const bvhvec3& mx )
+{
+	const float32x4x2_t cur = tinybvh_load8( &b.negMin );
+	float32x4x2_t v;
+	v.val[0] = vmaxq_f32( cur.val[0], SIMD_SETRVEC( -mn.x, -mn.y, -mn.z, -bvh_far<float> ) );
+	v.val[1] = vmaxq_f32( cur.val[1], SIMD_SETRVEC( mx.x, mx.y, mx.z, -bvh_far<float> ) );
+	tinybvh_store8( &b.negMin, v );
+}
+
 
 #define ILANE(a,b) vgetq_lane_s32( a, b )
 

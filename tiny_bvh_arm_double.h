@@ -13,6 +13,10 @@
 namespace tinybvh {
 
 // Specializations provided by this header.
+template <> void impl::BVH<double, uint64_t>::BinBoxClear( BVHBinBox<double>& b );
+template <> void impl::BVH<double, uint64_t>::BinBoxMerge( BVHBinBox<double>& b, const BVHBinBox<double>& o );
+template <> void impl::BVH<double, uint64_t>::BinBoxAddFrag( BVHBinBox<double>& b, const Fragment& f );
+template <> void impl::BVH<double, uint64_t>::BinBoxAdd( BVHBinBox<double>& b, const bvhdbl3& mn, const bvhdbl3& mx );
 template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const;
 template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const;
 
@@ -33,6 +37,42 @@ template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( 
 #define TINY_BVH_ARM_DOUBLE_H_IMPL
 
 namespace tinybvh {
+
+// BinBox helpers, NEON, double precision.
+template <> void impl::BVH<double, uint64_t>::BinBoxClear( BVHBinBox<double>& b )
+{
+	const float64x2_t far2 = vdupq_n_f64( -bvh_far<double> );
+	double* p = (double*)&b.negMin;
+	vst1q_f64( p, far2 ), vst1q_f64( p + 2, far2 ), vst1q_f64( p + 4, far2 ), vst1q_f64( p + 6, far2 );
+}
+template <> void impl::BVH<double, uint64_t>::BinBoxMerge( BVHBinBox<double>& b, const BVHBinBox<double>& o )
+{
+	double* p = (double*)&b.negMin; const double* q = (const double*)&o.negMin;
+	vst1q_f64( p, vmaxq_f64( vld1q_f64( p ), vld1q_f64( q ) ) );
+	vst1q_f64( p + 2, vmaxq_f64( vld1q_f64( p + 2 ), vld1q_f64( q + 2 ) ) );
+	vst1q_f64( p + 4, vmaxq_f64( vld1q_f64( p + 4 ), vld1q_f64( q + 4 ) ) );
+	vst1q_f64( p + 6, vmaxq_f64( vld1q_f64( p + 6 ), vld1q_f64( q + 6 ) ) );
+}
+template <> void impl::BVH<double, uint64_t>::BinBoxAddFrag( BVHBinBox<double>& b, const Fragment& f )
+{
+	// lanes 3 and 7 pick up primIdx and clipped; they are never read back.
+	double* p = (double*)&b.negMin; const double* q = (const double*)&f.bmin;
+	vst1q_f64( p, vmaxq_f64( vld1q_f64( p ), vnegq_f64( vld1q_f64( q ) ) ) );
+	vst1q_f64( p + 2, vmaxq_f64( vld1q_f64( p + 2 ), vnegq_f64( vld1q_f64( q + 2 ) ) ) );
+	vst1q_f64( p + 4, vmaxq_f64( vld1q_f64( p + 4 ), vld1q_f64( q + 4 ) ) );
+	vst1q_f64( p + 6, vmaxq_f64( vld1q_f64( p + 6 ), vld1q_f64( q + 6 ) ) );
+}
+template <> void impl::BVH<double, uint64_t>::BinBoxAdd( BVHBinBox<double>& b, const bvhdbl3& mn, const bvhdbl3& mx )
+{
+	double* p = (double*)&b.negMin;
+	const double far = -bvh_far<double>;
+	ALIGNED( 32 ) const double src[8] = { -mn.x, -mn.y, -mn.z, far, mx.x, mx.y, mx.z, far };
+	vst1q_f64( p, vmaxq_f64( vld1q_f64( p ), vld1q_f64( src ) ) );
+	vst1q_f64( p + 2, vmaxq_f64( vld1q_f64( p + 2 ), vld1q_f64( src + 2 ) ) );
+	vst1q_f64( p + 4, vmaxq_f64( vld1q_f64( p + 4 ), vld1q_f64( src + 4 ) ) );
+	vst1q_f64( p + 6, vmaxq_f64( vld1q_f64( p + 6 ), vld1q_f64( src + 6 ) ) );
+}
+
 
 // BVH4_CPU<double> traversal, NEON version.
 // ----------------------------------------------------------------------------
