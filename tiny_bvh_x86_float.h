@@ -31,7 +31,7 @@ TINYBVH_FORCEINLINE void tinybvh_store8i( void* p, const __m256i v ) { memcpy( p
 // Specializations provided by this header.
 #ifdef BVH_USESSE
 template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const;
-template <> void impl::BVH<float, uint32_t>::ClipFragToBins( const Fragment& orig, const int32_t bin1, const int32_t bin2, const uint32_t axis, const float nodeMin, const float planeDist, bvhvec3* sbinMin, bvhvec3* sbinMax ) const;
+template <> void impl::BVH<float, uint32_t>::ClipFragToBins( const Fragment& orig, const int32_t bin1, const int32_t bin2, const uint32_t axis, const float nodeMin, const float planeDist, BVHBinBox<float>* sbinBox ) const;
 template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
 template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
 template <> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectBundle( Ray* rays ) const;
@@ -40,6 +40,10 @@ template <> int32_t impl::BVH4_CPU<float, uint32_t>::IsOccludedBundle( Ray* rays
 template <> int32_t impl::BVH<float, uint32_t>::IsOccludedBundle( Ray* rays, bool* occluded ) const;
 #endif
 #ifdef BVH_USEAVX
+template <> void impl::BVH<float, uint32_t>::BinBoxClear( BVHBinBox<float>& b );
+template <> void impl::BVH<float, uint32_t>::BinBoxMerge( BVHBinBox<float>& b, const BVHBinBox<float>& o );
+template <> void impl::BVH<float, uint32_t>::BinBoxAddFrag( BVHBinBox<float>& b, const Fragment& f );
+template <> void impl::BVH<float, uint32_t>::BinBoxAdd( BVHBinBox<float>& b, const bvhvec3& mn, const bvhvec3& mx );
 template <> struct impl::BVHSIMDBuilders<float, uint32_t> { static constexpr bool available = true; };
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const uint32_t first, const uint32_t last, const uint32_t* indices, const int8_t* vertData, const uint32_t stride4, void* frags, float* rootMin, float* rootMax );
@@ -92,19 +96,44 @@ TINYBVH_FORCEINLINE float halfArea( const __m128 a /* a contains extent of aabb 
 	return LANE( a, 0 ) * LANE( a, 1 ) + LANE( a, 1 ) * LANE( a, 2 ) + LANE( a, 2 ) * LANE( a, 3 );
 }
 
+#ifdef BVH_USEAVX
+// BinBox helpers, AVX2.
+template <> void impl::BVH<float, uint32_t>::BinBoxClear( BVHBinBox<float>& b )
+{
+	_mm256_store_ps( &b.negMin.x, _mm256_set1_ps( -bvh_far<float> ) );
+}
+template <> void impl::BVH<float, uint32_t>::BinBoxMerge( BVHBinBox<float>& b, const BVHBinBox<float>& o )
+{
+	_mm256_store_ps( &b.negMin.x, _mm256_max_ps( _mm256_load_ps( &b.negMin.x ), _mm256_load_ps( &o.negMin.x ) ) );
+}
+template <> void impl::BVH<float, uint32_t>::BinBoxAddFrag( BVHBinBox<float>& b, const Fragment& f )
+{
+	// lanes 3 and 7 pick up primIdx and clipped; they are never read back.
+	_mm256_store_ps( &b.negMin.x, _mm256_max_ps( _mm256_load_ps( &b.negMin.x ),
+		_mm256_xor_ps( tinybvh_load8( &f.bmin ), _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f ) ) ) );
+}
+template <> void impl::BVH<float, uint32_t>::BinBoxAdd( BVHBinBox<float>& b, const bvhvec3& mn, const bvhvec3& mx )
+{
+	const __m128 mn4 = _mm_xor_ps( _mm_setr_ps( mn.x, mn.y, mn.z, 0 ), _mm_set1_ps( -0.0f ) );
+	const __m128 mx4 = _mm_setr_ps( mx.x, mx.y, mx.z, 0 );
+	_mm256_store_ps( &b.negMin.x, _mm256_max_ps( _mm256_load_ps( &b.negMin.x ),
+		_mm256_insertf128_ps( _mm256_castps128_ps256( mn4 ), mx4, 1 ) ) );
+}
+#endif
+
 // ClipFragToBins, SSE version.
 template <> void impl::BVH<float, uint32_t>::ClipFragToBins( const Fragment& orig, const int32_t bin1,
 	const int32_t bin2, const uint32_t axis, const float nodeMin, const float planeDist,
-	bvhvec3* sbinMin, bvhvec3* sbinMax ) const
+	BVHBinBox<float>* sbinBox ) const
 {
 	__m128 vert4[4], left4[5], right4[4];
 	uint32_t n = 3;
 	const uint32_t vidx = orig.primIdx * 3;
-	if (!vertIdx) 
+	if (!vertIdx)
 		memcpy( vert4, &verts[vidx], sizeof( __m128 ) ),
 		memcpy( vert4 + 1, &verts[vidx + 1], sizeof( __m128 ) ),
 		memcpy( vert4 + 2, &verts[vidx + 2], sizeof( __m128 ) );
-	else 
+	else
 		memcpy( vert4, &verts[vertIdx[vidx]], sizeof( __m128 ) ),
 		memcpy( vert4 + 1, &verts[vertIdx[vidx + 1]], sizeof( __m128 ) ),
 		memcpy( vert4 + 2, &verts[vertIdx[vidx + 2]], sizeof( __m128 ) );
@@ -141,17 +170,24 @@ template <> void impl::BVH<float, uint32_t>::ClipFragToBins( const Fragment& ori
 			ALIGNED( 16 ) float bn[4], bx[4];
 			tinybvh_store4( bn, bmin4 ), tinybvh_store4( bx, bmax4 );
 			const float ex = bx[0] - bn[0], ey = bx[1] - bn[1], ez = bx[2] - bn[2];
-			if (ex * ey + ey * ez + ez * ex <= 0) continue;
-			bvhvec3& dmin = sbinMin[j]; bvhvec3& dmax = sbinMax[j];
-			dmin.x = tinybvh_min( dmin.x, bn[0] ), dmin.y = tinybvh_min( dmin.y, bn[1] ), dmin.z = tinybvh_min( dmin.z, bn[2] );
-			dmax.x = tinybvh_max( dmax.x, bx[0] ), dmax.y = tinybvh_max( dmax.y, bx[1] ), dmax.z = tinybvh_max( dmax.z, bx[2] );
+			if (ex * ey + ey * ez + ez * ex > 0)
+			{
+			#ifdef BVH_USEAVX
+				// One 8-wide max folds the whole box in: the low half holds the negated
+				// minimum, so a max updates both bounds at once.
+				const __m256 box8 = _mm256_insertf128_ps( _mm256_castps128_ps256(
+					_mm_xor_ps( bmin4, _mm_set1_ps( -0.0f ) ) ), bmax4, 1 );
+				_mm256_store_ps( &sbinBox[j].negMin.x, _mm256_max_ps( _mm256_load_ps( &sbinBox[j].negMin.x ), box8 ) );
+			#else
+				BinBoxAdd( sbinBox[j], bvhvec3( bn[0], bn[1], bn[2] ), bvhvec3( bx[0], bx[1], bx[2] ) );
+			#endif
+			}
 		}
 		if (j == bin2) break;
-		memcpy( vert4, right4, 4 * sizeof( __m128 ) );
+		memcpy( vert4, right4, nr * sizeof( __m128 ) );
 		n = nr;
 	}
 }
-
 
 // SplitFrag: cut a fragment in two new fragments. Based on madmann91 code.
 template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const
