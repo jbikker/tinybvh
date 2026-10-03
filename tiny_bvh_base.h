@@ -775,6 +775,9 @@ public:
 	bool l_quads = false;			// some layouts have 4 prims in each leaf; adjust SAH cost for this.
 	uint32_t hqbvhbins = HQBVHBINS;	// number of bins to use in SBVH construction.
 	bool hqbvhoddeven = false;		// if true, odd levels will use one extra bin during construction.
+	// SBVH builder: nodes of at most this many prims become leaves without being split.
+	// Set to 0 to leave the decision to SAH
+	uint32_t hqLeafPrims = 0;
 	Vec3 aabbMin, aabbMax;		// bounds of the root node of the BVH.
 	// Opacity maps support.
 	uint32_t opmapN = 0;			// opacity micro map subdivision: 0 = no maps.
@@ -830,6 +833,7 @@ public:
 	using Base::l_quads;
 	using Base::hqbvhbins;
 	using Base::hqbvhoddeven;
+	using Base::hqLeafPrims;
 	using Base::aabbMin;
 	using Base::aabbMax;
 	using Base::opmapN;
@@ -1234,6 +1238,14 @@ public:
 	Index LeafCount( const Index nodeIdx = 0 ) const;
 	Float SAHCost( const Index nodeIdx = 0 ) const;
 	void ConvertFrom( const BVH& original, bool compact = true );
+	// pass 3 of ConvertFrom, split so each output level can be decoded in parallel.
+	uint32_t DecodeWalk( const BVH& original, const Index src, const uint8_t* dist, Index* term ) const;
+	void DecodeCount( const BVH& original, const Index from, const Index to, const uint8_t* dist,
+		const Index* srcNode, Index* first ) const;
+	void DecodeWrite( const BVH& original, const Index from, const Index to, const uint8_t* dist,
+		const uint8_t* flag, const Index* subFirst, const Index* subCount, const Index* first, Index* srcNode );
+	void DecodeEmit( const BVH& original, const Index i, const Index* term, const uint32_t n, const Index firstChild,
+		const uint8_t* flag, const Index* subFirst, const Index* subCount, Index* srcNode );
 	// BVH data
 	MBVHNode* mbvhNode = 0;			// BVH node for M-wide BVH.
 	BVH bvh;						// MBVH<M> is created from BVH and uses its data.
@@ -1454,7 +1466,7 @@ public:
 	void Optimize( const uint32_t iterations, bool extreme );
 	void Refit();
 	Float SAHCost( const Index nodeIdx ) const;
-	void ConvertFrom( MBVH<4, Float, Index>& original );
+	void ConvertFrom( MBVH<4, Float, Index>& original, bool leavesMerged = false );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// Traversal kernels specialized for the ray octant; the platform headers provide these.
@@ -1648,7 +1660,7 @@ public:
 	void Optimize( const uint32_t iterations, bool extreme );
 	void Refit();
 	Float SAHCost( const Index nodeIdx ) const;
-	void ConvertFrom( MBVH<8, Float, Index>& original );
+	void ConvertFrom( MBVH<8, Float, Index>& original, bool leavesMerged = false );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// Traversal kernels specialized for the ray octant; the platform headers provide these.
@@ -2887,37 +2899,37 @@ TEMPLATED void BVH<Float, Index>::PrepareHQBuild( const Slice& vertices, const I
 	{
 		ALIGNED( 64 ) BVHPrepHQBounds<Float, Index> bounds[MT_PREP_MAX_TASKS]; // one cache line each; no false sharing.
 		tinybvh_parallel_for( context, tasks, [&]( uint32_t task )
-		{
-			const Index first = (Index)(((uint64_t)triCount * task) / tasks);
-			const Index last = (Index)(((uint64_t)triCount * (task + 1)) / tasks);
-			Vec3 bmin( bvh_far<Float> ), bmax( -bvh_far<Float> );
-			// the indexed test stays out of the inner loop, as it was when this
-			// lived in a function of its own.
-			if (!indices) for (Index i = first; i < last; i++)
 			{
-				// triangles specified as three 16-byte vertices each.
-				const Vertex v0 = verts[i * 3], v1 = verts[i * 3 + 1], v2 = verts[i * 3 + 2];
-				const Vertex fmin = tinybvh_min( v0, tinybvh_min( v1, v2 ) );
-				const Vertex fmax = tinybvh_max( v0, tinybvh_max( v1, v2 ) );
-				fragment[i].bmin = fmin, fragment[i].bmax = fmax;
-				fragment[i].primIdx = i, fragment[i].clipped = 0;
-				bmin = tinybvh_min( bmin, fragment[i].bmin );
-				bmax = tinybvh_max( bmax, fragment[i].bmax ), primIdx[i] = i;
-			}
-			else for (Index i = first; i < last; i++)
-			{
-				// triangles consisting of vertices indexed by 'indices'.
-				const Index i0 = indices[i * 3], i1 = indices[i * 3 + 1], i2 = indices[i * 3 + 2];
-				const Vertex v0 = verts[i0], v1 = verts[i1], v2 = verts[i2];
-				const Vertex fmin = tinybvh_min( v0, tinybvh_min( v1, v2 ) );
-				const Vertex fmax = tinybvh_max( v0, tinybvh_max( v1, v2 ) );
-				fragment[i].bmin = fmin, fragment[i].bmax = fmax;
-				fragment[i].primIdx = i, fragment[i].clipped = 0;
-				bmin = tinybvh_min( bmin, fragment[i].bmin );
-				bmax = tinybvh_max( bmax, fragment[i].bmax ), primIdx[i] = i;
-			}
-			bounds[task].bmin = bmin, bounds[task].bmax = bmax;
-		} );
+				const Index first = (Index)(((uint64_t)triCount * task) / tasks);
+				const Index last = (Index)(((uint64_t)triCount * (task + 1)) / tasks);
+				Vec3 bmin( bvh_far<Float> ), bmax( -bvh_far<Float> );
+				// the indexed test stays out of the inner loop, as it was when this
+				// lived in a function of its own.
+				if (!indices) for (Index i = first; i < last; i++)
+				{
+					// triangles specified as three 16-byte vertices each.
+					const Vertex v0 = verts[i * 3], v1 = verts[i * 3 + 1], v2 = verts[i * 3 + 2];
+					const Vertex fmin = tinybvh_min( v0, tinybvh_min( v1, v2 ) );
+					const Vertex fmax = tinybvh_max( v0, tinybvh_max( v1, v2 ) );
+					fragment[i].bmin = fmin, fragment[i].bmax = fmax;
+					fragment[i].primIdx = i, fragment[i].clipped = 0;
+					bmin = tinybvh_min( bmin, fragment[i].bmin );
+					bmax = tinybvh_max( bmax, fragment[i].bmax ), primIdx[i] = i;
+				}
+				else for (Index i = first; i < last; i++)
+				{
+					// triangles consisting of vertices indexed by 'indices'.
+					const Index i0 = indices[i * 3], i1 = indices[i * 3 + 1], i2 = indices[i * 3 + 2];
+					const Vertex v0 = verts[i0], v1 = verts[i1], v2 = verts[i2];
+					const Vertex fmin = tinybvh_min( v0, tinybvh_min( v1, v2 ) );
+					const Vertex fmax = tinybvh_max( v0, tinybvh_max( v1, v2 ) );
+					fragment[i].bmin = fmin, fragment[i].bmax = fmax;
+					fragment[i].primIdx = i, fragment[i].clipped = 0;
+					bmin = tinybvh_min( bmin, fragment[i].bmin );
+					bmax = tinybvh_max( bmax, fragment[i].bmax ), primIdx[i] = i;
+				}
+				bounds[task].bmin = bmin, bounds[task].bmax = bmax;
+			} );
 		for (uint32_t t = 0; t < tasks; t++)
 			root.aabbMin = tinybvh_min( root.aabbMin, bounds[t].bmin ),
 			root.aabbMax = tinybvh_max( root.aabbMax, bounds[t].bmax );
@@ -2960,7 +2972,6 @@ TEMPLATED void BVH<Float, Index>::BuildHQ()
 	// Threaded SBVH builder entry point.
 	const Index slack = triCount >> 1; // for split prims
 	Index* idxTmp = (Index*)AlignedAlloc( (triCount + slack) * sizeof( Index ) );
-	memset( idxTmp, 0, (triCount + slack) * sizeof( Index ) );
 	// reset node pool
 	newNodePtr = 2, nextFrag = triCount;
 #ifdef ENABLE_THREADED_BUILDS
@@ -3146,10 +3157,9 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 		{
 			// fetch node to subdivide
 			BVHNode& node = bvhNode[nodeIdx];
-			// A single fragment cannot be usefully split, so it is a leaf without binning.
-			if (node.triCount == 1)
+			if (node.triCount == 1 || node.triCount <= (Index)hqLeafPrims)
 			{
-				primIdx[node.leftFirst] = fragment[primIdx[node.leftFirst]].primIdx;
+				for (Index i = 0; i < node.triCount; i++) primIdx[node.leftFirst + i] = fragment[primIdx[node.leftFirst + i]].primIdx;
 				break;
 			}
 			Index A = sliceStart, B = sliceEnd;
@@ -3193,28 +3203,28 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 					// bin one slice of the fragment range per task, then reduce in slice order.
 					const Index objFirst = node.leftFirst, objCount = node.triCount;
 					tinybvh_parallel_for( context, slices, [&]( uint32_t slice )
-					{
-						const size_t slot = (size_t)slice * 3 * binCount;
-						BinBox* bBox = sliceBox + slot;
-						Index* bCnt = sliceCnt + slot;
-						for (uint32_t i = 0; i < 3 * binCount; i++) BinBoxClear( bBox[i] ), bCnt[i] = 0;
-						const Index from = objFirst + (Index)(((uint64_t)objCount * slice) / slices);
-						const Index to = objFirst + (Index)(((uint64_t)objCount * (slice + 1)) / slices);
-						for (Index i = from; i < to; i++) // process all tris for x, y and z at once
 						{
-							const Index fi = primIdx[i];
-							const Fragment& f = fragment[fi];
-							const Vec3 fbi = ((f.bmin + f.bmax) * 0.5f - nmin3) * rpd3;
-							bvhint3 bi( (int32_t)fbi.x, (int32_t)fbi.y, (int32_t)fbi.z );
-							bi.x = tinybvh_clamp( bi.x, 0, binCount - 1 );
-							bi.y = tinybvh_clamp( bi.y, 0, binCount - 1 );
-							bi.z = tinybvh_clamp( bi.z, 0, binCount - 1 );
-							const uint32_t b0 = (uint32_t)bi.x, b1 = binCount + (uint32_t)bi.y, b2 = 2 * binCount + (uint32_t)bi.z;
-							BinBoxAddFrag( bBox[b0], f ), bCnt[b0]++;
-							BinBoxAddFrag( bBox[b1], f ), bCnt[b1]++;
-							BinBoxAddFrag( bBox[b2], f ), bCnt[b2]++;
-						}
-					} );
+							const size_t slot = (size_t)slice * 3 * binCount;
+							BinBox* bBox = sliceBox + slot;
+							Index* bCnt = sliceCnt + slot;
+							for (uint32_t i = 0; i < 3 * binCount; i++) BinBoxClear( bBox[i] ), bCnt[i] = 0;
+							const Index from = objFirst + (Index)(((uint64_t)objCount * slice) / slices);
+							const Index to = objFirst + (Index)(((uint64_t)objCount * (slice + 1)) / slices);
+							for (Index i = from; i < to; i++) // process all tris for x, y and z at once
+							{
+								const Index fi = primIdx[i];
+								const Fragment& f = fragment[fi];
+								const Vec3 fbi = ((f.bmin + f.bmax) * 0.5f - nmin3) * rpd3;
+								bvhint3 bi( (int32_t)fbi.x, (int32_t)fbi.y, (int32_t)fbi.z );
+								bi.x = tinybvh_clamp( bi.x, 0, binCount - 1 );
+								bi.y = tinybvh_clamp( bi.y, 0, binCount - 1 );
+								bi.z = tinybvh_clamp( bi.z, 0, binCount - 1 );
+								const uint32_t b0 = (uint32_t)bi.x, b1 = binCount + (uint32_t)bi.y, b2 = 2 * binCount + (uint32_t)bi.z;
+								BinBoxAddFrag( bBox[b0], f ), bCnt[b0]++;
+								BinBoxAddFrag( bBox[b1], f ), bCnt[b1]++;
+								BinBoxAddFrag( bBox[b2], f ), bCnt[b2]++;
+							}
+						} );
 					for (uint32_t s = 0; s < slices; s++)
 					{
 						const size_t base = (size_t)s * 3 * binCount;
@@ -3275,38 +3285,42 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 					Float minSplitCost = splitCost * 0.985f; // don't accept a spatial split for minimal gain
 					uint32_t axisMask = 0;
 					for (int a = 0; a < 3; a++) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a]) axisMask |= 1u << a;
+					// Skip smallest axis; winning spatial splits almost never lie on it.
+					const Vec3 extent = node.aabbMax - node.aabbMin;
+					const uint32_t smallest = extent.x < extent.y ? (extent.x < extent.z ? 0 : 2) : (extent.y < extent.z ? 1 : 2);
+					if (axisMask & ~(1u << smallest)) axisMask &= ~(1u << smallest);
 					if (slices > 1)
 					{
 						const Index spatFirst = node.leftFirst, spatCount = node.triCount;
 						const Vec3 nodeMin3 = node.aabbMin, nodeMax3 = node.aabbMax;
 						tinybvh_parallel_for( context, slices * 3, [&]( uint32_t task )
-						{
-							const uint32_t slice = task / 3;
-							const int32_t a = (int32_t)(task % 3);
-							const size_t slot = (size_t)task * binCount; // == (slice * 3 + a) * binCount
-							BinBox* sbBox = sliceBox + slot;
-							int32_t* cIn = sliceIn + slot; int32_t* cOut = sliceOut + slot;
-							for (uint32_t i = 0; i < binCount; i++)
-								BinBoxClear( sbBox[i] ), cIn[i] = 0, cOut[i] = 0;
-							// axes too thin to split on are still zeroed, so the reduction never reads garbage.
-							if (!(axisMask & (1u << a))) return;
-							const Float planeDist = (nodeMax3[a] - nodeMin3[a]) / (binCount * 0.9999f);
-							const Float rPlaneDist = 1.0f / planeDist, nodeMin = nodeMin3[a];
-							const Index from = spatFirst + (Index)(((uint64_t)spatCount * slice) / slices);
-							const Index to = spatFirst + (Index)(((uint64_t)spatCount * (slice + 1)) / slices);
-							for (Index i = from; i < to; i++)
 							{
-								const Index fi = primIdx[i];
-								const Fragment& f = fragment[fi];
-								const int bin1 = tinybvh_clamp( (int32_t)((f.bmin[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
-								const int bin2 = tinybvh_clamp( (int32_t)((f.bmax[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
-								cIn[bin1]++, cOut[bin2]++;
-								if (bin2 == bin1) // fragment fits in a single bin
-									BinBoxAddFrag( sbBox[bin1], f );
-								else // clip the fragment across the bins it overlaps, in one walk
-									ClipFragToBins( f, bin1, bin2, a, nodeMin, planeDist, sbBox );
-							}
-						} );
+								const uint32_t slice = task / 3;
+								const int32_t a = (int32_t)(task % 3);
+								const size_t slot = (size_t)task * binCount; // == (slice * 3 + a) * binCount
+								BinBox* sbBox = sliceBox + slot;
+								int32_t* cIn = sliceIn + slot; int32_t* cOut = sliceOut + slot;
+								for (uint32_t i = 0; i < binCount; i++)
+									BinBoxClear( sbBox[i] ), cIn[i] = 0, cOut[i] = 0;
+								// axes too thin to split on are still zeroed, so the reduction never reads garbage.
+								if (!(axisMask & (1u << a))) return;
+								const Float planeDist = (nodeMax3[a] - nodeMin3[a]) / (binCount * 0.9999f);
+								const Float rPlaneDist = 1.0f / planeDist, nodeMin = nodeMin3[a];
+								const Index from = spatFirst + (Index)(((uint64_t)spatCount * slice) / slices);
+								const Index to = spatFirst + (Index)(((uint64_t)spatCount * (slice + 1)) / slices);
+								for (Index i = from; i < to; i++)
+								{
+									const Index fi = primIdx[i];
+									const Fragment& f = fragment[fi];
+									const int bin1 = tinybvh_clamp( (int32_t)((f.bmin[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
+									const int bin2 = tinybvh_clamp( (int32_t)((f.bmax[a] - nodeMin) * rPlaneDist), 0, binCount - 1 );
+									cIn[bin1]++, cOut[bin2]++;
+									if (bin2 == bin1) // fragment fits in a single bin
+										BinBoxAddFrag( sbBox[bin1], f );
+									else // clip the fragment across the bins it overlaps, in one walk
+										ClipFragToBins( f, bin1, bin2, a, nodeMin, planeDist, sbBox );
+								}
+							} );
 					}
 					for (int a = 0; a < 3; a++) if (axisMask & (1u << a))
 					{
@@ -3767,28 +3781,28 @@ TEMPLATED Float BVH<Float, Index>::EPOCost( const Index nodeIdx, uint32_t ) cons
 	// the SAH term and the total primitive area are sums over the same index
 	// ranges, so they ride along in the same pass instead of costing a second one.
 	tinybvh_parallel_for( context, tasks, [&]( uint32_t task )
-	{
-		// score a contiguous slice of the node list
-		double e = 0, s = 0;
-		const Index first = (Index)(((uint64_t)count * task) / tasks);
-		const Index last = (Index)(((uint64_t)count * (task + 1)) / tasks);
-		for (Index i = first; i < last; i++)
 		{
-			const Index idx = list[i];
-			const BVHNode& n = bvhNode[idx];
-			const double w = n.isLeaf() ? ((double)c_int * n.triCount) : (double)c_trav;
-			s += w * (double)n.SurfaceArea();
-			e += w * (double)EPOArea( idx );
-		}
-		epo[task] = e, sah[task] = s;
-		// the SAH term and the total primitive area are sums over the same index
-		// ranges, so they ride along in the same pass instead of costing a second one.
-		double ar = 0;
-		const Index p0 = (Index)(((uint64_t)triCount * task) / tasks);
-		const Index p1 = (Index)(((uint64_t)triCount * (task + 1)) / tasks);
-		for (Index i = p0; i < p1; i++) ar += (double)PrimArea( i );
-		area[task] = ar;
-	} );
+			// score a contiguous slice of the node list
+			double e = 0, s = 0;
+			const Index first = (Index)(((uint64_t)count * task) / tasks);
+			const Index last = (Index)(((uint64_t)count * (task + 1)) / tasks);
+			for (Index i = first; i < last; i++)
+			{
+				const Index idx = list[i];
+				const BVHNode& n = bvhNode[idx];
+				const double w = n.isLeaf() ? ((double)c_int * n.triCount) : (double)c_trav;
+				s += w * (double)n.SurfaceArea();
+				e += w * (double)EPOArea( idx );
+			}
+			epo[task] = e, sah[task] = s;
+			// the SAH term and the total primitive area are sums over the same index
+			// ranges, so they ride along in the same pass instead of costing a second one.
+			double ar = 0;
+			const Index p0 = (Index)(((uint64_t)triCount * task) / tasks);
+			const Index p1 = (Index)(((uint64_t)triCount * (task + 1)) / tasks);
+			for (Index i = p0; i < p1; i++) ar += (double)PrimArea( i );
+			area[task] = ar;
+		} );
 	double epoSum = 0, sahSum = 0, areaSum = 0;
 	for (uint32_t i = 0; i < tasks; i++)
 		epoSum += epo[i], sahSum += sah[i], areaSum += area[i];
@@ -5355,6 +5369,83 @@ TEMPLATED_M Float MBVH<M, Float, Index>::SAHCost( const Index nodeIdx ) const
 // Collapse a BVH2 into an M-wide BVH. Based on "Efficient Incoherent Ray Traversal on GPUs 
 // Through Compressed Wide BVHs", Ylitie et al. 2017, section 4.2.
 static constexpr float c_leaf = C_INT * 0.8f;
+// DecodeWalk: the binary-tree nodes that become the children of output node 'src',
+// in slot order, following the slot distribution the dynamic program tabulated.
+TEMPLATED_M uint32_t MBVH<M, Float, Index>::DecodeWalk( const BVH& original, const Index src, const uint8_t* dist, Index* term ) const
+{
+	Index task[M + 2];
+	int32_t taskSlots[M + 2], tasks = 1;
+	uint32_t n = 0;
+	task[0] = src, taskSlots[0] = M;
+	while (tasks > 0)
+	{
+		const Index c = task[--tasks];
+		const int32_t slots = taskSlots[tasks];
+		const typename BVH::BVHNode& child = original.bvhNode[c];
+		if (slots > 1 && !child.isLeaf() && dist[(size_t)c * M + slots - 1] != 0)
+		{
+			const int32_t k = dist[(size_t)c * M + slots - 1];
+			task[tasks] = child.leftFirst + 1, taskSlots[tasks++] = slots - k; // right first,
+			task[tasks] = child.leftFirst, taskSlots[tasks++] = k; // so that left pops first.
+			continue;
+		}
+		term[n++] = c;
+	}
+	return n;
+}
+
+// DecodeCount: number of children of each output node in [from, to); leaves have none.
+TEMPLATED_M void MBVH<M, Float, Index>::DecodeCount( const BVH& original, const Index from, const Index to,
+	const uint8_t* dist, const Index* srcNode, Index* first ) const
+{
+	constexpr Index NOTANODE = (Index)-1;
+	Index term[M];
+	for (Index i = from; i < to; i++)
+		first[i] = srcNode[i] == NOTANODE ? 0 : DecodeWalk( original, srcNode[i], dist, term );
+}
+
+// DecodeEmit: write output node i, whose children are the binary nodes term[0..n),
+// placed from firstChild on. Writes only node i and its own children, so disjoint
+// ranges of a level can run in parallel; this level's srcNode entries are read, the
+// next level's are written.
+TEMPLATED_M void MBVH<M, Float, Index>::DecodeEmit( const BVH& original, const Index i, const Index* term,
+	const uint32_t n, const Index firstChild, const uint8_t* flag, const Index* subFirst, const Index* subCount, Index* srcNode )
+{
+	constexpr uint8_t ASLEAF = 4;
+	constexpr Index NOTANODE = (Index)-1;
+	MBVHNode& node = this->mbvhNode[i];
+	memset( &node, 0, sizeof( MBVHNode ) ); // unused child slots must read as 0
+	const typename BVH::BVHNode& orig = original.bvhNode[srcNode[i]];
+	node.aabbMin = orig.aabbMin, node.aabbMax = orig.aabbMax;
+	node.triCount = 0, node.childCount = 0;
+	for (uint32_t j = 0; j < n; j++)
+	{
+		const Index c = term[j], childIdx = firstChild + j;
+		const typename BVH::BVHNode& child = original.bvhNode[c];
+		node.child[node.childCount++] = childIdx;
+		if (flag[c] & ASLEAF)
+		{
+			MBVHNode& leaf = this->mbvhNode[childIdx];
+			memset( &leaf, 0, sizeof( MBVHNode ) );
+			leaf.aabbMin = child.aabbMin, leaf.aabbMax = child.aabbMax;
+			leaf.firstTri = subFirst[c], leaf.triCount = subCount[c], leaf.childCount = 0;
+			srcNode[childIdx] = NOTANODE;
+		}
+		else srcNode[childIdx] = c;
+	}
+}
+
+// DecodeWrite: walk and emit each output node in [from, to); first[i] is the offset of
+// node i's children, computed beforehand from DecodeCount.
+TEMPLATED_M void MBVH<M, Float, Index>::DecodeWrite( const BVH& original, const Index from, const Index to,
+	const uint8_t* dist, const uint8_t* flag, const Index* subFirst, const Index* subCount, const Index* first, Index* srcNode )
+{
+	constexpr Index NOTANODE = (Index)-1;
+	Index term[M];
+	for (Index i = from; i < to; i++) if (srcNode[i] != NOTANODE)
+		DecodeEmit( original, i, term, DecodeWalk( original, srcNode[i], dist, term ), first[i], flag, subFirst, subCount, srcNode );
+}
+
 TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( const BVH& original, bool compact )
 {
 	// get a copy of the original bvh
@@ -5391,7 +5482,6 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( const BVH& original, bool c
 	Index* srcNode = (Index*)AlignedAlloc( (size_t)spaceNeeded * sizeof( Index ) );
 	uint8_t* flag = (uint8_t*)AlignedAlloc( (size_t)N );
 	constexpr uint8_t USED = 1, CONTIG = 2, ASLEAF = 4;
-	constexpr Index NOTANODE = (Index)-1;
 	memset( flag, 0, N );
 	// pass 1: mark the nodes that are actually part of the tree. A child always
 	// has a higher index than its parent, so one forward sweep suffices.
@@ -5447,46 +5537,52 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( const BVH& original, bool c
 		for (int32_t i = 2; i <= M; i++) if (cost[base] < cost[base + i - 1])
 			cost[base + i - 1] = cost[base], dist[base + i - 1] = 0;
 	}
-	// pass 3: decode the solution, breadth-first, so the children of a node end
-	// up in consecutive entries of the node pool.
-	usedNodes = 1, srcNode[0] = 0;
-	for (Index i = 0; i < usedNodes; i++)
+	// pass 3: decode, breadth-first, so the children end up in consecutive entries of the node pool.
+	Index* first = (Index*)AlignedAlloc( (size_t)spaceNeeded * sizeof( Index ) );
+	srcNode[0] = 0;
+	Index lvlStart = 0, lvlEnd = 1;
+	while (lvlStart < lvlEnd)
 	{
-		if (srcNode[i] == NOTANODE) continue; // this one is a leaf; already final.
-		MBVHNode& node = this->mbvhNode[i];
-		memset( &node, 0, sizeof( MBVHNode ) ); // unused child slots must read as 0
-		const typename BVH::BVHNode& orig = original.bvhNode[srcNode[i]];
-		node.aabbMin = orig.aabbMin, node.aabbMax = orig.aabbMax;
-		node.triCount = 0, node.childCount = 0;
-		// hand out the M child slots according to the tabulated distribution
-		Index task[M + 2];
-		int32_t taskSlots[M + 2], tasks = 1;
-		task[0] = srcNode[i], taskSlots[0] = M;
-		while (tasks > 0)
+		const Index count = lvlEnd - lvlStart;
+		uint32_t tasks = 1;
+	#ifdef ENABLE_THREADED_BUILDS
+		if (this->settings.enableThreading && this->context.parallel_for && count >= 2 * (Index)MT_CONVERT_TASK_NODES)
+			tasks = (uint32_t)tinybvh_min( (Index)MT_CONVERT_MAX_TASKS, count / (Index)MT_CONVERT_TASK_NODES );
+	#endif
+		Index next = lvlEnd;
+		if (tasks > 1)
 		{
-			const Index c = task[--tasks];
-			const int32_t slots = taskSlots[tasks];
-			const typename BVH::BVHNode& child = original.bvhNode[c];
-			if (slots > 1 && !child.isLeaf() && dist[(size_t)c * M + slots - 1] != 0)
-			{
-				const int32_t k = dist[(size_t)c * M + slots - 1];
-				task[tasks] = child.leftFirst + 1, taskSlots[tasks++] = slots - k; // right first,
-				task[tasks] = child.leftFirst, taskSlots[tasks++] = k; // so that left pops first.
-				continue;
-			}
-			const Index childIdx = usedNodes++;
-			node.child[node.childCount++] = childIdx;
-			if (flag[c] & ASLEAF)
-			{
-				MBVHNode& leaf = this->mbvhNode[childIdx];
-				memset( &leaf, 0, sizeof( MBVHNode ) );
-				leaf.aabbMin = child.aabbMin, leaf.aabbMax = child.aabbMax;
-				leaf.firstTri = subFirst[c], leaf.triCount = subCount[c], leaf.childCount = 0;
-				srcNode[childIdx] = NOTANODE;
-			}
-			else srcNode[childIdx] = c;
+			tinybvh_parallel_for( this->context, tasks, [&]( uint32_t task )
+				{
+					const Index from = lvlStart + (Index)(((uint64_t)count * task) / tasks);
+					const Index to = lvlStart + (Index)(((uint64_t)count * (task + 1)) / tasks);
+					DecodeCount( original, from, to, dist, srcNode, first );
+				} );
+			// the only serial step per level: child counts become first-child offsets.
+			for (Index i = lvlStart; i < lvlEnd; i++) { const Index c = first[i]; first[i] = next, next += c; }
+			tinybvh_parallel_for( this->context, tasks, [&]( uint32_t task )
+				{
+					const Index from = lvlStart + (Index)(((uint64_t)count * task) / tasks);
+					const Index to = lvlStart + (Index)(((uint64_t)count * (task + 1)) / tasks);
+					DecodeWrite( original, from, to, dist, flag, subFirst, subCount, first, srcNode );
+				} );
 		}
+		else
+		{
+			// a level too small to split, or a single-threaded build: one walk per node,
+			// with offsets assigned as it goes. This is the sequential decode exactly.
+			Index term[M];
+			for (Index i = lvlStart; i < lvlEnd; i++) if (srcNode[i] != (Index)-1)
+			{
+				const uint32_t n = DecodeWalk( original, srcNode[i], dist, term );
+				DecodeEmit( original, i, term, n, next, flag, subFirst, subCount, srcNode );
+				next += n;
+			}
+		}
+		lvlStart = lvlEnd, lvlEnd = next;
 	}
+	usedNodes = lvlEnd;
+	AlignedFree( first );
 	// finalize
 	AlignedFree( cost ), AlignedFree( dist ), AlignedFree( subFirst );
 	AlignedFree( subCount ), AlignedFree( srcNode ), AlignedFree( flag );
@@ -5977,10 +6073,11 @@ TEMPLATED void BVH4_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	// propagate settings for this layout to the underlying layout
 	bvh4.bvh.context = bvh4.context = context, bvh4.bvh.settings = bvh4.settings = settings;
 	bvh4.bvh.c_int = bvh4.c_int = c_int, bvh4.bvh.c_trav = bvh4.c_trav = c_trav;
+	bvh4.bvh.hqLeafPrims = 4;
 	// build underlying layout
 	bvh4.bvh.Build( vertices, indices, prims );
 	// convert to BVH4_CPU layout
-	ConvertFrom( bvh4 );
+	ConvertFrom( bvh4, settings.useSpatialSplits && !settings.postOptimize );
 }
 
 TEMPLATED void BVH4_CPU<Float, Index>::Save( const char* fileName )
@@ -6098,15 +6195,18 @@ TEMPLATED void BVH4_CPU<Float, Index>::EmitNode( MBVH<4, Float, Index>& src, con
 	(void)blocks;
 }
 
-TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& original )
+TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& original, bool leavesMerged )
 {
 	// Note: identical to BVH8_CPU version, just with fewer lanes.
 	// get a copy of the input bvh4
 	if (&original != &bvh4) ownBVH4 = false; // bvh isn't ours; don't delete in destructor.
 	bvh4.ReferenceFrom( original );
 	// prepare input bvh4
-	Index firstIdx = 0;
-	bvh4.bvh.CombineLeafs( 4, firstIdx, 0 );
+	if (!leavesMerged)
+	{
+		Index firstIdx = 0;
+		bvh4.bvh.CombineLeafs( 4, firstIdx, 0 );
+	}
 	bvh4.bvh.SplitLeafs( 4 );
 	bvh4.leafPrimLimit = 4, bvh4.l_quads = l_quads; // leaves in this layout hold 4 prims
 	bvh4.c_int = c_int, bvh4.c_trav = c_trav;
@@ -6166,11 +6266,11 @@ TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& origi
 	}
 #endif
 	if (tasks > 1) tinybvh_parallel_for( context, tasks, [&]( uint32_t task )
-	{
-		const Index from = (Index)(((uint64_t)nodeCount * task) / tasks);
-		const Index to = (Index)(((uint64_t)nodeCount * (task + 1)) / tasks);
-		for (Index n = from; n < to; n++) EmitNode( bvh4, blocks, base, n );
-	} );
+		{
+			const Index from = (Index)(((uint64_t)nodeCount * task) / tasks);
+			const Index to = (Index)(((uint64_t)nodeCount * (task + 1)) / tasks);
+			for (Index n = from; n < to; n++) EmitNode( bvh4, blocks, base, n );
+		} );
 	else for (Index n = 0; n < nodeCount; n++) EmitNode( bvh4, blocks, base, n );
 	usedBlocks = blocks[0];
 	AlignedFree( blocks ), AlignedFree( base );
@@ -6215,11 +6315,13 @@ TEMPLATED void BVH8_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	// propagate settings for this layout to the underlying layout
 	bvh8.bvh.context = bvh8.context = context, bvh8.bvh.settings = bvh8.settings = settings;
 	bvh8.bvh.c_int = bvh8.c_int = c_int, bvh8.bvh.c_trav = bvh8.c_trav = c_trav;
+	// as for BVH4_CPU: leaves hold 4 prims, so the SBVH builder stops at that size.
+	bvh8.bvh.hqLeafPrims = 4;
 	// build underlying layout
 	bvh8.bvh.Build( vertices, indices, prims );
 	bvh8.bvh.Compact();
-	// convert to BVH4_CPU layout
-	ConvertFrom( bvh8 );
+	// convert to BVH8_CPU layout
+	ConvertFrom( bvh8, settings.useSpatialSplits && !settings.postOptimize );
 }
 
 TEMPLATED void BVH8_CPU<Float, Index>::Save( const char* fileName )
@@ -6339,15 +6441,18 @@ TEMPLATED void BVH8_CPU<Float, Index>::EmitNode( MBVH<8, Float, Index>& src, con
 	}
 }
 
-TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& original )
+TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& original, bool leavesMerged )
 {
 	// Note: identical to BVH4_CPU version, just with more lanes and a null leaf.
 	// get a copy of the input bvh8
 	if (&original != &bvh8) ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
 	bvh8.ReferenceFrom( original );
 	// prepare input bvh8
-	Index firstIdx = 0;
-	bvh8.bvh.CombineLeafs( 4, firstIdx, 0 );
+	if (!leavesMerged)
+	{
+		Index firstIdx = 0;
+		bvh8.bvh.CombineLeafs( 4, firstIdx, 0 );
+	}
 	bvh8.bvh.SplitLeafs( 4 );
 	bvh8.leafPrimLimit = 4, bvh8.l_quads = l_quads; // leaves in this layout hold 4 prims
 	bvh8.c_int = c_int, bvh8.c_trav = c_trav;
@@ -6412,11 +6517,11 @@ TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& origi
 	}
 #endif
 	if (tasks > 1) tinybvh_parallel_for( context, tasks, [&]( uint32_t task )
-	{
-		const Index from = (Index)(((uint64_t)nodeCount * task) / tasks);
-		const Index to = (Index)(((uint64_t)nodeCount * (task + 1)) / tasks);
-		for (Index n = from; n < to; n++) EmitNode( bvh8, base, nullLeafBlock, n );
-	} );
+		{
+			const Index from = (Index)(((uint64_t)nodeCount * task) / tasks);
+			const Index to = (Index)(((uint64_t)nodeCount * (task + 1)) / tasks);
+			for (Index n = from; n < to; n++) EmitNode( bvh8, base, nullLeafBlock, n );
+		} );
 	else for (Index n = 0; n < nodeCount; n++) EmitNode( bvh8, base, nullLeafBlock, n );
 	BVH_FATAL_ERROR_IF( blocks[0] > nullLeafBlock, "BVH8_CPU::ConvertFrom, block count underestimated." );
 	usedBlocks = nullLeafBlock + sizeof( BVHTri4Leaf ) / 64;
