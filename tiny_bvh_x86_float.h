@@ -41,6 +41,7 @@ template <> int32_t impl::BVH<float, uint32_t>::IsOccludedBundle( Ray* rays, boo
 #endif
 #ifdef BVH_USEAVX2
 template <> void impl::BVH<float, uint32_t>::SortByCentroid( const uint32_t* frag, const uint32_t n, const uint32_t axis, uint8_t* order ) const;
+template <> void impl::BVH4_CPU<float, uint32_t>::EmitNode( impl::MBVH<4, float, uint32_t>& src, const uint32_t* blocks, const uint32_t* base, uint32_t n );
 #endif
 #ifdef BVH_USEAVX
 template <> void impl::BVH<float, uint32_t>::BinBoxClear( BVHBinBox<float>& b );
@@ -126,6 +127,97 @@ template <> void impl::BVH<float, uint32_t>::SortByCentroid( const uint32_t* fra
 	v = _mm256_blend_epi32( _mm256_min_epi32( v, t ), _mm256_max_epi32( v, t ), 0xAA );
 	_mm256_store_si256( (__m256i*)key, v );
 	for (uint32_t i = 0; i < n; i++) order[i] = (uint8_t)(key[i] & 7);
+}
+#endif
+
+#ifdef BVH_USEAVX2
+// EmitNode, AVX2.
+template <> void impl::BVH4_CPU<float, uint32_t>::EmitNode( impl::MBVH<4, float, uint32_t>& src, const uint32_t* blocks, const uint32_t* base, uint32_t n )
+{
+	const MBVH<4, float, uint32_t>::MBVHNode& orig = src.mbvhNode[n];
+	if (orig.isLeaf()) return; // leaves are emitted as part of their parent
+	BVHNode* newNode = (BVHNode*)(bvh4Data + base[n]);
+	memset( newNode, 0, sizeof( BVHNode ) );
+	// lane q is octant q; per axis, the octant's bit selects +min or -max.
+	const __m256 bit0 = _mm256_castsi256_ps( _mm256_setr_epi32( 0, -1, 0, -1, 0, -1, 0, -1 ) );
+	const __m256 bit1 = _mm256_castsi256_ps( _mm256_setr_epi32( 0, 0, -1, -1, 0, 0, -1, -1 ) );
+	const __m256 bit2 = _mm256_castsi256_ps( _mm256_setr_epi32( 0, 0, 0, 0, -1, -1, -1, -1 ) );
+	const __m256i keyMask = _mm256_set1_epi32( (int32_t)0xfffffff8 );
+	__m256 k[4];
+	for (int32_t i = 0; i < 4; i++)
+	{
+		if (orig.child[i] == 0)
+		{
+			// empty slot: the same far key in every octant.
+			k[i] = _mm256_castsi256_ps( _mm256_set1_epi32( (int32_t)((tinybvh_as_uint( 1e30f ) & 0xfffffffc) + i) ) );
+			continue;
+		}
+		const MBVH<4, float, uint32_t>::MBVHNode& c = src.mbvhNode[orig.child[i]];
+		const __m256 tx = _mm256_blendv_ps( _mm256_set1_ps( -c.aabbMax.x ), _mm256_set1_ps( c.aabbMin.x ), bit0 );
+		const __m256 ty = _mm256_blendv_ps( _mm256_set1_ps( -c.aabbMax.y ), _mm256_set1_ps( c.aabbMin.y ), bit1 );
+		const __m256 tz = _mm256_blendv_ps( _mm256_set1_ps( -c.aabbMax.z ), _mm256_set1_ps( c.aabbMin.z ), bit2 );
+		const __m256 dist = _mm256_add_ps( _mm256_add_ps( tx, ty ), tz );
+		k[i] = _mm256_castsi256_ps( _mm256_or_si256( _mm256_and_si256( _mm256_castps_si256( dist ), keyMask ), _mm256_set1_epi32( i ) ) );
+	}
+	// the generic network, larger key first, on every octant at once.
+	#define TINYBVH_SORT8( a, b ) { const __m256 t = _mm256_max_ps( k[a], k[b] ); k[b] = _mm256_min_ps( k[a], k[b] ); k[a] = t; }
+	TINYBVH_SORT8( 0, 2 ); TINYBVH_SORT8( 1, 3 ); TINYBVH_SORT8( 0, 1 ); TINYBVH_SORT8( 2, 3 ); TINYBVH_SORT8( 1, 2 );
+	#undef TINYBVH_SORT8
+	// perm[i] holds the child at sorted position i for all eight octants, 2 bits each.
+	const __m256i three = _mm256_set1_epi32( 3 ), shift = _mm256_setr_epi32( 0, 2, 4, 6, 8, 10, 12, 14 );
+	for (int32_t i = 0; i < 4; i++)
+	{
+		const __m256i t = _mm256_sllv_epi32( _mm256_and_si256( _mm256_castps_si256( k[i] ), three ), shift );
+		__m128i s = _mm_or_si128( _mm256_castsi256_si128( t ), _mm256_extracti128_si256( t, 1 ) );
+		s = _mm_or_si128( s, _mm_shuffle_epi32( s, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+		s = _mm_or_si128( s, _mm_shuffle_epi32( s, _MM_SHUFFLE( 2, 3, 0, 1 ) ) );
+		newNode->perm[i] = (uint32_t)_mm_cvtsi128_si32( s );
+	}
+	// fill remaining fields. Leaf blocks sit directly behind the node, in child order,
+	// which is how sweep 2 accounted for them.
+	constexpr uint32_t NODE_BLOCKS = sizeof( BVHNode ) / 64, LEAF_BLOCKS = sizeof( BVHTri4Leaf ) / 64;
+	uint32_t leafBlock = base[n] + NODE_BLOCKS;
+	int32_t cidx = 0;
+	for (int32_t i = 0; i < 4; i++) if (orig.child[i])
+	{
+		const MBVH<4, float, uint32_t>::MBVHNode& child = src.mbvhNode[orig.child[i]];
+		newNode->xmin[cidx] = child.aabbMin.x, newNode->xmax[cidx] = child.aabbMax.x;
+		newNode->ymin[cidx] = child.aabbMin.y, newNode->ymax[cidx] = child.aabbMax.y;
+		newNode->zmin[cidx] = child.aabbMin.z, newNode->zmax[cidx] = child.aabbMax.z;
+		if (child.isLeaf())
+		{
+			newNode->child[cidx] = leafBlock + LEAF_BIT;
+			BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + leafBlock);
+			leafBlock += LEAF_BLOCKS;
+			// four triangles as rows (the last repeats if there are fewer), then one
+			// transpose per vertex quantity turns them into the leaf's columns.
+			__m128 v0[4], e1[4], e2[4];
+			for (uint32_t l = 0; l < 4; l++)
+			{
+				const uint32_t prim = src.bvh.primIdx[child.firstTri + tinybvh_min( l, child.triCount - 1 )];
+				uint32_t i0, i1, i2;
+				GET_PRIM_INDICES_I0_I1_I2( src.bvh, prim );
+				v0[l] = tinybvh_load4( &src.bvh.verts[i0] );
+				e1[l] = _mm_sub_ps( tinybvh_load4( &src.bvh.verts[i1] ), v0[l] );
+				e2[l] = _mm_sub_ps( tinybvh_load4( &src.bvh.verts[i2] ), v0[l] );
+				leaf->primIdx[l] = prim;
+			}
+			_MM_TRANSPOSE4_PS( v0[0], v0[1], v0[2], v0[3] );
+			_MM_TRANSPOSE4_PS( e1[0], e1[1], e1[2], e1[3] );
+			_MM_TRANSPOSE4_PS( e2[0], e2[1], e2[2], e2[3] );
+			tinybvh_store4( leaf->v0x, v0[0] ), tinybvh_store4( leaf->v0y, v0[1] ), tinybvh_store4( leaf->v0z, v0[2] );
+			tinybvh_store4( leaf->e1x, e1[0] ), tinybvh_store4( leaf->e1y, e1[1] ), tinybvh_store4( leaf->e1z, e1[2] );
+			tinybvh_store4( leaf->e2x, e2[0] ), tinybvh_store4( leaf->e2y, e2[1] ), tinybvh_store4( leaf->e2z, e2[2] );
+		}
+		else newNode->child[cidx] = base[orig.child[i]]; // address is already known
+		cidx++;
+	}
+	for (; cidx < 4; cidx++)
+		newNode->xmin[cidx] = bvh_far<float>, newNode->xmax[cidx] = -bvh_far<float>,
+		newNode->ymin[cidx] = bvh_far<float>, newNode->ymax[cidx] = -bvh_far<float>,
+		newNode->zmin[cidx] = bvh_far<float>, newNode->zmax[cidx] = -bvh_far<float>,
+		newNode->child[cidx] |= EMPTY_BIT;
+	(void)blocks;
 }
 #endif
 
