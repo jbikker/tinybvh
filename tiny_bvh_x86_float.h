@@ -254,14 +254,15 @@ template <> void impl::BVH<float, uint32_t>::ClipFragToBins( const Fragment& ori
 	__m128 vert4[4], left4[5], right4[4];
 	uint32_t n = 3;
 	const uint32_t vidx = orig.primIdx * 3;
+	// vertex w may carry integer payload, which reads as a denormal float; clear it.
 	if (!vertIdx)
-		memcpy( vert4, &verts[vidx], sizeof( __m128 ) ),
-		memcpy( vert4 + 1, &verts[vidx + 1], sizeof( __m128 ) ),
-		memcpy( vert4 + 2, &verts[vidx + 2], sizeof( __m128 ) );
+		vert4[0] = _mm_and_ps( tinybvh_load4( &verts[vidx] ), bvhc_mask3() ),
+		vert4[1] = _mm_and_ps( tinybvh_load4( &verts[vidx + 1] ), bvhc_mask3() ),
+		vert4[2] = _mm_and_ps( tinybvh_load4( &verts[vidx + 2] ), bvhc_mask3() );
 	else
-		memcpy( vert4, &verts[vertIdx[vidx]], sizeof( __m128 ) ),
-		memcpy( vert4 + 1, &verts[vertIdx[vidx + 1]], sizeof( __m128 ) ),
-		memcpy( vert4 + 2, &verts[vertIdx[vidx + 2]], sizeof( __m128 ) );
+		vert4[0] = _mm_and_ps( tinybvh_load4( &verts[vertIdx[vidx]] ), bvhc_mask3() ),
+		vert4[1] = _mm_and_ps( tinybvh_load4( &verts[vertIdx[vidx + 1]] ), bvhc_mask3() ),
+		vert4[2] = _mm_and_ps( tinybvh_load4( &verts[vertIdx[vidx + 2]] ), bvhc_mask3() );
 	// lane selector for 'axis', used to pin a split vertex exactly onto its plane.
 	ALIGNED( 16 ) static const uint32_t laneBits[3][4] = { { 0xffffffff, 0, 0, 0 }, { 0, 0xffffffff, 0, 0 }, { 0, 0, 0xffffffff, 0 } };
 	const __m128 axisSel4 = tinybvh_load4( laneBits[axis] );
@@ -324,6 +325,7 @@ template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fr
 	const uint32_t vidx = orig.primIdx * 3;
 	if (!vertIdx) v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
 	else v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
+	v0.w = v1.w = v2.w = 0; // w may hold payload that reads as a denormal; see ClipFragToBins.
 	const __m128 v0_4 = tinybvh_load4( &v0 ), v1_4 = tinybvh_load4( &v1 ), v2_4 = tinybvh_load4( &v2 );
 	const bool l0 = v0[axis] <= pos, l1 = v1[axis] <= pos, l2 = v2[axis] <= pos;
 	if (l0) lbmin4 = _mm_min_ps( lbmin4, v0_4 ), lbmax4 = _mm_max_ps( lbmax4, v0_4 );
@@ -684,6 +686,7 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 
 TINYBVH_FORCEINLINE __m256 bvhc_max8() { return _mm256_set1_ps( -BVH_FAR ); }
 TINYBVH_FORCEINLINE __m256 bvhc_signFlip8() { return _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f ); }
+TINYBVH_FORCEINLINE __m256 bvhc_xyz8() { return _mm256_castsi256_ps( _mm256_setr_epi32( -1, -1, -1, 0, -1, -1, -1, 0 ) ); }
 
 // Fast threaded AVX binned-SAH-builder.
 // This code produces BVHs nearly identical to reference, but much faster.
@@ -778,7 +781,12 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	threadedBuild = false;
 #ifdef ENABLE_THREADED_BUILDS
 	if (settings.enableThreading && triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
+	{
 		threadedBuild = true, atomicNewNodePtr = ContextNew<std::atomic<uint32_t>>( 2u );
+		// scratch for the parallel partition of large nodes; released in BuildSIMDFinalize.
+		AlignedFree( scratchPad );
+		scratchPad = (uint32_t*)AlignedAlloc( (primCount + splitBudget) * sizeof( uint32_t ) );
+	}
 #endif
 	// initialize fragments
 	__m128 rootMin = min4, rootMax = max4;
@@ -828,16 +836,15 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t fi
 {
 	__m256* binbox = (__m256*)binboxes;
 	const __m128 nmin4 = tinybvh_load4( nmin ), rpd4 = tinybvh_load4( rpd );
-	// A Fragment is 32 bytes and holds bmin/primIdx followed by bmax/clipped, so
-	// it can be read as a single 8-wide vector, or as two 4-wide bounds.
 	memset( count, 0, 3 * AVXBINS * 4 ); // exactly 96 bytes
 	for (uint32_t i = 0; i < 3 * AVXBINS; i++) binbox[i] = bvhc_max8();
 	if (first >= last) return; // empty slice; 'last - 1' below would wrap.
 	uint32_t fi = primIdx[first];
-	__m256 r0, r1, r2, f = _mm256_xor_ps( tinybvh_load8( fragment + fi ), bvhc_signFlip8() );
+	__m256 r0, r1, r2, f = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + fi ), bvhc_signFlip8() ), bvhc_xyz8() );
 	const __m128i zero4i = _mm_setzero_si128();
-	__m128i bc4 = _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_add_ps(
-		tinybvh_load4( &fragment[fi].bmax ), tinybvh_load4( &fragment[fi].bmin ) ), nmin4 ), rpd4 ) ), zero4i );
+	const __m128i max4i = _mm_set1_epi32( AVXBINS - 1 );
+	__m128i bc4 = _mm_min_epi32( _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_sub_ps(
+		_mm256_extractf128_ps( f, 1 ), _mm256_castps256_ps128( f ) ), nmin4 ), rpd4 ) ), zero4i ), max4i );
 	uint32_t i0 = TINYBVH_LANE0( bc4 ), i1 = TINYBVH_LANE1( bc4 ), i2 = TINYBVH_LANE2( bc4 ), * ti = primIdx + first + 1;
 	for (uint32_t i = first; i < last - 1; i++)
 	{
@@ -846,10 +853,10 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t fi
 		if (fid >= triCount) fid = triCount - 1; // never happens but g++ *and* vs2017 need this to not crash...
 	#endif
 		const __m256 b0 = binbox[i0], b1 = binbox[AVXBINS + i1], b2 = binbox[2 * AVXBINS + i2];
-		const __m128 frmin = tinybvh_load4( &fragment[fid].bmin ), frmax = tinybvh_load4( &fragment[fid].bmax );
 		r0 = _mm256_max_ps( b0, f ), r1 = _mm256_max_ps( b1, f ), r2 = _mm256_max_ps( b2, f );
-		bc4 = _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_add_ps( frmax, frmin ), nmin4 ), rpd4 ) ), zero4i );
-		f = _mm256_xor_ps( tinybvh_load8( fragment + fid ), bvhc_signFlip8() );
+		f = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + fid ), bvhc_signFlip8() ), bvhc_xyz8() );
+		bc4 = _mm_min_epi32( _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_sub_ps(
+			_mm256_extractf128_ps( f, 1 ), _mm256_castps256_ps128( f ) ), nmin4 ), rpd4 ) ), zero4i ), max4i );
 		count[i0]++, count[AVXBINS + i1]++, count[AVXBINS * 2 + i2]++;
 		binbox[i0] = r0, i0 = TINYBVH_LANE0( bc4 );
 		binbox[AVXBINS + i1] = r1, i1 = TINYBVH_LANE1( bc4 );
@@ -875,6 +882,8 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 	ALIGNED( 64 ) __m256 slicebinbox[maxSlices][3 * AVXBINS];
 	ALIGNED( 64 ) uint32_t slicecount[maxSlices][AVXCOUNTSTRIDE]; // padded: see AVXCOUNTSTRIDE
 	ALIGNED( 64 ) __m256 bestLBox, bestRBox;			// 64 bytes
+	uint32_t sliceLeft[maxSlices];					// per-slice left count of a parallel partition
+	ALIGNED( 64 ) __m256 sliceBox[maxSlices][2];	// per-slice child boxes of a parallel partition
 	__m256* binbox = slicebinbox[0];					// slot 0 doubles as the reduce target
 	uint32_t* count = slicecount[0];
 	// subdivide recursively
@@ -889,17 +898,19 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			const uint32_t slices = maxSlices > 2 * depth ? maxSlices - 2 * depth : 1;
 			const float SAV = node.SurfaceArea();
 			if (SAV == 0) break; // can't split an infinitely small node.
-			const __m128 nodeMin4 = tinybvh_load4( &bvhNode[nodeIdx].aabbMin );
-			const __m128 nodeMax4 = tinybvh_load4( &bvhNode[nodeIdx].aabbMax );
+			// lane 3 holds leftFirst / triCount: clear it, as above, to keep denormals out.
+			const __m128 nodeMin4 = _mm_and_ps( tinybvh_load4( &bvhNode[nodeIdx].aabbMin ), bvhc_mask3() );
+			const __m128 nodeMax4 = _mm_and_ps( tinybvh_load4( &bvhNode[nodeIdx].aabbMax ), bvhc_mask3() );
 			// find optimal object split
 			const __m128 d4 = _mm_blendv_ps( bvhc_min1(), _mm_sub_ps( nodeMax4, nodeMin4 ), bvhc_mask3() );
 			const __m128 nmin4 = _mm_add_ps( nodeMin4, nodeMin4 );
 			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( bvhc_binmul3(), d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
-			if (threadedBuild && slices > 1 && node.triCount > MT_BUILD_THRESHOLD)
+			const bool sliced = threadedBuild && slices > 1 && node.triCount > MT_BUILD_THRESHOLD;
+			const uint32_t sliceSize = node.triCount / slices;
+			if (sliced)
 			{
-				const uint32_t sliceSize = node.triCount / slices;
 				const uint32_t binFirst = node.leftFirst, binPrims = node.triCount;
 				tinybvh_parallel_for( context, slices, [&]( uint32_t i )
 					{
@@ -955,15 +966,65 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			if (splitCost >= noSplitCost) break; // not splitting is better.
 			const float rpd = tinybvh_getlane_f( &rpd4, bestAxis ), nmin = tinybvh_getlane_f( &nmin4, bestAxis );
 			uint32_t i = node.leftFirst, j = node.leftFirst + node.triCount;
-			for (uint32_t k = 0; k < node.triCount; k++)
+			if (sliced)
+			{
+				// parallel partition, over the slices used for binning.
+				const uint32_t first0 = node.leftFirst, last0 = node.leftFirst + node.triCount;
+				tinybvh_parallel_for( context, slices, [&]( uint32_t s )
+					{
+						const uint32_t first = first0 + sliceSize * s, last = s == (slices - 1) ? last0 : (first + sliceSize);
+						uint32_t l = first, r = last;
+						const __m256 empty8 = bvhc_max8();
+						__m256 lbox8 = empty8, rbox8 = empty8;
+						for (uint32_t k = first; k < last; k++)
+						{
+							const uint32_t fr = primIdx[k];
+							const int32_t bi = tinybvh_max( 0, (int32_t)((fragment[fr].bmax[bestAxis] + fragment[fr].bmin[bestAxis] - nmin) * rpd) );
+							const uint32_t isLeft = (uint32_t)bi <= bestPos ? 1 : 0;
+							scratchPad[l] = fr, scratchPad[r - 1] = fr; // branchless: one of the two is final
+							l += isLeft, r -= 1 - isLeft;
+							// child boxes from the fragments as partitioned, not from the bins.
+							const __m256 f8 = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + fr ), bvhc_signFlip8() ), bvhc_xyz8() );
+							const __m256 left8 = _mm256_castsi256_ps( _mm256_set1_epi32( -(int32_t)isLeft ) );
+							lbox8 = _mm256_max_ps( lbox8, _mm256_blendv_ps( empty8, f8, left8 ) );
+							rbox8 = _mm256_max_ps( rbox8, _mm256_blendv_ps( f8, empty8, left8 ) );
+						}
+						sliceLeft[s] = l - first, sliceBox[s][0] = lbox8, sliceBox[s][1] = rbox8;
+					} );
+				uint32_t leftTotal = 0;
+				bestLBox = sliceBox[0][0], bestRBox = sliceBox[0][1];
+				for (uint32_t s = 0; s < slices; s++) leftTotal += sliceLeft[s];
+				for (uint32_t s = 1; s < slices; s++)
+					bestLBox = _mm256_max_ps( bestLBox, sliceBox[s][0] ), bestRBox = _mm256_max_ps( bestRBox, sliceBox[s][1] );
+				tinybvh_parallel_for( context, slices, [&]( uint32_t s )
+					{
+						const uint32_t first = first0 + sliceSize * s, last = s == (slices - 1) ? last0 : (first + sliceSize);
+						uint32_t leftDst = first0, rightDst = first0 + leftTotal;
+						for (uint32_t t = 0; t < s; t++) leftDst += sliceLeft[t], rightDst += sliceSize - sliceLeft[t];
+						const uint32_t leftN = sliceLeft[s], rightN = last - first - leftN;
+						memcpy( primIdx + leftDst, scratchPad + first, leftN * sizeof( uint32_t ) );
+						memcpy( primIdx + rightDst, scratchPad + first + leftN, rightN * sizeof( uint32_t ) );
+					} );
+				i = first0 + leftTotal;
+			}
+			else
+			{
+				// child boxes from the fragments as partitioned, not from the bins: with
+				// reassociated float math the two may disagree near the split plane.
+				__m256 lbox8 = bvhc_max8(), rbox8 = lbox8;
+				for (uint32_t k = 0; k < node.triCount; k++)
 			{
 				const uint32_t fr = primIdx[i];
+					const __m256 f8 = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + fr ), bvhc_signFlip8() ), bvhc_xyz8() );
 				const int32_t bi = tinybvh_max( 0, (int32_t)((fragment[fr].bmax[bestAxis] + fragment[fr].bmin[bestAxis] - nmin) * rpd) );
-				if ((uint32_t)bi <= bestPos) i++; else
+					if ((uint32_t)bi <= bestPos) lbox8 = _mm256_max_ps( lbox8, f8 ), i++; else
 				{
+						rbox8 = _mm256_max_ps( rbox8, f8 );
 					const uint32_t t = primIdx[--j];
 					primIdx[j] = fr, primIdx[i] = t;
 				}
+			}
+				bestLBox = lbox8, bestRBox = rbox8;
 			}
 			// create child nodes and recurse
 			const uint32_t leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
@@ -1003,6 +1064,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize()
 		tinybvh_barrier( context ); // wait for all spawned subtrees
 		newNodePtr = atomicNewNodePtr->load();
 		ContextDelete( atomicNewNodePtr );
+		AlignedFree( scratchPad ), scratchPad = 0;
 	}
 #endif
 	// tree has been built.
