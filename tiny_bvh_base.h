@@ -8037,19 +8037,33 @@ public:
 	{
 		std::deque<Job> queue;
 		std::mutex locker;
-		TINYBVH_FORCEINLINE void push_back( const Job& item ) { std::scoped_lock lock( locker ); queue.push_back( item ); }
+		// Job count, written under the lock and read without it, so that pops skip an empty
+		// queue without locking it. A stale zero cannot strand a job: every push is followed
+		// by a seq_cst increment of Resources::pushed, and each scan starts after an acquire
+		// read of 'pushed' that a later push would change, sending the scanner round again.
+		std::atomic<uint32_t> size{ 0 };
+		TINYBVH_FORCEINLINE void push_back( const Job& item )
+		{
+			std::scoped_lock lock( locker );
+			queue.push_back( item );
+			size.store( (uint32_t)queue.size(), std::memory_order_relaxed );
+		}
 		TINYBVH_FORCEINLINE bool pop_front( Job& item )
 		{
+			if (size.load( std::memory_order_relaxed ) == 0) return false;
 			std::scoped_lock lock( locker );
 			if (queue.empty()) return false; else item = std::move( queue.front() );
 			queue.pop_front();
+			size.store( (uint32_t)queue.size(), std::memory_order_relaxed );
 			return true;
 		}
 		TINYBVH_FORCEINLINE bool pop_back( Job& item )
 		{
+			if (size.load( std::memory_order_relaxed ) == 0) return false;
 			std::scoped_lock lock( locker );
 			if (queue.empty()) return false; else item = std::move( queue.back() );
 			queue.pop_back();
+			size.store( (uint32_t)queue.size(), std::memory_order_relaxed );
 			return true;
 		}
 	};
