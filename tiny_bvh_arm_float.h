@@ -328,9 +328,32 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 		while (1)
 		{
 			BVHNode& node = bvhNode[nodeIdx];
+			if (node.triCount < 2) break; // a single primitive is always a leaf.
 			const uint32_t slices = maxSlices > 2 * depth ? maxSlices - 2 * depth : 1;
 			const float SAV = node.SurfaceArea();
 			if (SAV == 0) break; // can't split an infinitely small node.
+			if (node.triCount == 2)
+			{
+				// two primitives: the only split puts one in each child, so score it directly, without
+				// bins. The children hold a single primitive each: leaves, created here, never visited.
+				const uint32_t first = node.leftFirst;
+				const float32x4x2_t b0 = veorq_f32x2( tinybvh_load8( fragment + primIdx[first] ), neon_signFlip8 );
+				const float32x4x2_t b1 = veorq_f32x2( tinybvh_load8( fragment + primIdx[first + 1] ), neon_signFlip8 );
+				const float rSAV = 1.0f / SAV, splitCost = c_trav + c_int * rSAV * (halfArea( b0 ) + halfArea( b1 ));
+				if (splitCost >= 2.0f * c_int) break; // not splitting is better.
+				uint32_t n;
+			#ifdef ENABLE_THREADED_BUILDS
+				if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
+			#else
+				n = newNodePtr, newNodePtr += 2;
+			#endif
+				tinybvh_store8( &bvhNode[n], veorq_f32x2( b0, neon_signFlip8 ) );
+				bvhNode[n].leftFirst = first, bvhNode[n].triCount = 1;
+				tinybvh_store8( &bvhNode[n + 1], veorq_f32x2( b1, neon_signFlip8 ) );
+				bvhNode[n + 1].leftFirst = first + 1, bvhNode[n + 1].triCount = 1;
+				node.leftFirst = n, node.triCount = 0;
+				break;
+			}
 			const float32x4_t nodeMin4 = tinybvh_load4( &bvhNode[nodeIdx].aabbMin );
 			const float32x4_t nodeMax4 = tinybvh_load4( &bvhNode[nodeIdx].aabbMax );
 			// find optimal object split
