@@ -1810,6 +1810,7 @@ private:
 #include <fstream>			// fstream
 #include <algorithm>		// for std::swap
 #if defined ENABLE_THREADED_BUILDS && !defined TINYBVH_NO_BUILTIN_POOL
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -7982,6 +7983,25 @@ bool VoxelSet::IsOccluded( const Ray& ray ) const
 #endif
 #endif // __linux__ || __FreeBSD__
 
+// Idle workers and waiters spin this long before blocking on a condition variable.
+#ifndef TINYBVH_POOL_SPIN_US
+#define TINYBVH_POOL_SPIN_US 100
+#endif
+TINYBVH_FORCEINLINE void tinybvh_cpu_relax()
+{
+#if defined _MSC_VER && (defined _M_X64 || defined _M_IX86)
+	_mm_pause();
+#elif defined _MSC_VER && defined _M_ARM64
+	__yield();
+#elif (defined __GNUC__ || defined __clang__) && (defined __x86_64__ || defined __i386__)
+	__builtin_ia32_pause();
+#elif (defined __GNUC__ || defined __clang__) && (defined __aarch64__ || defined __arm__)
+	__asm__ __volatile__( "yield" );
+#else
+	std::this_thread::yield();
+#endif
+}
+
 // Wicked job system, condensed / modified. https://github.com/turanszkij/WickedEngine
 // Removed: Thread priority, Dispatch, graceful shutdown; not needed in TinyBVH.
 
@@ -8087,6 +8107,24 @@ public:
 			std::scoped_lock lock( sleepingMutex );
 			if (all) sleepingCondition.notify_all(); else sleepingCondition.notify_one();
 		}
+		// Poll 'done' for up to TINYBVH_POOL_SPIN_US; true as soon as it holds, false when
+		// the time runs out. Every 64 polls the clock is read and the core is offered to
+		// other runnable threads, so an oversubscribed machine is not starved by a spinner.
+		template <class Done> static bool spinUntil( const Done& done )
+		{
+		#if TINYBVH_POOL_SPIN_US > 0
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds( TINYBVH_POOL_SPIN_US );
+			for (uint32_t i = 1;; i++)
+			{
+				if (done()) return true;
+				if (i & 63) { tinybvh_cpu_relax(); continue; }
+				if (std::chrono::steady_clock::now() >= deadline) return done();
+				std::this_thread::yield();
+			}
+		#else
+			return done();
+		#endif
+		}
 	} res;
 	void Initialize()
 	{
@@ -8104,6 +8142,14 @@ public:
 					for (;;)
 					{
 						r.work( threadID, nullptr );
+						// Spin before parking; a push or shutdown seen here skips the mutex and
+						// condition variable entirely.
+						if (Resources::spinUntil( [&r, seen] { return !r.alive.load() || r.pushed.load() != seen; } ))
+						{
+							if (!r.alive.load()) break;
+							seen = r.pushed.load();
+							continue;
+						}
 						// Announce that we are about to park *before* re-reading 'pushed'.
 						// Execute() writes 'pushed' and then reads 'sleepers'; we write
 						// 'sleepers' and then read 'pushed'.
@@ -8160,8 +8206,13 @@ public:
 		while (IsBusy( group ))
 		{
 			res.wake( true ); // wake any sleeping threads
+			const uint64_t seen = res.pushed.load();
 			res.work( res.nextQueue.fetch_add( 1 ) % res.numThreads, &group );
 			if (!IsBusy( group )) break;
+			// Spin before blocking: the group's last jobs usually finish within microseconds,
+			// and a new push means there may be work to help with; both are cheaper to catch
+			// spinning than through waitingCondition.
+			if (Resources::spinUntil( [&] { return !IsBusy( group ) || res.pushed.load() != seen; } )) continue;
 			std::unique_lock<std::mutex> lock( res.waitingMutex );
 			if (IsBusy( group ))
 				res.waitingCondition.wait( lock, [&group] { return group.counter.load( std::memory_order_relaxed ) == 0; } );
