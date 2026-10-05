@@ -1018,7 +1018,7 @@ private:
 	std::atomic<Index>* atomicNextFrag = 0;
 #endif
 	BVHNode* leafNodes = 0; // will point inside node array
-	Index* scratchPad = 0; // for sorting
+	Index* scratchPad = 0; // scratch index buffer; parallel partition in threaded BuildSIMD.
 	Index numLeafNodes = 0;
 	Index numInternalNodes = 0;
 	// data for full sweep builder
