@@ -229,10 +229,10 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 		ALIGNED( 64 ) NEONSliceBounds slice[slices]; // one cache line per slice; no false sharing.
 		const uint32_t sliceSize = triCount / slices;
 		tinybvh_parallel_for( context, slices, [&]( uint32_t i )
-			{
-				const uint32_t first = sliceSize * i, last = i == (uint32_t)(slices - 1) ? triCount : (first + sliceSize);
-				PrepareSIMDBuildFragSlice( first, last, indices, vertData, stride4, fragment, slice[i].bmin, slice[i].bmax );
-			} );
+		{
+			const uint32_t first = sliceSize * i, last = i == (uint32_t)(slices - 1) ? triCount : (first + sliceSize);
+			PrepareSIMDBuildFragSlice( first, last, indices, vertData, stride4, fragment, slice[i].bmin, slice[i].bmax );
+		} );
 		rootMin = vld1q_f32( slice[0].bmin ), rootMax = vld1q_f32( slice[0].bmax );
 		for (int i = 1; i < slices; i++)
 			rootMin = vminq_f32( rootMin, vld1q_f32( slice[i].bmin ) ), rootMax = vmaxq_f32( rootMax, vld1q_f32( slice[i].bmax ) );
@@ -344,12 +344,12 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 				const uint32_t sliceSize = node.triCount / slices;
 				const uint32_t binFirst = node.leftFirst, binPrims = node.triCount;
 				tinybvh_parallel_for( context, slices, [&]( uint32_t i )
-					{
-						const uint32_t first = binFirst + sliceSize * i;
-						const uint32_t last = i == (slices - 1) ? (binFirst + binPrims) : (first + sliceSize);
-						BuildSIMDBinTask( first, last, slicebinbox[0] + i * 3 * AVXBINS,
-							slicecount[0] + i * NEONCOUNTSTRIDE, (const float*)&nmin4, (const float*)&rpd4 );
-					} );
+				{
+					const uint32_t first = binFirst + sliceSize * i;
+					const uint32_t last = i == (slices - 1) ? (binFirst + binPrims) : (first + sliceSize);
+					BuildSIMDBinTask( first, last, slicebinbox[0] + i * 3 * AVXBINS,
+						slicecount[0] + i * NEONCOUNTSTRIDE, (const float*)&nmin4, (const float*)&rpd4 );
+				} );
 				// combine results from slices; slice-major, so each slice is a linear sweep.
 				for (uint32_t slice = 1; slice < slices; slice++)
 				{
@@ -395,20 +395,25 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			splitCost = c_trav + c_int * rSAV * splitCost;
 			const float noSplitCost = (float)node.triCount * c_int;
 			if (splitCost >= noSplitCost) break; // not splitting is better.
-			// in-place partition; must reproduce the binning arithmetic exactly.
+			// in-place partition. Child boxes come from the fragments as partitioned, not from
+			// the bins: the two may disagree near the split plane when float math is reassociated.
 			const float rpd = tinybvh_getlane_f( &rpd4, bestAxis ), nmin = tinybvh_getlane_f( &nmin4, bestAxis );
 			uint32_t i = node.leftFirst, j = node.leftFirst + node.triCount;
+			float32x4x2_t lbox8 = neon_max8, rbox8 = neon_max8;
 			for (uint32_t k = 0; k < node.triCount; k++)
 			{
 				const uint32_t fr = primIdx[i];
+				const float32x4x2_t f8 = veorq_f32x2( tinybvh_load8( fragment + fr ), neon_signFlip8 );
 				const int32_t bi = tinybvh_clamp( (int32_t)((fragment[fr].bmax[bestAxis] +
 					fragment[fr].bmin[bestAxis] - nmin) * rpd), 0, AVXBINS - 1 );
-				if ((uint32_t)bi <= bestPos) i++; else
+				if ((uint32_t)bi <= bestPos) lbox8 = vmaxq_f32x2( lbox8, f8 ), i++; else
 				{
+					rbox8 = vmaxq_f32x2( rbox8, f8 );
 					const uint32_t t = primIdx[--j];
 					primIdx[j] = fr, primIdx[i] = t;
 				}
 			}
+			bestLBox = lbox8, bestRBox = rbox8;
 			// create child nodes and recurse
 			const uint32_t leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
