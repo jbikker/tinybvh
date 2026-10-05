@@ -998,7 +998,7 @@ public:
 	// Basic BVH data
 	Slice verts = {};				// pointer to input primitive array: 3 vertices per tri.
 	Index* vertIdx = 0;			// vertex indices, only used in case the BVH is built over indexed prims.
-	Index* primIdx = 0;				// primitive index array.
+	Index* primIdx = 0;				// primitive index array; capacity >= allocatedNodes / 2, see below.
 	uint32_t* rrsHits = 0;			// for RDH: ray hit count per triangle.
 	BLASInstance* instList = 0;		// instance array, for top-level acceleration structure.
 	BVHBase<Float, Index>** blasList = 0; // blas array, for TLAS traversal.
@@ -1007,6 +1007,9 @@ public:
 	Index newNodePtr = 0;			// used during build to keep track of next free node in pool.
 	Index nextFrag = 0;				// used during SBVH build to keep track of next free fragment.
 	Fragment* fragment = 0;			// input primitive bounding boxes.
+	// Builders skip reallocation when allocatedNodes suffices, and then assume primIdx and
+	// fragment hold allocatedNodes / 2 entries, which is what every builder allocates. Code
+	// that replaces primIdx (Compact, ConvertFrom) must keep at least that capacity.
 	// Custom geometry intersection callback
 	bool (*customIntersect)(Ray&, const Index, void*) = 0;
 	bool (*customIsOccluded)(const Ray&, const Index, void*) = 0;
@@ -3641,7 +3644,8 @@ TEMPLATED void BVH<Float, Index>::ConvertFrom( const BVH_Verbose& original, bool
 		primIdx = 0;
 		if (original.primIdx != 0 && original.idxCount > 0)
 		{
-			primIdx = (Index*)AlignedAlloc( original.idxCount * sizeof( Index ) );
+			// capacity as a builder would allocate it (see the note at BVH::fragment).
+			primIdx = (Index*)AlignedAlloc( tinybvh_max( original.idxCount, allocatedNodes / 2 ) * sizeof( Index ) );
 			memcpy( primIdx, original.primIdx, original.idxCount * sizeof( Index ) );
 		}
 	}
@@ -4477,7 +4481,8 @@ TEMPLATED void BVH<Float, Index>::Compact()
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::Compact(), bvhNode == 0." );
 	if (bvhNode[0].isLeaf()) return; // nothing to compact.
 	BVHNode* tmpNodes = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * allocatedNodes /* do *not* trim */ );
-	Index* idx = (Index*)AlignedAlloc( sizeof( Index ) * idxCount );
+	// don't trim primIdx either: a rebuild that fits allocatedNodes reuses it (see BVH::fragment).
+	Index* idx = (Index*)AlignedAlloc( sizeof( Index ) * tinybvh_max( idxCount, allocatedNodes / 2 ) );
 	memcpy( tmpNodes, bvhNode, 2 * sizeof( BVHNode ) );
 	newNodePtr = 2;
 	Index newIdxPtr = 0, nodeIdx = 0, stack[TINYBVH_STACK_SIZE], stackPtr = 0;
