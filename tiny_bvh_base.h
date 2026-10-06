@@ -943,6 +943,7 @@ private:
 	void BuildHQTask( Index nodeIdx, uint32_t depth, Index sliceStart, Index sliceEnd, Index* triIdxB );
 	void BuildSIMDSubtree( Index nodeIdx = 0, uint32_t depth = 0, bool allowTasks = true );
 	void BuildBonsai();
+	void BuildBonsaiCell( const Index nodeIdx, const bool allowTasks );
 	Index BonsaiPrune( const Index root, const Float threshold, BVHNode* promoted, Index* vacated ) const;
 	void PrepareSIMDBuildFragSlice( const Index first, const Index last, const Index* indices,
 		const int8_t* vertData, const uint32_t stride4, void* frags, Float* rootMin, Float* rootMax );
@@ -951,6 +952,7 @@ private:
 	template <typename, typename> friend void BVHBuildSubtree( void* payload );
 	template <typename, typename> friend void BVHBuildFullSweepSubtree( void* payload );
 	template <typename, typename> friend void BVHBuildHQSubtree( void* payload );
+	template <typename, typename> friend void BVHBuildBonsaiCell( void* payload );
 	friend void BVHBuildAVXSubtree( void* payload );
 	friend void BuildAVXFragSlice( uint32_t i, void* payload );
 	friend void BVHBuildAVXBinSlice( uint32_t i, void* payload );
@@ -7076,6 +7078,24 @@ TEMPLATED Index BVH<Float, Index>::BonsaiPrune( const Index root, const Float th
 	return count;
 }
 
+// One mini tree: the root bounds from the cell's fragments, then a regular subtree build.
+TEMPLATED void BVH<Float, Index>::BuildBonsaiCell( const Index nodeIdx, const bool allowTasks )
+{
+	BVHNode& node = bvhNode[nodeIdx];
+	const Index first = node.leftFirst, last = first + node.triCount;
+	Vec3 bmin( bvh_far<Float> ), bmax( -bvh_far<Float> );
+	for (Index i = first; i < last; i++)
+		bmin = tinybvh_min( bmin, fragment[primIdx[i]].bmin ), bmax = tinybvh_max( bmax, fragment[primIdx[i]].bmax );
+	node.aabbMin = bmin, node.aabbMax = bmax;
+	BuildSIMDSubtree( nodeIdx, 0, allowTasks );
+}
+// Pool entry point for a cell that is built as a threaded subtree; see BuildBonsai.
+TEMPLATED void BVHBuildBonsaiCell( void* payload )
+{
+	const BVHBuildSubtreeArgs<Float, Index>* a = (const BVHBuildSubtreeArgs<Float, Index>*)payload;
+	a->bvh->BuildBonsaiCell( a->node, true );
+}
+
 TEMPLATED void BVH<Float, Index>::BuildBonsai()
 {
 	// Fragments, root bounds and the threading decision come from PrepareSIMDBuild.
@@ -7144,39 +7164,42 @@ TEMPLATED void BVH<Float, Index>::BuildBonsai()
 		BuildSIMDSubtree( 0, 0 );
 		return;
 	}
-	// 3. Mini trees, one task each; the roots go to nodes [2, 2 + C), their pairs from 2C onwards.
+	// 3. Mini trees; the roots go to nodes [2, 2 + C), their pairs from 2C onwards.
 	newNodePtr = 2 * C;
 #ifdef ENABLE_THREADED_BUILDS
 	if (threadedBuild) atomicNewNodePtr->store( 2 * C );
 #endif
-	// Cells are claimed from a shared counter by a fixed number of pool tasks. For a threaded
-	// build they are handed out roughly largest-first (by log2 of their size) to balance the load.
-	auto forEachCell = [&]( const Index* cellOrder, const auto& body )
+	// Cells are claimed from a shared counter by a fixed number of pool tasks.
+	auto forEachCell = [&]( const Index* cellOrder, const Index n, const auto& body )
 	{
+		if (n == 0) return;
 		std::atomic<Index> next{ 0 };
-		run( (uint32_t)tinybvh_min( C, (Index)MT_BONSAI_TASKS ), [&]( uint32_t )
+		run( (uint32_t)tinybvh_min( n, (Index)MT_BONSAI_TASKS ), [&]( uint32_t )
 		{
-			for (Index k; (k = next.fetch_add( 1, std::memory_order_relaxed )) < C; ) body( cellOrder ? cellOrder[k] : k );
+			for (Index k; (k = next.fetch_add( 1, std::memory_order_relaxed )) < n; ) body( cellOrder ? cellOrder[k] : k );
 		} );
 	};
 	if (threadedBuild)
 	{
+		// for a threaded build, cells are handed out roughly largest-first (by log2 of their size).
 		Index bucket[65] = { 0 };
 		auto log2 = []( Index n ) { uint32_t b = 0; while (n > 1) n >>= 1, b++; return b; };
 		for (Index c = 0; c < C; c++) bucket[63 - log2( cellCount[c] )]++;
 		for (Index b = 0, sum = 0; b < 64; b++) { const Index n = bucket[b]; bucket[b] = sum, sum += n; }
 		for (Index c = 0; c < C; c++) order[bucket[63 - log2( cellCount[c] )]++] = c;
 	}
-	forEachCell( threadedBuild ? order : 0, [&]( Index c )
+	const Index spawnPrims = tinybvh_max( (Index)(2 * MT_SPAWN_MIN_PRIMS), prims / (Index)MT_BONSAI_TASKS );
+	Index cells = 0, spawned = 0;
+	for (Index k = 0; k < C; k++)
 	{
-		BVHNode& node = bvhNode[2 + c];
-		const Index first = cellFirst[c], last = first + cellCount[c];
-		Vec3 bmin( bvh_far<Float> ), bmax( -bvh_far<Float> );
-		for (Index i = first; i < last; i++)
-			bmin = tinybvh_min( bmin, fragment[primIdx[i]].bmin ), bmax = tinybvh_max( bmax, fragment[primIdx[i]].bmax );
-		node.aabbMin = bmin, node.aabbMax = bmax, node.leftFirst = first, node.triCount = last - first;
-		BuildSIMDSubtree( 2 + c, 0, false );
-	} );
+		const Index c = threadedBuild ? order[k] : k;
+		bvhNode[2 + c].leftFirst = cellFirst[c], bvhNode[2 + c].triCount = cellCount[c];
+		if (!threadedBuild || cellCount[c] <= spawnPrims) { order[cells++] = c; continue; }
+		const BVHBuildSubtreeArgs<Float, Index> a = { this, 2 + c, 0 };
+		tinybvh_spawn( context, &BVHBuildBonsaiCell<Float, Index>, &a, sizeof( a ) ), spawned++;
+	}
+	forEachCell( order, cells, [&]( Index c ) { BuildBonsaiCell( 2 + c, false ); } );
+	if (spawned) tinybvh_barrier( context ); // pruning reads every mini tree.
 	// 4. Pruning, against a fraction of the average mini tree root area. Two passes: count, then
 	// write the promoted nodes and freed pairs at offsets from a scan over the counts.
 	Float threshold = bvh_far<Float>;
@@ -7187,12 +7210,12 @@ TEMPLATED void BVH<Float, Index>::BuildBonsai()
 		threshold = settings.bonsaiPruneFactor * areaSum / (Float)C;
 	}
 	Index* promotedFirst = cellCount; // cell sizes are no longer needed
-	forEachCell( 0, [&]( Index c ) { promotedFirst[c] = BonsaiPrune( 2 + c, threshold, 0, 0 ); } );
+	forEachCell( 0, C, [&]( Index c ) { promotedFirst[c] = BonsaiPrune( 2 + c, threshold, 0, 0 ); } );
 	Index R = 0;
 	for (Index c = 0; c < C; c++) { const Index n = promotedFirst[c]; promotedFirst[c] = R, R += n; }
 	BVHNode* promoted = (BVHNode*)AlignedAlloc( R * sizeof( BVHNode ) );
 	Index* vacated = (Index*)AlignedAlloc( (R - C + 1) * sizeof( Index ) );
-	forEachCell( 0, [&]( Index c ) { BonsaiPrune( 2 + c, threshold, promoted + promotedFirst[c], vacated + promotedFirst[c] - c ); } );
+	forEachCell( 0, C, [&]( Index c ) { BonsaiPrune( 2 + c, threshold, promoted + promotedFirst[c], vacated + promotedFirst[c] - c ); } );
 	AlignedFree( cellFirst );
 	// 5. Top tree over the R promoted nodes, built in a separate BVH by the same SIMD builder, with
 	// threading as for the full build. c_trav = 0: never stop splitting on SAH grounds.
