@@ -52,7 +52,7 @@ template <> struct impl::BVHSIMDBuilders<float, uint32_t> { static constexpr boo
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const uint32_t first, const uint32_t last, const uint32_t* indices, const int8_t* vertData, const uint32_t stride4, void* frags, float* rootMin, float* rootMax );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t first, const uint32_t last, void* binbox, uint32_t* count, const float* nmin4, const float* rpd4 );
-template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth );
+template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth, bool allowTasks );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize();
 #endif
 #ifdef BVH_USEAVX2
@@ -875,7 +875,7 @@ void impl::BVHBuildAVXSubtree( void* payload )
 	impl::BVHBuildSubtreeArgs<float, uint32_t>* a = (impl::BVHBuildSubtreeArgs<float, uint32_t>*)payload;
 	a->bvh->BuildSIMDSubtree( a->node, a->depth );
 }
-template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth )
+template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth, bool allowTasks )
 {
 	// aligned data
 	constexpr uint32_t maxSlices = 24;
@@ -930,7 +930,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( bvhc_binmul3(), d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
-			const bool sliced = threadedBuild && slices > 1 && node.triCount > MT_BUILD_THRESHOLD;
+			const bool sliced = threadedBuild && allowTasks && slices > 1 && node.triCount > MT_BUILD_THRESHOLD;
 			const uint32_t sliceSize = node.triCount / slices;
 			if (sliced)
 			{
@@ -1063,7 +1063,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			node.leftFirst = n, node.triCount = 0;
 			tinybvh_store8( &bvhNode[n + 1], _mm256_xor_ps( bestRBox, bvhc_signFlip8() ) );
 			bvhNode[n + 1].leftFirst = i, bvhNode[n + 1].triCount = rightCount;
-			const bool spawnThreads = tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS && depth < MT_SPAWN_DEPTH && threadedBuild;
+			const bool spawnThreads = tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS && depth < MT_SPAWN_DEPTH && threadedBuild && allowTasks;
 			if (!spawnThreads) task[taskCount] = n + 1, taskDepth[taskCount++] = depth + 1, nodeIdx = n; else
 			{
 				// spawn the larger subtree, continue with the small one; root barrier joins.

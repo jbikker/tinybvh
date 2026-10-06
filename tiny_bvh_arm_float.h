@@ -39,7 +39,7 @@ template <> struct impl::BVHSIMDBuilders<float, uint32_t> { static constexpr boo
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const uint32_t first, const uint32_t last, const uint32_t* indices, const int8_t* vertData, const uint32_t stride4, void* frags, float* rootMin, float* rootMax );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t first, const uint32_t last, void* binbox, uint32_t* count, const float* nmin4, const float* rpd4 );
-template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth );
+template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth, bool allowTasks );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize();
 template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
 template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
@@ -214,10 +214,11 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	verts = vertices; // note: we're not copying this data; don't delete.
 	vertIdx = (uint32_t*)indices;
 	const int8_t* vertData = verts.data;
-	// prepare threading; the atomic node counter is claimed in BuildSIMDSubtree.
+	// prepare threading; as in the x86 builder, the shared node counter is created here.
 	threadedBuild = false;
 #ifdef ENABLE_THREADED_BUILDS
-	if (settings.enableThreading && triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier) threadedBuild = true;
+	if (settings.enableThreading && triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
+		threadedBuild = true, atomicNewNodePtr = ContextNew<std::atomic<uint32_t>>( 2u );
 #endif
 	// initialize fragments
 	float32x4_t rootMin = vdupq_n_f32( BVH_FAR ), rootMax = vdupq_n_f32( -BVH_FAR );
@@ -301,17 +302,8 @@ void impl::BVHBuildNEONSubtree( void* payload )
 	impl::BVHBuildSubtreeArgs<float, uint32_t>* a = (impl::BVHBuildSubtreeArgs<float, uint32_t>*)payload;
 	a->bvh->BuildSIMDSubtree( a->node, a->depth );
 }
-template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth )
+template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth, bool allowTasks )
 {
-	if (depth == 0)
-	{
-		threadedBuild = false;
-	#ifdef ENABLE_THREADED_BUILDS
-		// build in parallel when given a sufficiently large input
-		if (settings.enableThreading && triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
-			threadedBuild = true, atomicNewNodePtr = ContextNew<std::atomic<uint32_t>>( newNodePtr );
-	#endif
-	}
 	// aligned data
 	constexpr uint32_t maxSlices = 24;
 	ALIGNED( 64 ) float32x4x2_t slicebinbox[maxSlices][3 * AVXBINS];
@@ -362,7 +354,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			const uint32x4_t nonzero = vmvnq_u32( vceqq_f32( d4, neon_zero4 ) );
 			const float32x4_t rpd4 = vreinterpretq_f32_u32( vandq_u32(
 				vreinterpretq_u32_f32( vdivq_f32( neon_binmul3, d4 ) ), nonzero ) );
-			if (threadedBuild && slices > 1 && node.triCount > MT_BUILD_THRESHOLD)
+			if (threadedBuild && allowTasks && slices > 1 && node.triCount > MT_BUILD_THRESHOLD)
 			{
 				const uint32_t sliceSize = node.triCount / slices;
 				const uint32_t binFirst = node.leftFirst, binPrims = node.triCount;
@@ -452,7 +444,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			tinybvh_store8( &bvhNode[n + 1], veorq_f32x2( bestRBox, neon_signFlip8 ) );
 			bvhNode[n + 1].leftFirst = i, bvhNode[n + 1].triCount = rightCount;
 			const bool spawnThreads = tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS &&
-				depth < MT_SPAWN_DEPTH && threadedBuild;
+				depth < MT_SPAWN_DEPTH && threadedBuild && allowTasks;
 			if (!spawnThreads) task[taskCount] = n + 1, taskDepth[taskCount++] = depth + 1, nodeIdx = n; else
 			{
 				// spawn the larger subtree, continue with the small one; root barrier joins.

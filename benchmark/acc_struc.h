@@ -9,12 +9,13 @@ enum BuildFlags : int {
 	SIMDBUILD = 2,
 	FULLSWEEP = 4,
 	LBVH = 8,
-	PRESPLIT = 16,
-	SPATIALSPLITS = 32,
-	OPTIMIZE = 64,
-	LOW = 128, // low, medium, high: For Embree and Madmann91.
-	MEDIUM = 256,
-	HIGH = 512 
+	BONSAI = 16,
+	PRESPLIT = 32,
+	SPATIALSPLITS = 64,
+	OPTIMIZE = 128,
+	LOW = 256, // low, medium, high: For Embree and Madmann91.
+	MEDIUM = 512,
+	HIGH = 1024 
 };
 
 enum BVHLayout

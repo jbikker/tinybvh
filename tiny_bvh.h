@@ -110,7 +110,7 @@ THE SOFTWARE.
 #define TINY_BVH_VERSION_SUB	1
 
 // Cached BVH file version - increases only when file layout changes.
-#define TINY_BVH_CACHE_VERSION	191
+#define TINY_BVH_CACHE_VERSION	192
 
 // Features
 #ifndef NO_DOUBLE_PRECISION_SUPPORT
@@ -221,6 +221,10 @@ THE SOFTWARE.
 #endif
 #ifndef MT_PREP_MAX_TASKS
 #define MT_PREP_MAX_TASKS 32
+#endif
+// Threaded Bonsai builds: number of pool tasks that claim grid cells from a shared counter.
+#ifndef MT_BONSAI_TASKS
+#define MT_BONSAI_TASKS 128
 #endif
 // Layout conversion (BVH4_CPU / BVH8_CPU) threading settings.
 #ifndef MT_CONVERT_MIN_NODES

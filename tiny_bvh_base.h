@@ -64,7 +64,7 @@ struct bvhvec3;
 struct ALIGNED( 16 ) bvhvec4
 {
 	// vector naming is designed to not cause any name clashes.
-	constexpr bvhvec4() = default;
+	bvhvec4() = default;
 	constexpr bvhvec4( const float a, const float b, const float c, const float d ) : x( a ), y( b ), z( c ), w( d ) {}
 	constexpr bvhvec4( const float a ) : x( a ), y( a ), z( a ), w( a ) {}
 	bvhvec4( const bvhvec3 & a );
@@ -76,7 +76,7 @@ struct ALIGNED( 16 ) bvhvec4
 
 struct ALIGNED( 8 ) bvhvec2
 {
-	constexpr bvhvec2() = default;
+	bvhvec2() = default;
 	constexpr bvhvec2( const float a, const float b ) : x( a ), y( b ) {}
 	constexpr bvhvec2( const float a ) : x( a ), y( a ) {}
 	constexpr bvhvec2( const bvhvec4 a ) : x( a.x ), y( a.y ) {}
@@ -87,7 +87,7 @@ struct ALIGNED( 8 ) bvhvec2
 
 struct bvhvec3
 {
-	constexpr bvhvec3() = default;
+	bvhvec3() = default;
 	constexpr bvhvec3( const float a, const float b, const float c ) : x( a ), y( b ), z( c ) {}
 	constexpr bvhvec3( const float a ) : x( a ), y( a ), z( a ) {}
 	constexpr bvhvec3( const bvhvec4 a ) : x( a.x ), y( a.y ), z( a.z ) {}
@@ -98,7 +98,7 @@ struct bvhvec3
 
 struct bvhint3
 {
-	constexpr bvhint3() = default;
+	bvhint3() = default;
 	constexpr bvhint3( const int32_t a, const int32_t b, const int32_t c ) : x( a ), y( b ), z( c ) {}
 	constexpr bvhint3( const int32_t a ) : x( a ), y( a ), z( a ) {}
 	bvhint3( const bvhvec3& a ) { x = (int32_t)a.x, y = (int32_t)a.y, z = (int32_t)a.z; }
@@ -109,7 +109,7 @@ struct bvhint3
 
 struct bvhint2
 {
-	constexpr bvhint2() = default;
+	bvhint2() = default;
 	constexpr bvhint2( const int32_t a, const int32_t b ) : x( a ), y( b ) {}
 	constexpr bvhint2( const int32_t a ) : x( a ), y( a ) {}
 	constexpr int32_t& operator [] ( const int32_t i ) { return cell[i]; }
@@ -119,7 +119,7 @@ struct bvhint2
 
 struct bvhuint2
 {
-	constexpr bvhuint2() = default;
+	bvhuint2() = default;
 	constexpr bvhuint2( const uint32_t a, const uint32_t b ) : x( a ), y( b ) {}
 	constexpr bvhuint2( const uint32_t a ) : x( a ), y( a ) {}
 	constexpr uint32_t& operator [] ( const int32_t i ) { return cell[i]; }
@@ -129,7 +129,7 @@ struct bvhuint2
 
 struct bvhuint3
 {
-	constexpr bvhuint3() = default;
+	bvhuint3() = default;
 	constexpr bvhuint3( const uint32_t a, const uint32_t b, const uint32_t c ) : x( a ), y( b ), z( c ) {}
 	constexpr bvhuint3( const uint32_t a ) : x( a ), y( a ), z( a ) {}
 	constexpr uint32_t& operator [] ( const int32_t i ) { return cell[i]; }
@@ -139,7 +139,7 @@ struct bvhuint3
 
 struct bvhuint4
 {
-	constexpr bvhuint4() = default;
+	bvhuint4() = default;
 	constexpr bvhuint4( const uint32_t a, const uint32_t b, const uint32_t c, const uint32_t d ) : x( a ), y( b ), z( c ), w( d ) {}
 	constexpr bvhuint4( const uint32_t a ) : x( a ), y( a ), z( a ), w( a ) {}
 	constexpr uint32_t& operator [] ( const int32_t i ) { return cell[i]; }
@@ -659,6 +659,9 @@ struct BVHBuildSettings
 	bool presplitPostPass = true;	// attempt to un-split primitives in leaves after a presplit build.
 	float presplitFactor = 0.3f;	// presplit budget relative to input data size.
 	bool useFullSweep = false;		// for experiments only; full-sweep SAH builder.
+	bool useBonsaiBVH = false;		// Bonsai builder (Ganestam et al., 2015): grid cells, per-cell mini trees, top tree.
+	uint32_t bonsaiGridPrims = 256;	// Bonsai: grid resolution target, in primitives per grid cell (empty cells included).
+	float bonsaiPruneFactor = 0.1f;	// Bonsai: prune mini trees larger than this fraction of the average mini tree; 0 disables.
 	bool postOptimize = false;		// optimize generated BVH using tree rotations.
 	int optimizeIterations = 25;	// default optimization iterations.
 	bool useSIMDifavailable = true;	// set to false to use the scalar reference builder.
@@ -938,7 +941,9 @@ private:
 	void Build( Index nodeIdx = 0, uint32_t depth = 0 );
 	void BuildFullSweep( Index nodeIdx = 0, uint32_t depth = 0 );
 	void BuildHQTask( Index nodeIdx, uint32_t depth, Index sliceStart, Index sliceEnd, Index* triIdxB );
-	void BuildSIMDSubtree( Index nodeIdx = 0, uint32_t depth = 0 );
+	void BuildSIMDSubtree( Index nodeIdx = 0, uint32_t depth = 0, bool allowTasks = true );
+	void BuildBonsai();
+	Index BonsaiPrune( const Index root, const Float threshold, BVHNode* promoted, Index* vacated ) const;
 	void PrepareSIMDBuildFragSlice( const Index first, const Index last, const Index* indices,
 		const int8_t* vertData, const uint32_t stride4, void* frags, Float* rootMin, Float* rootMax );
 	void BuildSIMDBinTask( const Index first, const Index last, void* binbox,
@@ -2137,6 +2142,12 @@ TEMPLATED void BVH<Float, Index>::Build( const Slice& vertices, const Index* ind
 	{
 		PrepareBuild( vertices, indices, prims );
 		BuildFullSweep();
+	}
+	else if (BVHSIMDBuilders<Float, Index>::available && settings.useBonsaiBVH) // Bonsai: mini trees under a top tree
+	{
+		PrepareSIMDBuild( vertices, indices, prims );
+		BuildBonsai();
+		BuildSIMDFinalize();
 	}
 	else if (BVHSIMDBuilders<Float, Index>::available && settings.useSIMDifavailable) // No preference: use fast SIMD builder
 	{
@@ -7042,6 +7053,209 @@ TEMPLATED void BVH<Float, Index>::BuildSIMD( const Slice& v, const Index* i, con
 	BuildSIMDSubtree( 0u, 0u );
 	BuildSIMDFinalize();
 }
+
+// Bonsai builder: "Bonsai: Rapid Bounding Volume Hierarchy Generation using Mini Trees",
+// Ganestam et al., JCGT 4(3), 2015.
+TEMPLATED Index BVH<Float, Index>::BonsaiPrune( const Index root, const Float threshold, BVHNode* promoted, Index* vacated ) const
+{
+	Index stack[TINYBVH_STACK_SIZE], stackPtr = 0, node = root, count = 0, freed = 0;
+	while (1)
+	{
+		const BVHNode& n = bvhNode[node];
+		if (n.isLeaf() || n.SurfaceArea() < threshold || stackPtr == BVH_NUM_ELEMS( stack ))
+		{
+			if (promoted) promoted[count] = n;
+			count++;
+			if (stackPtr == 0) break;
+			node = stack[--stackPtr];
+			continue;
+		}
+		if (vacated) vacated[freed] = n.leftFirst;
+		freed++, stack[stackPtr++] = n.leftFirst + 1, node = n.leftFirst;
+	}
+	return count;
+}
+
+TEMPLATED void BVH<Float, Index>::BuildBonsai()
+{
+	// Fragments, root bounds and the threading decision come from PrepareSIMDBuild.
+	const BVHNode& root = bvhNode[0];
+	const Index prims = triCount;
+	// 1. Grid: roughly prims / bonsaiGridPrims cells, as cubical as the scene extent allows.
+	const Vec3 ext = root.aabbMax - root.aabbMin;
+	const Float maxExt = tinybvh_max( tinybvh_max( ext.x, ext.y ), ext.z );
+	const uint64_t target = (uint64_t)prims / tinybvh_max( 1u, settings.bonsaiGridPrims );
+	uint32_t dim[3] = { 1, 1, 1 };
+	if (maxExt > 0) for (uint32_t res = 2; res <= 1024 && (uint64_t)dim[0] * dim[1] * dim[2] < target; res++)
+		for (int a = 0; a < 3; a++) dim[a] = tinybvh_max( 1u, (uint32_t)(ext[a] / maxExt * (Float)res + Float( 0.5 )) );
+	const Index G = (Index)dim[0] * dim[1] * dim[2];
+	if (G == 1) { BuildSIMDSubtree( 0, 0 ); return; } // small input: a regular build.
+	Vec3 scale; // maps a doubled centroid to grid coordinates
+	for (int a = 0; a < 3; a++) scale[a] = ext[a] > 0 ? (Float)dim[a] / (2 * ext[a]) : 0;
+	const Vec3 gridMin2 = root.aabbMin * 2;
+	auto cellOf = [&]( const Fragment& f ) -> Index
+	{
+		const Vec3 c = (f.bmin + f.bmax - gridMin2) * scale;
+		const uint32_t x = tinybvh_min( (uint32_t)tinybvh_max( (int32_t)c.x, 0 ), dim[0] - 1 );
+		const uint32_t y = tinybvh_min( (uint32_t)tinybvh_max( (int32_t)c.y, 0 ), dim[1] - 1 );
+		const uint32_t z = tinybvh_min( (uint32_t)tinybvh_max( (int32_t)c.z, 0 ), dim[2] - 1 );
+		return x + dim[0] * (y + (Index)dim[1] * z);
+	};
+	// Loops over n items run on the pool only for a threaded build; enableThreading = false must
+	// keep the build on the calling thread.
+	auto run = [&]( const uint32_t n, const auto& body )
+	{
+		if (threadedBuild) tinybvh_parallel_for( context, n, body ); else for (uint32_t i = 0; i < n; i++) body( i );
+	};
+	// 2. Counting sort of the fragment indices by cell, in slices: per-slice histograms, then a
+	// scan that turns them into per-slice scatter offsets. The result is deterministic. Cell
+	// indices are kept for the scatter in the node array, which is unused until step 3.
+	const uint32_t slices = threadedBuild ? tinybvh_max( 2u, tinybvh_min( (uint32_t)(prims / MT_PREP_TASK_PRIMS), (uint32_t)MT_PREP_MAX_TASKS ) ) : 1;
+	const Index sliceSize = prims / slices;
+	Index* hist = (Index*)AlignedAlloc( (size_t)slices * G * sizeof( Index ) );
+	Index* cellIdx = (Index*)(bvhNode + 2); // G > 1 implies prims > 1: fits in 2 * prims - 2 nodes
+	run( slices, [&]( uint32_t s )
+	{
+		Index* h = hist + (size_t)s * G;
+		memset( h, 0, G * sizeof( Index ) );
+		const Index first = sliceSize * s, last = s == slices - 1 ? prims : (first + sliceSize);
+		for (Index i = first; i < last; i++) h[cellIdx[i] = cellOf( fragment[i] )]++;
+	} );
+	const Index maxCells = tinybvh_min( G, prims );
+	Index* cellFirst = (Index*)AlignedAlloc( 3 * (size_t)maxCells * sizeof( Index ) );
+	Index* cellCount = cellFirst + maxCells, * order = cellCount + maxCells, C = 0;
+	for (Index g = 0, offset = 0; g < G; g++)
+	{
+		const Index start = offset;
+		for (uint32_t s = 0; s < slices; s++) { Index& h = hist[(size_t)s * G + g]; const Index n = h; h = offset, offset += n; }
+		if (offset > start) cellFirst[C] = start, cellCount[C++] = offset - start;
+	}
+	run( slices, [&]( uint32_t s )
+	{
+		Index* h = hist + (size_t)s * G;
+		const Index first = sliceSize * s, last = s == slices - 1 ? prims : (first + sliceSize);
+		for (Index i = first; i < last; i++) primIdx[h[cellIdx[i]]++] = i;
+	} );
+	AlignedFree( hist );
+	if (C == 1)
+	{
+		// everything landed in one cell: a regular build over the (now permuted) index array.
+		AlignedFree( cellFirst );
+		BuildSIMDSubtree( 0, 0 );
+		return;
+	}
+	// 3. Mini trees, one task each; the roots go to nodes [2, 2 + C), their pairs from 2C onwards.
+	newNodePtr = 2 * C;
+#ifdef ENABLE_THREADED_BUILDS
+	if (threadedBuild) atomicNewNodePtr->store( 2 * C );
+#endif
+	// Cells are claimed from a shared counter by a fixed number of pool tasks. For a threaded
+	// build they are handed out roughly largest-first (by log2 of their size) to balance the load.
+	auto forEachCell = [&]( const Index* cellOrder, const auto& body )
+	{
+		std::atomic<Index> next{ 0 };
+		run( (uint32_t)tinybvh_min( C, (Index)MT_BONSAI_TASKS ), [&]( uint32_t )
+		{
+			for (Index k; (k = next.fetch_add( 1, std::memory_order_relaxed )) < C; ) body( cellOrder ? cellOrder[k] : k );
+		} );
+	};
+	if (threadedBuild)
+	{
+		Index bucket[65] = { 0 };
+		auto log2 = []( Index n ) { uint32_t b = 0; while (n > 1) n >>= 1, b++; return b; };
+		for (Index c = 0; c < C; c++) bucket[63 - log2( cellCount[c] )]++;
+		for (Index b = 0, sum = 0; b < 64; b++) { const Index n = bucket[b]; bucket[b] = sum, sum += n; }
+		for (Index c = 0; c < C; c++) order[bucket[63 - log2( cellCount[c] )]++] = c;
+	}
+	forEachCell( threadedBuild ? order : 0, [&]( Index c )
+	{
+		BVHNode& node = bvhNode[2 + c];
+		const Index first = cellFirst[c], last = first + cellCount[c];
+		Vec3 bmin( bvh_far<Float> ), bmax( -bvh_far<Float> );
+		for (Index i = first; i < last; i++)
+			bmin = tinybvh_min( bmin, fragment[primIdx[i]].bmin ), bmax = tinybvh_max( bmax, fragment[primIdx[i]].bmax );
+		node.aabbMin = bmin, node.aabbMax = bmax, node.leftFirst = first, node.triCount = last - first;
+		BuildSIMDSubtree( 2 + c, 0, false );
+	} );
+	// 4. Pruning, against a fraction of the average mini tree root area. Two passes: count, then
+	// write the promoted nodes and freed pairs at offsets from a scan over the counts.
+	Float threshold = bvh_far<Float>;
+	if (settings.bonsaiPruneFactor > 0)
+	{
+		Float areaSum = 0;
+		for (Index c = 0; c < C; c++) areaSum += bvhNode[2 + c].SurfaceArea();
+		threshold = settings.bonsaiPruneFactor * areaSum / (Float)C;
+	}
+	Index* promotedFirst = cellCount; // cell sizes are no longer needed
+	forEachCell( 0, [&]( Index c ) { promotedFirst[c] = BonsaiPrune( 2 + c, threshold, 0, 0 ); } );
+	Index R = 0;
+	for (Index c = 0; c < C; c++) { const Index n = promotedFirst[c]; promotedFirst[c] = R, R += n; }
+	BVHNode* promoted = (BVHNode*)AlignedAlloc( R * sizeof( BVHNode ) );
+	Index* vacated = (Index*)AlignedAlloc( (R - C + 1) * sizeof( Index ) );
+	forEachCell( 0, [&]( Index c ) { BonsaiPrune( 2 + c, threshold, promoted + promotedFirst[c], vacated + promotedFirst[c] - c ); } );
+	AlignedFree( cellFirst );
+	// 5. Top tree over the R promoted nodes, built in a separate BVH by the same SIMD builder, with
+	// threading as for the full build. c_trav = 0: never stop splitting on SAH grounds.
+	BVH top( context );
+	top.settings = settings, top.settings.usePresplitting = false;
+	top.c_trav = 0, top.c_int = 1;
+	top.triCount = top.idxCount = R, top.allocatedNodes = 2 * R;
+	top.fragment = (Fragment*)top.AlignedAlloc( R * sizeof( Fragment ) );
+	top.primIdx = (Index*)top.AlignedAlloc( R * sizeof( Index ) );
+	top.bvhNode = (BVHNode*)top.AlignedAlloc( 2 * R * sizeof( BVHNode ) );
+	for (Index r = 0; r < R; r++)
+	{
+		Fragment& f = top.fragment[r];
+		f.bmin = promoted[r].aabbMin, f.bmax = promoted[r].aabbMax, f.primIdx = r, f.clipped = 0, top.primIdx[r] = r;
+	}
+	top.bvhNode[0] = root, top.bvhNode[0].leftFirst = 0, top.bvhNode[0].triCount = R;
+	memset( &top.bvhNode[1], 0, sizeof( BVHNode ) );
+	top.newNodePtr = 2, top.threadedBuild = threadedBuild;
+#ifdef ENABLE_THREADED_BUILDS
+	if (threadedBuild)
+		top.atomicNewNodePtr = top.template ContextNew<std::atomic<Index>>( (Index)2 ),
+		top.scratchPad = (Index*)top.AlignedAlloc( R * sizeof( Index ) );
+#endif
+	top.BuildSIMDSubtree( 0, 0 );
+	top.BuildSIMDFinalize();
+	if (top.scratchPad) top.AlignedFree( top.scratchPad ), top.scratchPad = 0;
+	// Leaves that still hold several mini trees (the binned split could not separate them, e.g.
+	// coinciding centroids) are split by halving their index range; appended pairs are visited too.
+	for (Index t = 2; t < top.newNodePtr; t++)
+	{
+		BVHNode& leaf = top.bvhNode[t];
+		if (leaf.triCount < 2) continue;
+		const Index n = top.newNodePtr, half = leaf.triCount / 2;
+		top.newNodePtr += 2;
+		for (Index k = 0; k < 2; k++)
+		{
+			BVHNode& child = top.bvhNode[n + k];
+			child.leftFirst = leaf.leftFirst + k * half, child.triCount = k ? leaf.triCount - half : half;
+			child.aabbMin = Vec3( bvh_far<Float> ), child.aabbMax = Vec3( -bvh_far<Float> );
+			for (Index i = child.leftFirst; i < child.leftFirst + child.triCount; i++)
+			{
+				const Fragment& f = top.fragment[top.primIdx[i]];
+				child.aabbMin = tinybvh_min( child.aabbMin, f.bmin ), child.aabbMax = tinybvh_max( child.aabbMax, f.bmax );
+			}
+		}
+		leaf.leftFirst = n, leaf.triCount = 0;
+	}
+	// 6. Copy the top tree into place: its pair q goes to [2, 2C) for q < C - 1, or else to a
+	// freed pair; its leaves become the promoted nodes. Everything read here is a copy, so
+	// overwriting freed pairs and the old root slots is safe.
+	auto pairSlot = [&]( Index t ) { const Index q = (t - 2) >> 1; return q < C - 1 ? 2 + 2 * q : vacated[q - (C - 1)]; };
+	for (Index t = 0; t < top.newNodePtr; t++) if (t != 1)
+	{
+		const BVHNode& src = top.bvhNode[t];
+		BVHNode& dst = bvhNode[t == 0 ? 0 : (pairSlot( t ) + (t & 1))];
+		if (src.isLeaf()) dst = promoted[top.primIdx[src.leftFirst]];
+		else dst = src, dst.leftFirst = pairSlot( src.leftFirst );
+	}
+	AlignedFree( promoted );
+	AlignedFree( vacated );
+	// the node counter now holds the size of the complete, contiguous node list; see BuildSIMDFinalize.
+}
+
 TEMPLATED void BVH<Float, Index>::PrepareSIMDBuild( const Slice&, const Index*, const Index )
 {
 	BVH_FATAL_ERROR( "BVH::PrepareSIMDBuild requires a SIMD builder; see BVHSIMDBuilders." );
@@ -7054,7 +7268,7 @@ TEMPLATED void BVH<Float, Index>::BuildSIMDBinTask( const Index, const Index, vo
 {
 	BVH_FATAL_ERROR( "BVH::BuildSIMDBinTask requires a SIMD builder; see BVHSIMDBuilders." );
 }
-TEMPLATED void BVH<Float, Index>::BuildSIMDSubtree( Index, uint32_t )
+TEMPLATED void BVH<Float, Index>::BuildSIMDSubtree( Index, uint32_t, bool )
 {
 	BVH_FATAL_ERROR( "BVH::BuildSIMDSubtree requires a SIMD builder; see BVHSIMDBuilders." );
 }
