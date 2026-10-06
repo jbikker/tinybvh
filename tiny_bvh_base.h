@@ -941,7 +941,7 @@ private:
 	void Build( Index nodeIdx = 0, uint32_t depth = 0 );
 	void BuildFullSweep( Index nodeIdx = 0, uint32_t depth = 0 );
 	void BuildHQTask( Index nodeIdx, uint32_t depth, Index sliceStart, Index sliceEnd, Index* triIdxB );
-	void BuildSIMDSubtree( Index nodeIdx = 0, uint32_t depth = 0, bool allowTasks = true );
+	void BuildSIMDSubtree( Index nodeIdx = 0, uint32_t depth = 0, bool allowTasks = true, bool allowSlices = true );
 	void BuildBonsai();
 	void BuildBonsaiCell( const Index nodeIdx, const bool allowTasks );
 	Index BonsaiPrune( const Index root, const Float threshold, BVHNode* promoted, Index* vacated ) const;
@@ -2417,8 +2417,8 @@ TEMPLATED void BVH<Float, Index>::PrepareBuild( const Slice& vertices, const Ind
 	// all set; actual build happens in BVH::Build.
 }
 
-// Helper function to build a subtree via the thread pool
-TEMPLATED struct BVHBuildSubtreeArgs { BVH<Float, Index>* bvh; Index node; uint32_t depth; };
+// Helper function to build a subtree via the thread pool. Only the SIMD builders read allowSlices.
+TEMPLATED struct BVHBuildSubtreeArgs { BVH<Float, Index>* bvh; Index node; uint32_t depth; bool allowSlices = true; };
 TEMPLATED void BVHBuildSubtree( void* payload )
 {
 	BVHBuildSubtreeArgs<Float, Index>* a = (BVHBuildSubtreeArgs<Float, Index>*)payload;
@@ -7078,7 +7078,7 @@ TEMPLATED Index BVH<Float, Index>::BonsaiPrune( const Index root, const Float th
 	return count;
 }
 
-// One mini tree: the root bounds from the cell's fragments, then a regular subtree build.
+// One mini tree: the root bounds from the cell's fragments, then a subtree build.
 TEMPLATED void BVH<Float, Index>::BuildBonsaiCell( const Index nodeIdx, const bool allowTasks )
 {
 	BVHNode& node = bvhNode[nodeIdx];
@@ -7087,7 +7087,7 @@ TEMPLATED void BVH<Float, Index>::BuildBonsaiCell( const Index nodeIdx, const bo
 	for (Index i = first; i < last; i++)
 		bmin = tinybvh_min( bmin, fragment[primIdx[i]].bmin ), bmax = tinybvh_max( bmax, fragment[primIdx[i]].bmax );
 	node.aabbMin = bmin, node.aabbMax = bmax;
-	BuildSIMDSubtree( nodeIdx, 0, allowTasks );
+	BuildSIMDSubtree( nodeIdx, 0, allowTasks, false );
 }
 // Pool entry point for a cell that is built as a threaded subtree; see BuildBonsai.
 TEMPLATED void BVHBuildBonsaiCell( void* payload )
@@ -7291,7 +7291,7 @@ TEMPLATED void BVH<Float, Index>::BuildSIMDBinTask( const Index, const Index, vo
 {
 	BVH_FATAL_ERROR( "BVH::BuildSIMDBinTask requires a SIMD builder; see BVHSIMDBuilders." );
 }
-TEMPLATED void BVH<Float, Index>::BuildSIMDSubtree( Index, uint32_t, bool )
+TEMPLATED void BVH<Float, Index>::BuildSIMDSubtree( Index, uint32_t, bool, bool )
 {
 	BVH_FATAL_ERROR( "BVH::BuildSIMDSubtree requires a SIMD builder; see BVHSIMDBuilders." );
 }

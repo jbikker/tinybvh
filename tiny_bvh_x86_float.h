@@ -52,7 +52,7 @@ template <> struct impl::BVHSIMDBuilders<float, uint32_t> { static constexpr boo
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const uint32_t first, const uint32_t last, const uint32_t* indices, const int8_t* vertData, const uint32_t stride4, void* frags, float* rootMin, float* rootMax );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t first, const uint32_t last, void* binbox, uint32_t* count, const float* nmin4, const float* rpd4 );
-template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth, bool allowTasks );
+template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth, bool allowTasks, bool allowSlices );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize();
 #endif
 #ifdef BVH_USEAVX2
@@ -873,9 +873,9 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t fi
 void impl::BVHBuildAVXSubtree( void* payload )
 {
 	impl::BVHBuildSubtreeArgs<float, uint32_t>* a = (impl::BVHBuildSubtreeArgs<float, uint32_t>*)payload;
-	a->bvh->BuildSIMDSubtree( a->node, a->depth );
+	a->bvh->BuildSIMDSubtree( a->node, a->depth, true, a->allowSlices );
 }
-template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth, bool allowTasks )
+template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth, bool allowTasks, bool allowSlices )
 {
 	// aligned data
 	constexpr uint32_t maxSlices = 24;
@@ -930,7 +930,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( bvhc_binmul3(), d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
-			const bool sliced = threadedBuild && allowTasks && slices > 1 && node.triCount > MT_BUILD_THRESHOLD;
+			const bool sliced = threadedBuild && allowTasks && allowSlices && slices > 1 && node.triCount > MT_BUILD_THRESHOLD;
 			const uint32_t sliceSize = node.triCount / slices;
 			if (sliced)
 			{
@@ -988,7 +988,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			const float noSplitCost = (float)node.triCount * c_int;
 			if (splitCost >= noSplitCost) break; // not splitting is better.
 			const float rpd = tinybvh_getlane_f( &rpd4, bestAxis ), nmin = tinybvh_getlane_f( &nmin4, bestAxis );
-			uint32_t i = node.leftFirst, j = node.leftFirst + node.triCount;
+			uint32_t i = node.leftFirst;
 			if (sliced)
 			{
 				// parallel partition, over the slices used for binning.
@@ -1032,21 +1032,22 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			}
 			else
 			{
-				// child boxes from the fragments as partitioned, not from the bins: with
-				// reassociated float math the two may disagree near the split plane.
-				__m256 lbox8 = bvhc_max8(), rbox8 = lbox8;
+				// in-place partition without branching.
+				const __m256 empty8 = bvhc_max8();
+				__m256 lbox8 = empty8, rbox8 = empty8;
+				uint32_t* idx = primIdx + node.leftFirst, l = 0;
 				for (uint32_t k = 0; k < node.triCount; k++)
 			{
-				const uint32_t fr = primIdx[i];
+					const uint32_t fr = idx[k];
 					const __m256 f8 = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + fr ), bvhc_signFlip8() ), bvhc_xyz8() );
 				const int32_t bi = tinybvh_max( 0, (int32_t)((fragment[fr].bmax[bestAxis] + fragment[fr].bmin[bestAxis] - nmin) * rpd) );
-					if ((uint32_t)bi <= bestPos) lbox8 = _mm256_max_ps( lbox8, f8 ), i++; else
-				{
-						rbox8 = _mm256_max_ps( rbox8, f8 );
-					const uint32_t t = primIdx[--j];
-					primIdx[j] = fr, primIdx[i] = t;
-				}
+					const uint32_t isLeft = (uint32_t)bi <= bestPos ? 1 : 0;
+					const __m256 left8 = _mm256_castsi256_ps( _mm256_set1_epi32( -(int32_t)isLeft ) );
+					lbox8 = _mm256_max_ps( lbox8, _mm256_blendv_ps( empty8, f8, left8 ) );
+					rbox8 = _mm256_max_ps( rbox8, _mm256_blendv_ps( f8, empty8, left8 ) );
+					idx[k] = idx[l], idx[l] = fr, l += isLeft;
 			}
+				i = node.leftFirst + l;
 				bestLBox = lbox8, bestRBox = rbox8;
 			}
 			// create child nodes and recurse
@@ -1067,7 +1068,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			if (!spawnThreads) task[taskCount] = n + 1, taskDepth[taskCount++] = depth + 1, nodeIdx = n; else
 			{
 				// spawn the larger subtree, continue with the small one; root barrier joins.
-				impl::BVHBuildSubtreeArgs<float, uint32_t> a = { this, leftCount > rightCount ? n : (n + 1), depth + 1 };
+				impl::BVHBuildSubtreeArgs<float, uint32_t> a = { this, leftCount > rightCount ? n : (n + 1), depth + 1, allowSlices };
 				tinybvh_spawn( context, &BVHBuildAVXSubtree, &a, sizeof( a ) );
 				nodeIdx = leftCount > rightCount ? (n + 1) : n;
 			}
