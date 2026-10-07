@@ -49,6 +49,8 @@ int main()
 	// PART 1 - TinyBVH, from ultra-fast to ultra-quality
 	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene ) );
 	experiment.push_back( new Experiment( BVH2, BONSAI, scene ) );
+	experiment.push_back( new Experiment( BVH2, BONSAI|SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, HPLOC, scene ) );
 	experiment.push_back( new Experiment( BVH2, PRESPLIT, scene ) );
 	experiment.push_back( new Experiment( BVH2, FULLSWEEP, scene ) );
 	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );

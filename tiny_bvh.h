@@ -110,7 +110,7 @@ THE SOFTWARE.
 #define TINY_BVH_VERSION_SUB	1
 
 // Cached BVH file version - increases only when file layout changes.
-#define TINY_BVH_CACHE_VERSION	192
+#define TINY_BVH_CACHE_VERSION	191
 
 // Features
 #ifndef NO_DOUBLE_PRECISION_SUPPORT
@@ -178,10 +178,6 @@ THE SOFTWARE.
 #define W_EPO	0.71f // weight of 'end point overlap' in EPO calculation.
 #endif
 
-// SBVH: "Unsplitting"
-#define SBVH_UNSPLITTING
-#define RDH_MAX_WEIGHT 0.8f
-
 // Triangle intersection: "Watertight", at a small additional cost.
 // #define WATERTIGHT_TRITEST
 
@@ -247,7 +243,6 @@ THE SOFTWARE.
 // #define CWBVH_REPORT_FULLNESS
 // Variations for BVH8_CPU traversal
 #define BVH8_USE_PREFETCHING // small gain on Linux, unclear on Windows?
-#define BVH8_SORTING_NETWORK // use a sorting network for child distances
 #define BVH8_2VALIDNODES // make 2 valid nodes a special case
 // #define NORMALIZE_RAY_DIR // enable to match previous API behaviour
 

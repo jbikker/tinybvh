@@ -36,7 +36,7 @@ template <> void impl::BVH<float, uint32_t>::BinBoxMerge( BVHBinBox<float>& b, c
 template <> void impl::BVH<float, uint32_t>::BinBoxAddFrag( BVHBinBox<float>& b, const Fragment& f );
 template <> void impl::BVH<float, uint32_t>::BinBoxAdd( BVHBinBox<float>& b, const bvhvec3& mn, const bvhvec3& mx );
 template <> struct impl::BVHSIMDBuilders<float, uint32_t> { static constexpr bool available = true; };
-template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
+template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount, const uint32_t extraFrags );
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const uint32_t first, const uint32_t last, const uint32_t* indices, const int8_t* vertData, const uint32_t stride4, void* frags, float* rootMin, float* rootMax );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t first, const uint32_t last, void* binbox, uint32_t* count, const float* nmin4, const float* rpd4 );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth, bool allowTasks, bool allowSlices );
@@ -189,14 +189,16 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const ui
 	vst1q_f32( rootMin, rmin ), vst1q_f32( rootMax, rmax ); // slices are cache line separated; no false sharing.
 }
 
-template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
+template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims, const uint32_t extraFrags )
 {
 	BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH::PrepareSIMDBuild( .. ), primCount == 0." );
 	BVH_FATAL_ERROR_IF( vertices.stride & 15, "BVH::PrepareSIMDBuild( .. ), stride must be multiple of 16." );
 	// reset node pool
 	const uint32_t primCount = prims > 0 ? prims : vertices.count / 3;
 	const uint32_t splitBudget = settings.usePresplitting ? ((int)(primCount * settings.presplitFactor)) : 0;
-	const uint32_t spaceNeeded = (primCount + splitBudget) * 2; // upper limit
+	// extraFrags: room for fragments created during the build (Bonsai HQ splits as it partitions).
+	const uint32_t fragCap = primCount + splitBudget + extraFrags;
+	const uint32_t spaceNeeded = fragCap * 2; // upper limit
 	// a rebuild is unsafe once the tree has been converted, whether or not we reallocate.
 	BVH_FATAL_ERROR_IF( allocatedNodes > 0 && !rebuildable, "BVH::PrepareSIMDBuild( .. ), bvh not rebuildable." );
 	if (allocatedNodes < spaceNeeded)
@@ -206,9 +208,9 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 		AlignedFree( fragment );
 		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
 		allocatedNodes = spaceNeeded;
-		primIdx = (uint32_t*)AlignedAlloc( (primCount + splitBudget) * sizeof( uint32_t ) );
+		primIdx = (uint32_t*)AlignedAlloc( fragCap * sizeof( uint32_t ) );
 		memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // avoid crash in refit.
-		fragment = (Fragment*)AlignedAlloc( (primCount + splitBudget) * sizeof( Fragment ) );
+		fragment = (Fragment*)AlignedAlloc( fragCap * sizeof( Fragment ) );
 	}
 	triCount = primCount;
 	verts = vertices; // note: we're not copying this data; don't delete.

@@ -32,13 +32,24 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		bvh->settings.presplitPostPass = false;
 		bvh->settings.useFullSweep = false;
 		bvh->settings.useBonsaiBVH = false;
+		bvh->settings.useBonsaiBVHHQ = false;
+		bvh->settings.useHPLOC = false;
 		bvh->settings.useSIMDifavailable = false;
+		bvh->settings.enableThreading = true;
 		if (flags & BuildFlags::FULLSWEEP) bvh->settings.useFullSweep = true;
 		// if (flags & BuildFlags::LBVH) bvh->settings.useLBVH = true;
-		if (flags & BuildFlags::BONSAI) bvh->settings.useBonsaiBVH = true;
+		if (flags & BuildFlags::BONSAI) 
+		{
+			if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useBonsaiBVHHQ = true;
+			else bvh->settings.useBonsaiBVH = true;
+		}
+		else if (flags & BuildFlags::SPATIALSPLITS) 
+		{
+			bvh->settings.useSpatialSplits = true;
+		}
+		if (flags & BuildFlags::HPLOC) bvh->settings.useHPLOC = true;
 		if (flags & BuildFlags::PRESPLIT) bvh->settings.usePresplitting = true;
 		if (flags & BuildFlags::SIMDBUILD) bvh->settings.useSIMDifavailable = true;
-		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
 		if (flags & BuildFlags::OPTIMIZE) bvh->settings.postOptimize = true;
 	}
 	// fix flags for Embree / Madmann91
@@ -127,6 +138,7 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		else if (f & BuildFlags::FULLSWEEP) { strncat( desc, "full-sweep", 100 ); strncat( flagShrt, "F", 32 ); f -= BuildFlags::FULLSWEEP; }
 		else if (f & BuildFlags::LBVH) { strncat( desc, "LBVH", 100 ); strncat( flagShrt, "L", 32 ); f -= BuildFlags::LBVH; }
 		else if (f & BuildFlags::BONSAI) { strncat( desc, "Bonsai", 100 ); strncat( flagShrt, "B", 32 ); f -= BuildFlags::BONSAI; }
+		else if (f & BuildFlags::HPLOC) { strncat( desc, "H-PLOC", 100 ); strncat( flagShrt, "H", 32 ); f -= BuildFlags::HPLOC; }
 		else if (f & BuildFlags::SPATIALSPLITS) { strncat( desc, "SBVH", 100 ); strncat( flagShrt, "S", 32 ); f -= BuildFlags::SPATIALSPLITS; }
 		else if (f & BuildFlags::PRESPLIT) { strncat( desc, "presplit", 100 ); strncat( flagShrt, "P", 32 ); f -= BuildFlags::PRESPLIT; }
 		else if (f & BuildFlags::OPTIMIZE) { strncat( desc, "optimize", 100 ); strncat( flagShrt, "O", 32 ); f -= BuildFlags::OPTIMIZE; }
@@ -165,6 +177,7 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 		BVH* accstruc = (BVH*)bvh;
 		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
+		if (flags & HPLOC) accstruc->MergeLeafs();
 		break;
 	}
 #if 0
