@@ -704,10 +704,28 @@ TINYBVH_FORCEINLINE float halfArea( const __m256& a /* a contains aabb itself, w
 	return LANE( v, 0 ) + LANE( v, 1 ) + LANE( v, 2 );
 #endif
 }
-
-#define PROCESS_PLANE( a, pos, ANLR, lN, rN, lb, rb ) if (lN != 0 && rN != 0) { \
-	ANLR = halfArea( lb ) * (float)lN + halfArea( rb ) * (float)rN; if (ANLR < splitCost) \
-	splitCost = ANLR, bestAxis = a, bestPos = pos, bestLBox = lb, bestRBox = rb; }
+// half areas of 8 boxes in the same format, one per lane.
+TINYBVH_FORCEINLINE __m256 halfArea8( const __m256& b0, const __m256& b1, const __m256& b2, const __m256& b3,
+	const __m256& b4, const __m256& b5, const __m256& b6, const __m256& b7 )
+{
+	// extents of boxes k and k + 4 share a register; a 4x4 transpose per half gives x, y and z.
+	const __m256 v0 = _mm256_add_ps( _mm256_permute2f128_ps( b0, b4, 0x20 ), _mm256_permute2f128_ps( b0, b4, 0x31 ) );
+	const __m256 v1 = _mm256_add_ps( _mm256_permute2f128_ps( b1, b5, 0x20 ), _mm256_permute2f128_ps( b1, b5, 0x31 ) );
+	const __m256 v2 = _mm256_add_ps( _mm256_permute2f128_ps( b2, b6, 0x20 ), _mm256_permute2f128_ps( b2, b6, 0x31 ) );
+	const __m256 v3 = _mm256_add_ps( _mm256_permute2f128_ps( b3, b7, 0x20 ), _mm256_permute2f128_ps( b3, b7, 0x31 ) );
+	const __m256 t0 = _mm256_unpacklo_ps( v0, v1 ), t1 = _mm256_unpackhi_ps( v0, v1 );
+	const __m256 t2 = _mm256_unpacklo_ps( v2, v3 ), t3 = _mm256_unpackhi_ps( v2, v3 );
+	const __m256 x = _mm256_shuffle_ps( t0, t2, _MM_SHUFFLE( 1, 0, 1, 0 ) );
+	const __m256 y = _mm256_shuffle_ps( t0, t2, _MM_SHUFFLE( 3, 2, 3, 2 ) );
+	const __m256 z = _mm256_shuffle_ps( t1, t3, _MM_SHUFFLE( 1, 0, 1, 0 ) );
+	return _mm256_add_ps( _mm256_add_ps( _mm256_mul_ps( x, y ), _mm256_mul_ps( y, z ) ), _mm256_mul_ps( z, x ) );
+}
+// 8 counts as floats, in the lane order of the SAH sweep in BuildSIMDSubtree.
+TINYBVH_FORCEINLINE __m256 sweepLanes( const __m128i lo /* counts 0..3 */, const __m128i hi /* counts 4..7 */ )
+{
+	const __m128 l = _mm_cvtepi32_ps( lo ), h = _mm_cvtepi32_ps( hi );
+	return _mm256_insertf128_ps( _mm256_castps128_ps256( _mm_shuffle_ps( h, l, _MM_SHUFFLE( 1, 0, 2, 3 ) ) ), _mm_shuffle_ps( h, l, _MM_SHUFFLE( 3, 2, 0, 1 ) ), 1 );
+}
 #if defined _MSC_VER
 #pragma warning ( push )
 #pragma warning( disable:4701 ) // "potentially uninitialized local variable 'bestLBox' used"
@@ -961,28 +979,34 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			const __m256* bb = binbox;
 			for (int32_t a = 0; a < 3; a++, bb += AVXBINS) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
 			{
-				// hardcoded bin processing for AVXBINS == 8
+				// all 7 planes at once. Lane k holds plane { -, 6, 0, 1, 5, 4, 2, 3 }[k], so that __bfind
+				// breaks ties like the old scalar sweep, which visited them as 3, 2, 4, 5, 1, 0, 6.
 				assert( AVXBINS == 8 );
+				const __m256 l0 = bb[0], l1 = _mm256_max_ps( l0, bb[1] ), l2 = _mm256_max_ps( l1, bb[2] ), l3 = _mm256_max_ps( l2, bb[3] );
+				const __m256 l4 = _mm256_max_ps( l3, bb[4] ), l5 = _mm256_max_ps( l4, bb[5] ), l6 = _mm256_max_ps( l5, bb[6] );
+				const __m256 r6 = bb[7], r5 = _mm256_max_ps( r6, bb[6] ), r4 = _mm256_max_ps( r5, bb[5] ), r3 = _mm256_max_ps( r4, bb[4] );
+				const __m256 r2 = _mm256_max_ps( r3, bb[3] ), r1 = _mm256_max_ps( r2, bb[2] ), r0 = _mm256_max_ps( r1, bb[1] );
+				const __m256 AL = halfArea8( l6, l6, l0, l1, l5, l4, l2, l3 ), AR = halfArea8( r6, r6, r0, r1, r5, r4, r2, r3 );
+				// left counts are prefix sums over the bins; lane 0 gets all of them, so it never qualifies.
 				const uint32_t* cnt = count + a * AVXBINS;
-				const uint32_t lN0 = cnt[0], rN0 = cnt[7];
-				const __m256 lb0 = bb[0], rb0 = bb[7];
-				const uint32_t lN1 = lN0 + cnt[1], rN1 = rN0 + cnt[6], lN2 = lN1 + cnt[2];
-				const uint32_t rN2 = rN1 + cnt[5], lN3 = lN2 + cnt[3], rN3 = rN2 + cnt[4];
-				const __m256 lb1 = _mm256_max_ps( lb0, bb[1] ), rb1 = _mm256_max_ps( rb0, bb[6] );
-				const __m256 lb2 = _mm256_max_ps( lb1, bb[2] ), rb2 = _mm256_max_ps( rb1, bb[5] );
-				const __m256 lb3 = _mm256_max_ps( lb2, bb[3] ), rb3 = _mm256_max_ps( rb2, bb[4] );
-				const uint32_t lN4 = lN3 + cnt[4], rN4 = rN3 + cnt[3], lN5 = lN4 + cnt[5];
-				const uint32_t rN5 = rN4 + cnt[2], lN6 = lN5 + cnt[6], rN6 = rN5 + cnt[1];
-				const __m256 lb4 = _mm256_max_ps( lb3, bb[4] ), rb4 = _mm256_max_ps( rb3, bb[3] );
-				const __m256 lb5 = _mm256_max_ps( lb4, bb[5] ), rb5 = _mm256_max_ps( rb4, bb[2] );
-				const __m256 lb6 = _mm256_max_ps( lb5, bb[6] ), rb6 = _mm256_max_ps( rb5, bb[1] );
-				float ANLR3 = BVH_FAR; PROCESS_PLANE( a, 3, ANLR3, lN3, rN3, lb3, rb3 ); // most likely split
-				float ANLR2 = BVH_FAR; PROCESS_PLANE( a, 2, ANLR2, lN2, rN4, lb2, rb4 );
-				float ANLR4 = BVH_FAR; PROCESS_PLANE( a, 4, ANLR4, lN4, rN2, lb4, rb2 );
-				float ANLR5 = BVH_FAR; PROCESS_PLANE( a, 5, ANLR5, lN5, rN1, lb5, rb1 );
-				float ANLR1 = BVH_FAR; PROCESS_PLANE( a, 1, ANLR1, lN1, rN5, lb1, rb5 );
-				float ANLR0 = BVH_FAR; PROCESS_PLANE( a, 0, ANLR0, lN0, rN6, lb0, rb6 );
-				float ANLR6 = BVH_FAR; PROCESS_PLANE( a, 6, ANLR6, lN6, rN0, lb6, rb0 ); // least likely split
+				__m128i lo = _mm_loadu_si128( (const __m128i*)cnt ), hi = _mm_loadu_si128( (const __m128i*)(cnt + 4) );
+				lo = _mm_add_epi32( lo, _mm_slli_si128( lo, 4 ) ), lo = _mm_add_epi32( lo, _mm_slli_si128( lo, 8 ) );
+				hi = _mm_add_epi32( hi, _mm_slli_si128( hi, 4 ) ), hi = _mm_add_epi32( hi, _mm_slli_si128( hi, 8 ) );
+				hi = _mm_add_epi32( hi, _mm_shuffle_epi32( lo, _MM_SHUFFLE( 3, 3, 3, 3 ) ) );
+				const __m128i all = _mm_shuffle_epi32( hi, _MM_SHUFFLE( 3, 3, 3, 3 ) );
+				const __m256 NL = sweepLanes( lo, hi ), NR = sweepLanes( _mm_sub_epi32( all, lo ), _mm_sub_epi32( all, hi ) );
+				const __m256 empty = _mm256_or_ps( _mm256_cmp_ps( NL, _mm256_setzero_ps(), _CMP_EQ_OQ ), _mm256_cmp_ps( NR, _mm256_setzero_ps(), _CMP_EQ_OQ ) );
+				const __m256 cost = _mm256_blendv_ps( _mm256_add_ps( _mm256_mul_ps( AL, NL ), _mm256_mul_ps( AR, NR ) ), _mm256_set1_ps( BVH_FAR ), empty );
+				__m256 best = _mm256_min_ps( cost, _mm256_permute_ps( cost, _MM_SHUFFLE( 2, 3, 0, 1 ) ) );
+				best = _mm256_min_ps( best, _mm256_permute_ps( best, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+				best = _mm256_min_ps( best, _mm256_permute2f128_ps( best, best, 1 ) );
+				const float axisCost = _mm_cvtss_f32( _mm256_castps256_ps128( best ) );
+				if (axisCost < splitCost)
+				{
+					static const uint32_t plane[8] = { 7, 6, 0, 1, 5, 4, 2, 3 };
+					const uint32_t lane = __bfind( (uint32_t)_mm256_movemask_ps( _mm256_cmp_ps( cost, best, _CMP_EQ_OQ ) ) );
+					splitCost = axisCost, bestAxis = a, bestPos = plane[lane];
+				}
 			}
 			splitCost = c_trav + c_int * rSAV * splitCost;
 			const float noSplitCost = (float)node.triCount * c_int;
