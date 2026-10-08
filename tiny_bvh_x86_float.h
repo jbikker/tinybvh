@@ -30,7 +30,7 @@ TINYBVH_FORCEINLINE void tinybvh_store8i( void* p, const __m256i v ) { memcpy( p
 
 // Specializations provided by this header.
 #ifdef BVH_USESSE
-template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const;
+template <> uint32_t impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const;
 template <> void impl::BVH<float, uint32_t>::ClipFragToBins( const Fragment& orig, const int32_t bin1, const int32_t bin2, const uint32_t axis, const float nodeMin, const float planeDist, BVHBinBox<float>* sbinBox ) const;
 template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
 template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
@@ -136,8 +136,7 @@ template <> void impl::BVH<float, uint32_t>::SortByCentroid( const uint32_t* fra
 // BonsaiHQClassify, AVX2: pass 1 of a Bonsai HQ partition step, eight fragments at a time.
 template <> void impl::BVH<float, uint32_t>::BonsaiHQClassify( uint8_t* mask, const uint32_t lo, const uint32_t hi, const uint32_t axis, const float pos2, BonsaiHQPart& p ) const
 {
-	for (int k = 0; k < 6; k++) BinBoxClear( p.box[k] ), p.n[k] = 0;
-	p.both = 0;
+	p.Clear();
 	const __m256 pos8 = _mm256_set1_ps( pos2 * 0.5f ), pos2x8 = _mm256_set1_ps( pos2 ), none8 = _mm256_set1_ps( -BVH_FAR );
 	const __m256 flip8 = _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f ); // fragment to BinBox layout
 	const __m256 ones8 = _mm256_castsi256_ps( _mm256_set1_epi32( -1 ) );
@@ -289,8 +288,8 @@ template <> void impl::BVH<float, uint32_t>::BonsaiHQDistribute( BonsaiHQState& 
 			const __m128i out16 = _mm_shuffle_epi8( bytes16, order16 );
 			if (at + 8 <= end[k]) _mm_storel_epi64( (__m128i*)(maskOut + at), out16 );
 			else { uint64_t b; _mm_storel_epi64( (__m128i*) & b, out16 ); memcpy( maskOut + at, &b, n ); }
-			box8[k][0] = tinybvh_maxrows8( box8[k][0], row, cat[k][0] ), e.n[k][0] += lut.count[cat[k][0]];
-			box8[k][1] = tinybvh_maxrows8( box8[k][1], row, cat[k][1] ), e.n[k][1] += lut.count[cat[k][1]];
+			box8[k][0] = tinybvh_maxrows8( box8[k][0], row, cat[k][0] ), next[k].n[0] += lut.count[cat[k][0]];
+			box8[k][1] = tinybvh_maxrows8( box8[k][1], row, cat[k][1] ), next[k].n[3] += lut.count[cat[k][1]];
 			for (uint32_t b = straddle & sel[k]; b; b &= b - 1)
 			{
 				const uint32_t j = tinybvh_ctz( b );
@@ -299,15 +298,15 @@ template <> void impl::BVH<float, uint32_t>::BonsaiHQDistribute( BonsaiHQState& 
 		}
 	}
 	for (; i < hi; i++) BonsaiHQDistributeFrag( e, st, mask, maskOut, i, axis, pos2, doSplit, plan, next );
-	// fold the register accumulators into e.
+	// fold the register accumulators into e and the children's sets.
 	for (uint32_t k = 0; k < 2; k++)
 	{
 		ALIGNED( 32 ) BVHBinBox<float> b;
 		_mm256_store_ps( &b.negMin.x, cen8[k] );
 		e.cmin2[k] = tinybvh_min( e.cmin2[k], -b.negMin ), e.cmax2[k] = tinybvh_max( e.cmax2[k], b.bmax );
-		for (uint32_t side = 0; side < 2; side++) _mm256_store_ps( &b.negMin.x, box8[k][side] ), BinBoxMerge( e.box[k][side], b );
+		if (fused[k]) for (uint32_t side = 0; side < 2; side++) _mm256_store_ps( &b.negMin.x, box8[k][side] ), BinBoxMerge( next[k].box[3 * side], b );
 	}
-	BonsaiHQDistributeEnd( e, p, plan, next );
+	BonsaiHQDistributeEnd( e, p );
 }
 
 // EmitNode, AVX2.
@@ -490,7 +489,7 @@ template <> void impl::BVH<float, uint32_t>::ClipFragToBins( const Fragment& ori
 }
 
 // SplitFrag: cut a fragment in two new fragments. Based on madmann91 code.
-template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const
+template <> uint32_t impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const
 {
 	__m128 lbmin4, lbmax4, rbmin4, rbmax4;
 	lbmin4 = _mm_set1_ps( BVH_FAR ), rbmin4 = lbmin4;
@@ -530,7 +529,7 @@ template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fr
 	tinybvh_store4( &left.bmax, lbmax4 ), tinybvh_store4( &right.bmax, rbmax4 );
 	left.primIdx = right.primIdx = orig.primIdx;
 	left.clipped = right.clipped = true;
-	return tinybvh_halfarea( left.bmax - left.bmin ) > 0 && tinybvh_halfarea( right.bmax - right.bmin ) > 0;
+	return SplitFragMask( left, right );
 }
 
 // SSE box tests for BVH::EPOArea.

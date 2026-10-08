@@ -932,21 +932,31 @@ private:
 	void BuildSIMDSubtree( Index nodeIdx = 0, uint32_t depth = 0, bool allowTasks = true, bool allowSlices = true );
 	void BuildBonsai();
 	void BuildBonsaiTrees( const Index cells );
-	struct BonsaiHQState { BVH* bvh; Index* idxTmp; uint8_t* mask[2]; Index threshold; std::atomic<Index> cells{ 0 }; };
-	struct ALIGNED( 64 ) BonsaiHQPart { BinBox box[6]; Index n[6], both, left, right, frag; Vec3 cmin2[2], cmax2[2]; };
+	struct BonsaiHQState { Index* idxTmp; uint8_t* mask[2]; Index threshold; std::atomic<Index> cells{ 0 }; };
+	struct ALIGNED( 64 ) BonsaiHQPart
+	{
+		// six fragment sets, [0..2] left of the plane and [3..5] right: fragments that do not straddle it, straddlers 
+		// whole (by centroid), and straddlers clipped to that side (whole, if clipping leaves nothing on either side).
+		BinBox box[6];
+		Index n[6], both, left, right, frag;
+		Vec3 cmin2[2], cmax2[2];
+		void Clear() { for (int k = 0; k < 6; k++) BinBoxClear( box[k] ), n[k] = 0; both = 0; }
+		void Merge( const BonsaiHQPart& o ) { for (int k = 0; k < 6; k++) BinBoxMerge( box[k], o.box[k] ), n[k] += o.n[k]; both += o.both; }
+	};
 	struct ALIGNED( 64 ) BonsaiHQNext { BonsaiHQPart sum; Vec3 cmin2, cmax2; uint32_t axis; Float pos2; bool fused; };
+	// a partition: fragments [first, first + count) at the start of its slice [first, end), and its record 'in'.
+	struct BonsaiHQTask { Index first, count, end; uint32_t depth; BonsaiHQNext* in; };
 	void BuildBonsaiHQ( const Slice& vertices, const Index* indices, const Index prims );
-	void BonsaiHQPartition( BonsaiHQState& st, Index first, Index count, Index end, uint32_t depth, BonsaiHQNext* in );
-	struct ALIGNED( 64 ) BonsaiHQEmit { BinBox box[2][2]; Vec3 cmin2[2], cmax2[2]; Index at[2], frag, n[2][2]; };
+	void BonsaiHQPartition( BonsaiHQState& st, BonsaiHQTask t );
+	struct BonsaiHQEmit { Vec3 cmin2[2], cmax2[2]; Index at[2], frag; };
 	void BonsaiHQDistribute( BonsaiHQState& st, const uint8_t* mask, uint8_t* maskOut, const Index lo, const Index hi, const uint32_t axis,
 		const Float pos2, const bool doSplit, BonsaiHQPart& p, const BonsaiHQNext* plan, BonsaiHQPart* next );
 	void BonsaiHQDistributeFrag( BonsaiHQEmit& e, BonsaiHQState& st, const uint8_t* mask, uint8_t* maskOut, const Index i, const uint32_t axis,
 		const Float pos2, const bool doSplit, const BonsaiHQNext* plan, BonsaiHQPart* next );
 	void BonsaiHQDistributeBegin( BonsaiHQEmit& e, const BonsaiHQPart& p, const BonsaiHQNext* plan, BonsaiHQPart* next );
-	void BonsaiHQDistributeEnd( const BonsaiHQEmit& e, BonsaiHQPart& p, const BonsaiHQNext* plan, BonsaiHQPart* next );
+	static void BonsaiHQDistributeEnd( const BonsaiHQEmit& e, BonsaiHQPart& p );
 	void BonsaiHQClassify( uint8_t* mask, const Index lo, const Index hi, const uint32_t axis, const Float pos2, BonsaiHQPart& p ) const;
 	uint8_t BonsaiHQClassifyFrag( const Fragment& f, const uint32_t axis, const Float pos2, BonsaiHQPart& p ) const;
-	uint32_t BonsaiHQSplit( const Fragment& f, const uint32_t axis, const Float pos, Fragment* half ) const;
 	void BuildBonsaiCell( const Index nodeIdx, const bool allowTasks );
 	Index BonsaiPrune( const Index root, const Float threshold, BVHNode* promoted, Index* vacated ) const;
 	void BuildHPLOC();
@@ -959,6 +969,7 @@ private:
 	template <typename, typename> friend void BVHBuildHQSubtree( void* payload );
 	template <typename, typename> friend void BVHBuildBonsaiCell( void* payload );
 	template <typename, typename> friend void BVHBonsaiHQPartition( void* payload );
+	template <typename, typename> friend struct BVHBonsaiHQArgs;
 	friend void BVHBuildAVXSubtree( void* payload );
 	friend void BVHBuildNEONSubtree( void* payload );
 	BVH& operator=( const BVH& ) = default;
@@ -982,7 +993,8 @@ private:
 	void SortByCentroid( const Index* frag, const uint32_t n, const uint32_t axis, uint8_t* order ) const;
 	void ClipFragToBins( const Fragment& orig, const int32_t bin1, const int32_t bin2, const uint32_t axis,
 		const Float nodeMin, const Float planeDist, BinBox* sbinBox ) const;
-	bool SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t splitAxis, const Float splitPos ) const;
+	uint32_t SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t splitAxis, const Float splitPos ) const;
+	static uint32_t SplitFragMask( const Fragment& left, const Fragment& right );
 	Index CombineLeafs( const Index primCount, Index& firstIdx, Index nodeIdx = 0 );
 	Float SplitPriority( const Fragment& f ) const;
 	Index Presplit();
@@ -3444,7 +3456,8 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 							// split straddler
 							ALIGNED( 64 ) Fragment part1, part2; // keep all clipping in a single cacheline.
 							Float splitPos = bestLMax[bestAxis];
-							if (SplitFrag( fragment[fragIdx], part1, part2, bestAxis, splitPos ))
+							const uint32_t valid = SplitFrag( fragment[fragIdx], part1, part2, bestAxis, splitPos );
+							if (valid == 3)
 							{
 							#ifdef ENABLE_THREADED_BUILDS
 								Index newFragIdx = threadedBuild ? atomicNextFrag->fetch_add( 1 ) : nextFrag++;
@@ -3454,11 +3467,8 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 								fragment[fragIdx] = part1, idxTmp[A++] = fragIdx;
 								fragment[newFragIdx] = part2, idxTmp[--B] = newFragIdx;
 							}
-							else // didn't work out; see what we can do.
-							{
-								const Float sahLeft = tinybvh_halfarea( part1.bmax - part1.bmin );
-								if (sahLeft > 0) idxTmp[A++] = fragIdx; else idxTmp[--B] = fragIdx;
-							}
+							else if (valid & 1) idxTmp[A++] = fragIdx; // didn't work out: keep it whole, on a non-empty side.
+							else idxTmp[--B] = fragIdx;
 						}
 					}
 					// for spatial splits, we fully refresh the bounds: clipping is never fully stable..
@@ -3926,7 +3936,7 @@ TEMPLATED Index BVH<Float, Index>::Presplit()
 		const Float index = tinybvh_round( (midPos - root.aabbMin[splitAxis]) / nodeSize );
 		Float splitPos = root.aabbMin[splitAxis] + index * nodeSize;
 		if (!(splitPos > f.bmin[splitAxis] && splitPos < f.bmax[splitAxis])) splitPos = midPos;
-		if (!SplitFrag( fragment[i], part1, part2, splitAxis, splitPos )) { splits[i] = 1; continue; }
+		if (SplitFrag( fragment[i], part1, part2, splitAxis, splitPos ) != 3) { splits[i] = 1; continue; }
 		fragment[i] = part1, fragment[fragCount] = part2;
 		// distribute available splits over part1 and part2
 		const int toDivide = splits[i];
@@ -7243,26 +7253,16 @@ TEMPLATED void BVH<Float, Index>::BuildBonsaiTrees( const Index C )
 
 // Bonsai HQ: "SAH guided spatial split partitioning for fast BVH construction", Ganestam and
 // Doggett, EG 2016.
-TEMPLATED struct BVHBonsaiHQArgs { void* state; Index first, count, end; uint32_t depth; void* in; };
+TEMPLATED struct BVHBonsaiHQArgs
+{
+	BVH<Float, Index>* bvh;
+	typename BVH<Float, Index>::BonsaiHQState* st;
+	typename BVH<Float, Index>::BonsaiHQTask t;
+};
 TEMPLATED void BVHBonsaiHQPartition( void* payload )
 {
 	const BVHBonsaiHQArgs<Float, Index>* a = (const BVHBonsaiHQArgs<Float, Index>*)payload;
-	typename BVH<Float, Index>::BonsaiHQState* st = (typename BVH<Float, Index>::BonsaiHQState*)a->state;
-	st->bvh->BonsaiHQPartition( *st, a->first, a->count, a->end, a->depth, (typename BVH<Float, Index>::BonsaiHQNext*)a->in );
-}
-
-// Clipped halves of a fragment that straddles the plane at 'pos'. Returns a mask with bit k set
-// if half k is not empty.
-TEMPLATED uint32_t BVH<Float, Index>::BonsaiHQSplit( const Fragment& f, const uint32_t axis, const Float pos, Fragment* half ) const
-{
-	SplitFrag( f, half[0], half[1], axis, pos );
-	uint32_t valid = 0;
-	for (uint32_t k = 0; k < 2; k++)
-	{
-		const Vec3 e = half[k].bmax - half[k].bmin;
-		if (e.x >= 0 && e.y >= 0 && e.z >= 0 && tinybvh_halfarea( e ) > 0) valid |= 1u << k;
-	}
-	return valid;
+	a->bvh->BonsaiHQPartition( *a->st, a->t );
 }
 
 // Pass 1 of a Bonsai HQ partition step, for one fragment: add it to the sets of 'p', and return its mask byte.
@@ -7272,7 +7272,7 @@ TEMPLATED uint8_t BVH<Float, Index>::BonsaiHQClassifyFrag( const Fragment& f, co
 	const uint32_t right = f.bmin[axis] + f.bmax[axis] >= pos2 ? 1 : 0, set = right * 3;
 	if (!(f.bmin[axis] < pos && f.bmax[axis] > pos)) { BinBoxAddFrag( p.box[set], f ), p.n[set]++; return (uint8_t)right; }
 	ALIGNED( 64 ) Fragment half[2];
-	const uint32_t valid = BonsaiHQSplit( f, axis, pos, half );
+	const uint32_t valid = SplitFrag( f, half[0], half[1], axis, pos );
 	BinBoxAddFrag( p.box[set + 1], f ), p.n[set + 1]++;
 	if (valid & 1) BinBoxAddFrag( p.box[2], half[0] ), p.n[2]++;
 	if (valid & 2) BinBoxAddFrag( p.box[5], half[1] ), p.n[5]++;
@@ -7284,8 +7284,7 @@ TEMPLATED uint8_t BVH<Float, Index>::BonsaiHQClassifyFrag( const Fragment& f, co
 // Pass 1 of a Bonsai HQ partition step: gather the six sets over primIdx[lo, hi), and write the fragments' mask bytes.
 TEMPLATED void BVH<Float, Index>::BonsaiHQClassify( uint8_t* mask, const Index lo, const Index hi, const uint32_t axis, const Float pos2, BonsaiHQPart& p ) const
 {
-	for (int k = 0; k < 6; k++) BinBoxClear( p.box[k] ), p.n[k] = 0;
-	p.both = 0;
+	p.Clear();
 	for (Index i = lo; i < hi; i++) mask[i] = BonsaiHQClassifyFrag( fragment[primIdx[i]], axis, pos2, p );
 }
 
@@ -7296,7 +7295,7 @@ TEMPLATED void BVH<Float, Index>::BonsaiHQDistribute( BonsaiHQState& st, const u
 	BonsaiHQEmit e;
 	BonsaiHQDistributeBegin( e, p, plan, next );
 	for (Index i = lo; i < hi; i++) BonsaiHQDistributeFrag( e, st, mask, maskOut, i, axis, pos2, doSplit, plan, next );
-	BonsaiHQDistributeEnd( e, p, plan, next );
+	BonsaiHQDistributeEnd( e, p );
 }
 
 TEMPLATED void BVH<Float, Index>::BonsaiHQDistributeBegin( BonsaiHQEmit& e, const BonsaiHQPart& p, const BonsaiHQNext* plan, BonsaiHQPart* next )
@@ -7305,20 +7304,13 @@ TEMPLATED void BVH<Float, Index>::BonsaiHQDistributeBegin( BonsaiHQEmit& e, cons
 	for (uint32_t k = 0; k < 2; k++)
 	{
 		e.cmin2[k] = Vec3( bvh_far<Float> ), e.cmax2[k] = Vec3( -bvh_far<Float> );
-		BinBoxClear( e.box[k][0] ), BinBoxClear( e.box[k][1] ), e.n[k][0] = e.n[k][1] = 0;
-		if (plan[k].fused) { for (int j = 0; j < 6; j++) BinBoxClear( next[k].box[j] ), next[k].n[j] = 0; next[k].both = 0; }
+		if (plan[k].fused) next[k].Clear();
 	}
 }
 
-TEMPLATED void BVH<Float, Index>::BonsaiHQDistributeEnd( const BonsaiHQEmit& e, BonsaiHQPart& p, const BonsaiHQNext* plan, BonsaiHQPart* next )
+TEMPLATED void BVH<Float, Index>::BonsaiHQDistributeEnd( const BonsaiHQEmit& e, BonsaiHQPart& p )
 {
-	for (uint32_t k = 0; k < 2; k++)
-	{
-		p.cmin2[k] = e.cmin2[k], p.cmax2[k] = e.cmax2[k];
-		if (!plan[k].fused) continue;
-		BinBoxMerge( next[k].box[0], e.box[k][0] ), BinBoxMerge( next[k].box[3], e.box[k][1] );
-		next[k].n[0] += e.n[k][0], next[k].n[3] += e.n[k][1];
-	}
+	for (uint32_t k = 0; k < 2; k++) p.cmin2[k] = e.cmin2[k], p.cmax2[k] = e.cmax2[k];
 }
 
 // Pass 2 for the fragment at index slot i.
@@ -7332,13 +7324,7 @@ TEMPLATED void BVH<Float, Index>::BonsaiHQDistributeFrag( BonsaiHQEmit& e, Bonsa
 		e.cmin2[k] = tinybvh_min( e.cmin2[k], c2 ), e.cmax2[k] = tinybvh_max( e.cmax2[k], c2 );
 		const Index at = e.at[k]++;
 		st.idxTmp[at] = fi;
-		if (!plan[k].fused) return;
-		// the child's pass 1, as BonsaiHQClassifyFrag, which also handles the straddlers.
-		const uint32_t a = plan[k].axis;
-		const Float p2 = plan[k].pos2, p1 = p2 * Float( 0.5 );
-		if (f.bmin[a] < p1 && f.bmax[a] > p1) { maskOut[at] = BonsaiHQClassifyFrag( f, a, p2, next[k] ); return; }
-		const uint32_t side = c2[a] >= p2 ? 1 : 0;
-		BinBoxAddFrag( e.box[k][side], f ), e.n[k][side]++, maskOut[at] = (uint8_t)side;
+		if (plan[k].fused) maskOut[at] = BonsaiHQClassifyFrag( f, plan[k].axis, plan[k].pos2, next[k] ); // the child's pass 1
 	};
 	const Index fi = primIdx[i];
 	const uint32_t m = mask[i];
@@ -7347,7 +7333,7 @@ TEMPLATED void BVH<Float, Index>::BonsaiHQDistributeFrag( BonsaiHQEmit& e, Bonsa
 	{
 		ALIGNED( 64 ) Fragment half[2];
 		const Fragment orig = fragment[fi];
-		const uint32_t valid = BonsaiHQSplit( orig, axis, pos2 * Float( 0.5 ), half );
+		const uint32_t valid = SplitFrag( orig, half[0], half[1], axis, pos2 * Float( 0.5 ) );
 		for (uint32_t k = 0; k < 2; k++) if (!(valid & (1u << k))) half[k] = orig;
 		go = m >> 2;
 		if (go == 3) fragment[fi] = half[0], fragment[e.frag] = half[1]; else fragment[fi] = half[go - 1];
@@ -7356,18 +7342,20 @@ TEMPLATED void BVH<Float, Index>::BonsaiHQDistributeFrag( BonsaiHQEmit& e, Bonsa
 	if (go & 2) emit( 1, go == 3 ? e.frag++ : fi );
 }
 
-TEMPLATED void BVH<Float, Index>::BonsaiHQPartition( BonsaiHQState& st, Index first, Index count, Index end, uint32_t depth, BonsaiHQNext* in )
+TEMPLATED void BVH<Float, Index>::BonsaiHQPartition( BonsaiHQState& st, BonsaiHQTask t )
 {
-	// A partition: fragments [first, first + count) at the start of its slice [first, end), and its
-	// record 'in', owned by this step. Centroid bounds are doubled: a fragment is right of a plane
-	// at p if bmin + bmax >= 2p. The mask bytes of the partitions at depth d are in st.mask[d & 1].
-	struct Task { Index first, count, end; uint32_t depth; BonsaiHQNext* in; } stack[TINYBVH_STACK_SIZE];
+	// Partition t, and the partitions below it.
+	using Task = BonsaiHQTask;
 	using Part = BonsaiHQPart;
+	Task stack[TINYBVH_STACK_SIZE];
 	auto run = [&]( const uint32_t n, const auto& body ) { if (n > 1) tinybvh_parallel_for( context, n, body ); else body( 0 ); };
 	auto cost = [&]( const BinBox& a, const BinBox& b, const Index n ) { BinBox u = a; BinBoxMerge( u, b ); return n ? BinBoxArea( u ) * (Float)n : 0; };
 	uint32_t stackPtr = 0;
 	while (1)
 	{
+		const Index first = t.first, count = t.count, end = t.end;
+		const uint32_t depth = t.depth;
+		BonsaiHQNext* in = t.in;
 		const Vec3 cmin2 = in->cmin2, cmax2 = in->cmax2;
 		Part sum;
 		bool fused = in->fused;
@@ -7385,8 +7373,7 @@ TEMPLATED void BVH<Float, Index>::BonsaiHQPartition( BonsaiHQState& st, Index fi
 			const Index c = st.cells.fetch_add( 1 );
 			bvhNode[2 + c].leftFirst = first, bvhNode[2 + c].triCount = count;
 			if (stackPtr == 0) return;
-			const Task& t = stack[--stackPtr];
-			first = t.first, count = t.count, end = t.end, depth = t.depth, in = t.in;
+			t = stack[--stackPtr];
 			continue;
 		}
 		uint8_t* mask = st.mask[depth & 1], * maskOut = st.mask[(depth + 1) & 1];
@@ -7400,19 +7387,14 @@ TEMPLATED void BVH<Float, Index>::BonsaiHQPartition( BonsaiHQState& st, Index fi
 		{
 			run( slices, [&]( uint32_t s ) { BonsaiHQClassify( mask, lo( s ), hi( s ), axis, pos2, part[s] ); } );
 			sum = part[0];
-			for (uint32_t s = 1; s < slices; s++)
-			{
-				for (int k = 0; k < 6; k++) BinBoxMerge( sum.box[k], part[s].box[k] ), sum.n[k] += part[s].n[k];
-				sum.both += part[s].both;
-			}
+			for (uint32_t s = 1; s < slices; s++) sum.Merge( part[s] );
 		}
 		else if (slices == 1) part[0] = sum;
 		else run( slices, [&]( uint32_t s )
 		{
 			// the slices' counts, for the positions in pass 2, from the mask bytes.
 			Part& p = part[s];
-			for (int k = 0; k < 6; k++) p.n[k] = 0;
-			p.both = 0;
+			p.Clear();
 			for (Index i = lo( s ), last = hi( s ); i < last; )
 			{
 				// eight bytes at a time when none is a straddler: the side bits sum by multiplication.
@@ -7478,11 +7460,7 @@ TEMPLATED void BVH<Float, Index>::BonsaiHQPartition( BonsaiHQState& st, Index fi
 			for (uint32_t s = 1; s < slices; s++) c.cmin2 = tinybvh_min( c.cmin2, part[s].cmin2[k] ), c.cmax2 = tinybvh_max( c.cmax2, part[s].cmax2[k] );
 			if (!c.fused) continue;
 			c.sum = next[k];
-			for (uint32_t s = 1; s < slices; s++)
-			{
-				for (int j = 0; j < 6; j++) BinBoxMerge( c.sum.box[j], next[2 * s + k].box[j] ), c.sum.n[j] += next[2 * s + k].n[j];
-				c.sum.both += next[2 * s + k].both;
-			}
+			for (uint32_t s = 1; s < slices; s++) c.sum.Merge( next[2 * s + k] );
 		}
 		if (slices > 1) AlignedFree( part );
 		const Task l = { first, leftCount, mid, depth + 1, child[0] }, r = { mid, rightCount, end, depth + 1, child[1] };
@@ -7490,15 +7468,13 @@ TEMPLATED void BVH<Float, Index>::BonsaiHQPartition( BonsaiHQState& st, Index fi
 	#ifdef ENABLE_THREADED_BUILDS
 		if (threadedBuild && depth < MT_SPAWN_DEPTH && tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS)
 		{
-			const Task& big = leftCount > rightCount ? l : r, & tiny = leftCount > rightCount ? r : l;
-			const BVHBonsaiHQArgs<Float, Index> args = { &st, big.first, big.count, big.end, big.depth, big.in };
+			const BVHBonsaiHQArgs<Float, Index> args = { this, &st, leftCount > rightCount ? l : r };
 			tinybvh_spawn( context, &BVHBonsaiHQPartition<Float, Index>, &args, sizeof( args ) );
-			first = tiny.first, count = tiny.count, end = tiny.end, depth = tiny.depth, in = tiny.in;
+			t = leftCount > rightCount ? r : l;
 			continue;
 		}
 	#endif
-		stack[stackPtr++] = r;
-		first = l.first, count = l.count, end = l.end, depth = l.depth, in = l.in;
+		stack[stackPtr++] = r, t = l;
 	}
 }
 
@@ -7534,7 +7510,7 @@ TEMPLATED void BVH<Float, Index>::BuildBonsaiHQ( const Slice& vertices, const In
 		bounds[0].cmin2 = tinybvh_min( bounds[0].cmin2, bounds[s].cmin2 ), bounds[0].cmax2 = tinybvh_max( bounds[0].cmax2, bounds[s].cmax2 );
 	// partitioning
 	BonsaiHQState st;
-	st.bvh = this, st.idxTmp = (Index*)AlignedAlloc( cap * sizeof( Index ) );
+	st.idxTmp = (Index*)AlignedAlloc( cap * sizeof( Index ) );
 	st.mask[0] = (uint8_t*)AlignedAlloc( 2 * (size_t)cap ), st.mask[1] = st.mask[0] + cap;
 	// Section 3.2: mini trees of 512 fragments below 100k primitives, 8192 above 4M, linear in between.
 	st.threshold = 512 + (Index)(7680 * tinybvh_clamp( ((Float)N - 100000) / 3900000, Float( 0 ), Float( 1 ) ));
@@ -7546,7 +7522,7 @@ TEMPLATED void BVH<Float, Index>::BuildBonsaiHQ( const Slice& vertices, const In
 	{
 		BonsaiHQNext* root = (BonsaiHQNext*)AlignedAlloc( sizeof( BonsaiHQNext ) );
 		root->cmin2 = bounds[0].cmin2, root->cmax2 = bounds[0].cmax2, root->fused = false;
-		BonsaiHQPartition( st, 0, N, cap, 0, root );
+		BonsaiHQPartition( st, { 0, N, cap, 0, root } );
 	}
 	Index F = nextFrag;
 #ifdef ENABLE_THREADED_BUILDS
@@ -8036,7 +8012,14 @@ TEMPLATED bool BVH<Float, Index>::BVHNode::Intersect( const Vec3& bmin, const Ve
 }
 
 // SplitFrag: cut a fragment in two new fragments. Based on madmann91 code.
-TEMPLATED bool BVH<Float, Index>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const Float pos ) const
+TEMPLATED uint32_t BVH<Float, Index>::SplitFragMask( const Fragment& left, const Fragment& right )
+{
+	const Vec3 el = left.bmax - left.bmin, er = right.bmax - right.bmin;
+	const bool l = el.x >= 0 && el.y >= 0 && el.z >= 0 && tinybvh_halfarea( el ) > 0;
+	const bool r = er.x >= 0 && er.y >= 0 && er.z >= 0 && tinybvh_halfarea( er ) > 0;
+	return (l ? 1u : 0u) | (r ? 2u : 0u);
+}
+TEMPLATED uint32_t BVH<Float, Index>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const Float pos ) const
 {
 	left.bmin = Vec3( bvh_far<Float> ), left.bmax = Vec3( -bvh_far<Float> );
 	left.primIdx = orig.primIdx, left.clipped = true, right = left;
@@ -8061,7 +8044,7 @@ TEMPLATED bool BVH<Float, Index>::SplitFrag( const Fragment& orig, Fragment& lef
 		left.bmax = tinybvh_min( orig.bmax, left.bmax ),
 		right.bmin = tinybvh_max( orig.bmin, right.bmin ),
 		right.bmax = tinybvh_min( orig.bmax, right.bmax );
-	return tinybvh_halfarea( left.bmax - left.bmin ) > 0 && tinybvh_halfarea( right.bmax - right.bmin ) > 0;
+	return SplitFragMask( left, right );
 }
 
 
