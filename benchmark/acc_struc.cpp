@@ -31,23 +31,14 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		bvh->settings.useSpatialSplits = false;
 		bvh->settings.presplitPostPass = false;
 		bvh->settings.useFullSweep = false;
-		bvh->settings.useBonsaiBVH = false;
-		bvh->settings.useBonsaiBVHHQ = false;
+		bvh->settings.binnedBVH = false;
 		bvh->settings.useHPLOC = false;
-		bvh->settings.useSIMDifavailable = false;
+		bvh->settings.useSIMDifavailable = true;
 		bvh->settings.enableThreading = true;
+		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
 		if (flags & BuildFlags::FULLSWEEP) bvh->settings.useFullSweep = true;
-		// if (flags & BuildFlags::LBVH) bvh->settings.useLBVH = true;
-		if (flags & BuildFlags::BONSAI) 
-		{
-			if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useBonsaiBVHHQ = true;
-			else bvh->settings.useBonsaiBVH = true;
-		}
-		else if (flags & BuildFlags::SPATIALSPLITS) 
-		{
-			bvh->settings.useSpatialSplits = true;
-		}
-		if (flags & BuildFlags::HPLOC) bvh->settings.useHPLOC = true;
+		else if (flags & BuildFlags::HPLOC) bvh->settings.useHPLOC = true;
+		else if (!(flags & BuildFlags::BONSAI)) bvh->settings.binnedBVH = true;
 		if (flags & BuildFlags::PRESPLIT) bvh->settings.usePresplitting = true;
 		if (flags & BuildFlags::SIMDBUILD) bvh->settings.useSIMDifavailable = true;
 		if (flags & BuildFlags::OPTIMIZE) bvh->settings.postOptimize = true;

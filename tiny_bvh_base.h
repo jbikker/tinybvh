@@ -649,9 +649,7 @@ struct BVHBuildSettings
 	bool presplitPostPass = true;	// attempt to un-split primitives in leaves after a presplit build.
 	float presplitFactor = 0.3f;	// presplit budget relative to input data size.
 	bool useFullSweep = false;		// for experiments only; full-sweep SAH builder.
-	// The Bonsai builders run on the SIMD builder (float; AVX or NEON). Without it, Build() falls back to the reference builder.
-	bool useBonsaiBVH = false;		// Bonsai builder (Ganestam et al., 2015): grid cells, per-cell mini trees, top tree.
-	bool useBonsaiBVHHQ = false;	// Bonsai HQ (Ganestam & Doggett, 2016): Bonsai, splitting triangles as it partitions.
+	bool binnedBVH = false;			// reference BVH builders.
 	uint32_t bonsaiGridPrims = 256;	// Bonsai: grid resolution target, in primitives per grid cell (empty cells included).
 	float bonsaiPruneFactor = 0.1f;	// Bonsai, Bonsai HQ: prune mini trees larger than this fraction of the average mini tree; 0 disables.
 	bool useHPLOC = false;			// H-PLOC builder; builds trees identical to NexusBVH CUDA code, for comparisons.
@@ -1017,7 +1015,7 @@ private:
 	BVH& operator=( const BVH& ) = default;
 	void PrepareSIMDBuild( const Slice& vertices, const Index* indices, const Index primCount, const Index extraFrags = 0 );
 	// presplitting for the SIMD builders; Bonsai HQ splits as it partitions instead.
-	bool SIMDPresplit() const { return settings.usePresplitting && !settings.useBonsaiBVHHQ; }
+	bool SIMDPresplit() const { return settings.usePresplitting && (settings.binnedBVH || !settings.useSpatialSplits); }
 	void BuildSIMDFinalize();
 	void PrepareHQBuild( const Slice& vertices, const Index* indices, const Index prims );
 	void BuildHQ();
@@ -2211,7 +2209,6 @@ TEMPLATED bool BVH<Float, Index>::Load( const char* fileName, const Slice& verti
 }
 
 // BVH builder for triangle geometry.
-// This code uses no SIMD instructions. Faster code, using SSE/AVX, is available for x64 CPUs.
 TEMPLATED void BVH<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
 TEMPLATED void BVH<Float, Index>::Build( const Vertex* v, const Index* i, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 TEMPLATED void BVH<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
@@ -2230,25 +2227,39 @@ TEMPLATED void BVH<Float, Index>::Build( const Slice& vertices, const Index* ind
 	df.write( (char*)vertices.data, vertices.stride * vertices.count );
 	if (indexed) df.write( (char*)indices, pcount * 3 * sizeof( Index ) );
 #endif
-	if (settings.useSpatialSplits) // SBVH requested
-	{
-		PrepareHQBuild( vertices, indices, prims );
-		BuildHQ();
-	}
-	else if (settings.useFullSweep) // Full-sweep requested
+	// special builder: full-sweep.
+	if (settings.useFullSweep)
 	{
 		PrepareBuild( vertices, indices, prims );
 		BuildFullSweep();
 	}
-	else if (settings.useHPLOC) // H-PLOC requested
+	// special builder: H-PLOC.
+	else if (settings.useHPLOC)
 	{
 		PrepareBuild( vertices, indices, prims );
 		BuildHPLOC();
 	}
-	else if (BVHSIMDBuilders<Float, Index>::available && (settings.useSIMDifavailable || settings.useBonsaiBVH || settings.useBonsaiBVHHQ))
+	// default builder: high quality / spatial splits.
+	else if (settings.useSpatialSplits)
+	{
+		if (!settings.binnedBVH)
+		{
+			// use the Bonsai HQ builder unless told otherwise.
+			BuildBonsaiHQ( vertices, indices, prims );
+		}
+		else
+		{
+			// use the binned SBVH builder if specifically requested.
+			PrepareHQBuild( vertices, indices, prims );
+			BuildHQ();
+		}
+	}
+	// default builder: fast construction.
+	else if (BVHSIMDBuilders<Float, Index>::available && settings.useSIMDifavailable)
 	{
 		BuildSIMD( vertices, indices, prims ); // fast SIMD builder, or a Bonsai builder on top of it
 	}
+	// fall-back / reference builder.
 	else
 	{
 		PrepareBuild( vertices, indices, prims ); // No preference, no SIMD: use reference builder.
@@ -6807,9 +6818,9 @@ TEMPLATED void BVH<Float, Index>::BuildSIMD( const Slice& v, const Index* i, con
 {
 	// The SIMD steps are specialized in the platform headers for the instantiations that have a SIMD
 	// builder; the generic versions trap. Bonsai HQ prepares and finalizes itself.
-	if (settings.useBonsaiBVHHQ) { BuildBonsaiHQ( v, i, p ); return; }
+	if (settings.useSpatialSplits && !settings.binnedBVH) { BuildBonsaiHQ( v, i, p ); return; }
 	PrepareSIMDBuild( v, i, p );
-	if (settings.useBonsaiBVH) BuildBonsai(); else BuildSIMDSubtree( 0u, 0u );
+	if (!settings.binnedBVH) BuildBonsai(); else BuildSIMDSubtree( 0u, 0u );
 	BuildSIMDFinalize();
 }
 
