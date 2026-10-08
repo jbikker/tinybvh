@@ -54,6 +54,8 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize();
 #ifdef BVH_USEAVX2
 template <> void impl::BVH<float, uint32_t>::SortByCentroid( const uint32_t* frag, const uint32_t n, const uint32_t axis, uint8_t* order ) const;
 template <> void impl::BVH<float, uint32_t>::BonsaiHQClassify( uint8_t* mask, const uint32_t lo, const uint32_t hi, const uint32_t axis, const float pos2, BonsaiHQPart& p ) const;
+template <> void impl::BVH<float, uint32_t>::BonsaiHQDistribute( BonsaiHQState& st, const uint8_t* mask, uint8_t* maskOut, const uint32_t lo, const uint32_t hi, const uint32_t axis,
+	const float pos2, const bool doSplit, BonsaiHQPart& p, const BonsaiHQNext* plan, BonsaiHQPart* next );
 template <> void impl::BVH4_CPU<float, uint32_t>::EmitNode( impl::MBVH<4, float, uint32_t>& src, const uint32_t* base, uint32_t n );
 template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
 template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
@@ -91,6 +93,17 @@ TINYBVH_FORCEINLINE __m128 bvhc_mask3() { return _mm_cmpeq_ps( _mm_setr_ps( 0, 0
 #endif
 
 #ifdef BVH_USEAVX2
+
+static TINYBVH_FORCEINLINE uint32_t tinybvh_ctz( uint32_t x ) // lowest set bit
+{
+#if defined _MSC_VER && !defined __clang__
+	unsigned long i;
+	_BitScanForward( &i, x );
+	return (uint32_t)i;
+#else
+	return (uint32_t)__builtin_ctz( x );
+#endif
+}
 
 // SortByCentroid, AVX2.
 template <> void impl::BVH<float, uint32_t>::SortByCentroid( const uint32_t* frag, const uint32_t n, const uint32_t axis, uint8_t* order ) const
@@ -174,6 +187,127 @@ template <> void impl::BVH<float, uint32_t>::BonsaiHQClassify( uint8_t* mask, co
 	ALIGNED( 32 ) uint32_t count[16];
 	_mm256_store_si256( (__m256i*)count, countL8 ), _mm256_store_si256( (__m256i*)(count + 8), countR8 );
 	for (int k = 0; k < 8; k++) p.n[0] += count[k], p.n[3] += count[8 + k];
+}
+
+// Lane compaction for BonsaiHQDistribute: for each 8-bit lane mask, the selected lanes in
+// order (one per byte) and their count.
+struct tinybvh_compact8
+{
+	uint64_t order[256];
+	uint8_t count[256];
+	constexpr tinybvh_compact8() : order(), count()
+	{
+		for (uint32_t m = 0; m < 256; m++)
+		{
+			uint32_t n = 0;
+			for (uint32_t j = 0; j < 8; j++) if ((m >> j) & 1) order[m] |= (uint64_t)j << (8 * n++);
+			count[m] = (uint8_t)n;
+		}
+	}
+};
+static constexpr tinybvh_compact8 tinybvh_compact8_lut{};
+
+// max of the rows selected by an 8-bit mask; all eight in a tree.
+static TINYBVH_FORCEINLINE __m256 tinybvh_maxrows8( __m256 acc, const __m256* row, const uint32_t sel )
+{
+	if (sel == 255)
+	{
+		const __m256 m0 = _mm256_max_ps( _mm256_max_ps( row[0], row[1] ), _mm256_max_ps( row[2], row[3] ) );
+		const __m256 m1 = _mm256_max_ps( _mm256_max_ps( row[4], row[5] ), _mm256_max_ps( row[6], row[7] ) );
+		return _mm256_max_ps( acc, _mm256_max_ps( m0, m1 ) );
+	}
+	for (uint32_t b = sel; b; b &= b - 1) acc = _mm256_max_ps( acc, row[tinybvh_ctz( b )] );
+	return acc;
+}
+
+// BonsaiHQDistribute, AVX2: pass 2 of a Bonsai HQ partition step eight fragments at a time.
+template <> void impl::BVH<float, uint32_t>::BonsaiHQDistribute( BonsaiHQState& st, const uint8_t* mask, uint8_t* maskOut, const uint32_t lo, const uint32_t hi,
+	const uint32_t axis, const float pos2, const bool doSplit, BonsaiHQPart& p, const BonsaiHQNext* plan, BonsaiHQPart* next )
+{
+	BonsaiHQEmit e;
+	BonsaiHQDistributeBegin( e, p, plan, next );
+	const tinybvh_compact8& lut = tinybvh_compact8_lut;
+	const uint32_t a = doSplit ? 2 : 1, end[2] = { p.left + p.n[0] + p.n[a], p.right + p.n[3] + p.n[3 + a] }; // this slice's output runs
+	const uint32_t fused[2] = { plan[0].fused ? 255u : 0u, plan[1].fused ? 255u : 0u };
+	const __m256 flip8 = _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f ), none8 = _mm256_set1_ps( -BVH_FAR );
+	const __m256 pos2L8 = _mm256_set1_ps( plan[0].pos2 ), pos2R8 = _mm256_set1_ps( plan[1].pos2 );
+	const __m256 posL8 = _mm256_set1_ps( plan[0].pos2 * 0.5f ), posR8 = _mm256_set1_ps( plan[1].pos2 * 0.5f );
+	const __m256i axisL8 = _mm256_set1_epi32( (int)plan[0].axis ), axisR8 = _mm256_set1_epi32( (int)plan[1].axis ), one8 = _mm256_set1_epi32( 1 );
+	const __m256i lane8 = _mm256_setr_epi32( 0, 1, 2, 3, 4, 5, 6, 7 );
+	__m256 box8[2][2] = { { none8, none8 }, { none8, none8 } }, cen8[2] = { none8, none8 }; // sets and centroid bounds, BinBox layout
+	const float* frag = (const float*)fragment;
+	uint32_t i = lo;
+	// gather offsets are fragment index * 8 floats, in 31 bits.
+	if (allocatedNodes / 2 < (1u << 28)) for (; i + 8 <= hi; i += 8)
+	{
+		uint64_t m64;
+		memcpy( &m64, mask + i, 8 );
+		if (doSplit && (m64 & 0x0c0c0c0c0c0c0c0cull))
+		{
+			for (uint32_t j = 0; j < 8; j++) BonsaiHQDistributeFrag( e, st, mask, maskOut, i + j, axis, pos2, doSplit, plan, next );
+			continue;
+		}
+		const uint32_t* idx = primIdx + i;
+		const __m256i idx8 = _mm256_loadu_si256( (const __m256i*)idx );
+		const __m256i side8 = _mm256_cmpeq_epi32( _mm256_and_si256( _mm256_cvtepu8_epi32( _mm_loadl_epi64( (const __m128i*)(mask + i) ) ), one8 ), one8 );
+		const uint32_t right = (uint32_t)_mm256_movemask_ps( _mm256_castsi256_ps( side8 ) ), sel[2] = { ~right & 255u, right };
+		// rows in BinBox layout, and their doubled centroids as [-c2 | c2], c2 = bmin + bmax.
+		__m256 row[8], cen[8];
+		for (uint32_t j = 0; j < 8; j++)
+		{
+			const __m256 r = tinybvh_load8( fragment + idx[j] );
+			row[j] = _mm256_xor_ps( r, flip8 ), cen[j] = _mm256_xor_ps( _mm256_add_ps( r, _mm256_permute2f128_ps( r, r, 1 ) ), flip8 );
+		}
+		// each lane against the plane of its child; bit j of cat[k][s]: lane j is in child k, side s.
+		uint32_t cat[2][2] = { { 0, 0 }, { 0, 0 } }, straddle = 0, cright = 0;
+		if (fused[0] | fused[1])
+		{
+			const __m256 s8 = _mm256_castsi256_ps( side8 );
+			const __m256i offs8 = _mm256_add_epi32( _mm256_slli_epi32( idx8, 3 ), _mm256_blendv_epi8( axisL8, axisR8, side8 ) );
+			const __m256 bmin8 = _mm256_i32gather_ps( frag, offs8, 4 ), bmax8 = _mm256_i32gather_ps( frag + 4, offs8, 4 );
+			const __m256 cpos8 = _mm256_blendv_ps( posL8, posR8, s8 );
+			cright = (uint32_t)_mm256_movemask_ps( _mm256_cmp_ps( _mm256_add_ps( bmin8, bmax8 ), _mm256_blendv_ps( pos2L8, pos2R8, s8 ), _CMP_GE_OQ ) );
+			const uint32_t lanes = (sel[0] & fused[0]) | (sel[1] & fused[1]);
+			straddle = lanes & (uint32_t)_mm256_movemask_ps( _mm256_and_ps( _mm256_cmp_ps( bmin8, cpos8, _CMP_LT_OQ ), _mm256_cmp_ps( bmax8, cpos8, _CMP_GT_OQ ) ) );
+			for (uint32_t k = 0; k < 2; k++)
+				cat[k][0] = sel[k] & fused[k] & ~straddle & ~cright, cat[k][1] = sel[k] & fused[k] & ~straddle & cright;
+		}
+		// mask bytes: bit j of 'cright' becomes byte j.
+		const uint64_t spread = ((uint64_t)cright * 0x0101010101010101ull) & 0x8040201008040201ull;
+		const uint64_t bytes = ((spread + 0x7f7f7f7f7f7f7f7full) >> 7) & 0x0101010101010101ull;
+		const __m128i bytes16 = _mm_loadl_epi64( (const __m128i*) & bytes );
+		for (uint32_t k = 0; k < 2; k++) if (sel[k])
+		{
+			const uint32_t n = lut.count[sel[k]], at = e.at[k];
+			const __m128i order16 = _mm_loadl_epi64( (const __m128i*) & lut.order[sel[k]] );
+			const __m256i out8 = _mm256_permutevar8x32_epi32( idx8, _mm256_cvtepu8_epi32( order16 ) );
+			if (at + 8 <= end[k]) _mm256_storeu_si256( (__m256i*)(st.idxTmp + at), out8 );
+			else _mm256_maskstore_epi32( (int*)(st.idxTmp + at), _mm256_cmpgt_epi32( _mm256_set1_epi32( (int)n ), lane8 ), out8 );
+			cen8[k] = tinybvh_maxrows8( cen8[k], cen, sel[k] );
+			e.at[k] = at + n;
+			if (!fused[k]) continue;
+			const __m128i out16 = _mm_shuffle_epi8( bytes16, order16 );
+			if (at + 8 <= end[k]) _mm_storel_epi64( (__m128i*)(maskOut + at), out16 );
+			else { uint64_t b; _mm_storel_epi64( (__m128i*) & b, out16 ); memcpy( maskOut + at, &b, n ); }
+			box8[k][0] = tinybvh_maxrows8( box8[k][0], row, cat[k][0] ), e.n[k][0] += lut.count[cat[k][0]];
+			box8[k][1] = tinybvh_maxrows8( box8[k][1], row, cat[k][1] ), e.n[k][1] += lut.count[cat[k][1]];
+			for (uint32_t b = straddle & sel[k]; b; b &= b - 1)
+			{
+				const uint32_t j = tinybvh_ctz( b );
+				maskOut[at + lut.count[sel[k] & ((1u << j) - 1)]] = BonsaiHQClassifyFrag( fragment[idx[j]], plan[k].axis, plan[k].pos2, next[k] );
+			}
+		}
+	}
+	for (; i < hi; i++) BonsaiHQDistributeFrag( e, st, mask, maskOut, i, axis, pos2, doSplit, plan, next );
+	// fold the register accumulators into e.
+	for (uint32_t k = 0; k < 2; k++)
+	{
+		ALIGNED( 32 ) BVHBinBox<float> b;
+		_mm256_store_ps( &b.negMin.x, cen8[k] );
+		e.cmin2[k] = tinybvh_min( e.cmin2[k], -b.negMin ), e.cmax2[k] = tinybvh_max( e.cmax2[k], b.bmax );
+		for (uint32_t side = 0; side < 2; side++) _mm256_store_ps( &b.negMin.x, box8[k][side] ), BinBoxMerge( e.box[k][side], b );
+	}
+	BonsaiHQDistributeEnd( e, p, plan, next );
 }
 
 // EmitNode, AVX2.
@@ -1409,42 +1543,42 @@ template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant(
 				combined = _mm_and_ps( combined, tinybvh_load4( omask ) );
 				imask = _mm_movemask_ps( combined );
 			}
-				if (imask)
+			if (imask)
+			{
+				// compute broadcasted horizontal minimum of dist4
+				const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
+				const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
+				const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+				const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
+				// update hit record.
+				const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
+				const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
+				ray.hit.t = t;
+				ray.hit.u = _mm_cvtss_f32( _mm_permutevar_ps( u4, lane4 ) );
+				ray.hit.v = _mm_cvtss_f32( _mm_permutevar_ps( v4, lane4 ) );
+			#if INST_IDX_BITS == 32
+				ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
+			#else
+				ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
+			#endif
+				t8 = _mm256_set1_ps( t );
+				// compress stack
+				int32_t outStackPtr = 0;
+				for (int32_t i = 0; i < stackPtr; i += 8)
 				{
-					// compute broadcasted horizontal minimum of dist4
-					const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
-					const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
-					const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
-					const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
-					// update hit record.
-					const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
-					const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
-					ray.hit.t = t;
-					ray.hit.u = _mm_cvtss_f32( _mm_permutevar_ps( u4, lane4 ) );
-					ray.hit.v = _mm_cvtss_f32( _mm_permutevar_ps( v4, lane4 ) );
-				#if INST_IDX_BITS == 32
-					ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
-				#else
-					ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
-				#endif
-					t8 = _mm256_set1_ps( t );
-					// compress stack
-					int32_t outStackPtr = 0;
-					for (int32_t i = 0; i < stackPtr; i += 8)
-					{
-						const int32_t numItems = tinybvh_min( 8, stackPtr - i );
-						const __m256i valid8 = _mm256_cmpgt_epi32( _mm256_set1_epi32( numItems ), lane8 );
-						__m256i node8 = _mm256_maskload_epi32( (const int32_t*)(nodeStack + i), valid8 );
-						__m256 dist8 = _mm256_maskload_ps( distStack + i, valid8 );
-						const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) ) & ((1u << numItems) - 1);
-						const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
-						dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
-						_mm256_storeu_ps( distStack + outStackPtr, dist8 );
-						_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
-						outStackPtr += __popc( mask );
-					}
-					stackPtr = outStackPtr;
+					const int32_t numItems = tinybvh_min( 8, stackPtr - i );
+					const __m256i valid8 = _mm256_cmpgt_epi32( _mm256_set1_epi32( numItems ), lane8 );
+					__m256i node8 = _mm256_maskload_epi32( (const int32_t*)(nodeStack + i), valid8 );
+					__m256 dist8 = _mm256_maskload_ps( distStack + i, valid8 );
+					const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) ) & ((1u << numItems) - 1);
+					const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
+					dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
+					_mm256_storeu_ps( distStack + outStackPtr, dist8 );
+					_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
+					outStackPtr += __popc( mask );
 				}
+				stackPtr = outStackPtr;
+			}
 		}
 		if (!stackPtr) ISUNLIKELY break;
 		nodeIdx = nodeStack[--stackPtr];
@@ -1511,12 +1645,12 @@ template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( c
 				nodeIdx = nodeStack[--stackPtr];
 			}
 		}
-			if (stackPtr) ISLIKELY
-			{
-				const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
-				_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 128, _MM_HINT_T0 );
-			}
-				// Moeller-Trumbore ray/triangle intersection algorithm for four triangles.
+		if (stackPtr) ISLIKELY
+		{
+			const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
+			_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 128, _MM_HINT_T0 );
+		}
+		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles.
 		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, _mm_load_ps( leaf->e2z ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
 		const __m128 hy4 = _mm_fmsub_ps( dz4, _mm_load_ps( leaf->e2x ), _mm_mul_ps( dx4, _mm_load_ps( leaf->e2z ) ) );
@@ -1570,17 +1704,6 @@ template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( c
 
 // WiVeC bundle traversal, AVX2. Fuetterling et al., HPG 2017, section 4, and
 // rend.c's intersect_pckts_blas / intersect_pckts_tlas. Closest hit only.
-
-static TINYBVH_FORCEINLINE uint32_t tinybvh_ctz( uint32_t x ) // lowest set bit
-{
-#if defined _MSC_VER && !defined __clang__
-	unsigned long i;
-	_BitScanForward( &i, x );
-	return (uint32_t)i;
-#else
-	return (uint32_t)__builtin_ctz( x );
-#endif
-}
 
 // RayBundle: the rays of one IntersectBundle call, in SoA form.
 struct ALIGNED( 64 ) RayBundle
