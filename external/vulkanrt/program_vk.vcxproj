@@ -74,14 +74,14 @@
       <!-- tinybvh's x86 kernels are built for AVX2/FMA. -->
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <AdditionalIncludeDirectories>$(VULKAN_SDK)\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(VULKAN_SDK)\Include;..\..\external\OpenCL\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <!-- the ray set and scene are read with fopen/fread, as in the D3D12 version -->
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;NOMINMAX;WIN32_LEAN_AND_MEAN;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(VULKAN_SDK)\Lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(VULKAN_SDK)\Lib;..\..\external\OpenCL\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <!-- program_vk.cpp also has a #pragma comment(lib, "vulkan-1"); naming it
            here too is harmless and makes the dependency visible in the IDE. -->
       <AdditionalDependencies>vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -108,6 +108,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="program_vk.cpp" />
+    <ClCompile Include="tiny_ocl_impl.cpp" />
   </ItemGroup>
   <ItemGroup>
     <!-- browsing only; tinybvh is header-only and pulled in by program_vk.cpp -->

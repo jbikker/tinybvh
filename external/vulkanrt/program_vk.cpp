@@ -1,4 +1,4 @@
-﻿// Vulkan port of the D3D12 tinybvh GPU ray tracing benchmark (program.cpp).
+// Vulkan port of the D3D12 tinybvh GPU ray tracing benchmark (program.cpp).
 
 #if defined(_WIN32)
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -60,28 +60,49 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 #define ENABLE_HWRT			true	// display info on hardware RT pipeline performance
 #define ENABLE_BVH2			true	// display info on BVH_GPU performance
 #define ENABLE_BVH4			false	// display info on BVH4_GPU performance
-#define ENABLE_CWBVH		true	// display info on BVH8_CWBVH performance
+#define ENABLE_CWBVH		false	// display info on BVH8_CWBVH performance
 #define ENABLE_RAY_QUERIES	false	// display info on inline ray query performance
 #define ENABLE_VALIDATION	false	// VK_LAYER_KHRONOS_validation; costs performance
 #define BARRIER_BETWEEN_DISPATCHES false
 #define ALLOW_SYNTHETIC_RAYS false
 
+// OpenCL interleaving. The OpenCL backends trace the same rays through the same
+// tinybvh data as the compute shaders, using the traversal code from
+// kernels/traverse.cl, so the two APIs can be compared one frame apart.
+#define ENABLE_OPENCL		true	// init OpenCL and put its backends in the rotation
+#define ENABLE_OCL_BVH2		true	// display info on OpenCL BVH_GPU performance
+#define ENABLE_OCL_BVH4		false	// display info on OpenCL BVH4_GPU performance
+#define ENABLE_OCL_CWBVH	false	// display info on OpenCL BVH8_CWBVH performance
+#define OCL_PRESENT_RESULT	false	// show what OpenCL traced; costs a 4MB readback + upload per frame
+
 constexpr uint32_t NUM_INSTANCES = 1, FRAME_COUNT = 2;
 constexpr uint32_t NUM_DISPATCHES = 20;
 constexpr uint32_t NUM_SHADER_GROUPS = 3; // raygen, miss, hit group
 
-// The ray tracing backends that are cycled through, one per frame.
+// The ray tracing backends that are cycled through, one per frame. Everything from
+// BACKEND_OCL_* onwards runs outside Vulkan, on the OpenCL queue.
 enum Backend {
-	BACKEND_HWRT = 0, BACKEND_BVH_GPU, BACKEND_BVH4_GPU, BACKEND_BVH8_CWBVH, BACKEND_RAYQUERY, BACKEND_COUNT
+	BACKEND_HWRT = 0, BACKEND_BVH_GPU, BACKEND_BVH4_GPU, BACKEND_BVH8_CWBVH, BACKEND_RAYQUERY,
+	BACKEND_OCL_BVH_GPU, BACKEND_OCL_BVH4_GPU, BACKEND_OCL_BVH8_CWBVH, BACKEND_COUNT
 };
-static const char* backendName[BACKEND_COUNT] = { "HWRT", "BVH_GPU", "BVH4_GPU", "CWBVH", "RayQuery" };
-static const bool backendPrint[BACKEND_COUNT] = { ENABLE_HWRT, ENABLE_BVH2, ENABLE_BVH4, ENABLE_CWBVH, ENABLE_RAY_QUERIES };
+static const char* backendName[BACKEND_COUNT] = { "HWRT", "BVH_GPU", "BVH4_GPU", "CWBVH", "RayQuery",
+	"CL/BVH_GPU", "CL/BVH4_GPU", "CL/CWBVH" };
+static const bool backendPrint[BACKEND_COUNT] = { ENABLE_HWRT, ENABLE_BVH2, ENABLE_BVH4, ENABLE_CWBVH,
+	ENABLE_RAY_QUERIES, ENABLE_OCL_BVH2, ENABLE_OCL_BVH4, ENABLE_OCL_CWBVH };
+static bool BackendIsOpenCL( const int b ) { return b >= BACKEND_OCL_BVH_GPU; }
 static bool rayQuerySupported = false;
-static int activeBackends = BACKEND_COUNT;
+// Backends that can actually run on this machine, in rotation order; built by
+// BuildSchedule() once the device and OpenCL are up.
+static int schedule[BACKEND_COUNT] = {}, scheduleLen = 0;
 
 #define TINYBVH_IMPLEMENTATION
 #include "../../tiny_bvh.h"
 using namespace tinybvh;
+
+// Interface only: the tinyocl implementation lives in tiny_ocl_impl.cpp, because
+// it does a global 'using namespace tinyocl', which would collide with the Buffer
+// struct below.
+#include "../../tiny_ocl.h"
 
 #ifndef CWBVH_COMPRESSED_TRIS
 #error "tiny8.comp assumes CWBVH_COMPRESSED_TRIS; enable it, or set TRI_STRIDE 3 in tiny8.comp and recompile"
@@ -289,6 +310,8 @@ static Buffer MakeDeviceBuffer( const void* src, VkDeviceSize srcBytes, VkDevice
 
 static Buffer meshVB{};        // triangle soup for the hardware BLAS
 static Buffer rayBuffer{};     // the ray set, device local
+static std::vector<float> hostRays; // the same ray set on the host: 8 floats per ray, O and D
+static Buffer oclPresentStaging{};  // OCL_PRESENT_RESULT: host visible copy of the OpenCL image
 static Buffer instanceBuffer{};// VkAccelerationStructureInstanceKHR array, host visible
 static Buffer sbt{};           // shader binding table
 static VkStridedDeviceAddressRegionKHR sbtRaygen{}, sbtMiss{}, sbtHit{}, sbtCallable{};
@@ -521,10 +544,7 @@ static void InitDevice()
 		Fatal( "no device with VK_KHR_acceleration_structure + VK_KHR_ray_tracing_pipeline" );
 	rayQuerySupported = HasExtension( bestExt, VK_KHR_RAY_QUERY_EXTENSION_NAME );
 	if (!rayQuerySupported)
-	{
-		activeBackends = BACKEND_COUNT - 1;
 		printf( "VK_KHR_ray_query not available; the %s backend is disabled.\n", backendName[BACKEND_RAYQUERY] );
-	}
 	printf( "device: %s\n", deviceProps.deviceName );
 	vkGetPhysicalDeviceMemoryProperties( physicalDevice, &memProps );
 	// ray tracing / acceleration structure limits
@@ -789,23 +809,22 @@ static void InitBVHBuffers()
 
 static void UpdateRayBuffer()
 {
-	const VkDeviceSize size = 32ull * rtWidth * rtHeight; // 32 bytes per ray
-	Buffer staging = CreateBuffer( size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true );
-	float* data = (float*)staging.mapped;
-	memset( data, 0, (size_t)size );
+	const uint32_t rayCount = rtWidth * rtHeight;
+	const VkDeviceSize size = 32ull * rayCount; // 32 bytes per ray
+	// Kept on the host as well: the OpenCL side needs the same rays in its own
+	// 64-byte layout, and both APIs must trace exactly the same set.
+	hostRays.assign( (size_t)rayCount * 8, 0.0f );
+	float* data = hostRays.data();
 	const char* raySetPath = "../../view3rays.bin";
 	FILE* f = fopen( raySetPath, "rb" );
 	if (f)
 	{
-		const long long expected = 2ll * rtWidth * rtHeight * 3 * (long long)sizeof( float );
-		fseek( f, 0, SEEK_END );
-		const long long bytes = ftell( f );
-		fseek( f, 0, SEEK_SET );
+		// the file holds all origins first, then all directions, 3 floats each
 		size_t got = 0;
-		for (uint32_t i = 0; i < rtWidth * rtHeight; i++) got += fread( data + i * 8, 4, 3, f );
-		for (uint32_t i = 0; i < rtWidth * rtHeight; i++) got += fread( data + i * 8 + 4, 4, 3, f );
+		for (uint32_t i = 0; i < rayCount; i++) got += fread( data + i * 8, 4, 3, f );
+		for (uint32_t i = 0; i < rayCount; i++) got += fread( data + i * 8 + 4, 4, 3, f );
 		fclose( f );
+		if (got != (size_t)rayCount * 6) Fatal( "'%s' holds fewer than %u x %u rays", raySetPath, rtWidth, rtHeight );
 		printf( "rays: %s, %u x %u\n", raySetPath, rtWidth, rtHeight );
 	}
 	else
@@ -814,6 +833,9 @@ static void UpdateRayBuffer()
 		GetCwd( cwd, sizeof( cwd ) );
 		Fatal( "could not open '%s' (working directory: %s).\n\n", raySetPath, cwd );
 	}
+	Buffer staging = CreateBuffer( size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true );
+	memcpy( staging.mapped, data, (size_t)size );
 	// Device-local buffer the shaders actually read from on every ray.
 	rayBuffer = CreateBuffer( size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT );
@@ -822,6 +844,176 @@ static void UpdateRayBuffer()
 	vkCmdCopyBuffer( cb, staging.buf, rayBuffer.buf, 1, &region );
 	EndOneShot( cb );
 	DestroyBuffer( staging );
+}
+
+
+// ----------------------------------------------------------------------------
+// OpenCL
+// ----------------------------------------------------------------------------
+
+// The OpenCL backends trace the ray set from UpdateRayBuffer() through the very
+// same tinybvh blobs the compute shaders use, with the traversal code from
+// kernels/traverse.cl; kernels/bench.cl only adds entry points that match what the
+// GLSL does (tmax is always 1e30, the output is one RGBA8 pixel per ray).
+//
+// There is no interop: Vulkan and OpenCL get their own context, their own copy of
+// the data and their own GPU timer (timestamp queries vs. events). What makes the
+// comparison fair is that the two are never busy at the same time - Render() drains
+// Vulkan before it enqueues OpenCL work, and the OpenCL run is finished before the
+// frame's command buffer is submitted.
+//
+// Remaining differences worth knowing about when reading the numbers:
+// - the GLSL reads 32 bytes per ray and computes rD itself; the OpenCL kernels use
+//   the stock 64-byte tinybvh ray and get rD for free.
+// - tiny.comp keeps its traversal stack in shared memory, traverse_bvh2.cl keeps it
+//   in registers/scratch.
+// - the two compilers are told different things: -cl-fast-relaxed-math for OpenCL.
+
+static tinyocl::Kernel* oclKernel[BACKEND_COUNT] = {}; // indexed by backend
+static tinyocl::Buffer* oclBVH2Nodes = 0, * oclBVH2Verts = 0, * oclBVH4Data = 0;
+static tinyocl::Buffer* oclCWBVHNodes = 0, * oclCWBVHTris = 0;
+static tinyocl::Buffer* oclRays = 0, * oclPixels = 0;
+static bool openclReady = false;
+
+// matches safe_rcp in common.glsl, so both sides traverse with the same rD
+static float SafeRcp( const float x )
+{
+	const float a = x < 0 ? -x : x, s = x < 0 ? -1.0f : 1.0f;
+	return 1.0f / (s * (a > 1e-5f ? a : 1e-5f));
+}
+
+static const char* FindKernelFile( const char* name )
+{
+	static const char* dirs[] = { "kernels/", "../kernels/", "../../kernels/", "" };
+	static char path[512];
+	for (const char* dir : dirs)
+	{
+		snprintf( path, sizeof( path ), "%s%s", dir, name );
+		FILE* f = fopen( path, "rb" );
+		if (f) { fclose( f ); return path; }
+	}
+	return nullptr;
+}
+
+static void InitOpenCL()
+{
+	const uint32_t rayCount = rtWidth * rtHeight;
+	// One program, three entry points; tinyocl compiles a source file only once.
+	const char* kernelFile = FindKernelFile( "bench.cl" );
+	if (!kernelFile)
+	{
+		char cwd[1024] = {};
+		GetCwd( cwd, sizeof( cwd ) );
+		Fatal( "could not find 'bench.cl' next to traverse.cl (working directory: %s)", cwd );
+	}
+	oclKernel[BACKEND_OCL_BVH_GPU] = new tinyocl::Kernel( kernelFile, "bench_bvh2" );
+	oclKernel[BACKEND_OCL_BVH4_GPU] = new tinyocl::Kernel( kernelFile, "bench_bvh4" );
+	oclKernel[BACKEND_OCL_BVH8_CWBVH] = new tinyocl::Kernel( kernelFile, "bench_cwbvh" );
+	char clDeviceName[256] = {};
+	clGetDeviceInfo( tinyocl::Kernel::GetDevice(), CL_DEVICE_NAME, sizeof( clDeviceName ), clDeviceName, 0 );
+	printf( "OpenCL device: %s\n", clDeviceName );
+	if (!strstr( clDeviceName, deviceProps.deviceName ) && !strstr( deviceProps.deviceName, clDeviceName ))
+		printf( "warning: OpenCL picked a different GPU than Vulkan did; the comparison is meaningless.\n" );
+	// Exactly the bytes the Vulkan side uploads in InitBVHBuffers().
+	const unsigned nodeBytes = (unsigned)(bvh.allocatedNodes * sizeof( GPUBVHNode ));
+	const unsigned vertBytes = (unsigned)(bvh.bvh.idxCount * 3 * sizeof( bvhvec4 ));
+	const unsigned bvh4Bytes = (unsigned)(bvh4.usedBlocks * sizeof( bvhvec4 ));
+	const unsigned cwNodeBytes = (unsigned)(cwbvh.usedBlocks * sizeof( bvhvec4 ));
+#ifdef CWBVH_COMPRESSED_TRIS
+	const unsigned cwTriBytes = (unsigned)(cwbvh.idxCount * 4 * sizeof( bvhvec4 ));
+#else
+	const unsigned cwTriBytes = (unsigned)(cwbvh.idxCount * 3 * sizeof( bvhvec4 ));
+#endif
+	oclBVH2Nodes = new tinyocl::Buffer( nodeBytes, bvh.bvhNode, tinyocl::Buffer::READONLY );
+	oclBVH2Verts = new tinyocl::Buffer( vertBytes, (bvhvec4*)bvh.orderedVerts.data, tinyocl::Buffer::READONLY );
+	oclBVH4Data = new tinyocl::Buffer( bvh4Bytes, bvh4.bvh4Data, tinyocl::Buffer::READONLY );
+	oclCWBVHNodes = new tinyocl::Buffer( cwNodeBytes, cwbvh.bvh8Data, tinyocl::Buffer::READONLY );
+	oclCWBVHTris = new tinyocl::Buffer( cwTriBytes, cwbvh.bvh8Tris, tinyocl::Buffer::READONLY );
+	// The GPU-side ray is 64 bytes: O, D, rD and a hit record, 16 bytes each.
+	oclRays = new tinyocl::Buffer( rayCount * 64, 0, tinyocl::Buffer::READONLY );
+	oclPixels = new tinyocl::Buffer( rayCount * 4, 0, tinyocl::Buffer::WRITEONLY );
+	float* dst = (float*)oclRays->GetHostPtr();
+	for (uint32_t i = 0; i < rayCount; i++)
+	{
+		const float* src = hostRays.data() + i * 8;
+		float* r = dst + i * 16;
+		r[0] = src[0], r[1] = src[1], r[2] = src[2];
+		((uint32_t*)r)[3] = 0xFFFF;  // Ray::mask: intersect all instances
+		r[4] = src[4], r[5] = src[5], r[6] = src[6];
+		((uint32_t*)r)[7] = 0;       // Ray::instIdx
+		r[8] = SafeRcp( src[4] ), r[9] = SafeRcp( src[5] ), r[10] = SafeRcp( src[6] ), r[11] = 0;
+		r[12] = 1e30f, r[13] = 0, r[14] = 0;
+		((uint32_t*)r)[15] = 0;      // hit: t, u, v, prim
+	}
+	oclBVH2Nodes->CopyToDevice();
+	oclBVH2Verts->CopyToDevice();
+	oclBVH4Data->CopyToDevice();
+	oclCWBVHNodes->CopyToDevice();
+	oclCWBVHTris->CopyToDevice();
+	oclRays->CopyToDevice();
+	oclKernel[BACKEND_OCL_BVH_GPU]->SetArguments( oclBVH2Nodes, oclBVH2Verts, oclRays, oclPixels );
+	oclKernel[BACKEND_OCL_BVH4_GPU]->SetArguments( oclBVH4Data, oclRays, oclPixels );
+	oclKernel[BACKEND_OCL_BVH8_CWBVH]->SetArguments( oclCWBVHNodes, oclCWBVHTris, oclRays, oclPixels );
+	if (OCL_PRESENT_RESULT)
+		oclPresentStaging = CreateBuffer( rayCount * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true );
+	// One warm pass per kernel, which doubles as a sanity check: the three layouts
+	// trace the same scene, so they should agree on coverage and average depth.
+	for (int b = BACKEND_OCL_BVH_GPU; b < BACKEND_COUNT; b++)
+	{
+		oclKernel[b]->Run( rayCount, 64 );
+		oclPixels->CopyFromDevice(); // blocking, so this also drains the queue
+		const uint32_t* px = oclPixels->GetHostPtr();
+		uint32_t hits = 0;
+		double sum = 0;
+		for (uint32_t i = 0; i < rayCount; i++) if (px[i] & 255) hits++, sum += (double)(px[i] & 255);
+		printf( "%s: %.2f%% of rays hit, mean depth %.1f\n", backendName[b],
+			100.0 * hits / rayCount, hits ? sum / hits : 0.0 );
+	}
+	openclReady = true;
+}
+
+// Runs NUM_DISPATCHES passes back to back and returns the GPU time for all of them,
+// measured the same way the Vulkan side does it: from the start of the first pass to
+// the end of the last, so queue bubbles between passes are included.
+static double TraceOpenCL( const int backend )
+{
+	cl_event event[NUM_DISPATCHES] = {};
+	for (uint32_t i = 0; i < NUM_DISPATCHES; i++)
+		oclKernel[backend]->Run( rtWidth * rtHeight, 64, 0, &event[i] );
+	clWaitForEvents( 1, &event[NUM_DISPATCHES - 1] );
+	cl_ulong start = 0, end = 0;
+	clGetEventProfilingInfo( event[0], CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &start, 0 );
+	clGetEventProfilingInfo( event[NUM_DISPATCHES - 1], CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &end, 0 );
+	for (uint32_t i = 0; i < NUM_DISPATCHES; i++) clReleaseEvent( event[i] );
+	if (OCL_PRESENT_RESULT)
+	{
+		oclPixels->CopyFromDevice();
+		memcpy( oclPresentStaging.mapped, oclPixels->GetHostPtr(), (size_t)rtWidth * rtHeight * 4 );
+	}
+	return (double)(end - start) * 1e-9; // event timing is in nanoseconds
+}
+
+static void ShutdownOpenCL()
+{
+	if (!openclReady) return;
+	delete oclBVH2Nodes, delete oclBVH2Verts, delete oclBVH4Data;
+	delete oclCWBVHNodes, delete oclCWBVHTris;
+	delete oclRays, delete oclPixels;
+	for (int b = BACKEND_OCL_BVH_GPU; b < BACKEND_COUNT; b++) delete oclKernel[b];
+	tinyocl::Kernel::KillCL();
+	openclReady = false;
+}
+
+static void BuildSchedule()
+{
+	scheduleLen = 0;
+	for (int b = 0; b < BACKEND_COUNT; b++)
+	{
+		if (b == BACKEND_RAYQUERY && !rayQuerySupported) continue;
+		if (BackendIsOpenCL( b ) && !openclReady) continue;
+		schedule[scheduleLen++] = b;
+	}
 }
 
 // ----------------------------------------------------------------------------
@@ -1206,16 +1398,38 @@ static void ImageBarrier( VkCommandBuffer cb, VkImage image,
 	vkCmdPipelineBarrier( cb, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b );
 }
 
+// Pushes the image OpenCL just traced into the render target, so the window shows
+// what the OpenCL backend produced rather than the last Vulkan frame. Off by
+// default: it is pure presentation cost, outside the measured window, but it does
+// slow the frame down.
+static void UploadOpenCLImage( VkCommandBuffer cb )
+{
+	const VkPipelineStageFlags traceStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+		VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+	ImageBarrier( cb, renderTarget, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+		VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, traceStage, VK_PIPELINE_STAGE_TRANSFER_BIT );
+	VkBufferImageCopy region{};
+	region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+	region.imageExtent = { rtWidth, rtHeight, 1 };
+	vkCmdCopyBufferToImage( cb, oclPresentStaging.buf, renderTarget, VK_IMAGE_LAYOUT_GENERAL, 1, &region );
+	ImageBarrier( cb, renderTarget, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+		VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT );
+}
+
 static void Resize();
 
 static void Render()
 {
 	static uint64_t frameCounter = 0;
-	static int slotBackend[FRAME_COUNT] = {}; // which backend last ran in each frame slot
+	static int slotBackend[FRAME_COUNT] = {};   // which backend last ran in each frame slot
+	static int slotSchedIdx[FRAME_COUNT] = {};  // and where it sat in the rotation
+	static double slotOclTime[FRAME_COUNT] = {};// OpenCL event timing for that slot, if any
 	const uint32_t slot = (uint32_t)(frameCounter % FRAME_COUNT);
 	const uint32_t baseQuery = slot * 2;
 	// Round-robin the ray tracing backends.
-	const int backend = (int)(frameCounter % activeBackends);
+	const int schedIdx = (int)(frameCounter % scheduleLen);
+	const int backend = schedule[schedIdx];
 	// A zero-size client area (minimized) leaves the swapchain uncreatable.
 	if (swapChain == VK_NULL_HANDLE) { Resize(); if (swapChain == VK_NULL_HANDLE) { SleepMs( 16 ); return; } }
 	VK_CHECK( vkWaitForFences( device, 1, &frameFences[slot], VK_TRUE, UINT64_MAX ) );
@@ -1223,19 +1437,29 @@ static void Render()
 	if (frameSubmitted[slot])
 	{
 		frameSubmitted[slot] = false; // consume it, so an early return cannot double count
-		uint64_t timestamps[2] = {};
-		VK_CHECK( vkGetQueryPoolResults( device, timestampPool, baseQuery, 2,
-			sizeof( timestamps ), timestamps, sizeof( uint64_t ),
-			VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT ) );
-		const uint64_t start = timestamps[0] & timestampMask, end = timestamps[1] & timestampMask;
-		// timestampPeriod is nanoseconds per tick
-		double rtTime = (double)(end - start) * (double)deviceProps.limits.timestampPeriod * 1e-9;
+		const int k = slotBackend[slot]; // which backend produced this measurement
+		double rtTime;
+		if (BackendIsOpenCL( k ))
+		{
+			// already measured with OpenCL events, in the frame that ran it
+			rtTime = slotOclTime[slot];
+		}
+		else
+		{
+			uint64_t timestamps[2] = {};
+			VK_CHECK( vkGetQueryPoolResults( device, timestampPool, baseQuery, 2,
+				sizeof( timestamps ), timestamps, sizeof( uint64_t ),
+				VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT ) );
+			const uint64_t start = timestamps[0] & timestampMask, end = timestamps[1] & timestampMask;
+			// timestampPeriod is nanoseconds per tick
+			rtTime = (double)(end - start) * (double)deviceProps.limits.timestampPeriod * 1e-9;
+		}
 		rtTime /= (double)NUM_DISPATCHES;
-		const double raysPerSecond = (double)(rtWidth * rtHeight) / rtTime;
-		const int k = slotBackend[slot]; // which backend produced this timestamp
+		const double raysPerSecond = rtTime > 0.0 ? (double)(rtWidth * rtHeight) / rtTime : 0.0;
 		static double smoothed[BACKEND_COUNT] = {};
 		static double alpha = 0.8;
 		static int frames[BACKEND_COUNT] = {};
+		static bool lineStarted = false;
 		if (++frames[k] == 1) smoothed[k] = raysPerSecond;
 		else smoothed[k] = alpha * smoothed[k] + (1 - alpha) * raysPerSecond;
 		if (alpha < 0.99) alpha += 0.005;
@@ -1243,13 +1467,24 @@ static void Render()
 		const double ref = smoothed[BACKEND_HWRT];
 		if (backendPrint[k])
 		{
+			if (lineStarted) printf( "; " );
 			if (k == BACKEND_HWRT || ref <= 0.0)
 				printf( "%s: %6.1f MRays/s", backendName[k], smoothed[k] / 1e6 );
 			else
 				printf( "%s: %6.1f MRays/s, %4.1f%% of %s", backendName[k], smoothed[k] / 1e6,
 					100.0 * smoothed[k] / ref, backendName[BACKEND_HWRT] );
+			lineStarted = true;
 		}
-		if (k == activeBackends - 1) printf( "\n" ); else printf( "; " );
+		if (slotSchedIdx[slot] == scheduleLen - 1 && lineStarted)
+			printf( "\n" ), fflush( stdout ), lineStarted = false;
+	}
+	// An OpenCL frame traces here, before anything is recorded or submitted: waiting
+	// on every frame fence first keeps the two APIs off the GPU at the same time, so
+	// neither backend is measured while the other is still running.
+	if (BackendIsOpenCL( backend ))
+	{
+		VK_CHECK( vkWaitForFences( device, FRAME_COUNT, frameFences, VK_TRUE, UINT64_MAX ) );
+		slotOclTime[slot] = TraceOpenCL( backend );
 	}
 	uint32_t imageIndex = 0;
 	VkResult acq = vkAcquireNextImageKHR( device, swapChain, UINT64_MAX,
@@ -1265,7 +1500,15 @@ static void Render()
 	vkCmdResetQueryPool( cb, timestampPool, baseQuery, 2 );
 	static bool sceneDirty = true;
 	if (sceneDirty) { UpdateScene( cb ); sceneDirty = false; }
-	if (backend != BACKEND_HWRT)
+	if (BackendIsOpenCL( backend ))
+	{
+		// The trace already happened, on the OpenCL queue. Write both timestamps anyway:
+		// the readback above waits on this slot's queries whichever backend ran.
+		vkCmdWriteTimestamp( cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampPool, baseQuery );
+		vkCmdWriteTimestamp( cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampPool, baseQuery + 1 );
+		if (OCL_PRESENT_RESULT) UploadOpenCLImage( cb );
+	}
+	else if (backend != BACKEND_HWRT)
 	{
 		vkCmdBindPipeline( cb, VK_PIPELINE_BIND_POINT_COMPUTE,
 			backend == BACKEND_BVH4_GPU ? computePso4 :
@@ -1309,6 +1552,7 @@ static void Render()
 		vkCmdWriteTimestamp( cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampPool, baseQuery + 1 );
 	}
 	slotBackend[slot] = backend; // for the timing readback next time this slot runs
+	slotSchedIdx[slot] = schedIdx;
 	frameCounter++;
 	const VkPipelineStageFlags traceStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
 		VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
@@ -1378,6 +1622,8 @@ static void Init()
 	InitPipeline();
 	InitComputePipeline();
 	InitShaderTables();
+	if (ENABLE_OPENCL) InitOpenCL();
+	BuildSchedule();
 }
 
 int main()
@@ -1392,5 +1638,6 @@ int main()
 		Render(); // Render the next frame
 	}
 	vkDeviceWaitIdle( device );
+	ShutdownOpenCL();
 	return 0;
 }

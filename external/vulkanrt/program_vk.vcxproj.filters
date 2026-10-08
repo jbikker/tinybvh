@@ -22,6 +22,9 @@
     <ClCompile Include="program_vk.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="tiny_ocl_impl.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\tiny_bvh.h">
