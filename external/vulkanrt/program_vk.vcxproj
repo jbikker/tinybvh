@@ -125,6 +125,7 @@
     <None Include="compile_shaders.bat" />
     <None Include="build.bat" />
     <None Include="README_vulkan.md" />
+    <None Include="shaders\traverse.cl" />
   </ItemGroup>
   <ItemGroup>
     <!--

@@ -82,5 +82,8 @@
     <None Include="README_vulkan.md">
       <Filter>Build</Filter>
     </None>
+    <None Include="shaders\traverse.cl">
+      <Filter>Shaders</Filter>
+    </None>
   </ItemGroup>
 </Project>
