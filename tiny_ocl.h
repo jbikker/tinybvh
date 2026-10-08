@@ -419,7 +419,9 @@ public:
 #ifdef TINY_OCL_IMPLEMENTATION
 
 #ifdef _MSC_VER
+#ifndef SKIPLIB
 #pragma comment( lib, "../external/OpenCL/lib/OpenCL.lib" )
+#endif
 #endif
 #ifdef TINY_OCL_GLINTEROP
 #include "cl_gl.h"
