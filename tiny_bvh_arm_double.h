@@ -1,4 +1,4 @@
-// tiny_bvh_arm_double.h: NEON specializations for the double precision layouts.
+﻿// tiny_bvh_arm_double.h: NEON specializations for the double precision layouts.
 // Included by tiny_bvh.h; do not include directly.
 
 #ifndef TINY_BVH_H_
@@ -234,7 +234,7 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant
 			const float64x2_t dista = vbslq_f64( combineda, taa, inf2 ), distb = vbslq_f64( combinedb, tab, inf2 );
 			const double t = vminvq_f64( vminq_f64( dista, distb ) );
 			const uint32x4_t eq4 = neon_narrow_mask( vceqq_f64( dista, vdupq_n_f64( t ) ), vceqq_f64( distb, vdupq_n_f64( t ) ) );
-			const uint32_t lane = __bfind( neon_movemask_popc( eq4 ) & 15 );
+			const uint32_t lane = tinybvh_bfind( neon_movemask_popc( eq4 ) & 15 );
 			// update hit record
 			ray.hit.t = t, ray.hit.u = tinybvh_getlane_d( lane < 2 ? &ua : &ub, lane & 1 ), ray.hit.v = tinybvh_getlane_d( lane < 2 ? &va : &vb, lane & 1 );
 			ray.SetHitPrim( leaf->primIdx[lane] );

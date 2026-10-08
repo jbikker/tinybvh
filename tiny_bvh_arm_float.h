@@ -159,6 +159,12 @@ TINYBVH_FORCEINLINE int32x4_t neon_binIdx( const float32x4_t& fmin, const float3
 // Fragment setup, optionally sliced over the thread pool.
 static constexpr uint32_t NEONCOUNTSTRIDE = 32; // 32 * 4 bytes = 128 bytes.
 struct ALIGNED( 64 ) NEONSliceBounds { float bmin[4], bmax[4]; char pad[32]; };
+// Store a fragment's bounds, with primIdx and clipped = 0 in lane 3.
+static TINYBVH_FORCEINLINE void tinybvh_store_frag( void* frag, const float32x4_t bmin4, const float32x4_t bmax4, const uint32_t prim )
+{
+	tinybvh_store4( frag, vreinterpretq_f32_u32( vsetq_lane_u32( prim, vreinterpretq_u32_f32( bmin4 ), 3 ) ) );
+	tinybvh_store4( (char*)frag + 16, vreinterpretq_f32_u32( vsetq_lane_u32( 0, vreinterpretq_u32_f32( bmax4 ), 3 ) ) );
+}
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const uint32_t first, const uint32_t last,
 	const uint32_t* indices, const int8_t* vertData, const uint32_t stride4, void* frags,
 	float* rootMin, float* rootMax )
@@ -172,8 +178,7 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const ui
 		const float32x4_t v1 = tinybvh_load4( vertData + (size_t)(i1 * stride4) * 16 );
 		const float32x4_t v2 = tinybvh_load4( vertData + (size_t)(i2 * stride4) * 16 );
 		const float32x4_t t1 = vminq_f32( vminq_f32( v0, v1 ), v2 ), t2 = vmaxq_f32( vmaxq_f32( v0, v1 ), v2 );
-		tinybvh_store4( &frag[i].bmin, t1 ), tinybvh_store4( &frag[i].bmax, t2 );
-		rmin = vminq_f32( rmin, t1 ), rmax = vmaxq_f32( rmax, t2 );
+		tinybvh_store_frag( frag + i, t1, t2, i ), rmin = vminq_f32( rmin, t1 ), rmax = vmaxq_f32( rmax, t2 );
 		primIdx[i] = i;
 	}
 	else for (uint32_t i = first; i < last; i++)
@@ -182,8 +187,7 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const ui
 		const float32x4_t v1 = tinybvh_load4( vertData + (size_t)((i * 3 + 1) * stride4) * 16 );
 		const float32x4_t v2 = tinybvh_load4( vertData + (size_t)((i * 3 + 2) * stride4) * 16 );
 		const float32x4_t t1 = vminq_f32( vminq_f32( v0, v1 ), v2 ), t2 = vmaxq_f32( vmaxq_f32( v0, v1 ), v2 );
-		tinybvh_store4( &frag[i].bmin, t1 ), tinybvh_store4( &frag[i].bmax, t2 );
-		rmin = vminq_f32( rmin, t1 ), rmax = vmaxq_f32( rmax, t2 );
+		tinybvh_store_frag( frag + i, t1, t2, i ), rmin = vminq_f32( rmin, t1 ), rmax = vmaxq_f32( rmax, t2 );
 		primIdx[i] = i;
 	}
 	vst1q_f32( rootMin, rmin ), vst1q_f32( rootMax, rmax ); // slices are cache line separated; no false sharing.
@@ -195,7 +199,7 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	BVH_FATAL_ERROR_IF( vertices.stride & 15, "BVH::PrepareSIMDBuild( .. ), stride must be multiple of 16." );
 	// reset node pool
 	const uint32_t primCount = prims > 0 ? prims : vertices.count / 3;
-	const uint32_t splitBudget = settings.usePresplitting ? ((int)(primCount * settings.presplitFactor)) : 0;
+	const uint32_t splitBudget = SIMDPresplit() ? ((int)(primCount * settings.presplitFactor)) : 0;
 	// extraFrags: room for fragments created during the build (Bonsai HQ splits as it partitions).
 	const uint32_t fragCap = primCount + splitBudget + extraFrags;
 	const uint32_t spaceNeeded = fragCap * 2; // upper limit
@@ -217,48 +221,26 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	vertIdx = (uint32_t*)indices;
 	const int8_t* vertData = verts.data;
 	// prepare threading; as in the x86 builder, the shared node counter is created here.
-	threadedBuild = false;
-#ifdef ENABLE_THREADED_BUILDS
-	if (settings.enableThreading && triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
-		threadedBuild = true, atomicNewNodePtr = ContextNew<std::atomic<uint32_t>>( 2u );
-#endif
+	newNodePtr = 2, threadedBuild = UseThreads( triCount ), StartNodeCounter();
 	// initialize fragments
-	float32x4_t rootMin = vdupq_n_f32( BVH_FAR ), rootMax = vdupq_n_f32( -BVH_FAR );
-	const uint32_t stride4 = verts.stride / 16;
-	BVH_FATAL_ERROR_IF( primCount == 0, "BVH::PrepareSIMDBuild( .. ), primCount == 0." );
-	if (threadedBuild)
+	const uint32_t stride4 = verts.stride / 16, slices = TaskCount( threadedBuild, triCount, MT_PREP_TASK_PRIMS, MT_PREP_MAX_TASKS );
+	ALIGNED( 64 ) NEONSliceBounds slice[MT_PREP_MAX_TASKS]; // one cache line per slice; no false sharing.
+	ParallelFor( threadedBuild, slices, [&]( uint32_t i )
 	{
-		constexpr int slices = 4;
-		ALIGNED( 64 ) NEONSliceBounds slice[slices]; // one cache line per slice; no false sharing.
-		const uint32_t sliceSize = triCount / slices;
-		tinybvh_parallel_for( context, slices, [&]( uint32_t i )
-		{
-			const uint32_t first = sliceSize * i, last = i == (uint32_t)(slices - 1) ? triCount : (first + sliceSize);
-			PrepareSIMDBuildFragSlice( first, last, indices, vertData, stride4, fragment, slice[i].bmin, slice[i].bmax );
+		PrepareSIMDBuildFragSlice( SliceStart( triCount, i, slices ), SliceStart( triCount, i + 1, slices ), indices, vertData, stride4, fragment, slice[i].bmin, slice[i].bmax );
 		} );
-		rootMin = vld1q_f32( slice[0].bmin ), rootMax = vld1q_f32( slice[0].bmax );
-		for (int i = 1; i < slices; i++)
+	float32x4_t rootMin = vld1q_f32( slice[0].bmin ), rootMax = vld1q_f32( slice[0].bmax );
+	for (uint32_t i = 1; i < slices; i++)
 			rootMin = vminq_f32( rootMin, vld1q_f32( slice[i].bmin ) ), rootMax = vmaxq_f32( rootMax, vld1q_f32( slice[i].bmax ) );
-	}
-	else
-	{
-		ALIGNED( 16 ) float rmin[4], rmax[4];
-		PrepareSIMDBuildFragSlice( 0, triCount, indices, vertData, stride4, (void*)fragment, rmin, rmax );
-		rootMin = vld1q_f32( rmin ), rootMax = vld1q_f32( rmax );
-	}
 	BVHNode& root = bvhNode[0];
 	root.aabbMin = tinybvh_bitcast<bvhvec4>( rootMin ), root.aabbMax = tinybvh_bitcast<bvhvec4>( rootMax );
 	// presplitting
 	uint32_t fragCount = primCount;
-	if (settings.usePresplitting)
-	{
-		for (uint32_t i = 0; i < primCount; i++) fragment[i].primIdx = i, fragment[i].clipped = 0;
-		fragCount = Presplit();
-	}
+	if (SIMDPresplit()) fragCount = Presplit();
 	// finalize root node
 	root.leftFirst = 0, root.triCount = idxCount = triCount = fragCount;
 	// reset node pool
-	newNodePtr = 2, bvh_over_indices = indices != nullptr;
+	bvh_over_indices = indices != nullptr;
 	// all set; actual build happens in BVH::BuildSIMDSubtree.
 }
 
@@ -307,7 +289,7 @@ void impl::BVHBuildNEONSubtree( void* payload )
 template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth, bool allowTasks, bool allowSlices )
 {
 	// aligned data
-	constexpr uint32_t maxSlices = 24;
+	constexpr uint32_t maxSlices = MT_SIMD_MAX_SLICES;
 	ALIGNED( 64 ) float32x4x2_t slicebinbox[maxSlices][3 * AVXBINS];
 	ALIGNED( 64 ) uint32_t slicecount[maxSlices][NEONCOUNTSTRIDE]; // padded: see NEONCOUNTSTRIDE
 	ALIGNED( 64 ) float32x4x2_t bestLBox, bestRBox;            // 64 bytes
@@ -335,12 +317,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 				const float32x4x2_t b1 = veorq_f32x2( tinybvh_load8( fragment + primIdx[first + 1] ), neon_signFlip8 );
 				const float rSAV = 1.0f / SAV, splitCost = c_trav + c_int * rSAV * (halfArea( b0 ) + halfArea( b1 ));
 				if (splitCost >= 2.0f * c_int) break; // not splitting is better.
-				uint32_t n;
-			#ifdef ENABLE_THREADED_BUILDS
-				if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
-			#else
-				n = newNodePtr, newNodePtr += 2;
-			#endif
+				const uint32_t n = AllocNodePair();
 				tinybvh_store8( &bvhNode[n], veorq_f32x2( b0, neon_signFlip8 ) );
 				bvhNode[n].leftFirst = first, bvhNode[n].triCount = 1;
 				tinybvh_store8( &bvhNode[n + 1], veorq_f32x2( b1, neon_signFlip8 ) );
@@ -356,16 +333,13 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			const uint32x4_t nonzero = vmvnq_u32( vceqq_f32( d4, neon_zero4 ) );
 			const float32x4_t rpd4 = vreinterpretq_f32_u32( vandq_u32(
 				vreinterpretq_u32_f32( vdivq_f32( neon_binmul3, d4 ) ), nonzero ) );
-			if (threadedBuild && allowTasks && allowSlices && slices > 1 && node.triCount > MT_BUILD_THRESHOLD)
+			if (threadedBuild && allowTasks && allowSlices && slices > 1 && node.triCount > MT_SIMD_SLICE_THRESHOLD)
 			{
-				const uint32_t sliceSize = node.triCount / slices;
-				const uint32_t binFirst = node.leftFirst, binPrims = node.triCount;
+				const uint32_t first0 = node.leftFirst, count0 = node.triCount;
 				tinybvh_parallel_for( context, slices, [&]( uint32_t i )
 				{
-					const uint32_t first = binFirst + sliceSize * i;
-					const uint32_t last = i == (slices - 1) ? (binFirst + binPrims) : (first + sliceSize);
-					BuildSIMDBinTask( first, last, slicebinbox[0] + i * 3 * AVXBINS,
-						slicecount[0] + i * NEONCOUNTSTRIDE, (const float*)&nmin4, (const float*)&rpd4 );
+					BuildSIMDBinTask( first0 + SliceStart( count0, i, slices ), first0 + SliceStart( count0, i + 1, slices ),
+						slicebinbox[0] + i * 3 * AVXBINS, slicecount[0] + i * NEONCOUNTSTRIDE, (const float*)&nmin4, (const float*)&rpd4 );
 				} );
 				// combine results from slices; slice-major, so each slice is a linear sweep.
 				for (uint32_t slice = 1; slice < slices; slice++)
@@ -387,7 +361,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			for (int32_t a = 0; a < 3; a++, bb += AVXBINS) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
 			{
 				// hardcoded bin processing for AVXBINS == 8
-				assert( AVXBINS == 8 );
+				static_assert( AVXBINS == 8, "the sweep is written out for 8 bins" );
 				const uint32_t* cnt = count + a * AVXBINS;
 				const uint32_t lN0 = cnt[0], rN0 = cnt[7];
 				const float32x4x2_t lb0 = bb[0], rb0 = bb[7];
@@ -434,12 +408,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			// create child nodes and recurse
 			const uint32_t leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
-			uint32_t n;
-		#ifdef ENABLE_THREADED_BUILDS
-			if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
-		#else
-			n = newNodePtr, newNodePtr += 2;
-		#endif
+			const uint32_t n = AllocNodePair();
 			tinybvh_store8( &bvhNode[n], veorq_f32x2( bestLBox, neon_signFlip8 ) );
 			bvhNode[n].leftFirst = node.leftFirst, bvhNode[n].triCount = leftCount;
 			node.leftFirst = n, node.triCount = 0;
@@ -464,20 +433,13 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 
 template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize()
 {
-#ifdef ENABLE_THREADED_BUILDS
-	if (threadedBuild)
-	{
-		tinybvh_barrier( context ); // wait for all spawned subtrees
-		newNodePtr = atomicNewNodePtr->load();
-		ContextDelete( atomicNewNodePtr );
-	}
-#endif
+	StopNodeCounter();
 	// tree has been built.
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
-	refittable = settings.usePresplitting ? false : true; // only if not using spatial splits
+	refittable = !SIMDPresplit(); // only if not using spatial splits
 	may_have_holes = false; // there are no holes in the list of nodes.
 	usedNodes = newNodePtr;
-	if (settings.usePresplitting) // finalize indices in index array
+	if (SIMDPresplit()) // finalize indices in index array
 	{
 		for (uint32_t i = 0; i < triCount; i++) primIdx[i] = fragment[primIdx[i]].primIdx;
 		if (settings.presplitPostPass) PresplitPostPass();
@@ -625,7 +587,7 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant(
 		{
 			const float32x4_t dist4 = vbslq_f32( combined, ta4, inf4 );
 			const float t = vminvq_f32( dist4 );
-			const uint32_t lane = __bfind( neon_movemask_popc( vceqq_f32( dist4, vdupq_n_f32( t ) ) ) & 15 );
+			const uint32_t lane = tinybvh_bfind( neon_movemask_popc( vceqq_f32( dist4, vdupq_n_f32( t ) ) ) & 15 );
 			// update hit record
 			ray.hit.t = t, ray.hit.u = tinybvh_getlane_f( &u4, lane ), ray.hit.v = tinybvh_getlane_f( &v4, lane );
 		#if INST_IDX_BITS == 32

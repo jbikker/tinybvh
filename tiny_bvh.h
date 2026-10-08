@@ -35,11 +35,13 @@ THE SOFTWARE.
 //   tiny_bvh_arm_double.h  ARM kernels for the double precision layouts
 // Keep them together; only tiny_bvh.h is included by application code.
 // Instantiate a BVH and build it for a list of triangles:
-//   BVH bvh;
-//   bvh.Build( (bvhvec4*)myVerts, numTriangles );
-//   Ray ray( bvhvec3( 0, 0, 0 ), bvhvec3( 0, 0, 1 ) );
+//   tinybvh::BVH bvh;
+//   bvh.Build( (tinybvh::bvhvec4*)myVerts, numTriangles );
+//   tinybvh::Ray ray( tinybvh::bvhvec3( 0, 0, 0 ), tinybvh::bvhvec3( 0, 0, 1 ) );
 //   bvh.Intersect( ray );
-// After this, intersection information is in ray.hit.
+// After this, intersection information is in ray.hit. myVerts holds 3 vertices per triangle, each
+// four floats: x, y, z and a dummy value that exists purely for a more efficient memory layout.
+// See tiny_bvh_minimal.cpp for basic usage.
 
 // TinyBVH can use custom vector types by defining TINYBVH_USE_CUSTOM_VECTOR_TYPES once before inclusion.
 // To define custom vector types create a tinybvh namespace with the appropriate using directives, e.g.:
@@ -62,20 +64,11 @@ THE SOFTWARE.
 
 // TinyBVH can be further configured using #defines, to be specified before the #include:
 // #define BVHBINS 8        - the number of bins to use in regular BVH construction. Default is 8.
-// #define HQBVHBINS 32     - the number of bins to use in SBVH construction. Default is 8.
+// #define HQBVHBINS 32     - the number of bins to use in SBVH construction. Default is 8; at most MAXHQBINS (128).
 // #define INST_IDX_BITS 10 - the number of bits to use for the instance index. Default is 32,
 //                            which stores the bits in a separate field in tinybvh::Intersection.
 // #define C_INT 1          - the estimated cost of a primitive intersection test. Default is 1.
 // #define C_TRAV 1         - the estimated cost of a traversal step. Default is 1.
-
-// See tiny_bvh_minimal.cpp for basic usage. In short:
-// instantiate a BVH: tinybvh::BVH bvh;
-// build it: bvh.Build( (tinybvh::bvhvec4*)triangleData, TRIANGLE_COUNT );
-// ..where triangleData is an array of four-component float vectors:
-// - For a single triangle, provide 3 vertices,
-// - For each vertex provide x, y and z.
-// The fourth float in each vertex is a dummy value and exists purely for
-// a more efficient layout of the data in memory.
 
 // A manual for TinyBVH can be found here:
 // https://jacco.ompf2.com/2025/01/24/tinybvh-manual-basic-use
@@ -141,8 +134,10 @@ THE SOFTWARE.
 #endif
 #ifndef HQBVHBINS
 #define HQBVHBINS 8 // default; gets copied to hqbvhbins, which can be modified.
-#define MAXHQBINS 128 // max value for hqbvhbins.
-#endif // HQBVHBINS
+#endif
+#ifndef MAXHQBINS
+#define MAXHQBINS 128 // max value for hqbvhbins; one more than that with hqbvhoddeven.
+#endif
 
 // Stack size for all CPU-side traversal functions.
 #ifndef TINYBVH_STACK_SIZE
@@ -210,6 +205,14 @@ THE SOFTWARE.
 // Threaded builds: upper bound on the number of horizontal binning slices per node.
 #ifndef MT_HQ_MAX_SLICES
 #define MT_HQ_MAX_SLICES 32
+#endif
+// Threaded SIMD builds: bin and partition a node in up to this many slices ("horizontal"
+// parallelism) once it holds more than MT_SIMD_SLICE_THRESHOLD primitives.
+#ifndef MT_SIMD_MAX_SLICES
+#define MT_SIMD_MAX_SLICES 24
+#endif
+#ifndef MT_SIMD_SLICE_THRESHOLD
+#define MT_SIMD_SLICE_THRESHOLD 50000
 #endif
 // Threaded builds: target number of primitives per fragment-setup task.
 #ifndef MT_PREP_TASK_PRIMS
@@ -298,25 +301,24 @@ __FILE__ "(" EMIT_COMPILER_WARNING_STRINGIFY1(__LINE__) "): " type ": "
 // AVX2 availability: Since Haswell (2013)
 #ifndef TINYBVH_NO_SIMD
 #if defined __x86_64__ || defined _M_X64 || defined __wasm_simd128__ || defined __wasm_relaxed_simd__
-#if !defined __SSE4_2__  && !defined _MSC_VER
-WARNING( "SSE4.2 not enabled in compilation." )
-#else
-#define BVH_USESSE
-#endif
-#if !defined __AVX__
-WARNING( "AVX not enabled in compilation." )
-#define TINYBVH_NO_SIMD
-#else
-#define BVH_USEAVX		// required for BuildSIMD
-#define BVH_USESSE
-#endif
-#if !defined __AVX2__ || (!defined __FMA__ && !defined _MSC_VER)
-WARNING( "AVX2 and FMA not enabled in compilation." )
-#define TINYBVH_NO_SIMD
-#else
+// Each level implies the ones below it: BVH_USEAVX2 > BVH_USEAVX > BVH_USESSE.
+#if defined __AVX2__ && (defined __FMA__ || defined _MSC_VER)
 #define BVH_USEAVX2		// required for BVH8_CPU
-#define BVH_USEAVX
+#else
+WARNING( "AVX2 and FMA not enabled in compilation." )
+#endif
+#if defined __AVX__ || defined BVH_USEAVX2
+#define BVH_USEAVX		// required for BuildSIMD
+#else
+WARNING( "AVX not enabled in compilation." )
+#endif
+#if defined __SSE4_2__ || defined _MSC_VER || defined BVH_USEAVX
 #define BVH_USESSE
+#else
+WARNING( "SSE4.2 not enabled in compilation." )
+#endif
+#ifndef BVH_USEAVX2
+#define TINYBVH_NO_SIMD	// no complete SIMD path; tells the application. The SSE / AVX subsets above still apply.
 #endif
 #include "immintrin.h"	// for __m128 and __m256
 #elif defined __aarch64__ || defined _M_ARM64

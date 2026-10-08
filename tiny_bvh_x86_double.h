@@ -190,7 +190,7 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant
 			// compute broadcasted horizontal minimum of dist4
 			const __m256d a = _mm256_min_pd( dist4, _mm256_permute2f128_pd( dist4, dist4, 1 ) );
 			const __m256d c = _mm256_min_pd( a, _mm256_permute_pd( a, 5 ) );
-			const uint32_t lane = __bfind( _mm256_movemask_pd( _mm256_cmp_pd( c, dist4, _CMP_EQ_OQ ) ) );
+			const uint32_t lane = tinybvh_bfind( _mm256_movemask_pd( _mm256_cmp_pd( c, dist4, _CMP_EQ_OQ ) ) );
 			// update hit record
 			const double t = _mm256_cvtsd_f64( c );
 			ray.hit.t = t, ray.hit.u = tinybvh_getlane_d( &u4, lane ), ray.hit.v = tinybvh_getlane_d( &v4, lane );
