@@ -30,7 +30,8 @@ enum BVHLayout
 	CWBVH,		// 'Compressed Wide BVH'
 	AMD_HWRT,	// Native AMD format
 	MADMANN91,	// for reference: latest madmann91 BVH lib
-	EMBREE		// for reference: latest Embree lib.
+	EMBREE,		// for reference: latest Embree lib.
+	AMD_HWRT8,	// Native AMD 8-wide format
 };
 
 class PrimitiveSet;

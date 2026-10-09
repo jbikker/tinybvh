@@ -9,6 +9,8 @@ tinyocl::Kernel* gpu4way_kernel = nullptr;
 tinyocl::Kernel* gpu4way_kernel_any = nullptr;
 tinyocl::Kernel* amd4way_kernel = nullptr;
 tinyocl::Kernel* amd4way_kernel_any = nullptr;
+tinyocl::Kernel* amd8way_kernel = nullptr;
+tinyocl::Kernel* amd8way_kernel_any = nullptr;
 tinyocl::Kernel* cwbvh_kernel = nullptr;
 tinyocl::Kernel* cwbvh_kernel_any = nullptr;
 #endif
