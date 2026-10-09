@@ -686,6 +686,7 @@ enum BVHType : uint32_t
 	LAYOUT_BVH8_SIMD,
 	LAYOUT_VOXELSET,
 	LAYOUT_BVH4_AMD_HW,
+	LAYOUT_CWBVH8_AMD_HW,
 };
 
 namespace impl {
@@ -698,6 +699,7 @@ TEMPLATED_M class MBVH;
 TEMPLATED class BVH4_GPU;
 TEMPLATED class BVH4_CPU;
 TEMPLATED class BVH4_AMD_HW;
+TEMPLATED class CWBVH8_AMD_HW;
 TEMPLATED class BVH8_CWBVH;
 TEMPLATED class BVH8_CPU;
 TEMPLATED class BLASInstance;
@@ -1333,6 +1335,7 @@ public:
 	void DropReference( BVHContext ctx = {} );
 	template <typename, typename> friend class BVH4_GPU;
 	template <typename, typename> friend class BVH4_AMD_HW;
+	template <typename, typename> friend class CWBVH8_AMD_HW;
 	template <typename, typename> friend class BVH4_CPU;
 	template <typename, typename> friend class BVH8_CPU;
 	template <typename, typename> friend class BVH8_CWBVH;
@@ -1516,6 +1519,84 @@ private:
 	static constexpr uint32_t NODE_TRIANGLE = 0, NODE_BOX32 = 5;
 	static uint32_t PackNodeID( uint32_t offset, uint32_t type ) { return (offset >> 3) | type; }
 	BVH4_AMD_HW& operator=( const BVH4_AMD_HW& ) = default;
+};
+
+TEMPLATED class CWBVH8_AMD_HW : public BVHBase<Float, Index>
+{
+public:
+	using Base = BVHBase<Float, Index>;
+	using Base::allocatedNodes;
+	using Base::c_int;
+	using Base::c_trav;
+	using Base::context;
+	using Base::layout;
+	using Base::settings;
+	using Base::triCount;
+	using Base::usedNodes;
+	using typename Base::Ray;
+	using typename Base::Slice;
+	using typename Base::Vec3;
+
+protected:
+	using Base::AlignedAlloc;
+	using Base::AlignedFree;
+	using Base::CopyBasePropertiesFrom;
+
+public:
+	// Layout reference: Mesa, src/amd/vulkan/bvh/bvh_defines.h (GFX12 nodes).
+	// These structs document the packed buffer; ConvertFrom writes bvhvec4 blocks.
+	struct AMDBoxChild
+	{
+		uint32_t dword0; // 12-bit xmin, 12-bit ymin, 8-bit cull flags.
+		uint32_t dword1; // 12-bit zmin, 12-bit xmax, 8-bit ray mask.
+		uint32_t dword2; // 12-bit ymax, 12-bit zmax, 4-bit type, 4-bit size in 128-byte records.
+	}; // 12 bytes.
+
+	struct AMDBoxNode
+	{
+		uint32_t internal_base_id; // byte 0: first internal child, in 8-byte units.
+		uint32_t primitive_base_id; // byte 4: first primitive child, in 8-byte units.
+		uint32_t parent_id; // byte 8: packed parent ID; UINT32_MAX at the root.
+		bvhvec3 origin; // bytes 12..23: origin of the quantized child bounds.
+		uint32_t child_count_exponents; // byte 24: three biased exponents and (child count - 1) in bits 28..31.
+		uint32_t obb_matrix_index; // byte 28: 0x7f disables oriented bounding boxes.
+		AMDBoxChild children[8]; // bytes 32..127: internal children first, primitive children next.
+	}; // 128 bytes.
+
+	struct AMDTriangleNode
+	{
+		uint32_t words[32]; // 52-bit header, uncompressed vertices and primitive IDs, 29-bit pair descriptor.
+	}; // 128 bytes; stores one or two triangles.
+
+	CWBVH8_AMD_HW( BVHContext ctx = {} ) { layout = LAYOUT_CWBVH8_AMD_HW; context = ctx; }
+	CWBVH8_AMD_HW( const MBVH<8, Float, Index>& bvh8 ) { /* DEPRECATED */ layout = LAYOUT_CWBVH8_AMD_HW; ConvertFrom( bvh8 ); }
+	CWBVH8_AMD_HW( const CWBVH8_AMD_HW& ) = delete; // owns its allocations, so it cannot be copied
+	CWBVH8_AMD_HW( CWBVH8_AMD_HW&& ) noexcept;
+	CWBVH8_AMD_HW& operator=( CWBVH8_AMD_HW&& ) noexcept;
+	~CWBVH8_AMD_HW();
+	void Build( const bvhvec4* vertices, const Index primCount );
+	void Build( const Slice& vertices );
+	void Build( const bvhvec4* vertices, const uint32_t* indices, const Index primCount );
+	void Build( const Slice& vertices, const uint32_t* indices, const Index primCount );
+	void BuildHQ( const bvhvec4* vertices, const Index primCount );
+	void BuildHQ( const Slice& vertices );
+	void BuildHQ( const bvhvec4* vertices, const uint32_t* indices, const Index primCount );
+	void BuildHQ( const Slice& vertices, const uint32_t* indices, const Index primCount );
+	void Optimize( const uint32_t iterations = 25, bool extreme = false );
+	void ConvertFrom( const MBVH<8, Float, Index>& original, bool compact = true );
+	Float SAHCost( const Index nodeIdx = 0 ) const { return bvh8.SAHCost( nodeIdx ); }
+	// GPU traversal only; the underlying bvh8.bvh remains available for CPU queries.
+	// BVH data in 16-byte blocks; all nodes are 64-byte aligned.
+	// The kernel uses a zero descriptor base and encodes the device address in the node pointer.
+	bvhvec4* bvh8Data = 0;
+	uint32_t allocatedBlocks = 0; // node data and triangles are stored in 16-byte blocks.
+	uint32_t usedBlocks = 0; // actually used storage.
+	MBVH<8, Float, Index> bvh8; // CWBVH8_AMD_HW is created from BVH8 and uses its data.
+	bool ownBVH8 = true; // False when ConvertFrom receives an external bvh.
+private:
+	static constexpr uint32_t NODE_TRIANGLE = 0, NODE_BOX32 = 5;
+	static uint32_t PackNodeID( uint32_t offset, uint32_t type ) { return (offset >> 3) | type; }
+	CWBVH8_AMD_HW& operator=( const CWBVH8_AMD_HW& ) = default;
 };
 
 TEMPLATED class BVH4_CPU : public BVHBase<Float, Index>
@@ -1832,6 +1913,7 @@ using BVH_GPU = impl::BVH_GPU<float, uint32_t>;
 template <int M> using MBVH = impl::MBVH<M, float, uint32_t>;
 using BVH4_GPU = impl::BVH4_GPU<float, uint32_t>;
 using BVH4_AMD_HW = impl::BVH4_AMD_HW<float, uint32_t>;
+using CWBVH8_AMD_HW = impl::CWBVH8_AMD_HW<float, uint32_t>;
 using BVH4_CPU = impl::BVH4_CPU<float, uint32_t>;
 using BVH8_CWBVH = impl::BVH8_CWBVH<float, uint32_t>;
 using BVH8_CPU = impl::BVH8_CPU<float, uint32_t>;
@@ -5922,6 +6004,355 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::ConvertFrom( const MBVH<4, Float, Inde
 		retValPos = stack[--stackPtr];
 	}
 	usedBlocks = newAlt4Ptr;
+}
+
+// CWBVH8_AMD_HW implementation
+// ----------------------------------------------------------------------------
+
+TEMPLATED CWBVH8_AMD_HW<Float, Index>::CWBVH8_AMD_HW( CWBVH8_AMD_HW&& other ) noexcept
+{
+	*this = other;
+	// The embedded bvh8 must let go too: owned or not, this object now refers to
+	// the same buffers, and only one of the two may release them.
+	other.bvh8.ReleaseOwnership();
+	other.bvh8Data = 0;
+	other.allocatedBlocks = other.usedBlocks = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+TEMPLATED CWBVH8_AMD_HW<Float, Index>& CWBVH8_AMD_HW<Float, Index>::operator=( CWBVH8_AMD_HW&& other ) noexcept
+{
+	if (this != &other) this->~CWBVH8_AMD_HW(), new (this) CWBVH8_AMD_HW( tinybvh_move( other ) );
+	return *this;
+}
+
+TEMPLATED CWBVH8_AMD_HW<Float, Index>::~CWBVH8_AMD_HW()
+{
+	if (!ownBVH8) bvh8.ReleaseOwnership(); // clear out pointers we don't own.
+	AlignedFree( bvh8Data );
+}
+
+// forwarders
+TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Build( const bvhvec4* v, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
+TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Build( const bvhvec4* v, const uint32_t* i, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
+TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 ); }
+TEMPLATED void CWBVH8_AMD_HW<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
+TEMPLATED void CWBVH8_AMD_HW<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
+TEMPLATED void CWBVH8_AMD_HW<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
+TEMPLATED void CWBVH8_AMD_HW<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+
+TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
+{
+	if (!ownBVH8)
+	{
+		bvh8.DropReference( context );
+		ownBVH8 = true;
+	}
+	// propagate settings for this layout to the underlying layout
+	bvh8.context = bvh8.bvh.context = context, bvh8.settings = bvh8.bvh.settings = settings;
+	bvh8.c_int = bvh8.bvh.c_int = c_int, bvh8.c_trav = bvh8.bvh.c_trav = c_trav;
+	// build underlying layout
+	bvh8.bvh.Build( vertices, indices, prims );
+	bvh8.bvh.SplitLeafs( 2 );
+	bvh8.leafPrimLimit = 2;
+	bvh8.ConvertFrom( bvh8.bvh );
+	// convert to AMD format
+	ConvertFrom( bvh8 );
+}
+
+TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Optimize( const uint32_t iterations, bool extreme )
+{
+	if (!ownBVH8)
+	{
+		const Slice vertices = bvh8.bvh.verts;
+		const uint32_t* indices = bvh8.bvh.vertIdx;
+		const Index prims = bvh8.bvh.triCount;
+		Build( vertices, indices, prims );
+	}
+	bvh8.Optimize( iterations, extreme );
+	ConvertFrom( bvh8 );
+}
+
+// Sequential bit writer for GFX12 primitive records, following Mesa's
+struct AMDBitWriter
+{
+	uint8_t* data;
+	uint32_t capacityBits;
+	uint32_t position = 0;
+
+	explicit AMDBitWriter( void* destination, uint32_t bytes = 128 )
+		: data( (uint8_t*)destination ), capacityBits( bytes * 8 )
+	{
+		memset( data, 0, bytes );
+	}
+
+	void Write( uint32_t value, uint32_t bitCount )
+	{
+		assert( bitCount <= 32 );
+		assert( position <= capacityBits );
+		assert( bitCount <= capacityBits - position );
+		// A 64-bit temporary makes shifting by 32 safe.
+		uint64_t remaining = value;
+		while (bitCount)
+		{
+			const uint32_t shift = position & 31, available = 32 - shift;
+			const uint32_t count = tinybvh_min( bitCount, available );
+			const uint32_t mask = count == 32 ? UINT32_MAX : ((1u << count) - 1u);
+			uint8_t* destination = data + (position / 32) * 4;
+			uint32_t word;
+			memcpy( &word, destination, sizeof( word ) );
+			word = (word & ~(mask << shift)) | ((uint32_t( remaining ) & mask) << shift);
+			memcpy( destination, &word, sizeof( word ) );
+			remaining >>= count;
+			position += count;
+			bitCount -= count;
+		}
+	}
+
+	void SkipTo( uint32_t targetBit )
+	{
+		assert( targetBit >= position );
+		assert( targetBit <= capacityBits );
+		position = targetBit;
+	}
+};
+
+// Round the extent up to a power of two for 12-bit conservative child bounds.
+static int32_t AMDQuantExp( const double extent )
+{
+	if (!(extent > 0)) return -115;
+	uint32_t roundedBits = (tinybvh_as_uint( float( extent ) ) + 0x7fffffu) & 0x7f800000u;
+	if (double( tinybvh_as_float( roundedBits ) ) < extent) roundedBits += 1u << 23;
+	return int32_t( roundedBits >> 23 ) - 127;
+}
+
+TEMPLATED void CWBVH8_AMD_HW<Float, Index>::ConvertFrom( const MBVH<8, Float, Index>& original, bool compact )
+{
+	// get a copy of the original bvh8
+	if (&original != &bvh8)
+	{
+		if (ownBVH8) bvh8 = MBVH<8, Float, Index>( context ); else bvh8.DropReference( context );
+		ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
+	}
+	bvh8.ReferenceFrom( original );
+	const BVHContext ctx = context;
+	CopyBasePropertiesFrom( bvh8 );
+	context = ctx;
+	const uint32_t nodeCap = tinybvh_max( 128u, bvh8.triCount >> 1 );
+	if (bvh8Data == 0 || nodeCap > allocatedBlocks)
+	{
+		AlignedFree( bvh8Data );
+		bvh8Data = (bvhvec4*)AlignedAlloc( nodeCap * 16 );
+		allocatedBlocks = nodeCap;
+	}
+
+	uint32_t stackCap = TINYBVH_STACK_SIZE, stackPtr = 1;
+	uint32_t* stackNodeIdx = (uint32_t*)AlignedAlloc( stackCap * 4 );
+	uint32_t* stackNodeAddr = (uint32_t*)AlignedAlloc( stackCap * 4 );
+	uint32_t* parentNodeID = (uint32_t*)AlignedAlloc( stackCap * 4 );
+	stackNodeIdx[0] = 0, stackNodeAddr[0] = 0, parentNodeID[0] = UINT32_MAX;
+	uint32_t nodeDataPtr = 8;
+	while (stackPtr > 0)
+	{
+		const uint32_t origIdx = stackNodeIdx[--stackPtr];
+		const uint32_t parentID = parentNodeID[stackPtr];
+
+		const typename MBVH<8, Float, Index>::MBVHNode* orig = &bvh8.mbvhNode[origIdx];
+		const uint32_t currentNodeAddr = stackNodeAddr[stackPtr];
+
+		if (nodeDataPtr + 64 > allocatedBlocks)
+		{
+			const uint32_t newCap = tinybvh_max( allocatedBlocks + (allocatedBlocks >> 1), nodeDataPtr + 64 );
+			bvhvec4* newData = (bvhvec4*)AlignedAlloc( newCap * 16 );
+			memcpy( newData, bvh8Data, nodeDataPtr * 16 );
+			AlignedFree( bvh8Data );
+			bvh8Data = newData, allocatedBlocks = newCap;
+		}
+
+		memset( &bvh8Data[currentNodeAddr], 0, 128 );
+		const Vec3 nodeLo = orig->aabbMin, nodeHi = orig->aabbMax;
+
+		// Group children by type
+		uint32_t slotChild[8] = {};
+		int32_t internalChildCount = 0, leafChildCount = 0;
+		if (orig->isLeaf())
+		{
+			slotChild[0] = origIdx;
+			leafChildCount = 1;
+		}
+		else
+		{
+			for (int32_t i = 0; i < 8; i++)
+			{
+				const auto idx = orig->child[i];
+				if (idx != 0 && !bvh8.mbvhNode[idx].isLeaf())
+					slotChild[internalChildCount++] = idx;
+			}
+			for (int32_t i = 0; i < 8; i++)
+			{
+				const auto idx = orig->child[i];
+				if (idx != 0 && bvh8.mbvhNode[idx].isLeaf())
+					slotChild[internalChildCount + leafChildCount++] = idx;
+			}
+		}
+
+		const int32_t ex = AMDQuantExp( double( nodeHi.x ) - double( nodeLo.x ) );
+		const int32_t ey = AMDQuantExp( double( nodeHi.y ) - double( nodeLo.y ) );
+		const int32_t ez = AMDQuantExp( double( nodeHi.z ) - double( nodeLo.z ) );
+
+		const float extentX = tinybvh_as_float( uint32_t( ex + 127 ) << 23 );
+		const float extentY = tinybvh_as_float( uint32_t( ey + 127 ) << 23 );
+		const float extentZ = tinybvh_as_float( uint32_t( ez + 127 ) << 23 );
+		// encode output
+		uint32_t childBaseIndex = 0, leafBaseIndex = 0;
+		for (int32_t i = 0; i < 8; i++)
+		{
+			uint32_t* const childInfo = (uint32_t*)&bvh8Data[currentNodeAddr] + 8 + i * 3;
+			if (i >= internalChildCount + leafChildCount)
+			{
+				// Invalid quantized bounds and a zero record size mark an empty child.
+				childInfo[0] = 0xffffffffu, childInfo[1] = 0xfffu, childInfo[2] = 0;
+				continue;
+			}
+			const typename MBVH<8, Float, Index>::MBVHNode* const child = &bvh8.mbvhNode[slotChild[i]];
+
+			const uint32_t minX = tinybvh_min( uint32_t( floor( (double( child->aabbMin.x ) - double( nodeLo.x )) / double( extentX ) * 4096.0 ) ), 4095u );
+			const uint32_t minY = tinybvh_min( uint32_t( floor( (double( child->aabbMin.y ) - double( nodeLo.y )) / double( extentY ) * 4096.0 ) ), 4095u );
+			const uint32_t minZ = tinybvh_min( uint32_t( floor( (double( child->aabbMin.z ) - double( nodeLo.z )) / double( extentZ ) * 4096.0 ) ), 4095u );
+			const uint32_t maxX = tinybvh_min( uint32_t( ceil( (double( child->aabbMax.x ) - double( nodeLo.x )) / double( extentX ) * 4096.0 ) ) - 1u, 4095u );
+			const uint32_t maxY = tinybvh_min( uint32_t( ceil( (double( child->aabbMax.y ) - double( nodeLo.y )) / double( extentY ) * 4096.0 ) ) - 1u, 4095u );
+			const uint32_t maxZ = tinybvh_min( uint32_t( ceil( (double( child->aabbMax.z ) - double( nodeLo.z )) / double( extentZ ) * 4096.0 ) ) - 1u, 4095u );
+
+			if (!child->isLeaf())
+			{
+				childInfo[0] = minX | (minY << 12);
+				childInfo[1] = minZ | (maxX << 12) | (0xffu << 24);
+				childInfo[2] = maxY | (maxZ << 12) | (NODE_BOX32 << 24) | (1u << 28); // BOX32, one 128-byte record.
+
+				// interior node, set params and push onto stack
+				const uint32_t childNodeAddr = nodeDataPtr;
+				if (i == 0) childBaseIndex = childNodeAddr * 2;
+				nodeDataPtr += 8;
+				if (stackPtr == stackCap)
+				{
+					const uint32_t newCap = stackCap * 2;
+					uint32_t* ni = (uint32_t*)AlignedAlloc( newCap * 4 );
+					uint32_t* na = (uint32_t*)AlignedAlloc( newCap * 4 );
+					uint32_t* np = (uint32_t*)AlignedAlloc( newCap * 4 );
+					memcpy( ni, stackNodeIdx, stackCap * 4 ), memcpy( na, stackNodeAddr, stackCap * 4 );
+					memcpy( np, parentNodeID, stackCap * 4 );
+					AlignedFree( stackNodeIdx ), AlignedFree( stackNodeAddr );
+					AlignedFree( parentNodeID );
+					stackNodeIdx = ni, stackNodeAddr = na, parentNodeID = np, stackCap = newCap;
+				}
+				stackNodeIdx[stackPtr] = slotChild[i], stackNodeAddr[stackPtr] = childNodeAddr, parentNodeID[stackPtr++] = PackNodeID( currentNodeAddr * 16, NODE_BOX32 );
+				continue;
+			}
+			// leaf node
+			childInfo[0] = minX | (minY << 12);
+			childInfo[1] = minZ | (maxX << 12) | (0xffu << 24); // All ray mask bits enabled.
+			childInfo[2] = maxY | (maxZ << 12) | (NODE_TRIANGLE << 24) | (1u << 28); // Triangle pair, one 128-byte record.
+
+			const uint32_t leafNodeAddr = nodeDataPtr;
+			if (i == internalChildCount) leafBaseIndex = leafNodeAddr * 2;
+			nodeDataPtr += 8;
+
+			AMDBitWriter writer( &bvh8Data[leafNodeAddr] );
+
+			const uint32_t tcount = child->triCount;
+			BVH_FATAL_ERROR_IF( tcount == 0 || tcount > 2,
+				"CWBVH8_AMD_HW::ConvertFrom( .. ), leaf with unsupported triangle count; call BVH::SplitLeafs( 2 ) first." );
+			const uint32_t xBitWidth = 31; // Encoded as vertex bit width minus one.
+			const uint32_t yBitWidth = 31;
+			const uint32_t zBitWidth = 31;
+			const uint32_t trailingZeroes = 0;
+			const uint32_t geomBaseIdx = 0;
+			const uint32_t geomIdx = 0;
+			const uint32_t primBaseIdx = 31;
+			const uint32_t primIdx = 31;
+
+			const uint32_t midpointOffset = 52 + (xBitWidth + yBitWidth + zBitWidth + 3) * tcount * 3
+									+ (geomBaseIdx << 1) + (geomIdx << 1) * (tcount - 1) + 3 * (31 - trailingZeroes) - (xBitWidth + yBitWidth + zBitWidth);
+
+			// x bits | y bits | z bits | trailing bits | geom base | geom | pair count | vertex type
+			writer.Write( xBitWidth, 5 );
+			writer.Write( yBitWidth, 5 );
+			writer.Write( zBitWidth, 5 );
+			writer.Write( trailingZeroes, 5 );
+			writer.Write( geomBaseIdx, 4 );
+			writer.Write( geomIdx, 4 );
+			writer.Write( 0, 3 );
+			writer.Write( 0, 1 );
+			// Primitive ID widths and bit offset of the first primitive ID.
+			writer.Write( primBaseIdx, 5 );
+			writer.Write( primIdx, 5 );
+			writer.Write( midpointOffset, 10 );
+
+			for (uint32_t j = 0; j < tcount; j++)
+			{
+				const uint32_t triIdx = (uint32_t)bvh8.bvh.primIdx[child->firstTri + j];
+				uint32_t ti0, ti1, ti2;
+				if (bvh8.bvh.vertIdx)
+					ti0 = bvh8.bvh.vertIdx[triIdx * 3],
+					ti1 = bvh8.bvh.vertIdx[triIdx * 3 + 1],
+					ti2 = bvh8.bvh.vertIdx[triIdx * 3 + 2];
+				else
+					ti0 = triIdx * 3, ti1 = triIdx * 3 + 1, ti2 = triIdx * 3 + 2;
+
+				writer.Write( tinybvh_as_uint( bvh8.bvh.verts[ti0].x ), xBitWidth + 1 );
+				writer.Write( tinybvh_as_uint( bvh8.bvh.verts[ti0].y ), yBitWidth + 1 );
+				writer.Write( tinybvh_as_uint( bvh8.bvh.verts[ti0].z ), zBitWidth + 1 );
+				writer.Write( tinybvh_as_uint( bvh8.bvh.verts[ti1].x ), xBitWidth + 1 );
+				writer.Write( tinybvh_as_uint( bvh8.bvh.verts[ti1].y ), yBitWidth + 1 );
+				writer.Write( tinybvh_as_uint( bvh8.bvh.verts[ti1].z ), zBitWidth + 1 );
+				writer.Write( tinybvh_as_uint( bvh8.bvh.verts[ti2].x ), xBitWidth + 1 );
+				writer.Write( tinybvh_as_uint( bvh8.bvh.verts[ti2].y ), yBitWidth + 1 );
+				writer.Write( tinybvh_as_uint( bvh8.bvh.verts[ti2].z ), zBitWidth + 1 );
+			}
+			// Geometry ID fields have zero width; primitive IDs follow the vertices.
+			writer.SkipTo( midpointOffset );
+			writer.Write( (uint32_t)bvh8.bvh.primIdx[child->firstTri], primBaseIdx ); // Original ID of the first triangle.
+			for (uint32_t j = 1; j < tcount; j++)
+			{
+				const uint32_t triIdx = (uint32_t)bvh8.bvh.primIdx[child->firstTri + j];
+				writer.Write( triIdx, primIdx );
+			}
+			// Final 29 bits describe the two triangles and their vertex indices.
+			writer.SkipTo( 1024 - 29 );
+			writer.Write( 1, 1 );
+			writer.Write( 0, 1 );
+			writer.Write( 0, 1 );
+			writer.Write( tcount == 2 ? 3u : 0u, 4 );
+			writer.Write( tcount == 2 ? 4u : 0u, 4 );
+			writer.Write( tcount == 2 ? 5u : 0u, 4 );
+			writer.Write( 0, 1 );
+			writer.Write( 0, 1 );
+			writer.Write( 0, 4 );
+			writer.Write( 1, 4 );
+			writer.Write( 2, 4 );
+		}
+
+		bvh8Data[currentNodeAddr + 0].x = tinybvh_as_float( childBaseIndex );
+		bvh8Data[currentNodeAddr + 0].y = tinybvh_as_float( leafBaseIndex );
+		bvh8Data[currentNodeAddr + 0].z = tinybvh_as_float( parentID ); // Packed parent ID for traversal stack overflow recovery.
+
+		bvh8Data[currentNodeAddr + 0].w = nodeLo.x; // Store origin
+		bvh8Data[currentNodeAddr + 1].x = nodeLo.y;
+		bvh8Data[currentNodeAddr + 1].y = nodeLo.z;
+
+		const uint32_t exyzAndChildCount = uint32_t( ex + 127 ) | (uint32_t( ey + 127 ) << 8) | (uint32_t( ez + 127 ) << 16) | (uint32_t( internalChildCount + leafChildCount - 1 ) << 28);
+		bvh8Data[currentNodeAddr + 1].z = tinybvh_as_float( exyzAndChildCount ); // Exponents in bits 0..23; child count minus one in bits 28..31.
+		bvh8Data[currentNodeAddr + 1].w = tinybvh_as_float( 0x7f ); // Disable oriented bounding boxes.
+	}
+	AlignedFree( stackNodeIdx ), AlignedFree( stackNodeAddr ), AlignedFree( parentNodeID );
+	usedBlocks = nodeDataPtr;
+	if (compact && allocatedBlocks > usedBlocks)
+	{
+		bvhvec4* trimmed = (bvhvec4*)AlignedAlloc( usedBlocks * 16 );
+		memcpy( trimmed, bvh8Data, usedBlocks * 16 );
+		AlignedFree( bvh8Data );
+		bvh8Data = trimmed, allocatedBlocks = usedBlocks;
+	}
 }
 
 // BVH4_CPU implementation
