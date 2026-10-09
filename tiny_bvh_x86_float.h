@@ -94,7 +94,6 @@ TINYBVH_FORCEINLINE __m128 bvhc_mask3() { return _mm_cmpeq_ps( _mm_setr_ps( 0, 0
 
 #ifdef BVH_USEAVX2
 
-
 // SortByCentroid, AVX2.
 template <> void impl::BVH<float, uint32_t>::SortByCentroid( const uint32_t* frag, const uint32_t n, const uint32_t axis, uint8_t* order ) const
 {
@@ -668,11 +667,7 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant(
 			uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
 			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
 			// proceed with scalar code for gather operation - TODO: better approach?
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = 0xffffffff;
 			// combine
 			combined = _mm_and_ps( combined, tinybvh_load4( omask ) );
 			imask = _mm_movemask_ps( combined );
@@ -818,11 +813,7 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 			uint32_t idx[4];
 			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
 			// proceed with scalar code for gather operation - TODO: better approach?
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
 		}
 		// we continue.
 		if (!stackPtr) return false;
@@ -887,7 +878,6 @@ TINYBVH_FORCEINLINE __m256 sweepLanes( const __m128i lo /* counts 0..3 */, const
 
 // bin one slice of a node's fragment range; scheduled via the parallel_for hook.
 static constexpr uint32_t AVXCOUNTSTRIDE = 32; // 32 * 4 bytes = 128 bytes.
-struct ALIGNED( 64 ) SliceBounds { float bmin[4], bmax[4]; char pad[32]; };
 // Store a fragment's bounds, with primIdx and clipped = 0 in lane 3.
 static TINYBVH_FORCEINLINE void tinybvh_store_frag( void* frag, const __m128 bmin4, const __m128 bmax4, const uint32_t prim )
 {
@@ -932,8 +922,6 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	// extraFrags: room for fragments created during the build (Bonsai HQ splits as it partitions).
 	const uint32_t fragCap = primCount + splitBudget + extraFrags;
 	const uint32_t spaceNeeded = fragCap * 2; // upper limit
-	// a rebuild is unsafe once the tree has been converted, whether or not we reallocate.
-	BVH_FATAL_ERROR_IF( allocatedNodes > 0 && !rebuildable, "BVH::PrepareSIMDBuild( .. ), bvh not rebuildable." );
 	if (allocatedNodes < spaceNeeded)
 	{
 		AlignedFree( bvhNode );
@@ -959,14 +947,14 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	}
 	// initialize fragments
 	const uint32_t stride4 = verts.stride / 16, slices = TaskCount( threadedBuild, triCount, MT_PREP_TASK_PRIMS, MT_PREP_MAX_TASKS );
-		ALIGNED( 64 ) SliceBounds slice[MT_PREP_MAX_TASKS]; // one cache line per slice; no false sharing.
+	BVHSliceBounds<bvhvec4> slice[MT_PREP_MAX_TASKS];
 	ParallelFor( threadedBuild, slices, [&]( uint32_t i )
-		{
-		PrepareSIMDBuildFragSlice( SliceStart( triCount, i, slices ), SliceStart( triCount, i + 1, slices ), indices, vertData, stride4, fragment, slice[i].bmin, slice[i].bmax );
-		} );
-	__m128 rootMin = tinybvh_load4( slice[0].bmin ), rootMax = tinybvh_load4( slice[0].bmax );
-		for (uint32_t i = 1; i < slices; i++)
-			rootMin = _mm_min_ps( rootMin, tinybvh_load4( slice[i].bmin ) ), rootMax = _mm_max_ps( rootMax, tinybvh_load4( slice[i].bmax ) );
+	{
+		PrepareSIMDBuildFragSlice( SliceStart( triCount, i, slices ), SliceStart( triCount, i + 1, slices ), indices, vertData, stride4, fragment, &slice[i].bmin.x, &slice[i].bmax.x );
+	} );
+	__m128 rootMin = tinybvh_load4( &slice[0].bmin ), rootMax = tinybvh_load4( &slice[0].bmax );
+	for (uint32_t i = 1; i < slices; i++)
+		rootMin = _mm_min_ps( rootMin, tinybvh_load4( &slice[i].bmin ) ), rootMax = _mm_max_ps( rootMax, tinybvh_load4( &slice[i].bmax ) );
 	BVHNode& root = bvhNode[0];
 	root.aabbMin = tinybvh_bitcast<bvhvec4>( rootMin ), root.aabbMax = tinybvh_bitcast<bvhvec4>( rootMax );
 	// presplitting
@@ -1467,11 +1455,7 @@ template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant(
 				uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
 				tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
 				// proceed with scalar code for gather operation - TODO: better approach?
-				for (int i = 0; i < 4; i++) if (imask & (1 << i))
-				{
-					uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-					if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
-				}
+				for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = 0xffffffff;
 				// combine
 				combined = _mm_and_ps( combined, tinybvh_load4( omask ) );
 				imask = _mm_movemask_ps( combined );
@@ -1623,11 +1607,7 @@ template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( c
 			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
 			// proceed with scalar code for gather operation - TODO: better approach?
 			const uint32_t imask = _mm_movemask_ps( combined );
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
 		}
 		// continue
 		if (!stackPtr) ISUNLIKELY return false;
@@ -2510,4 +2490,4 @@ template <> int32_t impl::BVH<float, uint32_t>::IsOccludedBundle( Ray* rays, boo
 } // namespace tinybvh
 
 #endif // TINY_BVH_X86_FLOAT_H_IMPL
-#endif // TINYBVH_IMPLEMENTATION
+#endif // TINYBVH_IMPLEMENTATION

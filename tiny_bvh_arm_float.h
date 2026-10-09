@@ -90,7 +90,6 @@ template <> void impl::BVH<float, uint32_t>::BinBoxAdd( BVHBinBox<float>& b, con
 	tinybvh_store8( &b.negMin, v );
 }
 
-
 #define ILANE(a,b) vgetq_lane_s32( a, b )
 
 // AABB halfarea calculation
@@ -158,7 +157,6 @@ TINYBVH_FORCEINLINE int32x4_t neon_binIdx( const float32x4_t& fmin, const float3
 
 // Fragment setup, optionally sliced over the thread pool.
 static constexpr uint32_t NEONCOUNTSTRIDE = 32; // 32 * 4 bytes = 128 bytes.
-struct ALIGNED( 64 ) NEONSliceBounds { float bmin[4], bmax[4]; char pad[32]; };
 // Store a fragment's bounds, with primIdx and clipped = 0 in lane 3.
 static TINYBVH_FORCEINLINE void tinybvh_store_frag( void* frag, const float32x4_t bmin4, const float32x4_t bmax4, const uint32_t prim )
 {
@@ -203,8 +201,6 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	// extraFrags: room for fragments created during the build (Bonsai HQ splits as it partitions).
 	const uint32_t fragCap = primCount + splitBudget + extraFrags;
 	const uint32_t spaceNeeded = fragCap * 2; // upper limit
-	// a rebuild is unsafe once the tree has been converted, whether or not we reallocate.
-	BVH_FATAL_ERROR_IF( allocatedNodes > 0 && !rebuildable, "BVH::PrepareSIMDBuild( .. ), bvh not rebuildable." );
 	if (allocatedNodes < spaceNeeded)
 	{
 		AlignedFree( bvhNode );
@@ -224,14 +220,14 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	newNodePtr = 2, threadedBuild = UseThreads( triCount ), StartNodeCounter();
 	// initialize fragments
 	const uint32_t stride4 = verts.stride / 16, slices = TaskCount( threadedBuild, triCount, MT_PREP_TASK_PRIMS, MT_PREP_MAX_TASKS );
-	ALIGNED( 64 ) NEONSliceBounds slice[MT_PREP_MAX_TASKS]; // one cache line per slice; no false sharing.
+	BVHSliceBounds<bvhvec4> slice[MT_PREP_MAX_TASKS];
 	ParallelFor( threadedBuild, slices, [&]( uint32_t i )
 	{
-		PrepareSIMDBuildFragSlice( SliceStart( triCount, i, slices ), SliceStart( triCount, i + 1, slices ), indices, vertData, stride4, fragment, slice[i].bmin, slice[i].bmax );
-		} );
-	float32x4_t rootMin = vld1q_f32( slice[0].bmin ), rootMax = vld1q_f32( slice[0].bmax );
+		PrepareSIMDBuildFragSlice( SliceStart( triCount, i, slices ), SliceStart( triCount, i + 1, slices ), indices, vertData, stride4, fragment, &slice[i].bmin.x, &slice[i].bmax.x );
+	} );
+	float32x4_t rootMin = vld1q_f32( &slice[0].bmin.x ), rootMax = vld1q_f32( &slice[0].bmax.x );
 	for (uint32_t i = 1; i < slices; i++)
-			rootMin = vminq_f32( rootMin, vld1q_f32( slice[i].bmin ) ), rootMax = vmaxq_f32( rootMax, vld1q_f32( slice[i].bmax ) );
+		rootMin = vminq_f32( rootMin, vld1q_f32( &slice[i].bmin.x ) ), rootMax = vmaxq_f32( rootMax, vld1q_f32( &slice[i].bmax.x ) );
 	BVHNode& root = bvhNode[0];
 	root.aabbMin = tinybvh_bitcast<bvhvec4>( rootMin ), root.aabbMax = tinybvh_bitcast<bvhvec4>( rootMax );
 	// presplitting
@@ -574,11 +570,7 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant(
 			uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
 			vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
 			// gather the opacity bits with scalar loads
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = 0xffffffff;
 			// combine
 			combined = vandq_u32( combined, vld1q_u32( omask ) );
 			imask = neon_movemask_popc( combined ) & 15;
@@ -698,11 +690,7 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 			uint32_t idx[4];
 			vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
 			// gather the opacity bits with scalar loads
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
 		}
 		// we continue.
 		if (!stackPtr) return false;
@@ -715,4 +703,4 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 } // namespace tinybvh
 
 #endif // TINY_BVH_ARM_FLOAT_H_IMPL
-#endif // TINYBVH_IMPLEMENTATION
+#endif // TINYBVH_IMPLEMENTATION

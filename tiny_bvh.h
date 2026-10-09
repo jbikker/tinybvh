@@ -116,7 +116,7 @@ THE SOFTWARE.
 #define ENABLE_CUSTOM_GEOMETRY
 #endif
 #ifndef NO_THREADED_BUILDS // if defined, TinyBVH compiles using C++14.
-#define ENABLE_THREADED_BUILDS 
+#define ENABLE_THREADED_BUILDS
 #endif
 #ifndef NO_VOXEL_SUPPORT
 #define ENABLE_VOXEL_SUPPORT
@@ -144,7 +144,7 @@ THE SOFTWARE.
 #define TINYBVH_STACK_SIZE 128
 #endif
 
-// Rays per IntersectBundle call - multiple of 8, max 256. 
+// Rays per IntersectBundle call - multiple of 8, max 256.
 #ifndef TINYBVH_BUNDLE_RAYS
 #define TINYBVH_BUNDLE_RAYS 64
 #endif
@@ -255,23 +255,23 @@ THE SOFTWARE.
 //
 // ============================================================================
 
-// needful includes 
-#ifdef _MSC_VER // Visual Studio / C11 
-#include <malloc.h> // for alloc/free 
-#include <stdio.h> // for fprintf 
-#include <math.h> // for sqrtf, fabs 
-#include <string.h> // for memset 
-#include <stdlib.h> // for exit(1) 
-#else // Emscripten / gcc / clang 
-#include <cmath> // for sqrtf, fabs 
-#include <cstring> // for memset 
-#include <stdio.h> // for fprintf, snprintf 
-#include <stdlib.h> // for posix_memalign, free, exit 
-#ifdef _WIN32 // MinGW / clang-cl: no C11 aligned_alloc in the CRT, use _aligned_malloc 
-#include <malloc.h> // for alloc/free 
-#endif 
-#endif 
-#include <atomic> // for SBVH builds 
+// needful includes
+#ifdef _MSC_VER // Visual Studio / C11
+#include <malloc.h> // for alloc/free
+#include <stdio.h> // for fprintf
+#include <math.h> // for sqrtf, fabs
+#include <string.h> // for memset
+#include <stdlib.h> // for exit(1)
+#else // Emscripten / gcc / clang
+#include <cmath> // for sqrtf, fabs
+#include <cstring> // for memset
+#include <stdio.h> // for fprintf, snprintf
+#include <stdlib.h> // for posix_memalign, free, exit
+#ifdef _WIN32 // MinGW / clang-cl: no C11 aligned_alloc in the CRT, use _aligned_malloc
+#include <malloc.h> // for alloc/free
+#endif
+#endif
+#include <atomic> // for SBVH builds
 #include <new> // for placement new, in BVHBase::ContextNew
 
 // Platform-independent compile-time warnings.

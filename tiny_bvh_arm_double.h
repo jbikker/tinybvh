@@ -73,7 +73,6 @@ template <> void impl::BVH<double, uint64_t>::BinBoxAdd( BVHBinBox<double>& b, c
 	vst1q_f64( p + 6, vmaxq_f64( vld1q_f64( p + 6 ), vld1q_f64( src + 6 ) ) );
 }
 
-
 // BVH4_CPU<double> traversal, NEON version.
 // ----------------------------------------------------------------------------
 // Direct translation of the NEON single precision kernel. Every 4xFP32 operation
@@ -220,11 +219,7 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant
 			uint64_t omask[4] = { 0, 0, 0, 0 };
 			vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
 			// gather the opacity bits with scalar loads
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = ~0ull;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = ~0ull;
 			// combine
 			combineda = vandq_u64( combineda, vld1q_u64( omask ) ), combinedb = vandq_u64( combinedb, vld1q_u64( omask + 2 ) );
 			imask = neon_movemask_popc( neon_narrow_mask( combineda, combinedb ) ) & 15;
@@ -354,11 +349,7 @@ template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( 
 			uint32_t idx[4];
 			vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
 			// gather the opacity bits with scalar loads
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
 		}
 		// we continue.
 		if (!stackPtr) return false;
