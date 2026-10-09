@@ -60,6 +60,18 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 
 namespace tinybvh {
 
+// Opacity micro maps: the micro-triangle indices for four barycentric pairs; see tinybvh_opmap_index.
+static TINYBVH_FORCEINLINE void tinybvh_opmap_idx4( const float32x4_t u4, const float32x4_t v4, const uint32_t N, uint32_t* idx )
+{
+	const float32x4_t fN4 = vdupq_n_f32( (float)N );
+	const int32x4_t row4 = vcvtq_s32_f32( vmulq_f32( vaddq_f32( u4, v4 ), fN4 ) );
+	const int32x4_t dia4 = vcvtq_s32_f32( vmulq_f32( vsubq_f32( vdupq_n_f32( 1.0f ), u4 ), fN4 ) );
+	const int32x4_t v0 = vmulq_s32( row4, row4 );
+	const int32x4_t v1 = vcvtq_s32_f32( vmulq_f32( v4, fN4 ) );
+	const int32x4_t v2 = vsubq_s32( dia4, vsubq_s32( vdupq_n_s32( N - 1 ), row4 ) );
+	vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
+}
+
 // BinBox helpers, NEON.
 template <> void impl::BVH<float, uint32_t>::BinBoxClear( BVHBinBox<float>& b )
 {
@@ -200,21 +212,9 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	const uint32_t splitBudget = SIMDPresplit() ? ((int)(primCount * settings.presplitFactor)) : 0;
 	// extraFrags: room for fragments created during the build (Bonsai HQ splits as it partitions).
 	const uint32_t fragCap = primCount + splitBudget + extraFrags;
-	const uint32_t spaceNeeded = fragCap * 2; // upper limit
-	if (allocatedNodes < spaceNeeded)
-	{
-		AlignedFree( bvhNode );
-		AlignedFree( primIdx );
-		AlignedFree( fragment );
-		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
-		allocatedNodes = spaceNeeded;
-		primIdx = (uint32_t*)AlignedAlloc( fragCap * sizeof( uint32_t ) );
-		memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // avoid crash in refit.
-		fragment = (Fragment*)AlignedAlloc( fragCap * sizeof( Fragment ) );
-	}
+	ReserveNodes( fragCap * 2 );
 	triCount = primCount;
-	verts = vertices; // note: we're not copying this data; don't delete.
-	vertIdx = (uint32_t*)indices;
+	SetInput( vertices, indices ); // note: we're not copying this data; don't delete.
 	const int8_t* vertData = verts.data;
 	// prepare threading; as in the x86 builder, the shared node counter is created here.
 	newNodePtr = 2, threadedBuild = UseThreads( triCount ), StartNodeCounter();
@@ -561,14 +561,8 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant(
 		// evaluate opacity map, if present (NEON version).
 		if (opmap) if (imask)
 		{
-			const float32x4_t fN4 = vdupq_n_f32( (float)opmapN );
-			const int32x4_t row4 = vcvtq_s32_f32( vmulq_f32( vaddq_f32( u4, v4 ), fN4 ) );
-			const int32x4_t dia4 = vcvtq_s32_f32( vmulq_f32( vsubq_f32( one4, u4 ), fN4 ) );
-			const int32x4_t v0 = vmulq_s32( row4, row4 );
-			const int32x4_t v1 = vcvtq_s32_f32( vmulq_f32( v4, fN4 ) );
-			const int32x4_t v2 = vsubq_s32( dia4, vsubq_s32( vdupq_n_s32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
-			vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
+			tinybvh_opmap_idx4( u4, v4, opmapN, idx );
 			// gather the opacity bits with scalar loads
 			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = 0xffffffff;
 			// combine
@@ -681,14 +675,8 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 		{
 			if (!opmap) return true;
 			// evaluate opacity map, NEON version.
-			const float32x4_t fN4 = vdupq_n_f32( (float)opmapN );
-			const int32x4_t row4 = vcvtq_s32_f32( vmulq_f32( vaddq_f32( u4, v4 ), fN4 ) );
-			const int32x4_t dia4 = vcvtq_s32_f32( vmulq_f32( vsubq_f32( one4, u4 ), fN4 ) );
-			const int32x4_t v0 = vmulq_s32( row4, row4 );
-			const int32x4_t v1 = vcvtq_s32_f32( vmulq_f32( v4, fN4 ) );
-			const int32x4_t v2 = vsubq_s32( dia4, vsubq_s32( vdupq_n_s32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4];
-			vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
+			tinybvh_opmap_idx4( u4, v4, opmapN, idx );
 			// gather the opacity bits with scalar loads
 			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
 		}

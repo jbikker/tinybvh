@@ -90,6 +90,18 @@ TINYBVH_FORCEINLINE int32x4_t neon_cvt4_s32_f64( const float64x2_t a, const floa
 	return vuzp1q_s32( vreinterpretq_s32_s64( vcvtq_s64_f64( a ) ), vreinterpretq_s32_s64( vcvtq_s64_f64( b ) ) );
 }
 
+// Opacity micro maps: the micro-triangle indices for four barycentric pairs; see tinybvh_opmap_index.
+static TINYBVH_FORCEINLINE void tinybvh_opmap_idx4( const float64x2_t ua, const float64x2_t ub, const float64x2_t va, const float64x2_t vb, const uint32_t N, uint32_t* idx )
+{
+	const float64x2_t fN2 = vdupq_n_f64( (double)N ), one2 = vdupq_n_f64( 1.0 );
+	const int32x4_t row4 = neon_cvt4_s32_f64( vmulq_f64( vaddq_f64( ua, va ), fN2 ), vmulq_f64( vaddq_f64( ub, vb ), fN2 ) );
+	const int32x4_t dia4 = neon_cvt4_s32_f64( vmulq_f64( vsubq_f64( one2, ua ), fN2 ), vmulq_f64( vsubq_f64( one2, ub ), fN2 ) );
+	const int32x4_t v0 = vmulq_s32( row4, row4 );
+	const int32x4_t v1 = neon_cvt4_s32_f64( vmulq_f64( va, fN2 ), vmulq_f64( vb, fN2 ) );
+	const int32x4_t v2 = vsubq_s32( dia4, vsubq_s32( vdupq_n_s32( N - 1 ), row4 ) );
+	vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
+}
+
 #define NEON_HIT( s ) ((m64 >> (16 * s)) & 1)
 #define NEON_PUSH( c, l ) { nodeStack[stackPtr] = c; distStack[stackPtr] = tmin4[l]; stackPtr++; }
 
@@ -209,15 +221,9 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant
 		// evaluate opacity map, if present (NEON version).
 		if (opmap) if (imask)
 		{
-			const float64x2_t fN2 = vdupq_n_f64( (double)opmapN );
-			const int32x4_t row4 = neon_cvt4_s32_f64( vmulq_f64( vaddq_f64( ua, va ), fN2 ), vmulq_f64( vaddq_f64( ub, vb ), fN2 ) );
-			const int32x4_t dia4 = neon_cvt4_s32_f64( vmulq_f64( vsubq_f64( one2, ua ), fN2 ), vmulq_f64( vsubq_f64( one2, ub ), fN2 ) );
-			const int32x4_t v0 = vmulq_s32( row4, row4 );
-			const int32x4_t v1 = neon_cvt4_s32_f64( vmulq_f64( va, fN2 ), vmulq_f64( vb, fN2 ) );
-			const int32x4_t v2 = vsubq_s32( dia4, vsubq_s32( vdupq_n_s32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4];
 			uint64_t omask[4] = { 0, 0, 0, 0 };
-			vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
+			tinybvh_opmap_idx4( ua, ub, va, vb, opmapN, idx );
 			// gather the opacity bits with scalar loads
 			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = ~0ull;
 			// combine
@@ -340,14 +346,8 @@ template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( 
 		{
 			if (!opmap) return true;
 			// evaluate opacity map, NEON version.
-			const float64x2_t fN2 = vdupq_n_f64( (double)opmapN );
-			const int32x4_t row4 = neon_cvt4_s32_f64( vmulq_f64( vaddq_f64( ua, va ), fN2 ), vmulq_f64( vaddq_f64( ub, vb ), fN2 ) );
-			const int32x4_t dia4 = neon_cvt4_s32_f64( vmulq_f64( vsubq_f64( one2, ua ), fN2 ), vmulq_f64( vsubq_f64( one2, ub ), fN2 ) );
-			const int32x4_t v0 = vmulq_s32( row4, row4 );
-			const int32x4_t v1 = neon_cvt4_s32_f64( vmulq_f64( va, fN2 ), vmulq_f64( vb, fN2 ) );
-			const int32x4_t v2 = vsubq_s32( dia4, vsubq_s32( vdupq_n_s32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4];
-			vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
+			tinybvh_opmap_idx4( ua, ub, va, vb, opmapN, idx );
 			// gather the opacity bits with scalar loads
 			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
 		}

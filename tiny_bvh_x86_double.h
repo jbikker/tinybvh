@@ -38,6 +38,18 @@ template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( 
 
 namespace tinybvh {
 
+// Opacity micro maps: the micro-triangle indices for four barycentric pairs; see tinybvh_opmap_index.
+static TINYBVH_FORCEINLINE void tinybvh_opmap_idx4( const __m256d u4, const __m256d v4, const uint32_t N, uint32_t* idx )
+{
+	const __m256d fN4 = _mm256_set1_pd( (double)N );
+	const __m128i row4 = _mm256_cvttpd_epi32( _mm256_mul_pd( _mm256_add_pd( u4, v4 ), fN4 ) );
+	const __m128i dia4 = _mm256_cvttpd_epi32( _mm256_mul_pd( _mm256_sub_pd( _mm256_set1_pd( 1.0 ), u4 ), fN4 ) );
+	const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+	const __m128i v1 = _mm256_cvttpd_epi32( _mm256_mul_pd( v4, fN4 ) );
+	const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( N - 1 ), row4 ) );
+	tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+}
+
 // BinBox helpers, AVX2, double precision.
 template <> void impl::BVH<double, uint64_t>::BinBoxClear( BVHBinBox<double>& b )
 {
@@ -165,15 +177,9 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant
 		// evaluate opacity map, if present (AVX2 version).
 		if (opmap) if (imask)
 		{
-			const __m256d fN4 = _mm256_set1_pd( (double)opmapN );
-			const __m128i row4 = _mm256_cvttpd_epi32( _mm256_mul_pd( _mm256_add_pd( u4, v4 ), fN4 ) );
-			const __m128i dia4 = _mm256_cvttpd_epi32( _mm256_mul_pd( _mm256_sub_pd( one4, u4 ), fN4 ) );
-			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-			const __m128i v1 = _mm256_cvttpd_epi32( _mm256_mul_pd( v4, fN4 ) );
-			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4];
 			uint64_t omask[4] = { 0, 0, 0, 0 };
-			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+			tinybvh_opmap_idx4( u4, v4, opmapN, idx );
 			// gather the opacity bits with scalar loads
 			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = ~0ull;
 			// combine
@@ -282,14 +288,8 @@ template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( 
 		{
 			if (!opmap) return true;
 			// evaluate opacity map, AVX2 version.
-			const __m256d fN4 = _mm256_set1_pd( (double)opmapN );
-			const __m128i row4 = _mm256_cvttpd_epi32( _mm256_mul_pd( _mm256_add_pd( u4, v4 ), fN4 ) );
-			const __m128i dia4 = _mm256_cvttpd_epi32( _mm256_mul_pd( _mm256_sub_pd( one4, u4 ), fN4 ) );
-			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-			const __m128i v1 = _mm256_cvttpd_epi32( _mm256_mul_pd( v4, fN4 ) );
-			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4];
-			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+			tinybvh_opmap_idx4( u4, v4, opmapN, idx );
 			// gather the opacity bits with scalar loads
 			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
 		}

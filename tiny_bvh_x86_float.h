@@ -81,6 +81,18 @@ namespace tinybvh {
 
 #define AVXBINS 8 // must stay at 8.
 
+// Opacity micro maps: the micro-triangle indices for four barycentric pairs; see tinybvh_opmap_index.
+static TINYBVH_FORCEINLINE void tinybvh_opmap_idx4( const __m128 u4, const __m128 v4, const uint32_t N, uint32_t* idx )
+{
+	const __m128 fN4 = _mm_set1_ps( (float)N );
+	const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
+	const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_set1_ps( 1.0f ), u4 ), fN4 ) );
+	const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+	const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
+	const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( N - 1 ), row4 ) );
+	tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+}
+
 // SIMD constants - Functions rather than mutable statics. Calls fold to a constant or a single broadcast.
 TINYBVH_FORCEINLINE __m128 bvhc_min1() { return _mm_set1_ps( -1.0f ); }
 TINYBVH_FORCEINLINE __m128 bvhc_binmul3() { return _mm_set1_ps( AVXBINS * 0.49999f ); }
@@ -658,14 +670,8 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant(
 		// evaluate opacity map, if present (SSE version).
 		if (opmap) if (imask)
 		{
-			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
-			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
-			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
-			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
-			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
-			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+			tinybvh_opmap_idx4( u4, v4, opmapN, idx );
 			// proceed with scalar code for gather operation - TODO: better approach?
 			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = 0xffffffff;
 			// combine
@@ -804,14 +810,8 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 		{
 			if (!opmap) return true;
 			// evaluate opacity map, SSE version.
-			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
-			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
-			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
-			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
-			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4];
-			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+			tinybvh_opmap_idx4( u4, v4, opmapN, idx );
 			// proceed with scalar code for gather operation - TODO: better approach?
 			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
 		}
@@ -921,21 +921,9 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	const uint32_t splitBudget = SIMDPresplit() ? ((int)(primCount * settings.presplitFactor)) : 0;
 	// extraFrags: room for fragments created during the build (Bonsai HQ splits as it partitions).
 	const uint32_t fragCap = primCount + splitBudget + extraFrags;
-	const uint32_t spaceNeeded = fragCap * 2; // upper limit
-	if (allocatedNodes < spaceNeeded)
-	{
-		AlignedFree( bvhNode );
-		AlignedFree( primIdx );
-		AlignedFree( fragment );
-		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
-		allocatedNodes = spaceNeeded;
-		primIdx = (uint32_t*)AlignedAlloc( fragCap * sizeof( uint32_t ) );
-		memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // avoid crash in refit.
-		fragment = (Fragment*)AlignedAlloc( fragCap * sizeof( Fragment ) );
-	}
+	ReserveNodes( fragCap * 2 );
 	triCount = primCount;
-	verts = vertices; // note: we're not copying this data; don't delete.
-	vertIdx = (uint32_t*)indices;
+	SetInput( vertices, indices ); // note: we're not copying this data; don't delete.
 	const int8_t* vertData = verts.data;
 	// prepare threading
 	newNodePtr = 2, threadedBuild = UseThreads( triCount ), StartNodeCounter();
@@ -1413,7 +1401,7 @@ template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant(
 				_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
 				_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
 			}
-			#endif
+		#endif
 				// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
 		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, _mm_load_ps( leaf->e2z ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
@@ -1446,14 +1434,8 @@ template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant(
 			// evaluate opacity map, if present (SSE version).
 			if (opmap) ISUNLIKELY
 			{
-				const __m128 fN4 = _mm_set1_ps( (float)opmapN );
-				const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
-				const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
-				const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-				const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
-				const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
 				uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
-				tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+				tinybvh_opmap_idx4( u4, v4, opmapN, idx );
 				// proceed with scalar code for gather operation - TODO: better approach?
 				for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = 0xffffffff;
 				// combine
@@ -1597,14 +1579,8 @@ template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( c
 			// evaluate opacity map, SSE version.
 			const __m128 invDet4 = _mm_div_ps( one4, det4 );
 			const __m128 bu4 = _mm_mul_ps( nu4, invDet4 ), bv4 = _mm_mul_ps( nv4, invDet4 );
-			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
-			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( bu4, bv4 ), fN4 ) );
-			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, bu4 ), fN4 ) );
-			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( bv4, fN4 ) );
-			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4];
-			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+			tinybvh_opmap_idx4( bu4, bv4, opmapN, idx );
 			// proceed with scalar code for gather operation - TODO: better approach?
 			const uint32_t imask = _mm_movemask_ps( combined );
 			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
@@ -1708,19 +1684,6 @@ PER_OCTANT static TINYBVH_FORCEINLINE float tinybvh_interval_slab( const bvhvec3
 	const float tmin = tinybvh_max( tinybvh_max( x1, y1 ), tinybvh_max( z1, 0.0f ) );
 	const float tmax = tinybvh_min( tinybvh_min( x2, y2 ), tinybvh_min( z2, tfar ) );
 	return tmin <= tmax ? tmin : BVH_FAR;
-}
-
-// Trace one ray through a blas of any layout.
-static int32_t tinybvh_blas_intersect( const BVHBase* blas, Ray& ray )
-{
-	if (blas->layout == LAYOUT_BVH) return ((BVH*)blas)->Intersect( ray );
-#ifdef ENABLE_VOXEL_SUPPORT
-	if (blas->layout == LAYOUT_VOXELSET) return ((VoxelSet*)blas)->Intersect( ray );
-#endif
-	if (blas->layout == LAYOUT_BVH4_CPU) return ((BVH4_CPU*)blas)->Intersect( ray );
-	if (blas->layout == LAYOUT_BVH8_AVX2) return ((BVH8_CPU*)blas)->Intersect( ray );
-	assert( !"unsupported BLAS layout" );
-	return 0;
 }
 
 // Trace selected packets one ray at a time - whenever we can't do packet traversal.
@@ -2122,18 +2085,6 @@ template <> int32_t impl::BVH<float, uint32_t>::IntersectBundle( Ray* rays ) con
 // Bundle traversal for occlusion rays.
 
 static int32_t tinybvh_occlude_packets( const BVHBase* bvh, RayBundle& b, const uint32_t* pk, const uint32_t n );
-
-static bool tinybvh_blas_occluded( const BVHBase* blas, const Ray& ray )
-{
-	if (blas->layout == LAYOUT_BVH) return ((BVH*)blas)->IsOccluded( ray );
-#ifdef ENABLE_VOXEL_SUPPORT
-	if (blas->layout == LAYOUT_VOXELSET) return ((VoxelSet*)blas)->IsOccluded( ray );
-#endif
-	if (blas->layout == LAYOUT_BVH4_CPU) return ((BVH4_CPU*)blas)->IsOccluded( ray );
-	if (blas->layout == LAYOUT_BVH8_AVX2) return ((BVH8_CPU*)blas)->IsOccluded( ray );
-	assert( !"unsupported BLAS layout" );
-	return false;
-}
 
 static int32_t tinybvh_packets_occluded_per_ray( const BVHBase* bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
 {
