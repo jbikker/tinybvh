@@ -1,4 +1,4 @@
-﻿// Compare the SIMD kernels and builders against the scalar reference.
+// Compare the SIMD kernels and builders against the scalar reference.
 //
 // This file instantiates SIMD and scalar BVH implementations side by side and
 // compares them against each other. The scalar side uses the fact that the
@@ -214,9 +214,19 @@ static void CompareBuilders( const Scene& s )
 		CompareRays<Ray, Ray>( "BuildSIMD versus reference builder", simd, reference );
 	}
 #endif
-	// The SBVH builder clips fragments with SSE code on x86 and scalar code elsewhere.
+	// The default HQ builder is Bonsai HQ, which has no scalar counterpart on the
+	// <float, uint64_t> side: compare its hits against the reference builder instead.
+	{
+		BVH bonsai;
+		bonsai.BuildHQ( s.verts.data(), s.triCount );
+		CompareRays<Ray, Ray>( "BuildHQ (Bonsai HQ) versus reference builder", bonsai, reference );
+	}
+	// The binned SBVH builder clips fragments with SSE code on x86 and scalar code
+	// elsewhere. Request it explicitly on both sides, so that the two trees differ in
+	// the fragment clipping only and may be compared structurally.
 	BVH hq;
 	BVHS hqS;
+	hq.settings.binnedBVH = hqS.settings.binnedBVH = true;
 	hq.BuildHQ( s.verts.data(), s.triCount ), hqS.BuildHQ( s.verts.data(), s.triCount );
 	if (hq.usedNodes != hqS.usedNodes || fabsf( hq.SAHCost() - hqS.SAHCost() ) > 1e-3f * hq.SAHCost())
 		g_failures++, printf( "FAIL: BuildHQ, SIMD tree has %u nodes, SAH %.4f; scalar tree has %llu nodes, SAH %.4f\n",
