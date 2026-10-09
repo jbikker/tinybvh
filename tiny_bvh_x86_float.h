@@ -1221,7 +1221,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize()
 	// tree has been built.
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 	refittable = !SIMDPresplit(); // only if not using spatial splits
-	may_have_holes = false; // there are no holes in the list of nodes.
+	may_have_holes = false, ordered_nodes = true; // there are no holes in the list of nodes.
 	usedNodes = newNodePtr;
 	if (SIMDPresplit()) // finalize indices in index array
 	{

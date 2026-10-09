@@ -645,17 +645,20 @@ template <typename F> inline void tinybvh_parallel_for( const BVHContext& ctx, u
 struct BVHBuildSettings
 {
 	bool usePresplitting = false;	// pre-split triangles before building the BVH.
-	bool useSpatialSplits = false;	// consider spatial splits during construction (SBVH).
+	bool useSpatialSplits = false;	// split triangles during construction: Bonsai HQ, or SBVH with binnedBVH.
 	bool presplitPostPass = true;	// attempt to un-split primitives in leaves after a presplit build.
 	float presplitFactor = 0.3f;	// presplit budget relative to input data size.
 	bool useFullSweep = false;		// for experiments only; full-sweep SAH builder.
-	bool binnedBVH = false;			// reference BVH builders.
+	// Default builders: Bonsai (Ganestam et al., 2015) and, with useSpatialSplits, Bonsai HQ (Ganestam &
+	// Doggett, 2016). They run on the SIMD builder (float; AVX or NEON); without it, Build() uses the
+	// reference builder, or SBVH for useSpatialSplits; as with useSIMDifavailable = false.
+	bool binnedBVH = false;			// use the binned SAH builders instead: the SIMD builder, or SBVH with useSpatialSplits.
 	uint32_t bonsaiGridPrims = 256;	// Bonsai: grid resolution target, in primitives per grid cell (empty cells included).
 	float bonsaiPruneFactor = 0.1f;	// Bonsai, Bonsai HQ: prune mini trees larger than this fraction of the average mini tree; 0 disables.
 	bool useHPLOC = false;			// H-PLOC builder; builds trees identical to NexusBVH CUDA code, for comparisons.
 	bool postOptimize = false;		// optimize generated BVH using tree rotations.
 	int optimizeIterations = 25;	// default optimization iterations.
-	bool useSIMDifavailable = true;	// set to false to use the scalar reference builder.
+	bool useSIMDifavailable = true;	// set to false to use the scalar reference builder, or SBVH with useSpatialSplits.
 #ifdef ENABLE_THREADED_BUILDS
 	bool enableThreading = true;	// default to threaded builds.
 #else
@@ -743,6 +746,7 @@ protected:
 	bool rebuildable = true;		// rebuilds are safe only if a tree has not been converted.
 	bool refittable = true;			// refits are safe only if the tree has no spatial splits.
 	bool may_have_holes = false;	// threaded builds and MergeLeafs produce BVHs with unused nodes.
+	bool ordered_nodes = true;		// depth-first: children follow their parents, subtree prims are contiguous. Not after Bonsai.
 	bool bvh_over_aabbs = false;	// a BVH over AABBs is useful for e.g. TLAS traversal.
 	bool bvh_over_indices = false;	// a BVH over indices cannot translate primitive index to vertex index.
 public:
@@ -750,6 +754,7 @@ public:
 	bool isRebuildable() const { return rebuildable; }
 	bool isRefittable() const { return refittable; }
 	bool mayHaveHoles() const { return may_have_holes; }
+	bool hasOrderedNodes() const { return ordered_nodes; }
 	bool isOverAABBs() const { return bvh_over_aabbs; }
 	bool isOverIndices() const { return bvh_over_indices; }
 	bool threadedBuild = true;		// will be disabled for small meshes.
@@ -867,6 +872,7 @@ protected:
 	using Base::rebuildable;
 	using Base::refittable;
 	using Base::may_have_holes;
+	using Base::ordered_nodes;
 	using Base::bvh_over_aabbs;
 	using Base::bvh_over_indices;
 	using Base::AlignedAlloc;
@@ -1143,6 +1149,7 @@ public:
 	using Base::aabbMax;
 protected:
 	using Base::may_have_holes;
+	using Base::ordered_nodes;
 	using Base::bvh_over_aabbs;
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
@@ -1210,6 +1217,7 @@ public:
 protected:
 	using Base::refittable;
 	using Base::may_have_holes;
+	using Base::ordered_nodes;
 	using Base::bvh_over_indices;
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
@@ -1284,6 +1292,7 @@ public:
 	using Base::aabbMax;
 protected:
 	using Base::may_have_holes;
+	using Base::ordered_nodes;
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
@@ -1300,7 +1309,7 @@ public:
 		bool isLeaf() const { return triCount > 0; }
 	};
 	MBVH( BVHContext ctx = {} ) { layout = LAYOUT_MBVH; context = ctx; }
-	MBVH( const BVH& original ) { /* DEPRECATED */ layout = LAYOUT_MBVH; ConvertFrom( original ); }
+	MBVH( BVH& original ) { /* DEPRECATED */ layout = LAYOUT_MBVH; ConvertFrom( original ); }
 	MBVH( const MBVH& ) = delete; // owns its allocations, so it cannot be copied
 	MBVH( MBVH&& ) noexcept;
 	MBVH& operator=( MBVH&& ) noexcept;
@@ -1328,7 +1337,7 @@ public:
 	void Refit( const Index nodeIdx = 0 );
 	Index LeafCount( const Index nodeIdx = 0 ) const;
 	Float SAHCost( const Index nodeIdx = 0 ) const;
-	void ConvertFrom( const BVH& original, bool compact = true );
+	void ConvertFrom( BVH& original, bool compact = true );
 	// pass 3 of ConvertFrom, split so each output level can be decoded in parallel.
 	uint32_t DecodeWalk( const BVH& original, const Index src, const uint8_t* dist, Index* term ) const;
 	void DecodeCount( const BVH& original, const Index from, const Index to, const uint8_t* dist,
@@ -2094,6 +2103,7 @@ TEMPLATED void BVHBase<Float, Index>::CopyBasePropertiesFrom( const BVHBase& ori
 	this->rebuildable = original.rebuildable;
 	this->refittable = original.refittable;
 	this->may_have_holes = original.may_have_holes;
+	this->ordered_nodes = original.ordered_nodes;
 	this->bvh_over_aabbs = original.bvh_over_aabbs;
 	this->bvh_over_indices = original.bvh_over_indices;
 	this->context = original.context;
@@ -2242,14 +2252,14 @@ TEMPLATED void BVH<Float, Index>::Build( const Slice& vertices, const Index* ind
 	// default builder: high quality / spatial splits.
 	else if (settings.useSpatialSplits)
 	{
-		if (!settings.binnedBVH)
+		if (BVHSIMDBuilders<Float, Index>::available && settings.useSIMDifavailable && !settings.binnedBVH)
 		{
-			// use the Bonsai HQ builder unless told otherwise.
+			// use the Bonsai HQ builder unless told otherwise; it needs the SIMD builder.
 			BuildBonsaiHQ( vertices, indices, prims );
 		}
 		else
 		{
-			// use the binned SBVH builder if specifically requested.
+			// use the binned SBVH builder if requested, or without (permission to use) the SIMD builder.
 			PrepareHQBuild( vertices, indices, prims );
 			BuildHQ();
 		}
@@ -2453,7 +2463,7 @@ TEMPLATED void BVH<Float, Index>::BuildQuick( const Slice& vertices )
 	// all done.
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax, usedNodes = newNodePtr;
 	refittable = true; // not using spatial splits: can refit this BVH
-	may_have_holes = false; // the reference builder produces a continuous list of nodes
+	may_have_holes = false, ordered_nodes = true; // the reference builder produces a continuous list of nodes
 }
 
 // Fragments and primIdx for primitives [first, last) from verts and vertIdx, and their bounds.
@@ -2644,7 +2654,7 @@ TEMPLATED void BVH<Float, Index>::Build( Index nodeIdx, uint32_t depth )
 		usedNodes = newNodePtr;
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = settings.usePresplitting ? false : true; // only if not using spatial splits
-		may_have_holes = false; // the reference builder produces a continuous list of nodes
+		may_have_holes = false, ordered_nodes = true; // the reference builder produces a continuous list of nodes
 		bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
 		if (settings.usePresplitting)
 		{
@@ -2723,7 +2733,7 @@ TEMPLATED void BVH<Float, Index>::BuildFullSweep( Index nodeIdx, uint32_t depth 
 				root.aabbMax = tinybvh_max( root.aabbMax, fragment[primIdx[i]].bmax );
 			root.leftFirst = 0, root.triCount = triCount;
 			aabbMin = root.aabbMin, aabbMax = root.aabbMax, usedNodes = newNodePtr;
-			refittable = true, may_have_holes = false, bvh_over_aabbs = (verts == 0);
+			refittable = true, may_have_holes = false, ordered_nodes = true, bvh_over_aabbs = (verts == 0);
 			if (settings.usePresplitting)
 			{
 				for (Index i = 0; i < triCount; i++) primIdx[i] = fragment[primIdx[i]].primIdx;
@@ -2893,7 +2903,7 @@ TEMPLATED void BVH<Float, Index>::BuildFullSweep( Index nodeIdx, uint32_t depth 
 		AlignedFree( flag ), flag = 0;
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = true; // not using spatial splits: can refit this BVH
-		may_have_holes = false; // this builder produces a continuous list of nodes
+		may_have_holes = false, ordered_nodes = true; // this builder produces a continuous list of nodes
 		bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
 		usedNodes = newNodePtr;
 		if (settings.usePresplitting)
@@ -2909,8 +2919,8 @@ TEMPLATED void BVH<Float, Index>::BuildFullSweep( Index nodeIdx, uint32_t depth 
 // improving tree quality at the expense of construction time.
 TEMPLATED void BVH<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
 TEMPLATED void BVH<Float, Index>::BuildHQ( const Vertex* v, const Index* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-TEMPLATED void BVH<Float, Index>::BuildHQ( const Slice& v ) { PrepareHQBuild( v, 0, 0 ); BuildHQ(); }
-TEMPLATED void BVH<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { PrepareHQBuild( v, i, p ); BuildHQ(); }
+TEMPLATED void BVH<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
+TEMPLATED void BVH<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
 // Parallel fragment setup for the SBVH builder.
 TEMPLATED struct ALIGNED( 64 ) BVHPrepHQBounds
 {
@@ -2979,7 +2989,7 @@ TEMPLATED void BVH<Float, Index>::BuildHQ()
 	AlignedFree( idxTmp );
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 	refittable = false; // can't refit an SBVH
-	may_have_holes = false; // there may be holes in the index list, but not in the node list
+	may_have_holes = false, ordered_nodes = true; // there may be holes in the index list, but not in the node list
 	StopNodeCounter( false ); // BuildHQTask waited for the spawned tasks
 #ifdef ENABLE_THREADED_BUILDS
 	if (threadedBuild) nextFrag = atomicNextFrag->load(), ContextDelete( atomicNextFrag );
@@ -3577,6 +3587,7 @@ TEMPLATED void BVH<Float, Index>::ConvertFrom( const BVH_Verbose& original, bool
 		}
 	}
 	usedNodes = original.usedNodes;
+	ordered_nodes = true; // the node list was rebuilt depth-first
 }
 
 TEMPLATED Float BVH<Float, Index>::TriArea( const Index triIdx ) const
@@ -3724,6 +3735,7 @@ TEMPLATED Float BVH<Float, Index>::EPOCost( const Index nodeIdx, uint32_t ) cons
 
 TEMPLATED void BVH<Float, Index>::SplitLeafs( const Index maxPrims )
 {
+	if (!ordered_nodes) Compact(); // the reachability sweep below requires children to follow their parents
 	const Index origNodes = newNodePtr;
 	if (origNodes == 0) { usedNodes = 0; return; }
 	uint8_t* reachable = (uint8_t*)AlignedAlloc( (size_t)origNodes );
@@ -3893,6 +3905,7 @@ TEMPLATED void BVH<Float, Index>::Refit( const Index /* unused */ )
 	BVH_FATAL_ERROR_IF( may_have_holes, "BVH::Refit( .. ), bvh may have holes." );
 	BVH_FATAL_ERROR_IF( isTLAS(), "BVH::Refit( .. ), do not refit a TLAS, use Build(..)." );
 	BVH_FATAL_ERROR_IF( !verts, "BVH::Refit( .. ), bvh has no vertex data." );
+	if (!ordered_nodes) Compact(); // the backward sweep below requires children to follow their parents
 	for (int64_t i = (int64_t)usedNodes - 1; i >= 0; i--) if (i != 1)
 	{
 		BVHNode& node = bvhNode[i];
@@ -3931,6 +3944,12 @@ TEMPLATED void BVH<Float, Index>::Refit( const Index /* unused */ )
 // exceed the specified number. For BVH8_CPU construction.
 TEMPLATED Index BVH<Float, Index>::CombineLeafs( const Index primCount, Index& firstIdx, Index nodeIdx )
 {
+	// merging two leaves requires the primitives of each subtree to be contiguous in primIdx.
+	if (!ordered_nodes)
+	{
+		BVH_FATAL_ERROR_IF( nodeIdx != 0, "BVH::CombineLeafs( .. ), nodes are not ordered; call Compact() first." );
+		Compact();
+	}
 	struct Frame { Index node, firstLeft, leftCount; uint32_t state; };
 	Frame stack[TINYBVH_STACK_SIZE];
 	uint32_t stackPtr = 0;
@@ -4366,6 +4385,7 @@ TEMPLATED Index BVH<Float, Index>::LeafCount() const
 TEMPLATED void BVH<Float, Index>::Compact()
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::Compact(), bvhNode == 0." );
+	ordered_nodes = true; // depth-first, below; a single leaf is ordered too.
 	if (bvhNode[0].isLeaf()) return; // nothing to compact.
 	BVHNode* tmpNodes = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * allocatedNodes /* do *not* trim */ );
 	// don't trim primIdx either: a rebuild that fits allocatedNodes reuses it (see BVH::fragment).
@@ -5337,8 +5357,11 @@ TEMPLATED_M void MBVH<M, Float, Index>::DecodeWrite( const BVH& original, const 
 		DecodeEmit( original, i, term, DecodeWalk( original, srcNode[i], dist, term ), first[i], flag, subFirst, subCount, srcNode );
 }
 
-TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( const BVH& original, bool compact )
+TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact )
 {
+	// the collapse sweeps the nodes in index order, which requires children to follow their parents.
+	// Compact reorders the node list of the original in place; it keeps the tree it describes.
+	if (!original.ordered_nodes) original.Compact();
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
 	bvh.ReferenceFrom( original );
@@ -5982,7 +6005,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	bvh4.bvh.Build( vertices, indices, prims );
 	if (settings.discardIntermediates && ownBVH4 && bvh4.ownBVH) AlignedFree( bvh4.bvh.fragment ), bvh4.bvh.fragment = 0;
 	// convert to BVH4_CPU layout
-	ConvertFrom( bvh4, settings.useSpatialSplits && !settings.postOptimize );
+	ConvertFrom( bvh4, settings.useSpatialSplits && settings.binnedBVH && !settings.postOptimize ); // only SBVH caps leaves at 4 prims
 }
 
 TEMPLATED void BVH4_CPU<Float, Index>::Save( const char* fileName )
@@ -6236,7 +6259,7 @@ TEMPLATED void BVH8_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	if (settings.discardIntermediates && ownBVH8 && bvh8.ownBVH) AlignedFree( bvh8.bvh.fragment ), bvh8.bvh.fragment = 0;
 	bvh8.bvh.Compact();
 	// convert to BVH8_CPU layout
-	ConvertFrom( bvh8, settings.useSpatialSplits && !settings.postOptimize );
+	ConvertFrom( bvh8, settings.useSpatialSplits && settings.binnedBVH && !settings.postOptimize ); // only SBVH caps leaves at 4 prims
 }
 
 TEMPLATED void BVH8_CPU<Float, Index>::Save( const char* fileName )
@@ -6822,6 +6845,7 @@ TEMPLATED void BVH<Float, Index>::BuildSIMD( const Slice& v, const Index* i, con
 	PrepareSIMDBuild( v, i, p );
 	if (!settings.binnedBVH) BuildBonsai(); else BuildSIMDSubtree( 0u, 0u );
 	BuildSIMDFinalize();
+	ordered_nodes = settings.binnedBVH; // the Bonsai top tree refers back to cell roots with lower indices
 }
 
 // Bonsai builder: "Bonsai: Rapid Bounding Volume Hierarchy Generation using Mini Trees",
@@ -7342,7 +7366,7 @@ TEMPLATED void BVH<Float, Index>::BuildBonsaiHQ( const Slice& vertices, const In
 	BuildSIMDFinalize();
 	// leaves now hold fragment indices; replace them by primitive indices.
 	run( [&]( uint32_t s ) { for (Index i = lo( s, F ), last = lo( s + 1, F ); i < last; i++) primIdx[i] = fragment[primIdx[i]].primIdx; } );
-	triCount = N, idxCount = F, refittable = false;
+	triCount = N, idxCount = F, refittable = false, ordered_nodes = false; // as BuildBonsai
 }
 
 // H-PLOC builder: "H-PLOC: Hierarchical Parallel Locally-Ordered Clustering for Bounding Volume
@@ -7451,7 +7475,7 @@ TEMPLATED void BVH<Float, Index>::BuildHPLOC()
 		stackPtr += 4, newNodePtr += 2;
 	}
 	usedNodes = newNodePtr, aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
-	refittable = !settings.usePresplitting, may_have_holes = false, bvh_over_aabbs = false, threadedBuild = false;
+	refittable = !settings.usePresplitting, may_have_holes = false, ordered_nodes = true, bvh_over_aabbs = false, threadedBuild = false;
 	AlignedFree( tree ), AlignedFree( key ), AlignedFree( delta ), AlignedFree( cluster );
 }
 
