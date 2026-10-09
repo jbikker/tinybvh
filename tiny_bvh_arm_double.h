@@ -1,4 +1,4 @@
-﻿// tiny_bvh_arm_double.h: NEON specializations for the double precision layouts.
+// tiny_bvh_arm_double.h: NEON specializations for the double precision layouts.
 // Included by tiny_bvh.h; do not include directly.
 
 #ifndef TINY_BVH_H_
@@ -65,8 +65,8 @@ template <> void impl::BVH<double, uint64_t>::BinBoxAddFrag( BVHBinBox<double>& 
 template <> void impl::BVH<double, uint64_t>::BinBoxAdd( BVHBinBox<double>& b, const bvhdbl3& mn, const bvhdbl3& mx )
 {
 	double* p = (double*)&b.negMin;
-	const double far = -bvh_far<double>;
-	ALIGNED( 32 ) const double src[8] = { -mn.x, -mn.y, -mn.z, far, mx.x, mx.y, mx.z, far };
+	const double farVal = -bvh_far<double>;
+	ALIGNED( 32 ) const double src[8] = { -mn.x, -mn.y, -mn.z, farVal, mx.x, mx.y, mx.z, farVal };
 	vst1q_f64( p, vmaxq_f64( vld1q_f64( p ), vld1q_f64( src ) ) );
 	vst1q_f64( p + 2, vmaxq_f64( vld1q_f64( p + 2 ), vld1q_f64( src + 2 ) ) );
 	vst1q_f64( p + 4, vmaxq_f64( vld1q_f64( p + 4 ), vld1q_f64( src + 4 ) ) );
@@ -195,13 +195,13 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant
 		const float64x2_t qza = vfmsq_f64( vmulq_f64( sxa, e1ya ), sya, e1xa ), qzb = vfmsq_f64( vmulq_f64( sxb, e1yb ), syb, e1xb );
 		const float64x2_t qxa = vfmsq_f64( vmulq_f64( sya, e1za ), sza, e1ya ), qxb = vfmsq_f64( vmulq_f64( syb, e1zb ), szb, e1yb );
 		const float64x2_t qya = vfmsq_f64( vmulq_f64( sza, e1xa ), sxa, e1za ), qyb = vfmsq_f64( vmulq_f64( szb, e1xb ), sxb, e1zb );
-		const float64x2_t inv_deta = vdivq_f64( one2, deta ), inv_detb = vdivq_f64( one2, detb );
-		const float64x2_t ua = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( sya, hya ), sxa, hxa ), sza, hza ), inv_deta );
-		const float64x2_t ub = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( syb, hyb ), sxb, hxb ), szb, hzb ), inv_detb );
-		const float64x2_t va = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qya ), dx2, qxa ), dz2, qza ), inv_deta );
-		const float64x2_t vb = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qyb ), dx2, qxb ), dz2, qzb ), inv_detb );
-		const float64x2_t taa = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2ya, qya ), e2xa, qxa ), e2za, qza ), inv_deta );
-		const float64x2_t tab = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2yb, qyb ), e2xb, qxb ), e2zb, qzb ), inv_detb );
+		const float64x2_t invDetA = vdivq_f64( one2, deta ), invDetB = vdivq_f64( one2, detb );
+		const float64x2_t ua = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( sya, hya ), sxa, hxa ), sza, hza ), invDetA );
+		const float64x2_t ub = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( syb, hyb ), sxb, hxb ), szb, hzb ), invDetB );
+		const float64x2_t va = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qya ), dx2, qxa ), dz2, qza ), invDetA );
+		const float64x2_t vb = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qyb ), dx2, qxb ), dz2, qzb ), invDetB );
+		const float64x2_t taa = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2ya, qya ), e2xa, qxa ), e2za, qza ), invDetA );
+		const float64x2_t tab = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2yb, qyb ), e2xb, qxb ), e2zb, qzb ), invDetB );
 		const uint64x2_t mask1a = vandq_u64( vcgeq_f64( ua, zero2 ), vcgeq_f64( va, zero2 ) ), mask1b = vandq_u64( vcgeq_f64( ub, zero2 ), vcgeq_f64( vb, zero2 ) );
 		const uint64x2_t mask2a = vcleq_f64( vaddq_f64( ua, va ), one2 ), mask2b = vcleq_f64( vaddq_f64( ub, vb ), one2 );
 		const uint64x2_t mask3a = vandq_u64( vcltq_f64( taa, t2 ), vcgtq_f64( taa, zero2 ) ), mask3b = vandq_u64( vcltq_f64( tab, t2 ), vcgtq_f64( tab, zero2 ) );
@@ -329,13 +329,13 @@ template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( 
 		const float64x2_t qza = vfmsq_f64( vmulq_f64( sxa, e1ya ), sya, e1xa ), qzb = vfmsq_f64( vmulq_f64( sxb, e1yb ), syb, e1xb );
 		const float64x2_t qxa = vfmsq_f64( vmulq_f64( sya, e1za ), sza, e1ya ), qxb = vfmsq_f64( vmulq_f64( syb, e1zb ), szb, e1yb );
 		const float64x2_t qya = vfmsq_f64( vmulq_f64( sza, e1xa ), sxa, e1za ), qyb = vfmsq_f64( vmulq_f64( szb, e1xb ), sxb, e1zb );
-		const float64x2_t inv_deta = vdivq_f64( one2, deta ), inv_detb = vdivq_f64( one2, detb );
-		const float64x2_t ua = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( sya, hya ), sxa, hxa ), sza, hza ), inv_deta );
-		const float64x2_t ub = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( syb, hyb ), sxb, hxb ), szb, hzb ), inv_detb );
-		const float64x2_t va = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qya ), dx2, qxa ), dz2, qza ), inv_deta );
-		const float64x2_t vb = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qyb ), dx2, qxb ), dz2, qzb ), inv_detb );
-		const float64x2_t taa = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2ya, qya ), e2xa, qxa ), e2za, qza ), inv_deta );
-		const float64x2_t tab = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2yb, qyb ), e2xb, qxb ), e2zb, qzb ), inv_detb );
+		const float64x2_t invDetA = vdivq_f64( one2, deta ), invDetB = vdivq_f64( one2, detb );
+		const float64x2_t ua = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( sya, hya ), sxa, hxa ), sza, hza ), invDetA );
+		const float64x2_t ub = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( syb, hyb ), sxb, hxb ), szb, hzb ), invDetB );
+		const float64x2_t va = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qya ), dx2, qxa ), dz2, qza ), invDetA );
+		const float64x2_t vb = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qyb ), dx2, qxb ), dz2, qzb ), invDetB );
+		const float64x2_t taa = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2ya, qya ), e2xa, qxa ), e2za, qza ), invDetA );
+		const float64x2_t tab = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2yb, qyb ), e2xb, qxb ), e2zb, qzb ), invDetB );
 		const uint64x2_t mask1a = vandq_u64( vcgeq_f64( ua, zero2 ), vcgeq_f64( va, zero2 ) ), mask1b = vandq_u64( vcgeq_f64( ub, zero2 ), vcgeq_f64( vb, zero2 ) );
 		const uint64x2_t mask2a = vcleq_f64( vaddq_f64( ua, va ), one2 ), mask2b = vcleq_f64( vaddq_f64( ub, vb ), one2 );
 		const uint64x2_t mask3a = vandq_u64( vcltq_f64( taa, t2 ), vcgtq_f64( taa, zero2 ) ), mask3b = vandq_u64( vcltq_f64( tab, t2 ), vcgtq_f64( tab, zero2 ) );

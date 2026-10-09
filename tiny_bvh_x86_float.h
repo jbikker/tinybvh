@@ -1,4 +1,4 @@
-﻿// tiny_bvh_x86_float.h: SSE / AVX / AVX2 specializations for the single
+// tiny_bvh_x86_float.h: SSE / AVX / AVX2 specializations for the single
 // precision layouts. Included by tiny_bvh.h; do not include directly.
 
 #ifndef TINY_BVH_H_
@@ -477,14 +477,14 @@ template <> uint32_t impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig
 	if (!vertIdx) v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
 	else v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
 	v0.w = v1.w = v2.w = 0; // w may hold payload that reads as a denormal; see ClipFragToBins.
-	const __m128 v0_4 = tinybvh_load4( &v0 ), v1_4 = tinybvh_load4( &v1 ), v2_4 = tinybvh_load4( &v2 );
+	const __m128 v04 = tinybvh_load4( &v0 ), v14 = tinybvh_load4( &v1 ), v24 = tinybvh_load4( &v2 );
 	const bool l0 = v0[axis] <= pos, l1 = v1[axis] <= pos, l2 = v2[axis] <= pos;
-	if (l0) lbmin4 = _mm_min_ps( lbmin4, v0_4 ), lbmax4 = _mm_max_ps( lbmax4, v0_4 );
-	else rbmin4 = _mm_min_ps( rbmin4, v0_4 ), rbmax4 = _mm_max_ps( rbmax4, v0_4 );
-	if (l1) lbmin4 = _mm_min_ps( lbmin4, v1_4 ), lbmax4 = _mm_max_ps( lbmax4, v1_4 );
-	else rbmin4 = _mm_min_ps( rbmin4, v1_4 ), rbmax4 = _mm_max_ps( rbmax4, v1_4 );
-	if (l2) lbmin4 = _mm_min_ps( lbmin4, v2_4 ), lbmax4 = _mm_max_ps( lbmax4, v2_4 );
-	else rbmin4 = _mm_min_ps( rbmin4, v2_4 ), rbmax4 = _mm_max_ps( rbmax4, v2_4 );
+	if (l0) lbmin4 = _mm_min_ps( lbmin4, v04 ), lbmax4 = _mm_max_ps( lbmax4, v04 );
+	else rbmin4 = _mm_min_ps( rbmin4, v04 ), rbmax4 = _mm_max_ps( rbmax4, v04 );
+	if (l1) lbmin4 = _mm_min_ps( lbmin4, v14 ), lbmax4 = _mm_max_ps( lbmax4, v14 );
+	else rbmin4 = _mm_min_ps( rbmin4, v14 ), rbmax4 = _mm_max_ps( rbmax4, v14 );
+	if (l2) lbmin4 = _mm_min_ps( lbmin4, v24 ), lbmax4 = _mm_max_ps( lbmax4, v24 );
+	else rbmin4 = _mm_min_ps( rbmin4, v24 ), rbmax4 = _mm_max_ps( rbmax4, v24 );
 	bvhvec4 c; __m128 c4;
 	if (l0 ^ l1)
 		c = v0 + (pos - v0[axis]) / (v1[axis] - v0[axis]) * (v1 - v0), c[axis] = pos, c4 = tinybvh_load4( &c ),
@@ -633,10 +633,10 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant(
 		const __m128 qz4 = _mm_fmsub_ps( sx4, _mm_load_ps( leaf->e1y ), _mm_mul_ps( sy4, _mm_load_ps( leaf->e1x ) ) );
 		const __m128 qx4 = _mm_fmsub_ps( sy4, _mm_load_ps( leaf->e1z ), _mm_mul_ps( sz4, _mm_load_ps( leaf->e1y ) ) );
 		const __m128 qy4 = _mm_fmsub_ps( sz4, _mm_load_ps( leaf->e1x ), _mm_mul_ps( sx4, _mm_load_ps( leaf->e1z ) ) );
-		const __m128 inv_det4 = _mm_div_ps( one4, det4 );
-		const __m128 u4 = _mm_mul_ps( _mm_fmadd_ps( sz4, hz4, _mm_fmadd_ps( sx4, hx4, _mm_mul_ps( sy4, hy4 ) ) ), inv_det4 );
-		const __m128 v4 = _mm_mul_ps( _mm_fmadd_ps( dz4, qz4, _mm_fmadd_ps( dx4, qx4, _mm_mul_ps( dy4, qy4 ) ) ), inv_det4 );
-		const __m128 ta4 = _mm_mul_ps( _mm_fmadd_ps( _mm_load_ps( leaf->e2z ), qz4, _mm_fmadd_ps( _mm_load_ps( leaf->e2x ), qx4, _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), inv_det4 );
+		const __m128 invDet4 = _mm_div_ps( one4, det4 );
+		const __m128 u4 = _mm_mul_ps( _mm_fmadd_ps( sz4, hz4, _mm_fmadd_ps( sx4, hx4, _mm_mul_ps( sy4, hy4 ) ) ), invDet4 );
+		const __m128 v4 = _mm_mul_ps( _mm_fmadd_ps( dz4, qz4, _mm_fmadd_ps( dx4, qx4, _mm_mul_ps( dy4, qy4 ) ) ), invDet4 );
+		const __m128 ta4 = _mm_mul_ps( _mm_fmadd_ps( _mm_load_ps( leaf->e2z ), qz4, _mm_fmadd_ps( _mm_load_ps( leaf->e2x ), qx4, _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), invDet4 );
 	#else
 		const __m128 hx4 = _mm_sub_ps( _mm_mul_ps( dy4, _mm_load_ps( leaf->e2z ) ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
 		const __m128 hy4 = _mm_sub_ps( _mm_mul_ps( dz4, _mm_load_ps( leaf->e2x ) ), _mm_mul_ps( dx4, _mm_load_ps( leaf->e2z ) ) );
@@ -646,10 +646,10 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant(
 		const __m128 qz4 = _mm_sub_ps( _mm_mul_ps( sx4, _mm_load_ps( leaf->e1y ) ), _mm_mul_ps( sy4, _mm_load_ps( leaf->e1x ) ) );
 		const __m128 qx4 = _mm_sub_ps( _mm_mul_ps( sy4, _mm_load_ps( leaf->e1z ) ), _mm_mul_ps( sz4, _mm_load_ps( leaf->e1y ) ) );
 		const __m128 qy4 = _mm_sub_ps( _mm_mul_ps( sz4, _mm_load_ps( leaf->e1x ) ), _mm_mul_ps( sx4, _mm_load_ps( leaf->e1z ) ) );
-		const __m128 inv_det4 = _mm_div_ps( one4, det4 );
-		const __m128 u4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( sz4, hz4 ), _mm_add_ps( _mm_mul_ps( sx4, hx4 ), _mm_mul_ps( sy4, hy4 ) ) ), inv_det4 );
-		const __m128 v4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( dz4, qz4 ), _mm_add_ps( _mm_mul_ps( dx4, qx4 ), _mm_mul_ps( dy4, qy4 ) ) ), inv_det4 );
-		const __m128 ta4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2z ), qz4 ), _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2x ), qx4 ), _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), inv_det4 );
+		const __m128 invDet4 = _mm_div_ps( one4, det4 );
+		const __m128 u4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( sz4, hz4 ), _mm_add_ps( _mm_mul_ps( sx4, hx4 ), _mm_mul_ps( sy4, hy4 ) ) ), invDet4 );
+		const __m128 v4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( dz4, qz4 ), _mm_add_ps( _mm_mul_ps( dx4, qx4 ), _mm_mul_ps( dy4, qy4 ) ) ), invDet4 );
+		const __m128 ta4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2z ), qz4 ), _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2x ), qx4 ), _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), invDet4 );
 	#endif
 		const __m128 mask1 = _mm_and_ps( _mm_cmpge_ps( u4, zero4 ), _mm_cmpge_ps( v4, zero4 ) );
 		const __m128 mask2 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
@@ -782,10 +782,10 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 		const __m128 qz4 = _mm_fmsub_ps( sx4, _mm_load_ps( leaf->e1y ), _mm_mul_ps( sy4, _mm_load_ps( leaf->e1x ) ) );
 		const __m128 qx4 = _mm_fmsub_ps( sy4, _mm_load_ps( leaf->e1z ), _mm_mul_ps( sz4, _mm_load_ps( leaf->e1y ) ) );
 		const __m128 qy4 = _mm_fmsub_ps( sz4, _mm_load_ps( leaf->e1x ), _mm_mul_ps( sx4, _mm_load_ps( leaf->e1z ) ) );
-		const __m128 inv_det4 = _mm_div_ps( one4, det4 );
-		const __m128 u4 = _mm_mul_ps( _mm_fmadd_ps( sz4, hz4, _mm_fmadd_ps( sx4, hx4, _mm_mul_ps( sy4, hy4 ) ) ), inv_det4 );
-		const __m128 v4 = _mm_mul_ps( _mm_fmadd_ps( dz4, qz4, _mm_fmadd_ps( dx4, qx4, _mm_mul_ps( dy4, qy4 ) ) ), inv_det4 );
-		const __m128 ta4 = _mm_mul_ps( _mm_fmadd_ps( _mm_load_ps( leaf->e2z ), qz4, _mm_fmadd_ps( _mm_load_ps( leaf->e2x ), qx4, _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), inv_det4 );
+		const __m128 invDet4 = _mm_div_ps( one4, det4 );
+		const __m128 u4 = _mm_mul_ps( _mm_fmadd_ps( sz4, hz4, _mm_fmadd_ps( sx4, hx4, _mm_mul_ps( sy4, hy4 ) ) ), invDet4 );
+		const __m128 v4 = _mm_mul_ps( _mm_fmadd_ps( dz4, qz4, _mm_fmadd_ps( dx4, qx4, _mm_mul_ps( dy4, qy4 ) ) ), invDet4 );
+		const __m128 ta4 = _mm_mul_ps( _mm_fmadd_ps( _mm_load_ps( leaf->e2z ), qz4, _mm_fmadd_ps( _mm_load_ps( leaf->e2x ), qx4, _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), invDet4 );
 	#else
 		const __m128 hx4 = _mm_sub_ps( _mm_mul_ps( dy4, _mm_load_ps( leaf->e2z ) ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
 		const __m128 hy4 = _mm_sub_ps( _mm_mul_ps( dz4, _mm_load_ps( leaf->e2x ) ), _mm_mul_ps( dx4, _mm_load_ps( leaf->e2z ) ) );
@@ -795,10 +795,10 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 		const __m128 qz4 = _mm_sub_ps( _mm_mul_ps( sx4, _mm_load_ps( leaf->e1y ) ), _mm_mul_ps( sy4, _mm_load_ps( leaf->e1x ) ) );
 		const __m128 qx4 = _mm_sub_ps( _mm_mul_ps( sy4, _mm_load_ps( leaf->e1z ) ), _mm_mul_ps( sz4, _mm_load_ps( leaf->e1y ) ) );
 		const __m128 qy4 = _mm_sub_ps( _mm_mul_ps( sz4, _mm_load_ps( leaf->e1x ) ), _mm_mul_ps( sx4, _mm_load_ps( leaf->e1z ) ) );
-		const __m128 inv_det4 = _mm_div_ps( one4, det4 );
-		const __m128 u4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( sz4, hz4 ), _mm_add_ps( _mm_mul_ps( sx4, hx4 ), _mm_mul_ps( sy4, hy4 ) ) ), inv_det4 );
-		const __m128 v4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( dz4, qz4 ), _mm_add_ps( _mm_mul_ps( dx4, qx4 ), _mm_mul_ps( dy4, qy4 ) ) ), inv_det4 );
-		const __m128 ta4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2z ), qz4 ), _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2x ), qx4 ), _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), inv_det4 );
+		const __m128 invDet4 = _mm_div_ps( one4, det4 );
+		const __m128 u4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( sz4, hz4 ), _mm_add_ps( _mm_mul_ps( sx4, hx4 ), _mm_mul_ps( sy4, hy4 ) ) ), invDet4 );
+		const __m128 v4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( dz4, qz4 ), _mm_add_ps( _mm_mul_ps( dx4, qx4 ), _mm_mul_ps( dy4, qy4 ) ) ), invDet4 );
+		const __m128 ta4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2z ), qz4 ), _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2x ), qx4 ), _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), invDet4 );
 	#endif
 		const __m128 mask1 = _mm_and_ps( _mm_cmpge_ps( u4, zero4 ), _mm_cmpge_ps( v4, zero4 ) );
 		const __m128 mask2 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
@@ -975,7 +975,7 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	// finalize root node
 	root.leftFirst = 0, root.triCount = idxCount = triCount = fragCount;
 	// reset node pool
-	bvh_over_indices = indices != nullptr;
+	bvhOverIndices = indices != nullptr;
 	// all set; actual build happens in BVH::BuildSIMDSubtree.
 }
 
@@ -1221,7 +1221,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize()
 	// tree has been built.
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 	refittable = !SIMDPresplit(); // only if not using spatial splits
-	may_have_holes = false, ordered_nodes = true; // there are no holes in the list of nodes.
+	hasHoles = false, orderedNodes = true; // there are no holes in the list of nodes.
 	usedNodes = newNodePtr;
 	if (SIMDPresplit()) // finalize indices in index array
 	{
@@ -1451,10 +1451,10 @@ template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant(
 		uint32_t imask = _mm_movemask_ps( combined );
 		if (imask)
 		{
-			const __m128 inv_det4 = _mm_div_ps( one4, absDet4 );
-			const __m128 u4 = _mm_mul_ps( U4, inv_det4 );
-			const __m128 v4 = _mm_mul_ps( V4, inv_det4 );
-			const __m128 ta4 = _mm_mul_ps( T4, inv_det4 );
+			const __m128 invDet4 = _mm_div_ps( one4, absDet4 );
+			const __m128 u4 = _mm_mul_ps( U4, invDet4 );
+			const __m128 v4 = _mm_mul_ps( V4, invDet4 );
+			const __m128 ta4 = _mm_mul_ps( T4, invDet4 );
 			// evaluate opacity map, if present (SSE version).
 			if (opmap) ISUNLIKELY
 			{
@@ -1611,8 +1611,8 @@ template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( c
 		{
 			if (!opmap) return true;
 			// evaluate opacity map, SSE version.
-			const __m128 inv_det4 = _mm_div_ps( one4, det4 );
-			const __m128 bu4 = _mm_mul_ps( nu4, inv_det4 ), bv4 = _mm_mul_ps( nv4, inv_det4 );
+			const __m128 invDet4 = _mm_div_ps( one4, det4 );
+			const __m128 bu4 = _mm_mul_ps( nu4, invDet4 ), bv4 = _mm_mul_ps( nv4, invDet4 );
 			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
 			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( bu4, bv4 ), fN4 ) );
 			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, bu4 ), fN4 ) );
@@ -2510,4 +2510,4 @@ template <> int32_t impl::BVH<float, uint32_t>::IsOccludedBundle( Ray* rays, boo
 } // namespace tinybvh
 
 #endif // TINY_BVH_X86_FLOAT_H_IMPL
-#endif // TINYBVH_IMPLEMENTATION
+#endif // TINYBVH_IMPLEMENTATION

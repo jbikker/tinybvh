@@ -1,4 +1,4 @@
-﻿// tiny_bvh_x86_double.h: AVX2 specializations for the double precision layouts.
+// tiny_bvh_x86_double.h: AVX2 specializations for the double precision layouts.
 // Included by tiny_bvh.h; do not include directly.
 
 #ifndef TINY_BVH_H_
@@ -153,10 +153,10 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant
 		const __m256d qz4 = _mm256_fmsub_pd( sx4, _mm256_load_pd( leaf->e1y ), _mm256_mul_pd( sy4, _mm256_load_pd( leaf->e1x ) ) );
 		const __m256d qx4 = _mm256_fmsub_pd( sy4, _mm256_load_pd( leaf->e1z ), _mm256_mul_pd( sz4, _mm256_load_pd( leaf->e1y ) ) );
 		const __m256d qy4 = _mm256_fmsub_pd( sz4, _mm256_load_pd( leaf->e1x ), _mm256_mul_pd( sx4, _mm256_load_pd( leaf->e1z ) ) );
-		const __m256d inv_det4 = _mm256_div_pd( one4, det4 );
-		const __m256d u4 = _mm256_mul_pd( _mm256_fmadd_pd( sz4, hz4, _mm256_fmadd_pd( sx4, hx4, _mm256_mul_pd( sy4, hy4 ) ) ), inv_det4 );
-		const __m256d v4 = _mm256_mul_pd( _mm256_fmadd_pd( dz4, qz4, _mm256_fmadd_pd( dx4, qx4, _mm256_mul_pd( dy4, qy4 ) ) ), inv_det4 );
-		const __m256d ta4 = _mm256_mul_pd( _mm256_fmadd_pd( _mm256_load_pd( leaf->e2z ), qz4, _mm256_fmadd_pd( _mm256_load_pd( leaf->e2x ), qx4, _mm256_mul_pd( _mm256_load_pd( leaf->e2y ), qy4 ) ) ), inv_det4 );
+		const __m256d invDet4 = _mm256_div_pd( one4, det4 );
+		const __m256d u4 = _mm256_mul_pd( _mm256_fmadd_pd( sz4, hz4, _mm256_fmadd_pd( sx4, hx4, _mm256_mul_pd( sy4, hy4 ) ) ), invDet4 );
+		const __m256d v4 = _mm256_mul_pd( _mm256_fmadd_pd( dz4, qz4, _mm256_fmadd_pd( dx4, qx4, _mm256_mul_pd( dy4, qy4 ) ) ), invDet4 );
+		const __m256d ta4 = _mm256_mul_pd( _mm256_fmadd_pd( _mm256_load_pd( leaf->e2z ), qz4, _mm256_fmadd_pd( _mm256_load_pd( leaf->e2x ), qx4, _mm256_mul_pd( _mm256_load_pd( leaf->e2y ), qy4 ) ) ), invDet4 );
 		const __m256d mask1 = _mm256_and_pd( _mm256_cmp_pd( u4, zero4, _CMP_GE_OQ ), _mm256_cmp_pd( v4, zero4, _CMP_GE_OQ ) );
 		const __m256d mask2 = _mm256_cmp_pd( _mm256_add_pd( u4, v4 ), one4, _CMP_LE_OQ );
 		const __m256d mask3 = _mm256_and_pd( _mm256_cmp_pd( ta4, t4, _CMP_LT_OQ ), _mm256_cmp_pd( ta4, zero4, _CMP_GT_OQ ) );
@@ -273,10 +273,10 @@ template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( 
 		const __m256d qz4 = _mm256_fmsub_pd( sx4, _mm256_load_pd( leaf->e1y ), _mm256_mul_pd( sy4, _mm256_load_pd( leaf->e1x ) ) );
 		const __m256d qx4 = _mm256_fmsub_pd( sy4, _mm256_load_pd( leaf->e1z ), _mm256_mul_pd( sz4, _mm256_load_pd( leaf->e1y ) ) );
 		const __m256d qy4 = _mm256_fmsub_pd( sz4, _mm256_load_pd( leaf->e1x ), _mm256_mul_pd( sx4, _mm256_load_pd( leaf->e1z ) ) );
-		const __m256d inv_det4 = _mm256_div_pd( one4, det4 );
-		const __m256d u4 = _mm256_mul_pd( _mm256_fmadd_pd( sz4, hz4, _mm256_fmadd_pd( sx4, hx4, _mm256_mul_pd( sy4, hy4 ) ) ), inv_det4 );
-		const __m256d v4 = _mm256_mul_pd( _mm256_fmadd_pd( dz4, qz4, _mm256_fmadd_pd( dx4, qx4, _mm256_mul_pd( dy4, qy4 ) ) ), inv_det4 );
-		const __m256d ta4 = _mm256_mul_pd( _mm256_fmadd_pd( _mm256_load_pd( leaf->e2z ), qz4, _mm256_fmadd_pd( _mm256_load_pd( leaf->e2x ), qx4, _mm256_mul_pd( _mm256_load_pd( leaf->e2y ), qy4 ) ) ), inv_det4 );
+		const __m256d invDet4 = _mm256_div_pd( one4, det4 );
+		const __m256d u4 = _mm256_mul_pd( _mm256_fmadd_pd( sz4, hz4, _mm256_fmadd_pd( sx4, hx4, _mm256_mul_pd( sy4, hy4 ) ) ), invDet4 );
+		const __m256d v4 = _mm256_mul_pd( _mm256_fmadd_pd( dz4, qz4, _mm256_fmadd_pd( dx4, qx4, _mm256_mul_pd( dy4, qy4 ) ) ), invDet4 );
+		const __m256d ta4 = _mm256_mul_pd( _mm256_fmadd_pd( _mm256_load_pd( leaf->e2z ), qz4, _mm256_fmadd_pd( _mm256_load_pd( leaf->e2x ), qx4, _mm256_mul_pd( _mm256_load_pd( leaf->e2y ), qy4 ) ) ), invDet4 );
 		const __m256d mask1 = _mm256_and_pd( _mm256_cmp_pd( u4, zero4, _CMP_GE_OQ ), _mm256_cmp_pd( v4, zero4, _CMP_GE_OQ ) );
 		const __m256d mask2 = _mm256_cmp_pd( _mm256_add_pd( u4, v4 ), one4, _CMP_LE_OQ );
 		const __m256d mask3 = _mm256_and_pd( _mm256_cmp_pd( ta4, t4, _CMP_LT_OQ ), _mm256_cmp_pd( ta4, zero4, _CMP_GT_OQ ) );

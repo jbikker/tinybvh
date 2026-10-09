@@ -1,4 +1,4 @@
-﻿/*
+/*
 The MIT License (MIT)
 
 Copyright (c) 2024-2026, Jacco Bikker / Breda University of Applied Sciences.

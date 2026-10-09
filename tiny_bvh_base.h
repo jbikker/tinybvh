@@ -1,4 +1,4 @@
-﻿// tiny_bvh_base.h: platform-neutral part of TinyBVH. Do not include this file
+// tiny_bvh_base.h: platform-neutral part of TinyBVH. Do not include this file
 // directly; include tiny_bvh.h, which selects the platform headers.
 
 #ifndef TINY_BVH_H_
@@ -245,11 +245,11 @@ TINYBVH_FORCEINLINE float tinybvh_fma( const float a, const float b, const float
 	return fmaf( a, b, c );
 #elif defined(__clang__)
 	_Pragma( "clang diagnostic push" )
-	_Pragma( "clang diagnostic ignored \"-Wunknown-pragmas\"" )
-	_Pragma( "STDC FP_CONTRACT ON" )
-	_Pragma( "clang diagnostic pop" )
-#endif
-	return a * b + c;
+		_Pragma( "clang diagnostic ignored \"-Wunknown-pragmas\"" )
+		_Pragma( "STDC FP_CONTRACT ON" )
+		_Pragma( "clang diagnostic pop" )
+	#endif
+		return a * b + c;
 }
 TINYBVH_FORCEINLINE float tinybvh_round( const float x ) { return roundf( x ); }
 TINYBVH_FORCEINLINE float tinybvh_min( const float a, const float b ) { return a < b ? a : b; }
@@ -593,7 +593,7 @@ inline Float tinybvh_intersect_aabb( impl::Ray<Float, Index>& ray, const Vec3& a
 #if defined ENABLE_THREADED_BUILDS && !defined TINYBVH_NO_BUILTIN_POOL
 // Default build hooks: a process-wide std::thread pool, implemented at the end of this file.
 // Define TINYBVH_NO_BUILTIN_POOL if you prefer to provide your own interface.
-void tinybvh_builtin_spawn( void (*fn)(void* payload), const void* payload, uint32_t payload_size, void* userdata );
+void tinybvh_builtin_spawn( void (*fn)(void* payload), const void* payload, uint32_t payloadSize, void* userdata );
 void tinybvh_builtin_barrier( void* userdata );
 void tinybvh_builtin_parallel_for( uint32_t n, void (*fn)(uint32_t index, void* payload), void* payload, void* userdata );
 // tinybvh_shutdown_builtin_pool: Releases the process-wide build pool, joining its worker threads.
@@ -613,7 +613,7 @@ struct BVHContext
 	void* (*malloc)(size_t size, void* userdata) = malloc64;
 	void (*free)(void* ptr, void* userdata) = free64;
 	// Parallel build hooks: 'spawn' runs fn(payload-copy) asynchronously
-	void (*spawn)(void (*fn)(void* payload), const void* payload, uint32_t payload_size, void* userdata) = TINYBVH_DEFAULT_SPAWN;
+	void (*spawn)(void (*fn)(void* payload), const void* payload, uint32_t payloadSize, void* userdata) = TINYBVH_DEFAULT_SPAWN;
 	// Wait for spawned tasks
 	void (*barrier)(void* userdata) = TINYBVH_DEFAULT_BARRIER;
 	// Runs fn(i, payload) for i in [0,n) and block for the results
@@ -628,9 +628,9 @@ struct BVHContext
 // The functions below serialize when no thread pool is available.
 
 // Spawn fn(payload) asynchronously
-inline void tinybvh_spawn( const BVHContext& ctx, void (*fn)(void*), const void* payload, uint32_t payload_size )
+inline void tinybvh_spawn( const BVHContext& ctx, void (*fn)(void*), const void* payload, uint32_t payloadSize )
 {
-	if (ctx.spawn) ctx.spawn( fn, payload, payload_size, ctx.userdata ); else fn( (void*)payload );
+	if (ctx.spawn) ctx.spawn( fn, payload, payloadSize, ctx.userdata ); else fn( (void*)payload );
 }
 // Wait for spawned tasks to finish
 inline void tinybvh_barrier( const BVHContext& ctx ) { if (ctx.barrier) ctx.barrier( ctx.userdata ); }
@@ -745,18 +745,18 @@ public:
 protected:
 	bool rebuildable = true;		// rebuilds are safe only if a tree has not been converted.
 	bool refittable = true;			// refits are safe only if the tree has no spatial splits.
-	bool may_have_holes = false;	// threaded builds and MergeLeafs produce BVHs with unused nodes.
-	bool ordered_nodes = true;		// depth-first: children follow their parents, subtree prims are contiguous. Not after Bonsai.
-	bool bvh_over_aabbs = false;	// a BVH over AABBs is useful for e.g. TLAS traversal.
-	bool bvh_over_indices = false;	// a BVH over indices cannot translate primitive index to vertex index.
+	bool hasHoles = false;	// threaded builds and MergeLeafs produce BVHs with unused nodes.
+	bool orderedNodes = true;		// depth-first: children follow their parents, subtree prims are contiguous. Not after Bonsai.
+	bool bvhOverAabbs = false;	// a BVH over AABBs is useful for e.g. TLAS traversal.
+	bool bvhOverIndices = false;	// a BVH over indices cannot translate primitive index to vertex index.
 public:
 	// read-only queries on the flags.
 	bool isRebuildable() const { return rebuildable; }
 	bool isRefittable() const { return refittable; }
-	bool mayHaveHoles() const { return may_have_holes; }
-	bool hasOrderedNodes() const { return ordered_nodes; }
-	bool isOverAABBs() const { return bvh_over_aabbs; }
-	bool isOverIndices() const { return bvh_over_indices; }
+	bool mayHaveHoles() const { return hasHoles; }
+	bool hasOrderedNodes() const { return orderedNodes; }
+	bool isOverAABBs() const { return bvhOverAabbs; }
+	bool isOverIndices() const { return bvhOverIndices; }
 	bool threadedBuild = true;		// will be disabled for small meshes.
 	// BVH construction flags and settings.
 	BVHBuildSettings settings;		// build settings: presplitting, full-sweep etc.
@@ -769,7 +769,7 @@ public:
 	Index usedNodes = 0;			// number of nodes used for the BVH.
 	Index triCount = 0;				// number of primitives in the BVH.
 	Index idxCount = 0;				// number of primitive indices; can exceed triCount for SBVH.
-	bool l_quads = false;			// some layouts have 4 prims in each leaf; adjust SAH cost for this.
+	bool lQuads = false;			// some layouts have 4 prims in each leaf; adjust SAH cost for this.
 	uint32_t hqbvhbins = HQBVHBINS;	// number of bins to use in SBVH construction.
 	bool hqbvhoddeven = false;		// if true, odd levels will use one extra bin during construction.
 	// SBVH builder: nodes of at most this many prims become leaves without being split.
@@ -798,7 +798,7 @@ protected:
 		if (obj) obj->~T(), AlignedFree( obj ), obj = 0;
 	}
 	// SAH cost of a leaf counts its primitives in groups of 4 for layouts with 4 prims per leaf.
-	Index LeafPrims( const Index n ) const { return l_quads ? ((n + 3) >> 2) * 4 : n; }
+	Index LeafPrims( const Index n ) const { return lQuads ? ((n + 3) >> 2) * 4 : n; }
 	// Threading helpers. ParallelFor runs body( i ) for i in [0, n), on the pool only if 'threads';
 	// enableThreading = false must keep a build on the calling thread.
 	template <typename F> void ParallelFor( const bool threads, const uint32_t n, const F& body ) const
@@ -860,7 +860,7 @@ public:
 	using Base::usedNodes;
 	using Base::triCount;
 	using Base::idxCount;
-	using Base::l_quads;
+	using Base::lQuads;
 	using Base::hqbvhbins;
 	using Base::hqbvhoddeven;
 	using Base::hqLeafPrims;
@@ -871,10 +871,10 @@ public:
 protected:
 	using Base::rebuildable;
 	using Base::refittable;
-	using Base::may_have_holes;
-	using Base::ordered_nodes;
-	using Base::bvh_over_aabbs;
-	using Base::bvh_over_indices;
+	using Base::hasHoles;
+	using Base::orderedNodes;
+	using Base::bvhOverAabbs;
+	using Base::bvhOverIndices;
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::ContextNew;
@@ -1148,9 +1148,9 @@ public:
 	using Base::aabbMin;
 	using Base::aabbMax;
 protected:
-	using Base::may_have_holes;
-	using Base::ordered_nodes;
-	using Base::bvh_over_aabbs;
+	using Base::hasHoles;
+	using Base::orderedNodes;
+	using Base::bvhOverAabbs;
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
@@ -1216,9 +1216,9 @@ public:
 	using Base::aabbMax;
 protected:
 	using Base::refittable;
-	using Base::may_have_holes;
-	using Base::ordered_nodes;
-	using Base::bvh_over_indices;
+	using Base::hasHoles;
+	using Base::orderedNodes;
+	using Base::bvhOverIndices;
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
@@ -1287,12 +1287,12 @@ public:
 	using Base::allocatedNodes;
 	using Base::usedNodes;
 	using Base::triCount;
-	using Base::l_quads;
+	using Base::lQuads;
 	using Base::aabbMin;
 	using Base::aabbMax;
 protected:
-	using Base::may_have_holes;
-	using Base::ordered_nodes;
+	using Base::hasHoles;
+	using Base::orderedNodes;
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
@@ -1525,7 +1525,7 @@ public:
 	using Base::layout;
 	using Base::usedNodes;
 	using Base::triCount;
-	using Base::l_quads;
+	using Base::lQuads;
 protected:
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
@@ -1548,7 +1548,7 @@ public:
 		uint32_t perm[4];		// sorted lane order per octant, see ConvertFrom.
 	};
 	struct ALIGNED( 64 ) CacheLine { uint8_t data[64]; };
-	BVH4_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH4_CPU; context = ctx; c_int = 2; l_quads = true; }
+	BVH4_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH4_CPU; context = ctx; c_int = 2; lQuads = true; }
 	BVH4_CPU( const BVH4_CPU& ) = delete; // owns its allocations, so it cannot be copied
 	BVH4_CPU( BVH4_CPU&& ) noexcept;
 	BVH4_CPU& operator=( BVH4_CPU&& ) noexcept;
@@ -1715,7 +1715,7 @@ public:
 	using Base::layout;
 	using Base::usedNodes;
 	using Base::triCount;
-	using Base::l_quads;
+	using Base::lQuads;
 protected:
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
@@ -1746,7 +1746,7 @@ public:
 		uint32_t cbminmaxx[4], cbminmaxy[4];						// 32, total: 128
 	};
 	struct ALIGNED( 64 ) CacheLine { uint8_t data[64]; };
-	BVH8_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH8_AVX2; context = ctx; c_int = 2; l_quads = true; }
+	BVH8_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH8_AVX2; context = ctx; c_int = 2; lQuads = true; }
 	BVH8_CPU( const BVH8_CPU& ) = delete; // owns its allocations, so it cannot be copied
 	BVH8_CPU( BVH8_CPU&& ) noexcept;
 	BVH8_CPU& operator=( BVH8_CPU&& ) noexcept;
@@ -2102,10 +2102,10 @@ TEMPLATED void BVHBase<Float, Index>::CopyBasePropertiesFrom( const BVHBase& ori
 {
 	this->rebuildable = original.rebuildable;
 	this->refittable = original.refittable;
-	this->may_have_holes = original.may_have_holes;
-	this->ordered_nodes = original.ordered_nodes;
-	this->bvh_over_aabbs = original.bvh_over_aabbs;
-	this->bvh_over_indices = original.bvh_over_indices;
+	this->hasHoles = original.hasHoles;
+	this->orderedNodes = original.orderedNodes;
+	this->bvhOverAabbs = original.bvhOverAabbs;
+	this->bvhOverIndices = original.bvhOverIndices;
 	this->context = original.context;
 	this->settings = original.settings;
 	this->triCount = original.triCount;
@@ -2406,7 +2406,7 @@ TEMPLATED void BVH<Float, Index>::BuildQuick( const Slice& vertices )
 		fragment = (Fragment*)AlignedAlloc( primCount * sizeof( Fragment ) );
 	}
 	verts = vertices; // note: we're not copying this data; don't delete.
-	vertIdx = 0, bvh_over_indices = false, bvh_over_aabbs = false;
+	vertIdx = 0, bvhOverIndices = false, bvhOverAabbs = false;
 	instList = 0, blasList = 0, blasCount = 0;
 	idxCount = triCount = primCount, newNodePtr = 2;
 	// assign all triangles to the root node
@@ -2463,7 +2463,7 @@ TEMPLATED void BVH<Float, Index>::BuildQuick( const Slice& vertices )
 	// all done.
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax, usedNodes = newNodePtr;
 	refittable = true; // not using spatial splits: can refit this BVH
-	may_have_holes = false, ordered_nodes = true; // the reference builder produces a continuous list of nodes
+	hasHoles = false, orderedNodes = true; // the reference builder produces a continuous list of nodes
 }
 
 // Fragments and primIdx for primitives [first, last) from verts and vertIdx, and their bounds.
@@ -2518,7 +2518,7 @@ TEMPLATED void BVH<Float, Index>::PrepareBuild( const Slice& vertices, const Ind
 	root.leftFirst = 0, root.triCount = idxCount = triCount = fragCount;
 	// reset node pool
 	newNodePtr = 2;
-	bvh_over_indices = indices != nullptr;
+	bvhOverIndices = indices != nullptr;
 	// all set; actual build happens in BVH::Build.
 }
 
@@ -2654,8 +2654,8 @@ TEMPLATED void BVH<Float, Index>::Build( Index nodeIdx, uint32_t depth )
 		usedNodes = newNodePtr;
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = settings.usePresplitting ? false : true; // only if not using spatial splits
-		may_have_holes = false, ordered_nodes = true; // the reference builder produces a continuous list of nodes
-		bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
+		hasHoles = false, orderedNodes = true; // the reference builder produces a continuous list of nodes
+		bvhOverAabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
 		if (settings.usePresplitting)
 		{
 			// finalize indices in index array
@@ -2733,7 +2733,7 @@ TEMPLATED void BVH<Float, Index>::BuildFullSweep( Index nodeIdx, uint32_t depth 
 				root.aabbMax = tinybvh_max( root.aabbMax, fragment[primIdx[i]].bmax );
 			root.leftFirst = 0, root.triCount = triCount;
 			aabbMin = root.aabbMin, aabbMax = root.aabbMax, usedNodes = newNodePtr;
-			refittable = true, may_have_holes = false, ordered_nodes = true, bvh_over_aabbs = (verts == 0);
+			refittable = true, hasHoles = false, orderedNodes = true, bvhOverAabbs = (verts == 0);
 			if (settings.usePresplitting)
 			{
 				for (Index i = 0; i < triCount; i++) primIdx[i] = fragment[primIdx[i]].primIdx;
@@ -2903,8 +2903,8 @@ TEMPLATED void BVH<Float, Index>::BuildFullSweep( Index nodeIdx, uint32_t depth 
 		AlignedFree( flag ), flag = 0;
 		aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 		refittable = true; // not using spatial splits: can refit this BVH
-		may_have_holes = false, ordered_nodes = true; // this builder produces a continuous list of nodes
-		bvh_over_aabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
+		hasHoles = false, orderedNodes = true; // this builder produces a continuous list of nodes
+		bvhOverAabbs = (verts == 0); // bvh over aabbs is suitable as TLAS
 		usedNodes = newNodePtr;
 		if (settings.usePresplitting)
 		{
@@ -2966,7 +2966,7 @@ TEMPLATED void BVH<Float, Index>::PrepareHQBuild( const Slice& vertices, const I
 		root.aabbMin = tinybvh_min( root.aabbMin, bounds[t].bmin ), root.aabbMax = tinybvh_max( root.aabbMax, bounds[t].bmax );
 	// clear remainder of index array
 	memset( primIdx + triCount, 0, slack * sizeof( Index ) );
-	bvh_over_indices = indices != nullptr;
+	bvhOverIndices = indices != nullptr;
 	// all set; actual build happens in BVH::BuildHQ.
 }
 
@@ -2989,7 +2989,7 @@ TEMPLATED void BVH<Float, Index>::BuildHQ()
 	AlignedFree( idxTmp );
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 	refittable = false; // can't refit an SBVH
-	may_have_holes = false, ordered_nodes = true; // there may be holes in the index list, but not in the node list
+	hasHoles = false, orderedNodes = true; // there may be holes in the index list, but not in the node list
 	StopNodeCounter( false ); // BuildHQTask waited for the spawned tasks
 #ifdef ENABLE_THREADED_BUILDS
 	if (threadedBuild) nextFrag = atomicNextFrag->load(), ContextDelete( atomicNextFrag );
@@ -3587,7 +3587,7 @@ TEMPLATED void BVH<Float, Index>::ConvertFrom( const BVH_Verbose& original, bool
 		}
 	}
 	usedNodes = original.usedNodes;
-	ordered_nodes = true; // the node list was rebuilt depth-first
+	orderedNodes = true; // the node list was rebuilt depth-first
 }
 
 TEMPLATED Float BVH<Float, Index>::TriArea( const Index triIdx ) const
@@ -3735,7 +3735,7 @@ TEMPLATED Float BVH<Float, Index>::EPOCost( const Index nodeIdx, uint32_t ) cons
 
 TEMPLATED void BVH<Float, Index>::SplitLeafs( const Index maxPrims )
 {
-	if (!ordered_nodes) Compact(); // the reachability sweep below requires children to follow their parents
+	if (!orderedNodes) Compact(); // the reachability sweep below requires children to follow their parents
 	const Index origNodes = newNodePtr;
 	if (origNodes == 0) { usedNodes = 0; return; }
 	uint8_t* reachable = (uint8_t*)AlignedAlloc( (size_t)origNodes );
@@ -3767,14 +3767,14 @@ TEMPLATED void BVH<Float, Index>::SplitLeafs( const Index maxPrims )
 TEMPLATED Float BVH<Float, Index>::SplitPriority( const Fragment& f ) const
 {
 	auto fastCbrt = []( float x )
-	{
-		uint32_t i;
-		memcpy( &i, &x, sizeof( i ) );
-		i = 0x2A51067Fu + i / 3u;
-		Float y = tinybvh_as_float( i );
-		y = (2.0f * y + x / (y * y)) * (1.0f / 3.0f); // refine with Newton-Raphson iterations.
-		return y;
-	};
+		{
+			uint32_t i;
+			memcpy( &i, &x, sizeof( i ) );
+			i = 0x2A51067Fu + i / 3u;
+			Float y = tinybvh_as_float( i );
+			y = (2.0f * y + x / (y * y)) * (1.0f / 3.0f); // refine with Newton-Raphson iterations.
+			return y;
+		};
 	const Vec3 extent = f.bmax - f.bmin;
 	const Float extentPrio = tinybvh_sqrf( extent[tinybvh_maxdim( extent )] );
 	const Float boxArea = tinybvh_halfarea( extent );
@@ -3902,10 +3902,10 @@ TEMPLATED void BVH<Float, Index>::Refit( const Index /* unused */ )
 {
 	BVH_FATAL_ERROR_IF( !refittable, "BVH::Refit( .. ), refitting an SBVH or pre-splitted BVH." );
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::Refit( .. ), bvhNode == 0." );
-	BVH_FATAL_ERROR_IF( may_have_holes, "BVH::Refit( .. ), bvh may have holes." );
+	BVH_FATAL_ERROR_IF( hasHoles, "BVH::Refit( .. ), bvh may have holes." );
 	BVH_FATAL_ERROR_IF( isTLAS(), "BVH::Refit( .. ), do not refit a TLAS, use Build(..)." );
 	BVH_FATAL_ERROR_IF( !verts, "BVH::Refit( .. ), bvh has no vertex data." );
-	if (!ordered_nodes) Compact(); // the backward sweep below requires children to follow their parents
+	if (!orderedNodes) Compact(); // the backward sweep below requires children to follow their parents
 	for (int64_t i = (int64_t)usedNodes - 1; i >= 0; i--) if (i != 1)
 	{
 		BVHNode& node = bvhNode[i];
@@ -3945,7 +3945,7 @@ TEMPLATED void BVH<Float, Index>::Refit( const Index /* unused */ )
 TEMPLATED Index BVH<Float, Index>::CombineLeafs( const Index primCount, Index& firstIdx, Index nodeIdx )
 {
 	// merging two leaves requires the primitives of each subtree to be contiguous in primIdx.
-	if (!ordered_nodes)
+	if (!orderedNodes)
 	{
 		BVH_FATAL_ERROR_IF( nodeIdx != 0, "BVH::CombineLeafs( .. ), nodes are not ordered; call Compact() first." );
 		Compact();
@@ -4385,7 +4385,7 @@ TEMPLATED Index BVH<Float, Index>::LeafCount() const
 TEMPLATED void BVH<Float, Index>::Compact()
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::Compact(), bvhNode == 0." );
-	ordered_nodes = true; // depth-first, below; a single leaf is ordered too.
+	orderedNodes = true; // depth-first, below; a single leaf is ordered too.
 	if (bvhNode[0].isLeaf()) return; // nothing to compact.
 	BVHNode* tmpNodes = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * allocatedNodes /* do *not* trim */ );
 	// don't trim primIdx either: a rebuild that fits allocatedNodes reuses it (see BVH::fragment).
@@ -4512,7 +4512,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::Refit( const Index nodeIdx, bool skipL
 {
 	BVH_FATAL_ERROR_IF( !refittable && !skipLeafs, "BVH_Verbose::Refit( .. ), refitting an SBVH." );
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH_Verbose::Refit( .. ), bvhNode == 0." );
-	BVH_FATAL_ERROR_IF( bvh_over_indices && !skipLeafs, "BVH_Verbose::Refit( .. ), bvh used indexed tris." );
+	BVH_FATAL_ERROR_IF( bvhOverIndices && !skipLeafs, "BVH_Verbose::Refit( .. ), bvh used indexed tris." );
 	BVHNode& node = bvhNode[nodeIdx];
 	if (node.isLeaf()) // leaf: adjust to current triangle vertex positions
 	{
@@ -4600,7 +4600,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::Compact()
 	usedNodes = newNodePtr;
 	AlignedFree( bvhNode );
 	bvhNode = tmp;
-	may_have_holes = false; // the relocated node list is contiguous again.
+	hasHoles = false; // the relocated node list is contiguous again.
 }
 
 TEMPLATED void BVH_Verbose<Float, Index>::SortIndices()
@@ -4632,7 +4632,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::SortIndices()
 TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, const bool extreme, bool stochastic )
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH_Verbose::Optimize( .. ), bvhNode == 0." );
-	BVH_FATAL_ERROR_IF( may_have_holes, "BVH_Verbose::Optimize( .. ), bvh may have holes; Compact() first." );
+	BVH_FATAL_ERROR_IF( hasHoles, "BVH_Verbose::Optimize( .. ), bvh may have holes; Compact() first." );
 	if (iterations == 0 || usedNodes < 6 || bvhNode[0].isLeaf()) return;
 	// working memory, allocated once.
 	SortItem* sortList = (SortItem*)AlignedAlloc( usedNodes * sizeof( SortItem ) );
@@ -4884,7 +4884,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::MergeLeafs()
 	memcpy( primIdx, newIdx, newIdxPtr * sizeof( Index ) );
 	AlignedFree( newIdx );
 	AlignedFree( subtreeTriCount );
-	may_have_holes = true; // all over the place, in fact
+	hasHoles = true; // all over the place, in fact
 }
 
 // BVH_GPU implementation
@@ -4986,7 +4986,7 @@ TEMPLATED void BVH_GPU<Float, Index>::ConvertFrom( const BVH& original, bool com
 		allocatedNodes = spaceNeeded;
 	}
 	memset( bvhNode, 0, sizeof( BVHNode ) * spaceNeeded );
-	this->may_have_holes = false;
+	this->hasHoles = false;
 	// a bvh consisting of a single leaf: traversal always starts at an interior
 	// node, so wrap the leaf in one. The second child is an empty leaf, which is
 	// harmless to 'hit' - it intersects nothing and pops immediately.
@@ -5032,7 +5032,7 @@ TEMPLATED void BVH_GPU<Float, Index>::ConvertFrom( const BVH& original, bool com
 	// conversion; this object owns it.
 	AlignedFree( (void*)orderedVerts.data );
 	orderedVerts = Slice( nullptr, 0, 0 );
-	if (bvh_over_aabbs) return; // skip for TLAS builds.
+	if (bvhOverAabbs) return; // skip for TLAS builds.
 	bvhvec4* vertexData = (bvhvec4*)AlignedAlloc( sizeof( bvhvec4 ) * 3 * idxCount );
 	orderedVerts = Slice( vertexData, 3 * idxCount );
 	for (Index i = 0; i < idxCount; i++)
@@ -5169,7 +5169,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::Optimize( const uint32_t iterations, boo
 TEMPLATED_M Index MBVH<M, Float, Index>::LeafCount( const Index nodeIdx ) const
 {
 	BVH_FATAL_ERROR_IF( mbvhNode == 0, "MBVH::LeafCount( .. ), mbvhNode == 0." );
-	if (nodeIdx == 0 && !may_have_holes)
+	if (nodeIdx == 0 && !hasHoles)
 	{
 		Index count = 0;
 		for (Index i = 0; i < usedNodes; i++)
@@ -5207,7 +5207,7 @@ TEMPLATED_M Index MBVH<M, Float, Index>::LeafCount( const Index nodeIdx ) const
 TEMPLATED_M void MBVH<M, Float, Index>::Refit( const Index /* unused */ )
 {
 	BVH_FATAL_ERROR_IF( mbvhNode == 0, "MBVH::Refit( .. ), mbvhNode == 0." );
-	BVH_FATAL_ERROR_IF( may_have_holes, "MBVH::Refit( .. ), mbvh may have holes." );
+	BVH_FATAL_ERROR_IF( hasHoles, "MBVH::Refit( .. ), mbvh may have holes." );
 	BVH_FATAL_ERROR_IF( !bvh.verts, "MBVH::Refit( .. ), mbvh has no vertex data." );
 	for (Index i = usedNodes; i-- > 0; )
 	{
@@ -5254,7 +5254,7 @@ TEMPLATED_M Float MBVH<M, Float, Index>::SAHCost( const Index nodeIdx ) const
 {
 	BVH_FATAL_ERROR_IF( mbvhNode == 0, "MBVH::SAHCost( .. ), mbvhNode == 0." );
 	double cost = 0;
-	if (nodeIdx == 0 && !may_have_holes) // flat scan if done for root node.
+	if (nodeIdx == 0 && !hasHoles) // flat scan if done for root node.
 	{
 		for (Index i = 0; i < usedNodes; i++)
 		{
@@ -5361,7 +5361,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 {
 	// the collapse sweeps the nodes in index order, which requires children to follow their parents.
 	// Compact reorders the node list of the original in place; it keeps the tree it describes.
-	if (!original.ordered_nodes) original.Compact();
+	if (!original.orderedNodes) original.Compact();
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
 	bvh.ReferenceFrom( original );
@@ -5387,7 +5387,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 		root.aabbMax = leaf.aabbMax = original.bvhNode[0].aabbMax;
 		leaf.firstTri = original.bvhNode[0].leftFirst, leaf.triCount = original.bvhNode[0].triCount;
 		root.child[0] = 1, root.childCount = 1, root.triCount = 0;
-		usedNodes = 2, this->may_have_holes = false;
+		usedNodes = 2, this->hasHoles = false;
 		return;
 	}
 	// scratch data for the collapse
@@ -5513,7 +5513,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 	// finalize
 	AlignedFree( dist ), AlignedFree( subFirst );
 	AlignedFree( subCount ), AlignedFree( srcNode ), AlignedFree( flag );
-	this->may_have_holes = false; // the collapse produces a continuous list of nodes.
+	this->hasHoles = false; // the collapse produces a continuous list of nodes.
 }
 
 // BVH4_GPU implementation
@@ -6177,7 +6177,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& origi
 	if (&original != &bvh4) ownBVH4 = false; // bvh isn't ours; don't delete in destructor.
 	bvh4.ReferenceFrom( original );
 	const bool discard = settings.discardIntermediates && ownBVH4;
-	bvh4.l_quads = l_quads, bvh4.c_int = c_int, bvh4.c_trav = c_trav;
+	bvh4.lQuads = lQuads, bvh4.c_int = c_int, bvh4.c_trav = c_trav;
 	bvh4.ConvertForCPULayout( leavesMerged );
 	// from here on only bvh4.bvh.primIdx is read; the binary nodes can go.
 	if (discard && bvh4.ownBVH) AlignedFree( bvh4.bvh.bvhNode ), bvh4.bvh.bvhNode = 0;
@@ -6339,7 +6339,7 @@ TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& origi
 	if (&original != &bvh8) ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
 	bvh8.ReferenceFrom( original );
 	const bool discard = settings.discardIntermediates && ownBVH8;
-	bvh8.l_quads = l_quads, bvh8.c_int = c_int, bvh8.c_trav = c_trav;
+	bvh8.lQuads = lQuads, bvh8.c_int = c_int, bvh8.c_trav = c_trav;
 	bvh8.ConvertForCPULayout( leavesMerged );
 	if (discard && bvh8.ownBVH) AlignedFree( bvh8.bvh.bvhNode ), bvh8.bvh.bvhNode = 0;
 	// allocate if needed - leaves are stored only as leaf blocks: they get no node record.
@@ -6845,7 +6845,7 @@ TEMPLATED void BVH<Float, Index>::BuildSIMD( const Slice& v, const Index* i, con
 	PrepareSIMDBuild( v, i, p );
 	if (!settings.binnedBVH) BuildBonsai(); else BuildSIMDSubtree( 0u, 0u );
 	BuildSIMDFinalize();
-	ordered_nodes = settings.binnedBVH; // the Bonsai top tree refers back to cell roots with lower indices
+	orderedNodes = settings.binnedBVH; // the Bonsai top tree refers back to cell roots with lower indices
 }
 
 // Bonsai builder: "Bonsai: Rapid Bounding Volume Hierarchy Generation using Mini Trees",
@@ -7366,7 +7366,7 @@ TEMPLATED void BVH<Float, Index>::BuildBonsaiHQ( const Slice& vertices, const In
 	BuildSIMDFinalize();
 	// leaves now hold fragment indices; replace them by primitive indices.
 	run( [&]( uint32_t s ) { for (Index i = lo( s, F ), last = lo( s + 1, F ); i < last; i++) primIdx[i] = fragment[primIdx[i]].primIdx; } );
-	triCount = N, idxCount = F, refittable = false, ordered_nodes = false; // as BuildBonsai
+	triCount = N, idxCount = F, refittable = false, orderedNodes = false; // as BuildBonsai
 }
 
 // H-PLOC builder: "H-PLOC: Hierarchical Parallel Locally-Ordered Clustering for Bounding Volume
@@ -7475,7 +7475,7 @@ TEMPLATED void BVH<Float, Index>::BuildHPLOC()
 		stackPtr += 4, newNodePtr += 2;
 	}
 	usedNodes = newNodePtr, aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
-	refittable = !settings.usePresplitting, may_have_holes = false, ordered_nodes = true, bvh_over_aabbs = false, threadedBuild = false;
+	refittable = !settings.usePresplitting, hasHoles = false, orderedNodes = true, bvhOverAabbs = false, threadedBuild = false;
 	AlignedFree( tree ), AlignedFree( key ), AlignedFree( delta ), AlignedFree( cluster );
 }
 
@@ -8661,14 +8661,14 @@ public:
 		#elif defined __linux__
 			// linux-specific thread setup; the name is capped at 15 chars plus a zero,
 			// and pthread_setname_np fails outright if it does not fit, so bound the id.
-			char thread_name[16];
-			snprintf( thread_name, sizeof( thread_name ), "tinybvh_%u", threadID % 10000000u );
-			pthread_setname_np( handle, thread_name );
+			char threadName[16];
+			snprintf( threadName, sizeof( threadName ), "tinybvh_%u", threadID % 10000000u );
+			pthread_setname_np( handle, threadName );
 		#elif defined __FreeBSD__
 			// freebsd names threads through a differently spelled function.
-			char thread_name[16];
-			snprintf( thread_name, sizeof( thread_name ), "tinybvh_%u", threadID % 10000000u );
-			pthread_set_name_np( handle, thread_name );
+			char threadName[16];
+			snprintf( threadName, sizeof( threadName ), "tinybvh_%u", threadID % 10000000u );
+			pthread_set_name_np( handle, threadName );
 		#endif
 		}
 	}
@@ -8742,15 +8742,15 @@ static void tinybvh_spawn_task( void* blob )
 	e->fn( (uint8_t*)blob + sizeof( BVHSpawnEnvelope ) );
 	tinybvh_tl_group = prev;
 }
-void tinybvh_builtin_spawn( void (*fn)(void*), const void* payload, uint32_t payload_size, void* )
+void tinybvh_builtin_spawn( void (*fn)(void*), const void* payload, uint32_t payloadSize, void* )
 {
 	JobSystem::JobGroup& group = tinybvh_build_group();
 	alignas(16) uint8_t blob[JobSystem::JOB_PAYLOAD_MAX];
 	BVHSpawnEnvelope* e = (BVHSpawnEnvelope*)blob;
 	e->group = &group, e->fn = fn;
-	memcpy( blob + sizeof( BVHSpawnEnvelope ), payload, payload_size );
+	memcpy( blob + sizeof( BVHSpawnEnvelope ), payload, payloadSize );
 	// recursive work: keep it on this thread's own queue.
-	tinybvh_pool().Execute( group, &tinybvh_spawn_task, blob, sizeof( BVHSpawnEnvelope ) + payload_size, true );
+	tinybvh_pool().Execute( group, &tinybvh_spawn_task, blob, sizeof( BVHSpawnEnvelope ) + payloadSize, true );
 }
 
 void tinybvh_builtin_barrier( void* ) { tinybvh_pool().Wait( tinybvh_build_group() ); }
@@ -8780,4 +8780,4 @@ void tinybvh_builtin_parallel_for( uint32_t n, void (*fn)(uint32_t, void*), void
 } // namespace tinybvh
 
 #endif // TINY_BVH_BASE_H_IMPL
-#endif // TINYBVH_IMPLEMENTATION
+#endif // TINYBVH_IMPLEMENTATION

@@ -1,4 +1,4 @@
-﻿// tiny_bvh_arm_float.h: NEON specializations for the single precision layouts.
+// tiny_bvh_arm_float.h: NEON specializations for the single precision layouts.
 // Included by tiny_bvh.h; do not include directly.
 
 #ifndef TINY_BVH_H_
@@ -240,7 +240,7 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	// finalize root node
 	root.leftFirst = 0, root.triCount = idxCount = triCount = fragCount;
 	// reset node pool
-	bvh_over_indices = indices != nullptr;
+	bvhOverIndices = indices != nullptr;
 	// all set; actual build happens in BVH::BuildSIMDSubtree.
 }
 
@@ -437,7 +437,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize()
 	// tree has been built.
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 	refittable = !SIMDPresplit(); // only if not using spatial splits
-	may_have_holes = false, ordered_nodes = true; // there are no holes in the list of nodes.
+	hasHoles = false, orderedNodes = true; // there are no holes in the list of nodes.
 	usedNodes = newNodePtr;
 	if (SIMDPresplit()) // finalize indices in index array
 	{
@@ -553,10 +553,10 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant(
 		const float32x4_t qz4 = vfmsq_f32( vmulq_f32( sx4, vld1q_f32( leaf->e1y ) ), sy4, vld1q_f32( leaf->e1x ) );
 		const float32x4_t qx4 = vfmsq_f32( vmulq_f32( sy4, vld1q_f32( leaf->e1z ) ), sz4, vld1q_f32( leaf->e1y ) );
 		const float32x4_t qy4 = vfmsq_f32( vmulq_f32( sz4, vld1q_f32( leaf->e1x ) ), sx4, vld1q_f32( leaf->e1z ) );
-		const float32x4_t inv_det4 = vdivq_f32( one4, det4 );
-		const float32x4_t u4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( sy4, hy4 ), sx4, hx4 ), sz4, hz4 ), inv_det4 );
-		const float32x4_t v4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( dy4, qy4 ), dx4, qx4 ), dz4, qz4 ), inv_det4 );
-		const float32x4_t ta4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( vld1q_f32( leaf->e2y ), qy4 ), vld1q_f32( leaf->e2x ), qx4 ), vld1q_f32( leaf->e2z ), qz4 ), inv_det4 );
+		const float32x4_t invDet4 = vdivq_f32( one4, det4 );
+		const float32x4_t u4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( sy4, hy4 ), sx4, hx4 ), sz4, hz4 ), invDet4 );
+		const float32x4_t v4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( dy4, qy4 ), dx4, qx4 ), dz4, qz4 ), invDet4 );
+		const float32x4_t ta4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( vld1q_f32( leaf->e2y ), qy4 ), vld1q_f32( leaf->e2x ), qx4 ), vld1q_f32( leaf->e2z ), qz4 ), invDet4 );
 		const uint32x4_t mask1 = vandq_u32( vcgeq_f32( u4, zero4 ), vcgeq_f32( v4, zero4 ) );
 		const uint32x4_t mask2 = vcleq_f32( vaddq_f32( u4, v4 ), one4 );
 		const uint32x4_t mask3 = vandq_u32( vcltq_f32( ta4, t4 ), vcgtq_f32( ta4, zero4 ) );
@@ -676,10 +676,10 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 		const float32x4_t qz4 = vfmsq_f32( vmulq_f32( sx4, vld1q_f32( leaf->e1y ) ), sy4, vld1q_f32( leaf->e1x ) );
 		const float32x4_t qx4 = vfmsq_f32( vmulq_f32( sy4, vld1q_f32( leaf->e1z ) ), sz4, vld1q_f32( leaf->e1y ) );
 		const float32x4_t qy4 = vfmsq_f32( vmulq_f32( sz4, vld1q_f32( leaf->e1x ) ), sx4, vld1q_f32( leaf->e1z ) );
-		const float32x4_t inv_det4 = vdivq_f32( one4, det4 );
-		const float32x4_t u4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( sy4, hy4 ), sx4, hx4 ), sz4, hz4 ), inv_det4 );
-		const float32x4_t v4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( dy4, qy4 ), dx4, qx4 ), dz4, qz4 ), inv_det4 );
-		const float32x4_t ta4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( vld1q_f32( leaf->e2y ), qy4 ), vld1q_f32( leaf->e2x ), qx4 ), vld1q_f32( leaf->e2z ), qz4 ), inv_det4 );
+		const float32x4_t invDet4 = vdivq_f32( one4, det4 );
+		const float32x4_t u4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( sy4, hy4 ), sx4, hx4 ), sz4, hz4 ), invDet4 );
+		const float32x4_t v4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( dy4, qy4 ), dx4, qx4 ), dz4, qz4 ), invDet4 );
+		const float32x4_t ta4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( vld1q_f32( leaf->e2y ), qy4 ), vld1q_f32( leaf->e2x ), qx4 ), vld1q_f32( leaf->e2z ), qz4 ), invDet4 );
 		const uint32x4_t mask1 = vandq_u32( vcgeq_f32( u4, zero4 ), vcgeq_f32( v4, zero4 ) );
 		const uint32x4_t mask2 = vcleq_f32( vaddq_f32( u4, v4 ), one4 );
 		const uint32x4_t mask3 = vandq_u32( vcltq_f32( ta4, t4 ), vcgtq_f32( ta4, zero4 ) );
@@ -715,4 +715,4 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 } // namespace tinybvh
 
 #endif // TINY_BVH_ARM_FLOAT_H_IMPL
-#endif // TINYBVH_IMPLEMENTATION
+#endif // TINYBVH_IMPLEMENTATION
