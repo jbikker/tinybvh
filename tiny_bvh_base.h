@@ -2326,7 +2326,7 @@ TEMPLATED void BVH<Float, Index>::Build( const Slice& vertices, const Index* ind
 	df.write( (char*)vertices.data, vertices.stride * vertices.count );
 	if (indexed) df.write( (char*)indices, pcount * 3 * sizeof( Index ) );
 #endif
-	const bool simd = BVHSIMDBuilders<Float, Index>::available && settings.useSIMDifavailable;
+	const bool simd = BVHSIMDBuilders<Float, Index>::available&& settings.useSIMDifavailable;
 	// special builders: full-sweep, H-PLOC.
 	if (settings.useFullSweep) PrepareBuild( vertices, indices, prims ), BuildFullSweep();
 	else if (settings.useHPLOC) PrepareBuild( vertices, indices, prims ), BuildHPLOC();
@@ -2755,7 +2755,9 @@ TEMPLATED void BVH<Float, Index>::BuildFullSweep( Index nodeIdx, uint32_t depth 
 		for (Index i = 0; i < triCount; i++) for (int a = 0; a < 3; a++)
 		{
 			const Float t = (fragment[i].bmin[a] + fragment[i].bmax[a] - keyBias[a]) * keyScale[a];
-			sortKey[a][i] = (uint32_t)tinybvh_clamp( t, (Float)0, (Float)0xffffffffu );
+			// note: 0xffffffff is not representable in float and rounds up to 2^32, which does
+			// not survive the cast; 0xffffff00 is exact and leaves the ordering intact.
+			sortKey[a][i] = (uint32_t)tinybvh_clamp( t, (Float)0, (Float)0xffffff00u );
 		}
 		// allocate data for O(N) stable partition
 		flag = (uint8_t*)AlignedAlloc( triCount );
@@ -3816,13 +3818,12 @@ TEMPLATED Index BVH<Float, Index>::Presplit()
 		const Vec3 extent = f.bmax - f.bmin;
 		const uint32_t splitAxis = tinybvh_maxdim( extent );
 		if (!(extent[splitAxis] > 0)) { splits[i] = 1; continue; }
-		Float nodeSize = GetNodeSize( extent[splitAxis], rootExtent[splitAxis] );
-		if (nodeSize > extent[splitAxis] * 0.9999f) nodeSize *= 0.5f;
+		const Float nodeSize = GetNodeSize( extent[splitAxis], rootExtent[splitAxis] );
 		// snap mid position to nearest split plane
 		const Float midPos = (f.bmin[splitAxis] + f.bmax[splitAxis]) * 0.5f;
 		const Float index = tinybvh_round( (midPos - root.aabbMin[splitAxis]) / nodeSize );
-		Float splitPos = root.aabbMin[splitAxis] + index * nodeSize;
-		if (!(splitPos > f.bmin[splitAxis] && splitPos < f.bmax[splitAxis])) splitPos = midPos;
+		const Float splitPos = root.aabbMin[splitAxis] + index * nodeSize;
+		if (!(splitPos > f.bmin[splitAxis] && splitPos < f.bmax[splitAxis])) { splits[i] = 1; continue; }
 		if (SplitFrag( fragment[i], part1, part2, splitAxis, splitPos ) != 3) { splits[i] = 1; continue; }
 		fragment[i] = part1, fragment[fragCount] = part2;
 		// distribute available splits over part1 and part2
@@ -4764,27 +4765,16 @@ TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, c
 //
 // ============================================================================
 
-// OptimizeEx takes a finished BVH - intended for Bonsai with spatial splits - and spends
-// an unbounded amount of time reducing its SAH cost. It runs five stages in a loop:
+// OptimizeEx takes a BVH and reduces its SAH cost, in a looped five-stage process:
 //
-//   0. explode: every leaf is broken down to one reference per leaf, so that no later
-//      stage has a multi-reference leaf as an immovable atom. Raises SAH on purpose;
-//      stage 4 gets it back.
-//   1. reinsertion: BVH_Verbose::Optimize in 'extreme' mode, unchanged.
+//   0. explode: split leafs to single-primitive leaf nodes.
+//   1. reinsertion: the existing BVH_Verbose::Optimize in 'extreme' mode.
 //   2. treelet restructuring: bottom-up exact DP over the topology of n treelet leaves.
-//      Fixes what reinsertion structurally cannot: local topology.
-//   3. subtree rebuild: the worst subtrees are rebuilt from scratch, best of k seeded
-//      attempts. The only stage that can undo a bad split near the top of a region.
-//   4. unsplitting: spatial split references that stopped paying for themselves once
-//      the topology moved are merged back.
-//   5. leaf collapse: an exact bottom-up DP over the final topology, once, at the end.
-//
-// Stages 1-4 only ever accept a change that lowers the cost, so the tree never degrades.
+//   3. subtree rebuild: the worst subtrees are rebuilt from scratch.
+//   4. unsplitting: unneeded spatial split references are merged back.
+//   5. leaf collapse: combine leaves into larger leaves. Done once at the end.
 
-// ClipRefToBox: bounds of primitive 'prim' clipped to [bmin, bmax]. A finished spatial-split
-// build has remapped primIdx to primitive indices and its fragment array no longer applies,
-// so the per-reference bounds every stage needs are recovered from the leaf that holds them.
-// The result contains the original fragment: fragment <= primitive, and fragment <= leaf box.
+// ClipRefToBox: bounds of primitive 'prim' clipped to [bmin, bmax].
 TEMPLATED void BVH<Float, Index>::ClipRefToBox( const Index prim, const Vec3& bmin, const Vec3& bmax, Fragment& out ) const
 {
 	Fragment cur, a, b;
@@ -4847,8 +4837,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptExRefitUp( Index nodeIdx )
 	}
 }
 
-// OptExComputeCosts: subtree cost and reference count for every node, plus a pre-order list
-// of the interior nodes. Walking that list backwards visits children before their parents.
+// OptExComputeCosts: subtree cost and refcount per node, plus a pre-order list of the interior nodes.
 TEMPLATED void BVH_Verbose<Float, Index>::OptExComputeCosts( OptExState& st )
 {
 	st.orderCount = 0;
@@ -4878,10 +4867,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptExComputeCosts( OptExState& st )
 	}
 }
 
-// OptExSweepSplit: exact SAH sweep over all three axes for a set of child nodes, partitioned
-// in place. 'jitter' scales each axis' score by a hashed factor: the candidate set stays the
-// same and the decision stays cost-driven, so repeated attempts sample a plateau rather than
-// drift off it. jitter 0 is the plain greedy choice.
+// OptExSweepSplit: exact SAH sweep over all three axes for a set of child nodes, partitioned in place.
 TEMPLATED Index BVH_Verbose<Float, Index>::OptExSweepSplit( Index* leaf, const Index count,
 	const Float jitter, uint32_t& seed, OptExState& st )
 {
@@ -4930,8 +4916,7 @@ TEMPLATED Index BVH_Verbose<Float, Index>::OptExSweepSplit( Index* leaf, const I
 }
 
 // OptExBuildTopology: build a subtree over 'count' existing nodes, consuming interior node
-// slots from 'slots'. Returns the subtree root and accumulates the interior cost it creates;
-// the leaves' own cost is invariant, so that accumulator is all a comparison needs.
+// slots from 'slots'. Returns the subtree root and accumulates the interior cost it creates.
 TEMPLATED Index BVH_Verbose<Float, Index>::OptExBuildTopology( Index* leaf, const Index count,
 	Index* slots, Index& slotPtr, const Index parent, const Float jitter, uint32_t& seed,
 	Float& interiorCost, OptExState& st )
@@ -4951,8 +4936,7 @@ TEMPLATED Index BVH_Verbose<Float, Index>::OptExBuildTopology( Index* leaf, cons
 	return self;
 }
 
-// OptExExplode: one reference per leaf. Multi-reference leaves become small subtrees over the
-// recovered reference bounds; single-reference leaves just take their reference's (tighter) box.
+// OptExExplode: one reference per leaf.
 TEMPLATED void BVH_Verbose<Float, Index>::OptExExplode( const Fragment* refBox, OptExState& st )
 {
 	const Index origNodes = usedNodes;
@@ -4990,10 +4974,8 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptExExplode( const Fragment* refBox, 
 	Refit( 0, true );
 }
 
-// OptExTreelet: form a treelet of up to maxL leaves below 'nodeIdx' by repeatedly opening up
-// the treelet leaf with the largest surface area, then solve its optimal binary topology by
-// exact DP over all 2^maxL subsets. The current topology is one of the candidates, so the
-// result is never worse. Reuses the treelet's own interior slots: no allocation, no holes.
+// OptExTreelet: form a treelet below 'nodeIdx' by repeatedly opening up the treelet leaf with
+// the largest SA, then solve its optimal topology by exact DP over all 2^maxL subsets.
 TEMPLATED bool BVH_Verbose<Float, Index>::OptExTreelet( const Index nodeIdx, const uint32_t maxL, const bool epoCheck, OptExState& st )
 {
 	BVHNode& root = bvhNode[nodeIdx];
@@ -5019,12 +5001,8 @@ TEMPLATED bool BVH_Verbose<Float, Index>::OptExTreelet( const Index nodeIdx, con
 	Float* cost = st.tCost;
 	uint32_t* part = st.tPart;
 	Vec3* tMin = st.tMin, * tMax = st.tMax;
-	// Near the root a single node's box covers much of the scene, and the SAH-optimal topology
-	// can give away more EPO than it wins. For those nodes the DP is re-run under a few sibling
-	// overlap weights - useless as a global objective, but a cheap generator of topologies that
-	// differ in the way EPO cares about - and the alternatives are measured exactly. Only the
-	// treelet's own interior nodes change, so each measurement is 2(L-1) clipping traversals and
-	// nothing outside the treelet needs visiting.
+	// Near the root node boxes are large, and the SAH-optimal topology can effect EPO
+	// substantially. Here we rerun the DP under a few sibling overlap weights.
 	static const Float epoWeight[4] = { Float( 0 ), Float( 0.25 ), Float( 0.75 ), Float( 2 ) };
 	const uint32_t candidates = epoCheck ? tinybvh_min( st.epoCandidates, 4u ) : 1u;
 	BVHNode bckInterior[MAX_TREELET_SIZE], bestInterior[MAX_TREELET_SIZE];
@@ -5040,21 +5018,21 @@ TEMPLATED bool BVH_Verbose<Float, Index>::OptExTreelet( const Index nodeIdx, con
 	for (uint32_t cand = 0; cand < candidates; cand++)
 	{
 		const Float w = epoCheck ? epoWeight[cand] : st.epoProxy;
-	for (uint32_t S = 1; S <= full; S++)
-	{
-		if (tinybvh_popc( S ) == 1)
+		for (uint32_t S = 1; S <= full; S++)
 		{
-			const Index n = leaf[tinybvh_ctz( S )];
-			tMin[S] = bvhNode[n].aabbMin, tMax[S] = bvhNode[n].aabbMax, cost[S] = st.subCost[n];
-			continue;
-		}
-		const uint32_t low = S & (uint32_t)(-(int32_t)S), rest = S ^ low;
-		tMin[S] = tinybvh_min( tMin[low], tMin[rest] ), tMax[S] = tinybvh_max( tMax[low], tMax[rest] );
-		Float best = bvh_far<Float>;
-		uint32_t bestP = 0;
-		for (uint32_t P = (S - 1) & S; P; P = (P - 1) & S)
-		{
-			if (P < (S ^ P)) continue; // each unordered partition once
+			if (tinybvh_popc( S ) == 1)
+			{
+				const Index n = leaf[tinybvh_ctz( S )];
+				tMin[S] = bvhNode[n].aabbMin, tMax[S] = bvhNode[n].aabbMax, cost[S] = st.subCost[n];
+				continue;
+			}
+			const uint32_t low = S & (uint32_t)(-(int32_t)S), rest = S ^ low;
+			tMin[S] = tinybvh_min( tMin[low], tMin[rest] ), tMax[S] = tinybvh_max( tMax[low], tMax[rest] );
+			Float best = bvh_far<Float>;
+			uint32_t bestP = 0;
+			for (uint32_t P = (S - 1) & S; P; P = (P - 1) & S)
+			{
+				if (P < (S ^ P)) continue; // each unordered partition once
 				Float c = cost[P] + cost[S ^ P];
 				if (w > 0)
 				{
@@ -5063,37 +5041,37 @@ TEMPLATED bool BVH_Verbose<Float, Index>::OptExTreelet( const Index nodeIdx, con
 					const Vec3 e = omax - omin;
 					if (e.x >= 0 && e.y >= 0 && e.z >= 0) c += w * SA( omin, omax );
 				}
-			if (c < best) best = c, bestP = P;
+				if (c < best) best = c, bestP = P;
+			}
+			cost[S] = best + c_trav * SA( tMin[S], tMax[S] ), part[S] = bestP;
 		}
-		cost[S] = best + c_trav * SA( tMin[S], tMax[S] ), part[S] = bestP;
-	}
 		// without the exact test the DP must beat the current topology on its own terms.
 		if (!epoCheck && !(cost[full] < st.subCost[nodeIdx])) return false;
-	// write the winning topology back, root first so it lands in 'nodeIdx'.
+		// write the winning topology back, root first so it lands in 'nodeIdx'.
 		const Index rootParent = bvhNode[nodeIdx].parent;
-	uint32_t slotPtr = 0, depth = 0;
-	struct Item { uint32_t set; Index slot, parent; } todo[2 * MAX_TREELET_SIZE];
-	todo[depth].set = full, todo[depth].slot = interior[slotPtr++], todo[depth].parent = rootParent, depth++;
-	while (depth)
-	{
-		const Item it = todo[--depth];
-		const uint32_t P = part[it.set], Q = it.set ^ P;
-		Index child[2];
-		const uint32_t sub[2] = { P, Q };
-		for (uint32_t k = 0; k < 2; k++)
+		uint32_t slotPtr = 0, depth = 0;
+		struct Item { uint32_t set; Index slot, parent; } todo[2 * MAX_TREELET_SIZE];
+		todo[depth].set = full, todo[depth].slot = interior[slotPtr++], todo[depth].parent = rootParent, depth++;
+		while (depth)
 		{
-			if (tinybvh_popc( sub[k] ) == 1) { child[k] = leaf[tinybvh_ctz( sub[k] )], bvhNode[child[k]].parent = it.slot; }
-			else
+			const Item it = todo[--depth];
+			const uint32_t P = part[it.set], Q = it.set ^ P;
+			Index child[2];
+			const uint32_t sub[2] = { P, Q };
+			for (uint32_t k = 0; k < 2; k++)
 			{
-				child[k] = interior[slotPtr++];
-				todo[depth].set = sub[k], todo[depth].slot = child[k], todo[depth].parent = it.slot, depth++;
+				if (tinybvh_popc( sub[k] ) == 1) { child[k] = leaf[tinybvh_ctz( sub[k] )], bvhNode[child[k]].parent = it.slot; }
+				else
+				{
+					child[k] = interior[slotPtr++];
+					todo[depth].set = sub[k], todo[depth].slot = child[k], todo[depth].parent = it.slot, depth++;
+				}
 			}
+			BVHNode& n = bvhNode[it.slot];
+			n.left = child[0], n.right = child[1], n.triCount = 0, n.firstTri = 0, n.parent = it.parent;
+			n.aabbMin = tMin[it.set], n.aabbMax = tMax[it.set];
+			st.subCost[it.slot] = cost[it.set], st.refCount[it.slot] = 0;
 		}
-		BVHNode& n = bvhNode[it.slot];
-		n.left = child[0], n.right = child[1], n.triCount = 0, n.firstTri = 0, n.parent = it.parent;
-		n.aabbMin = tMin[it.set], n.aabbMax = tMax[it.set];
-		st.subCost[it.slot] = cost[it.set], st.refCount[it.slot] = 0;
-	}
 		if (!epoCheck) break; // the SAH winner is the only candidate; keep it
 		const Float local = OptExLocalEPO( interior, I, st.vertIdx, st.primArea, st.rootArea );
 		if (local < bestEPO)
@@ -5146,9 +5124,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptExTreeletSweep( const OptimizeExSet
 	Refit( 0, true );
 }
 
-// OptExRebuildSubtrees: rebuild the subtrees that carry the most cost from scratch. The root
-// box of a subtree is the union of its references and cannot change, so a rebuild is a purely
-// local move: nothing above it is touched, and the comparison is exact.
+// OptExRebuildSubtrees: rebuild the subtrees that carry the most cost from scratch.
 TEMPLATED void BVH_Verbose<Float, Index>::OptExRebuildSubtrees( const OptimizeExSettings& s, OptExState& st )
 {
 	OptExComputeCosts( st );
@@ -5237,10 +5213,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptExRebuildSubtrees( const OptimizeEx
 }
 
 // OptExUnsplit: a primitive that a spatial split duplicated may no longer be worth duplicating
-// once the topology around it has moved. Merging two of its references deletes one leaf and its
-// parent, and grows the survivor to the union; both sides of that trade are evaluated exactly
-// along the paths they touch. Shrinkage above the deleted node is ignored, which only ever
-// makes the estimate pessimistic.
+// once the topology around it has moved.
 TEMPLATED void BVH_Verbose<Float, Index>::OptExUnsplit( OptExState& st )
 {
 	OptExComputeCosts( st );
@@ -5255,7 +5228,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptExUnsplit( OptExState& st )
 		ref[refs].prim = primIdx[node.firstTri], ref[refs++].node = n;
 	}
 	std::sort( ref, ref + refs, []( const RefEntry& a, const RefEntry& b )
-	{ return a.prim != b.prim ? (a.prim < b.prim) : (a.node < b.node); } );
+		{ return a.prim != b.prim ? (a.prim < b.prim) : (a.node < b.node); } );
 	for (Index i = 0; i < refs; )
 	{
 		Index j = i;
@@ -5317,9 +5290,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptExUnsplit( OptExState& st )
 	AlignedFree( ref );
 }
 
-// OptExCompactRefs: rewrite primIdx in depth-first order so that every subtree owns a
-// contiguous range, which is what makes the collapse below a constant-time operation per
-// node. Drops the slots of references that unsplitting removed.
+// OptExCompactRefs: rewrite primIdx in depth-first order so that every subtree owns a contiguous range.
 TEMPLATED void BVH_Verbose<Float, Index>::OptExCompactRefs()
 {
 	if (bvhNode == 0 || idxCount == 0) return;
@@ -5345,8 +5316,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptExCompactRefs()
 	AlignedFree( tmp );
 }
 
-// OptExCollapse: exact bottom-up leaf sizing for the final topology. Run once, at the end:
-// a multi-reference leaf is an atom that every other stage would have to work around.
+// OptExCollapse: exact bottom-up leaf sizing for the final topology.
 TEMPLATED void BVH_Verbose<Float, Index>::OptExCollapse( const uint32_t maxLeafPrims, OptExState& st )
 {
 	if (maxLeafPrims < 2) return;
@@ -5396,11 +5366,8 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptExCollapse( const uint32_t maxLeafP
 	}
 }
 
-
-// OptExOverlap: surface area of the intersection of two boxes, zero if they are disjoint. This
-// is the free stand-in for EPO used inside the optimizer: foreign geometry inside a node's box
-// arrives overwhelmingly through its sibling, and the overlap of the two child boxes is the
-// part of that which can be read off the boxes alone, at no geometric cost at all.
+// OptExOverlap: surface area of the intersection of two boxes, zero if they are disjoint.
+// Free stand-in for EPO used inside the optimizer.
 TEMPLATED Float BVH_Verbose<Float, Index>::OptExOverlap( const Index a, const Index b ) const
 {
 	const Vec3 bmin = tinybvh_max( bvhNode[a].aabbMin, bvhNode[b].aabbMin );
@@ -5411,7 +5378,7 @@ TEMPLATED Float BVH_Verbose<Float, Index>::OptExOverlap( const Index a, const In
 }
 
 // OptExEPOArea: area of the primitives *not* below 'subtreeRoot' that falls inside its box.
-// Mirrors BVH::EPOArea for the verbose layout.
+// Implements BVH::EPOArea for the verbose layout.
 TEMPLATED Float BVH_Verbose<Float, Index>::OptExEPOArea( const Index subtreeRoot, const Index nodeIdx,
 	const Index* vertIdx ) const
 {
@@ -5439,9 +5406,7 @@ TEMPLATED Float BVH_Verbose<Float, Index>::OptExEPOArea( const Index subtreeRoot
 	return area;
 }
 
-// OptExPrimAreaSum: total primitive area, the normalizer of the EPO term. Computed over the
-// distinct primitives rather than over primIdx slots, so that it stays constant while the
-// optimizer reorders and duplicates references.
+// OptExPrimAreaSum: total primitive area, the normalizer of the EPO term.
 TEMPLATED Float BVH_Verbose<Float, Index>::OptExPrimAreaSum( const Index* vertIdx ) const
 {
 	double sum = 0;
@@ -5456,10 +5421,7 @@ TEMPLATED Float BVH_Verbose<Float, Index>::OptExPrimAreaSum( const Index* vertId
 	return (Float)sum;
 }
 
-// OptExCombined: the full EPO-weighted quality metric, same definition as BVH::EPOCost. One
-// call walks every node and clips geometry against each of their boxes: on Sponza that is
-// three orders of magnitude slower than SAHCost, which is why the optimizer only ever calls
-// this at round granularity.
+// OptExCombined: the full EPO-weighted quality metric, same definition as BVH::EPOCost.
 TEMPLATED Float BVH_Verbose<Float, Index>::OptExCombined( const Index* vertIdx, const Float primArea, Float& sahOut ) const
 {
 	double epoSum = 0, sahSum = 0;
@@ -5485,10 +5447,7 @@ TEMPLATED Float BVH_Verbose<Float, Index>::OptExCombined( const Index* vertIdx, 
 	return (Float( 1 ) - Float( W_EPO )) * sahOut + Float( W_EPO ) * (Float)(epoSum / (double)primArea);
 }
 
-// OptExLocalEPO: the combined cost of one set of interior nodes, in the units of the global
-// metric. A treelet rewrite leaves the boxes and the primitive sets of every node outside the
-// treelet untouched - its root box is the union of its leaves either way - so the change in
-// the global metric is exactly the change over these nodes, and nothing else needs visiting.
+// OptExLocalEPO: the combined cost of one set of interior nodes, in the units of the global metric.
 TEMPLATED Float BVH_Verbose<Float, Index>::OptExLocalEPO( const Index* nodes, const uint32_t count,
 	const Index* vertIdx, const Float primArea, const Float rootArea ) const
 {
@@ -5502,13 +5461,8 @@ TEMPLATED Float BVH_Verbose<Float, Index>::OptExLocalEPO( const Index* nodes, co
 	return (Float)((1.0 - (double)W_EPO) * sah / (double)rootArea + (double)W_EPO * epo / (double)primArea);
 }
 
-
 // OptExExactBottom: replace every maximal subtree holding at most 'exactBottomSize' references
-// with the provably optimal BVH over those references - topology and leaf formation decided
-// jointly, which is what separates this from running the treelet pass and then collapsing.
-// The DP is the standard subset recurrence: for every subset S of the m references, the best
-// cost is the cheaper of making S a leaf and splitting it into two subsets, and the table is
-// filled in ascending numeric order because every proper subset of S precedes it.
+// with the provably optimal BVH over those references.
 TEMPLATED void BVH_Verbose<Float, Index>::OptExExactBottom( const OptimizeExSettings& s, OptExState& st )
 {
 	const uint32_t maxN = (uint32_t)tinybvh_clamp( (int32_t)s.exactBottomSize, 2, (int32_t)MAX_EXACT_SIZE );
@@ -5587,9 +5541,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptExExactBottom( const OptimizeExSett
 				}
 				if (cost[full] < current)
 				{
-					// write the optimal tree back. Leaves get contiguous slices of the same
-					// primIdx range, in whatever order the walk emits them; the compaction that
-					// follows puts the range back in depth-first order.
+					// write the optimal tree back.
 					Index slotPtr = 0, leafPtr = 0, refPtr = 0, depth = 0;
 					struct Item { uint32_t set; Index slot, parent; } todo[2 * MAX_EXACT_SIZE];
 					auto emitLeaf = [&]( const uint32_t S, const Index parent ) -> Index
@@ -5746,8 +5698,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptimizeEx( const OptimizeExSettings& 
 	AlignedFree( st.order ), AlignedFree( st.refCount ), AlignedFree( st.subCost );
 }
 
-// Single-primitive leaves: Prepare the BVH for optimization. The leaves of the optimized BVH should
-// be collapsed ('MergeLeafs') to obtain the final tree.
+// Single-primitive leaves: Prepare the BVH for optimization.
 TEMPLATED void BVH_Verbose<Float, Index>::SplitLeafs( const Index maxPrims )
 {
 	if (bvhNode == 0 || usedNodes == 0) return;
@@ -5756,10 +5707,6 @@ TEMPLATED void BVH_Verbose<Float, Index>::SplitLeafs( const Index maxPrims )
 	while (1)
 	{
 		if (!bvhNode[nodeIdx].isLeaf()) { nodeIdx = bvhNode[nodeIdx].left; continue; }
-		// Expand one oversized leaf into a subtree of leaves holding at most
-		// 'maxPrims' primitives each. Within that subtree the right child is
-		// visited first, as the previous version did: the resulting node numbering
-		// is what 'Optimize' later sorts on, so the order is not free to change.
 		const Index subRoot = nodeIdx;
 		Index c = subRoot;
 		while (1)
@@ -5806,8 +5753,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::SplitLeafs( const Index maxPrims )
 	}
 }
 
-// MergeLeafs: After optimizing a BVH, single-primitive leaves should be merged whenever
-// SAH indicates this is an improvement.
+// MergeLeafs: After optimizing a BVH, merge single-primitive leaves using SAH.
 TEMPLATED void BVH_Verbose<Float, Index>::MergeLeafs()
 {
 	// allocate some working space
