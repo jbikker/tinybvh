@@ -88,6 +88,14 @@ NEON path. Editing `shaders/common.glsl` rebuilds all seven shaders;
 | `BVH4_GPU` | `tiny4.comp` | — |
 | `CWBVH` | `tiny8.comp` | — |
 | `RayQuery` | `tinyrq.comp`, `VK_KHR_ray_query` | optional |
+| `CL/BVH_GPU` | `traverse.cl` (OpenCL) | OpenCL GPU device |
+| `CL/AMD_BVH4` | `traverse_amd.cl` (OpenCL, AMD BVH intrinsics) | AMD RDNA3 or RDNA4 |
+| `CL/AMD_BVH8` | `traverse_amd.cl` (OpenCL, AMD BVH intrinsics) | AMD RDNA4 |
+
+The AMD backends use the same rays, 8x8 tiles, output and timing as `CL/BVH_GPU`.
+Their trees are converted from the same BVH2 as `BVH_GPU`, with leaves split to one
+(BVH4) or two (BVH8) triangles. `traverse_amd.cl` is a copy of the traversal in
+`kernels/traverse_amd_hw_bvh4.cl` / `_bvh8.cl`; keep the two in sync.
 
 `VK_KHR_acceleration_structure` + `VK_KHR_ray_tracing_pipeline` are required, as
 raytracing tier 1.0 was in the D3D12 version. `VK_KHR_ray_query` stands in for

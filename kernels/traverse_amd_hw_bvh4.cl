@@ -44,16 +44,13 @@ inline uint id_to_type( uint id ) { return id & 7u; }
 #define BVH_DESCRIPTOR                        \
 	( (uint4)( 0u, ( 1u << 31 ), 0xffffffffu, \
 			   ( 1u << 31 ) | ( 1u << 24 ) | ( 1u << 23 ) | 0x3ffu ) )
-// Return triangle hit status instead of barycentrics for occlusion.
-#define BVH_DESCRIPTOR_OCCLUSION \
-	( (uint4)( 0u, ( 1u << 31 ), 0xffffffffu, ( 1u << 31 ) | ( 1u << 23 ) | 0x3ffu ) )
 
 float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const float4 D, const float4 rD, const float tmax, __local uint* hwStack )
 {
 	const ulong encoded_base = ( (ulong)alt4Node >> 3 ) & ( ( ( 1UL << 42 ) - 1UL ) << 3 );
 	uint prevNode = INVALID_NODE;
 	// LDS stack entries have a fixed stride of 32 words, even with wave64.
-	uint lane = get_local_id( 0 );
+	uint lane = get_local_id( 1 ) * get_local_size( 0 ) + get_local_id( 0 );
 	uint stackAddr = ( ( (uint)(size_t)hwStack >> 2 ) + ( lane & 31u ) +
 					  ( lane >> 5 ) * ( 32u * HW_BVH_STACK_ENTRIES ) ) << HW_BVH_STACK_BASE_SHIFT;
 	float4 hit = (float4)( tmax, 0.0f, 0.0f, as_float( INVALID_NODE ) );
@@ -145,7 +142,7 @@ bool isoccluded_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 	const ulong encoded_base = ( (ulong)alt4Node >> 3 ) & ( ( ( 1UL << 42 ) - 1UL ) << 3 );
 	uint prevNode = INVALID_NODE;
 	// LDS stack entries have a fixed stride of 32 words, even with wave64.
-	uint lane = get_local_id( 0 );
+	uint lane = get_local_id( 1 ) * get_local_size( 0 ) + get_local_id( 0 );
 	uint stackAddr = ( ( (uint)(size_t)hwStack >> 2 ) + ( lane & 31u ) +
 					  ( lane >> 5 ) * ( 32u * HW_BVH_STACK_ENTRIES ) ) << HW_BVH_STACK_BASE_SHIFT;
 
@@ -155,12 +152,15 @@ bool isoccluded_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 		uint2 stackResults;
 		ulong currentPointer = encoded_base + (ulong)currentNodeID;
 		uint4 dst4 = __builtin_amdgcn_image_bvh_intersect_ray_l(
-			currentPointer, tmax, O, D, rD, BVH_DESCRIPTOR_OCCLUSION );
+			currentPointer, tmax, O, D, rD, BVH_DESCRIPTOR );
 
 		uint type = id_to_type( currentNodeID );
 		if (type == TRIANGLE)
 		{
-			if (dst4.w != 0u) return true;
+			const float4 triData = as_float4( dst4 );
+			// Check the ray interval explicitly, using the closest-hit result format.
+			const float t = triData.x * native_recip( triData.y );
+			if (isfinite( t ) && t >= 0.0f && t < tmax) return true;
 			stackResults = __builtin_amdgcn_ds_bvh_stack_push4_pop1_rtn(
 				stackAddr, BVH_STACK_TERMINAL_NODE, (uint4)INVALID_NODE, BVH_STACK_CONTROLS );
 		}

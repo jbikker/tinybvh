@@ -67,10 +67,12 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 #define ALLOW_SYNTHETIC_RAYS false
 
 // OpenCL interleaving. The OpenCL backends trace the same rays through the same
-// tinybvh data as the compute shaders, using the traversal code from
-// kernels/traverse.cl, so the two APIs can be compared one frame apart.
+// scene as the compute shaders: BVH_GPU with shaders/traverse.cl, the AMD layouts
+// with shaders/traverse_amd.cl, so the two APIs can be compared one frame apart.
 #define ENABLE_OPENCL		true	// init OpenCL and put its backends in the rotation
 #define ENABLE_OCL_BVH2		true	// display info on OpenCL BVH_GPU performance
+#define ENABLE_OCL_AMD_BVH4	true	// display info on AMD BVH4 hardware traversal (RDNA3/RDNA4)
+#define ENABLE_OCL_AMD_BVH8	true	// display info on AMD BVH8 hardware traversal (RDNA4)
 #define OCL_PRESENT_RESULT	false	// show what OpenCL traced; costs a 4MB readback + upload per frame
 
 constexpr uint32_t NUM_INSTANCES = 1, FRAME_COUNT = 2;
@@ -81,12 +83,12 @@ constexpr uint32_t NUM_SHADER_GROUPS = 3; // raygen, miss, hit group
 // BACKEND_OCL_* onwards runs outside Vulkan, on the OpenCL queue.
 enum Backend {
 	BACKEND_HWRT = 0, BACKEND_BVH_GPU, BACKEND_BVH4_GPU, BACKEND_BVH8_CWBVH, BACKEND_RAYQUERY,
-	BACKEND_OCL_BVH_GPU, BACKEND_COUNT
+	BACKEND_OCL_BVH_GPU, BACKEND_OCL_AMD_BVH4, BACKEND_OCL_AMD_BVH8, BACKEND_COUNT
 };
 static const char* backendName[BACKEND_COUNT] = { "HWRT", "BVH_GPU", "BVH4_GPU", "CWBVH", "RayQuery",
-	"CL/BVH_GPU" };
+	"CL/BVH_GPU", "CL/AMD_BVH4", "CL/AMD_BVH8" };
 static const bool backendPrint[BACKEND_COUNT] = { ENABLE_HWRT, ENABLE_BVH2, ENABLE_BVH4, ENABLE_CWBVH,
-	ENABLE_RAY_QUERIES, ENABLE_OCL_BVH2 };
+	ENABLE_RAY_QUERIES, ENABLE_OCL_BVH2, ENABLE_OCL_AMD_BVH4, ENABLE_OCL_AMD_BVH8 };
 static bool BackendIsOpenCL( const int b ) { return b >= BACKEND_OCL_BVH_GPU; }
 static bool rayQuerySupported = false;
 // Backends that can actually run on this machine, in rotation order; built by
@@ -849,10 +851,11 @@ static void UpdateRayBuffer()
 // OpenCL
 // ----------------------------------------------------------------------------
 
-// The OpenCL backends trace the ray set from UpdateRayBuffer() through the very
-// same tinybvh blobs the compute shaders use, with the traversal code from
-// kernels/traverse.cl; kernels/bench.cl only adds entry points that match what the
-// GLSL does (tmax is always 1e30, the output is one RGBA8 pixel per ray).
+// The OpenCL backends trace the ray set from UpdateRayBuffer(). CL/BVH_GPU uses the
+// very same tinybvh blobs as the compute shaders, with shaders/traverse.cl. The AMD
+// backends convert the same BVH2 to the hardware layouts and use shaders/traverse_amd.cl,
+// a copy of the traversal in kernels/traverse_amd_hw*.cl. All entry points match what
+// the GLSL does (tmax is always 1e30, the output is one RGBA8 pixel per ray).
 //
 // There is no interop: Vulkan and OpenCL get their own context, their own copy of
 // the data and their own GPU timer (timestamp queries vs. events). What makes the
@@ -875,16 +878,61 @@ static void UpdateRayBuffer()
 // silent slowdown.
 constexpr int OCL_GROUP_X = 8, OCL_GROUP_Y = 8;
 
-static tinyocl::Kernel* oclKernel = 0;
+static tinyocl::Kernel* oclKernel[BACKEND_COUNT] = {}; // null: backend not available
 static tinyocl::Buffer* oclBVH2Nodes = 0, * oclBVH2Verts = 0, * oclBVH4Data = 0;
 static tinyocl::Buffer* oclCWBVHNodes = 0, * oclCWBVHTris = 0;
+static tinyocl::Buffer* oclAMD4Data = 0, * oclAMD8Data = 0;
 static tinyocl::Buffer* oclRays = 0, * oclPixels = 0;
 static bool openclReady = false;
+
+// AMD hardware layouts, converted from the shared bvh2 so that every software
+// backend traverses the same tree. This mirrors BVH4_AMD_HW::Build and
+// CWBVH8_AMD_HW::Build, minus the build: split leaves to what the hardware
+// accepts (1 triangle for BVH4, 2 for BVH8), collapse, convert. SplitLeafs works
+// in place, so each layout gets its own copy of bvh2.
+static BVH bvh2AMD4, bvh2AMD8;
+static MBVH<4> mbvh4AMD;
+static MBVH<8> mbvh8AMD;
+static BVH4_AMD_HW bvh4AMD;
+static CWBVH8_AMD_HW bvh8AMD;
+
+static void CopyBVH2( BVH& copy )
+{
+	// Through BVH_Verbose, without compaction: that keeps the 3 x triCount node
+	// capacity SplitLeafs appends into (it does not check bounds itself).
+	BVH_Verbose verbose;
+	verbose.ConvertFrom( bvh2 );
+	copy.ConvertFrom( verbose, false );
+}
+
+static void InitAMDBVH4()
+{
+	CopyBVH2( bvh2AMD4 );
+	bvh2AMD4.SplitLeafs( 1 );
+	mbvh4AMD.leafPrimLimit = 0;
+	mbvh4AMD.ConvertFrom( bvh2AMD4, true );
+	bvh4AMD.ConvertFrom( mbvh4AMD );
+}
+
+static void InitAMDBVH8()
+{
+	CopyBVH2( bvh2AMD8 );
+	bvh2AMD8.SplitLeafs( 2 );
+	mbvh8AMD.leafPrimLimit = 2;
+	mbvh8AMD.ConvertFrom( bvh2AMD8, true );
+	bvh8AMD.ConvertFrom( mbvh8AMD );
+}
+
+static void RunOpenCL( const int backend, cl_event* event = 0 )
+{
+	oclKernel[backend]->Run2D( tinyocl::oclint2( rtWidth, rtHeight ),
+		tinyocl::oclint2( OCL_GROUP_X, OCL_GROUP_Y ), 0, event );
+}
 
 static void InitOpenCL()
 {
 	const uint32_t rayCount = rtWidth * rtHeight;
-	oclKernel = new tinyocl::Kernel( "shaders/traverse.cl", "bench_bvh2" );
+	oclKernel[BACKEND_OCL_BVH_GPU] = new tinyocl::Kernel( "shaders/traverse.cl", "bench_bvh2" );
 	char clDeviceName[256] = {};
 	clGetDeviceInfo( tinyocl::Kernel::GetDevice(), CL_DEVICE_NAME, sizeof( clDeviceName ), clDeviceName, 0 );
 	printf( "OpenCL device: %s\n", clDeviceName );
@@ -916,13 +964,36 @@ static void InitOpenCL()
 	oclCWBVHNodes->CopyToDevice();
 	oclCWBVHTris->CopyToDevice();
 	oclRays->CopyToDevice();
-	oclKernel->SetArguments( oclBVH2Nodes, oclBVH2Verts, oclRays, oclPixels );
+	oclKernel[BACKEND_OCL_BVH_GPU]->SetArguments( oclBVH2Nodes, oclBVH2Verts, oclRays, oclPixels );
+	// AMD hardware traversal: the intrinsics exist on RDNA3 (BVH4) and RDNA4 (BVH4 + BVH8).
+	// Kernels are only requested where they can run; elsewhere traverse_amd.cl compiles
+	// to an empty program.
+	if (tinyocl::Kernel::isAMD && (tinyocl::Kernel::isRDNA3 || tinyocl::Kernel::isRDNA4))
+	{
+		InitAMDBVH4();
+		oclAMD4Data = new tinyocl::Buffer( (unsigned)(bvh4AMD.usedBlocks * sizeof( bvhvec4 )),
+			bvh4AMD.bvh4Data, tinyocl::Buffer::READONLY );
+		oclAMD4Data->CopyToDevice();
+		oclKernel[BACKEND_OCL_AMD_BVH4] = new tinyocl::Kernel( "shaders/traverse_amd.cl", "bench_amd_bvh4" );
+		oclKernel[BACKEND_OCL_AMD_BVH4]->SetArguments( oclAMD4Data, oclRays, oclPixels );
+	}
+	else printf( "%s disabled: requires AMD RDNA3 or RDNA4.\n", backendName[BACKEND_OCL_AMD_BVH4] );
+	if (tinyocl::Kernel::isAMD && tinyocl::Kernel::isRDNA4)
+	{
+		InitAMDBVH8();
+		oclAMD8Data = new tinyocl::Buffer( (unsigned)(bvh8AMD.usedBlocks * sizeof( bvhvec4 )),
+			bvh8AMD.bvh8Data, tinyocl::Buffer::READONLY );
+		oclAMD8Data->CopyToDevice();
+		oclKernel[BACKEND_OCL_AMD_BVH8] = new tinyocl::Kernel( "shaders/traverse_amd.cl", "bench_amd_bvh8" );
+		oclKernel[BACKEND_OCL_AMD_BVH8]->SetArguments( oclAMD8Data, oclRays, oclPixels );
+	}
+	else printf( "%s disabled: requires AMD RDNA4.\n", backendName[BACKEND_OCL_AMD_BVH8] );
 	if (OCL_PRESENT_RESULT)
 		oclPresentStaging = CreateBuffer( rayCount * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true );
 	// One warm pass, which doubles as a sanity check: this traces the same scene the
 	// compute shaders do, so coverage and average depth should match what they show.
-	oclKernel->Run2D( tinyocl::oclint2( rtWidth, rtHeight ), tinyocl::oclint2( OCL_GROUP_X, OCL_GROUP_Y ) );
+	RunOpenCL( BACKEND_OCL_BVH_GPU );
 	oclPixels->CopyFromDevice(); // blocking, so this also drains the queue
 	const uint32_t* px = oclPixels->GetHostPtr();
 	uint32_t hits = 0;
@@ -939,9 +1010,7 @@ static void InitOpenCL()
 static double TraceOpenCL( const int backend )
 {
 	cl_event event[NUM_DISPATCHES] = {};
-	for (uint32_t i = 0; i < NUM_DISPATCHES; i++)
-		oclKernel->Run2D( tinyocl::oclint2( rtWidth, rtHeight ),
-			tinyocl::oclint2( OCL_GROUP_X, OCL_GROUP_Y ), 0, &event[i] );
+	for (uint32_t i = 0; i < NUM_DISPATCHES; i++) RunOpenCL( backend, &event[i] );
 	clWaitForEvents( 1, &event[NUM_DISPATCHES - 1] );
 	cl_ulong start = 0, end = 0;
 	clGetEventProfilingInfo( event[0], CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &start, 0 );
@@ -960,8 +1029,9 @@ static void ShutdownOpenCL()
 	if (!openclReady) return;
 	delete oclBVH2Nodes, delete oclBVH2Verts, delete oclBVH4Data;
 	delete oclCWBVHNodes, delete oclCWBVHTris;
+	delete oclAMD4Data, delete oclAMD8Data;
 	delete oclRays, delete oclPixels;
-	delete oclKernel;
+	for (int b = 0; b < BACKEND_COUNT; b++) delete oclKernel[b], oclKernel[b] = 0;
 	tinyocl::Kernel::KillCL();
 	openclReady = false;
 }
@@ -972,7 +1042,7 @@ static void BuildSchedule()
 	for (int b = 0; b < BACKEND_COUNT; b++)
 	{
 		if (b == BACKEND_RAYQUERY && !rayQuerySupported) continue;
-		if (BackendIsOpenCL( b ) && !openclReady) continue;
+		if (BackendIsOpenCL( b ) && (!openclReady || !oclKernel[b])) continue;
 		schedule[scheduleLen++] = b;
 	}
 }

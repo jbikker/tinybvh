@@ -24,6 +24,7 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 	if (layout == GPU_BVH4) bvh = new BVH4_GPU();
 	if (layout == CWBVH) bvh = new BVH8_CWBVH();
 	if (layout == AMD_HWRT) bvh = new BVH4_AMD_HW();
+	if (layout == AMD_HWRT8) bvh = new CWBVH8_AMD_HW();
 	// set specified flags
 	if (bvh)
 	{
@@ -97,6 +98,12 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 	{
 		strncpy( desc, "4-wide AMD BVH", sizeof( desc ) ); 
 		strncpy( shrt, "AMD4", sizeof( shrt ) ); 
+		break;
+	}
+	case AMD_HWRT8:
+	{
+		strncpy( desc, "8-wide AMD BVH", sizeof( desc ) );
+		strncpy( shrt, "AMD8", sizeof( shrt ) );
 		break;
 	}
 	case MADMANN91: 
@@ -222,6 +229,13 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
+	case AMD_HWRT8:
+	{
+		CWBVH8_AMD_HW* accstruc = (CWBVH8_AMD_HW*)bvh;
+		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		else accstruc->Build( primSet->verts, primSet->primCount );
+		break;
+	}
 	case MADMANN91:
 	{
 		bvh::v2::ThreadPool thread_pool;
@@ -276,6 +290,7 @@ float AccStruc::SAHCost()
 	case GPU_BVH4: return ((BVH4_GPU*)bvh)->SAHCost();
 	case CWBVH: return ((BVH8_CWBVH*)bvh)->SAHCost();
 	case AMD_HWRT: return ((BVH4_AMD_HW*)bvh)->SAHCost();
+	case AMD_HWRT8: return ((CWBVH8_AMD_HW*)bvh)->SAHCost();
 	case MADMANN91:
 	{
 		// directly walk the madmann91 bvh to calculate its SAH cost.
@@ -322,6 +337,7 @@ float AccStruc::EPOCost()
 	case GPU_BVH4: return ((BVH4_GPU*)bvh)->bvh4.bvh.EPOCost();
 	case CWBVH: return ((BVH8_CWBVH*)bvh)->bvh8.bvh.EPOCost();
 	case AMD_HWRT: return ((BVH4_AMD_HW*)bvh)->bvh4.bvh.EPOCost();
+	case AMD_HWRT8: return ((CWBVH8_AMD_HW*)bvh)->bvh8.bvh.EPOCost();
 	default: return 0; // unsupported layout. See note in constructor.
 	}
 	// note: there is (intentionally) no full class derivation in tinybvh.
@@ -461,6 +477,22 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 		}
 		break;
 	}
+	case AMD_HWRT8:
+	{
+		// TODO: we're simply intersecting the underlying bvh for now.
+		CWBVH8_AMD_HW* accstruc = (CWBVH8_AMD_HW*)bvh;
+		if (rayCount == 1)
+		{
+			accstruc->bvh8.bvh.Intersect( ((Ray*)rayData)[0] );
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit.t = origDist; // reset
+		}
+		else for (int i = 0; i < rayCount; i++, rayData += 64)
+		{
+			accstruc->bvh8.bvh.Intersect( ((Ray*)rayData)[0] );
+			((Ray*)rayData)[0].hit.t = origDist; // reset
+		}
+		break;
+	}
 	case MADMANN91:
 	{
 		// for this experiment we use ideal circumstances for the Manmann91 library:
@@ -594,6 +626,12 @@ void AccStruc::OcclusionBatch( char* rayData, int rayCount )
 	{
 		BVH4_AMD_HW* accstruc = (BVH4_AMD_HW*)bvh;
 		for (int i = 0; i < rayCount; i++, rayData += 64) accstruc->bvh4.bvh.IsOccluded( ((Ray*)rayData)[0] );
+		break;
+	}
+	case AMD_HWRT8:
+	{
+		CWBVH8_AMD_HW* accstruc = (CWBVH8_AMD_HW*)bvh;
+		for (int i = 0; i < rayCount; i++, rayData += 64) accstruc->bvh8.bvh.IsOccluded( ((Ray*)rayData)[0] );
 		break;
 	}
 	case MADMANN91:

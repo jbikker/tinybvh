@@ -14,6 +14,8 @@ extern tinyocl::Kernel* gpu4way_kernel;
 extern tinyocl::Kernel* gpu4way_kernel_any;
 extern tinyocl::Kernel* amd4way_kernel;
 extern tinyocl::Kernel* amd4way_kernel_any;
+extern tinyocl::Kernel* amd8way_kernel;
+extern tinyocl::Kernel* amd8way_kernel_any;
 extern tinyocl::Kernel* cwbvh_kernel;
 extern tinyocl::Kernel* cwbvh_kernel_any;
 cl_event event;
@@ -168,6 +170,13 @@ void Experiment::RunTraceExperiment()
 		runs = 40;
 		if (tgaFile) WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 	}
+	else if (flags & USE_GPU && bvh->layout == AMD_HWRT8)
+	{
+		traceTime = RunGPU_AMD8( extensionRays, N, tgaFile );
+		raysPerSecond = (float)(N * 8) / traceTime;
+		runs = 40;
+		if (tgaFile) WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
+	}
 	else
 	#endif
 	{
@@ -268,6 +277,12 @@ void Experiment::RunTraceExperiment()
 		else if (flags & USE_GPU && bvh->layout == AMD_HWRT)
 		{
 			traceTime = RunGPU_AMD4_Any( extensionRays, N );
+			raysPerSecond = (float)(N * 8) / traceTime;
+			runs = 40;
+		}
+		else if (flags & USE_GPU && bvh->layout == AMD_HWRT8)
+		{
+			traceTime = RunGPU_AMD8_Any( extensionRays, N );
 			raysPerSecond = (float)(N * 8) / traceTime;
 			runs = 40;
 		}
@@ -657,6 +672,68 @@ float Experiment::RunGPU_AMD4_Any( char* raySet, const int N )
 	{
 		gpuRayData->CopyToDevice();
 		amd4way_kernel_any->Run( N * 8, 64, 0, &event );
+		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
+		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
+		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );
+		if (pass < 10) continue; else runs++; // encourage the GPU to run at full speed
+		traceTime += endTime - startTime;
+	}
+	// get results from GPU for verification.
+	// gpuRayData->CopyFromDevice();
+	return (traceTime / runs) * 1e-9f;
+}
+
+float Experiment::RunGPU_AMD8( char* raySet, const int N, const char* tgaFile )
+{
+	// load AMD-specific kernel
+	amd8way_kernel = new tinyocl::Kernel( "kernels/traverse_amd_hw.cl", "batch_gpu8wayHW" );
+	// trace 'first hit' rays on GPU using an 8-wide BVH
+	CWBVH8_AMD_HW* bvh8_gpu = (CWBVH8_AMD_HW*)bvh->GetBVH();
+	tinyocl::Buffer gpuNodes( bvh8_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh8_gpu->bvh8Data, tinyocl::Buffer::READONLY );
+	gpuNodes.CopyToDevice();
+	// create rays and send them to the gpu side
+	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
+		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
+	// start timer and start kernel on gpu
+	uint64_t traceTime = 0;
+	amd8way_kernel->SetArguments( &gpuNodes, gpuRayData );
+	int runs = 0;
+	for (int pass = 0; pass < 50; pass++)
+	{
+		gpuRayData->CopyToDevice();
+		amd8way_kernel->Run( N * 8, 64, 0, &event );
+		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
+		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
+		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );
+		if (pass < 10) continue; else runs++; // encourage the GPU to run at full speed
+		traceTime += endTime - startTime;
+	}
+	// get results from GPU for verification.
+	gpuRayData->CopyFromDevice();
+	return (traceTime / runs) * 1e-9f;
+}
+
+float Experiment::RunGPU_AMD8_Any( char* raySet, const int N )
+{
+	// load AMD-specific kernel
+	amd8way_kernel_any = new tinyocl::Kernel( "kernels/traverse_amd_hw.cl", "batch_gpu8wayHW_any" );
+	// trace 'any hit' rays on GPU, using an 8-way BVH
+	CWBVH8_AMD_HW* bvh8_gpu = (CWBVH8_AMD_HW*)bvh->GetBVH();
+	tinyocl::Buffer gpuNodes( bvh8_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh8_gpu->bvh8Data, tinyocl::Buffer::READONLY );
+	gpuNodes.CopyToDevice();
+	// create rays and send them to the gpu side
+	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
+		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
+	// start timer and start kernel on gpu
+	uint64_t traceTime = 0;
+	amd8way_kernel_any->SetArguments( &gpuNodes, gpuRayData );
+	int runs = 0;
+	for (int pass = 0; pass < 50; pass++)
+	{
+		gpuRayData->CopyToDevice();
+		amd8way_kernel_any->Run( N * 8, 64, 0, &event );
 		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );

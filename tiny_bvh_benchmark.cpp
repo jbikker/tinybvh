@@ -1,7 +1,7 @@
 // Benchmark Suite for TinyBVH. Work in Progress.
 // Construct experiments using:
 // - BVH layout:  
-//   { BVH2, BVH4_WIVE, BVH8_WIVE, GPU_BVH, GPU_BVH4, CWBVH, AMD_HWRT, MADDMAN91, EMBREE } a.k.a. { 0 .. 8 };
+//   { BVH2, BVH4, BVH4_WIVE, BVH8_WIVE, GPU_BVH, GPU_BVH4, CWBVH, AMD_HWRT, MADMANN91, EMBREE, AMD_HWRT8 } a.k.a. { 0 .. 10 };
 // - Build flags: NO_FLAGS or 
 //   { INDEXED, SIMDBUILD, FULLSWEEP, PRESPLIT, SPATIALSPLITS, OPTIMIZE } and combinations thereof;
 // - Scene: 
@@ -192,6 +192,11 @@ int main()
 	experiment.push_back( new Experiment( AMD_HWRT, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
 	experiment.push_back( new Experiment( AMD_HWRT, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
 	experiment.push_back( new Experiment( AMD_HWRT, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
+	experiment.push_back( new Experiment( AMD_HWRT8, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( AMD_HWRT8, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
+	experiment.push_back( new Experiment( AMD_HWRT8, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
+	experiment.push_back( new Experiment( AMD_HWRT8, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( AMD_HWRT8, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
 
 #endif
 
