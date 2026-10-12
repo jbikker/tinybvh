@@ -1,8 +1,10 @@
 # TinyBVH
 
+> **This is the development branch of TinyBVH. Please direct your PRs here.**
+
 Header-only BVH construction and traversal library, written in C++14 / "Sane C++" (or "C with classes"). C++17 is used for threading. **This library has no dependencies.**
 
-Current version: **1.9.1**.
+Current version: **1.9.2**.
 
 TinyBVH is _fast_. Here is, in a nutshell, how it compares to [Intel's Embree](https://www.embree.org) and [Madmann91's BVH library](https://github.com/madmann91/bvh):
 
