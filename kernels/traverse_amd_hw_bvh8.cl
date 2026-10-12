@@ -51,7 +51,7 @@ float4 traverse_gpu8wayHW( const global float4* alt4Node, const float4 O, const 
 	uint prevNode = INVALID_NODE;
 	uint parentBoxID = INVALID_NODE;
 	// LDS stack entries have a fixed stride of 32 words, even with wave64.
-	uint lane = get_local_id( 0 );
+	uint lane = get_local_id( 1 ) * get_local_size( 0 ) + get_local_id( 0 );
 	uint stackAddr = ( ( (uint)(size_t)hwStack >> 2 ) + ( lane & 31u ) +
 					  ( lane >> 5 ) * ( 32u * HW_BVH_STACK_ENTRIES ) ) << HW_BVH_STACK_BASE_SHIFT;
 	float4 hit = (float4)( tmax, 0.0f, 0.0f, as_float( INVALID_NODE ) );
@@ -137,7 +137,7 @@ bool isoccluded_gpu8wayHW( const global float4* alt4Node, const float4 O, const 
 	uint prevNode = INVALID_NODE;
 	uint parentBoxID = INVALID_NODE;
 	// LDS stack entries have a fixed stride of 32 words, even with wave64.
-	uint lane = get_local_id( 0 );
+	uint lane = get_local_id( 1 ) * get_local_size( 0 ) + get_local_id( 0 );
 	uint stackAddr = ( ( (uint)(size_t)hwStack >> 2 ) + ( lane & 31u ) +
 					  ( lane >> 5 ) * ( 32u * HW_BVH_STACK_ENTRIES ) ) << HW_BVH_STACK_BASE_SHIFT;
 
@@ -155,7 +155,7 @@ bool isoccluded_gpu8wayHW( const global float4* alt4Node, const float4 O, const 
 			for (uint i = 0; i < 2; ++i)
 			{
 				const float t = as_float( result[i * 4] );
-				if (isfinite( t ) && t >= 0.0f && t <= tmax) return true;
+				if (isfinite( t ) && t >= 0.0f && t < tmax) return true;
 			}
 			uint8 children = (uint8)INVALID_NODE;
 			children.s7 = BVH_STACK_SKIP_0_TO_7;
