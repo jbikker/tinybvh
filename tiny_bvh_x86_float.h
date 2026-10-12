@@ -1,4 +1,4 @@
-﻿// tiny_bvh_x86_float.h: SSE / AVX / AVX2 specializations for the single
+// tiny_bvh_x86_float.h: SSE / AVX / AVX2 specializations for the single
 // precision layouts. Included by tiny_bvh.h; do not include directly.
 
 #ifndef TINY_BVH_H_
@@ -30,26 +30,35 @@ TINYBVH_FORCEINLINE void tinybvh_store8i( void* p, const __m256i v ) { memcpy( p
 
 // Specializations provided by this header.
 #ifdef BVH_USESSE
-template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const;
-template <> bool impl::BVH<float, uint32_t>::ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, const uint32_t axis ) const;
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
+template <> uint32_t impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const;
+template <> void impl::BVH<float, uint32_t>::ClipFragToBins( const Fragment& orig, const int32_t bin1, const int32_t bin2, const uint32_t axis, const float nodeMin, const float planeDist, BVHBinBox<float>* sbinBox ) const;
+template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
+template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
 template <> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectBundle( Ray* rays ) const;
 template <> int32_t impl::BVH<float, uint32_t>::IntersectBundle( Ray* rays ) const;
 template <> int32_t impl::BVH4_CPU<float, uint32_t>::IsOccludedBundle( Ray* rays, bool* occluded ) const;
 template <> int32_t impl::BVH<float, uint32_t>::IsOccludedBundle( Ray* rays, bool* occluded ) const;
 #endif
 #ifdef BVH_USEAVX
+template <> void impl::BVH<float, uint32_t>::BinBoxClear( BVHBinBox<float>& b );
+template <> void impl::BVH<float, uint32_t>::BinBoxMerge( BVHBinBox<float>& b, const BVHBinBox<float>& o );
+template <> void impl::BVH<float, uint32_t>::BinBoxAddFrag( BVHBinBox<float>& b, const Fragment& f );
+template <> void impl::BVH<float, uint32_t>::BinBoxAdd( BVHBinBox<float>& b, const bvhvec3& mn, const bvhvec3& mx );
 template <> struct impl::BVHSIMDBuilders<float, uint32_t> { static constexpr bool available = true; };
-template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount );
+template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t primCount, const uint32_t extraFrags );
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const uint32_t first, const uint32_t last, const uint32_t* indices, const int8_t* vertData, const uint32_t stride4, void* frags, float* rootMin, float* rootMax );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t first, const uint32_t last, void* binbox, uint32_t* count, const float* nmin4, const float* rpd4 );
-template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth );
+template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth, bool allowTasks, bool allowSlices );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize();
 #endif
 #ifdef BVH_USEAVX2
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
+template <> void impl::BVH<float, uint32_t>::SortByCentroid( const uint32_t* frag, const uint32_t n, const uint32_t axis, uint8_t* order ) const;
+template <> void impl::BVH<float, uint32_t>::BonsaiHQClassify( uint8_t* mask, const uint32_t lo, const uint32_t hi, const uint32_t axis, const float pos2, BonsaiHQPart& p ) const;
+template <> void impl::BVH<float, uint32_t>::BonsaiHQDistribute( BonsaiHQState& st, const uint8_t* mask, uint8_t* maskOut, const uint32_t lo, const uint32_t hi, const uint32_t axis,
+	const float pos2, const bool doSplit, BonsaiHQPart& p, const BonsaiHQNext* plan, BonsaiHQPart* next );
+template <> void impl::BVH4_CPU<float, uint32_t>::EmitNode( impl::MBVH<4, float, uint32_t>& src, const uint32_t* base, uint32_t n );
+template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
+template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
 #endif
 
 } // namespace tinybvh
@@ -72,6 +81,18 @@ namespace tinybvh {
 
 #define AVXBINS 8 // must stay at 8.
 
+// Opacity micro maps: the micro-triangle indices for four barycentric pairs; see tinybvh_opmap_index.
+static TINYBVH_FORCEINLINE void tinybvh_opmap_idx4( const __m128 u4, const __m128 v4, const uint32_t N, uint32_t* idx )
+{
+	const __m128 fN4 = _mm_set1_ps( (float)N );
+	const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
+	const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_set1_ps( 1.0f ), u4 ), fN4 ) );
+	const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+	const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
+	const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( N - 1 ), row4 ) );
+	tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+}
+
 // SIMD constants - Functions rather than mutable statics. Calls fold to a constant or a single broadcast.
 TINYBVH_FORCEINLINE __m128 bvhc_min1() { return _mm_set1_ps( -1.0f ); }
 TINYBVH_FORCEINLINE __m128 bvhc_binmul3() { return _mm_set1_ps( AVXBINS * 0.49999f ); }
@@ -79,21 +100,385 @@ TINYBVH_FORCEINLINE __m128 bvhc_mask3() { return _mm_cmpeq_ps( _mm_setr_ps( 0, 0
 // SIMD lane access
 #if defined _MSC_VER && !defined __clang__
 #define LANE(a,b) a.m128_f32[b]
-// Not using clang/g++ method under MSCC; compiler may benefit from .m128_i32.
-#define ILANE(a,b) a.m128i_i32[b]
 #else
 #define LANE(a,b) a[b]
-// Below method reduces to a single instruction.
-#define ILANE(a,b) _mm_cvtsi128_si32(_mm_castps_si128( _mm_shuffle_ps(_mm_castsi128_ps( a ), _mm_castsi128_ps( a ), b)))
 #endif
-// AABB halfarea calculation
-TINYBVH_FORCEINLINE float halfArea( const __m128 a /* a contains extent of aabb */ )
+
+#ifdef BVH_USEAVX2
+
+// SortByCentroid, AVX2.
+template <> void impl::BVH<float, uint32_t>::SortByCentroid( const uint32_t* frag, const uint32_t n, const uint32_t axis, uint8_t* order ) const
 {
-	return LANE( a, 0 ) * LANE( a, 1 ) + LANE( a, 1 ) * LANE( a, 2 ) + LANE( a, 2 ) * LANE( a, 3 );
+	ALIGNED( 32 ) int32_t key[8];
+	for (uint32_t i = 0; i < 8; i++)
+	{
+		if (i >= n) { key[i] = 0x7fffffff; continue; }
+		const Fragment& f = fragment[frag[i]];
+		key[i] = (int32_t)tinybvh_centroid_key( f.bmin[axis] + f.bmax[axis], i );
+	}
+	__m256i v = _mm256_load_si256( (const __m256i*)key ), t;
+	// comparators i^1, i^3, i^1, i^7, i^2, i^1; the blend keeps the max in the upper lane.
+	t = _mm256_shuffle_epi32( v, _MM_SHUFFLE( 2, 3, 0, 1 ) );
+	v = _mm256_blend_epi32( _mm256_min_epi32( v, t ), _mm256_max_epi32( v, t ), 0xAA );
+	t = _mm256_shuffle_epi32( v, _MM_SHUFFLE( 0, 1, 2, 3 ) );
+	v = _mm256_blend_epi32( _mm256_min_epi32( v, t ), _mm256_max_epi32( v, t ), 0xCC );
+	t = _mm256_shuffle_epi32( v, _MM_SHUFFLE( 2, 3, 0, 1 ) );
+	v = _mm256_blend_epi32( _mm256_min_epi32( v, t ), _mm256_max_epi32( v, t ), 0xAA );
+	t = _mm256_permutevar8x32_epi32( v, _mm256_setr_epi32( 7, 6, 5, 4, 3, 2, 1, 0 ) );
+	v = _mm256_blend_epi32( _mm256_min_epi32( v, t ), _mm256_max_epi32( v, t ), 0xF0 );
+	t = _mm256_shuffle_epi32( v, _MM_SHUFFLE( 1, 0, 3, 2 ) );
+	v = _mm256_blend_epi32( _mm256_min_epi32( v, t ), _mm256_max_epi32( v, t ), 0xCC );
+	t = _mm256_shuffle_epi32( v, _MM_SHUFFLE( 2, 3, 0, 1 ) );
+	v = _mm256_blend_epi32( _mm256_min_epi32( v, t ), _mm256_max_epi32( v, t ), 0xAA );
+	_mm256_store_si256( (__m256i*)key, v );
+	for (uint32_t i = 0; i < n; i++) order[i] = (uint8_t)(key[i] & 7);
+}
+
+// max of the rows selected by an 8-bit mask; all eight in a tree.
+static TINYBVH_FORCEINLINE __m256 tinybvh_maxrows8( __m256 acc, const __m256* row, const uint32_t sel )
+{
+	if (sel == 255)
+	{
+		const __m256 m0 = _mm256_max_ps( _mm256_max_ps( row[0], row[1] ), _mm256_max_ps( row[2], row[3] ) );
+		const __m256 m1 = _mm256_max_ps( _mm256_max_ps( row[4], row[5] ), _mm256_max_ps( row[6], row[7] ) );
+		return _mm256_max_ps( acc, _mm256_max_ps( m0, m1 ) );
+	}
+	for (uint32_t b = sel; b; b &= b - 1) acc = _mm256_max_ps( acc, row[tinybvh_ctz( b )] );
+	return acc;
+}
+
+// BonsaiHQClassify, AVX2: pass 1 of a Bonsai HQ partition step, eight fragments at a time.
+template <> void impl::BVH<float, uint32_t>::BonsaiHQClassify( uint8_t* mask, const uint32_t lo, const uint32_t hi, const uint32_t axis, const float pos2, BonsaiHQPart& p ) const
+{
+	p.Clear();
+	const __m256 pos8 = _mm256_set1_ps( pos2 * 0.5f ), pos2x8 = _mm256_set1_ps( pos2 ), none8 = _mm256_set1_ps( -BVH_FAR );
+	const __m256 flip8 = _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f ); // fragment to BinBox layout
+	const __m256 ones8 = _mm256_castsi256_ps( _mm256_set1_epi32( -1 ) );
+	const float* frag = (const float*)fragment;
+	__m256 boxL8 = none8, boxR8 = none8;
+	__m256i countL8 = _mm256_setzero_si256(), countR8 = _mm256_setzero_si256();
+	uint32_t i = lo;
+	// gather offsets are fragment index * 8 floats, in 31 bits.
+	if (allocatedNodes / 2 < (1u << 28)) for (; i + 8 <= hi; i += 8)
+	{
+		const uint32_t* idx = primIdx + i;
+		const __m256i offs8 = _mm256_slli_epi32( _mm256_loadu_si256( (const __m256i*)idx ), 3 );
+		const __m256 bmin8 = _mm256_i32gather_ps( frag + axis, offs8, 4 ), bmax8 = _mm256_i32gather_ps( frag + 4 + axis, offs8, 4 );
+		const __m256 right8 = _mm256_cmp_ps( _mm256_add_ps( bmin8, bmax8 ), pos2x8, _CMP_GE_OQ );
+		const __m256 straddle8 = _mm256_and_ps( _mm256_cmp_ps( bmin8, pos8, _CMP_LT_OQ ), _mm256_cmp_ps( bmax8, pos8, _CMP_GT_OQ ) );
+		const __m256 selR8 = _mm256_andnot_ps( straddle8, right8 ), selL8 = _mm256_andnot_ps( _mm256_or_ps( straddle8, right8 ), ones8 );
+		countR8 = _mm256_sub_epi32( countR8, _mm256_castps_si256( selR8 ) ); // selected lanes are -1
+		countL8 = _mm256_sub_epi32( countL8, _mm256_castps_si256( selL8 ) );
+		const uint32_t right = (uint32_t)_mm256_movemask_ps( right8 ), straddle = (uint32_t)_mm256_movemask_ps( straddle8 );
+		// mask bytes: bit j of 'right' becomes byte j; straddlers are rewritten below.
+		const uint64_t spread = ((uint64_t)right * 0x0101010101010101ull) & 0x8040201008040201ull;
+		const uint64_t bytes = ((spread + 0x7f7f7f7f7f7f7f7full) >> 7) & 0x0101010101010101ull;
+		memcpy( mask + i, &bytes, 8 );
+		__m256 row[8];
+		for (uint32_t j = 0; j < 8; j++) row[j] = _mm256_xor_ps( tinybvh_load8( fragment + idx[j] ), flip8 );
+		boxR8 = tinybvh_maxrows8( boxR8, row, (uint32_t)_mm256_movemask_ps( selR8 ) );
+		boxL8 = tinybvh_maxrows8( boxL8, row, (uint32_t)_mm256_movemask_ps( selL8 ) );
+		if (straddle) for (uint32_t j = 0; j < 8; j++) if ((straddle >> j) & 1) mask[i + j] = BonsaiHQClassifyFrag( fragment[idx[j]], axis, pos2, p );
+	}
+	for (; i < hi; i++) mask[i] = BonsaiHQClassifyFrag( fragment[primIdx[i]], axis, pos2, p );
+	// fold the accumulators into the disjoint sets.
+	ALIGNED( 32 ) BVHBinBox<float> b;
+	_mm256_store_ps( &b.negMin.x, boxL8 ), BinBoxMerge( p.box[0], b );
+	_mm256_store_ps( &b.negMin.x, boxR8 ), BinBoxMerge( p.box[3], b );
+	ALIGNED( 32 ) uint32_t count[16];
+	_mm256_store_si256( (__m256i*)count, countL8 ), _mm256_store_si256( (__m256i*)(count + 8), countR8 );
+	for (int k = 0; k < 8; k++) p.n[0] += count[k], p.n[3] += count[8 + k];
+}
+
+// Lane compaction for BonsaiHQDistribute: for each 8-bit lane mask, the selected lanes in
+// order (one per byte) and their count.
+struct tinybvh_compact8
+{
+	uint64_t order[256];
+	uint8_t count[256];
+	constexpr tinybvh_compact8() : order(), count()
+	{
+		for (uint32_t m = 0; m < 256; m++)
+		{
+			uint32_t n = 0;
+			for (uint32_t j = 0; j < 8; j++) if ((m >> j) & 1) order[m] |= (uint64_t)j << (8 * n++);
+			count[m] = (uint8_t)n;
+		}
+	}
+};
+static constexpr tinybvh_compact8 tinybvh_compact8_lut{};
+
+// BonsaiHQDistribute, AVX2: pass 2 of a Bonsai HQ partition step eight fragments at a time.
+template <> void impl::BVH<float, uint32_t>::BonsaiHQDistribute( BonsaiHQState& st, const uint8_t* mask, uint8_t* maskOut, const uint32_t lo, const uint32_t hi,
+	const uint32_t axis, const float pos2, const bool doSplit, BonsaiHQPart& p, const BonsaiHQNext* plan, BonsaiHQPart* next )
+{
+	BonsaiHQEmit e;
+	BonsaiHQDistributeBegin( e, p, plan, next );
+	const tinybvh_compact8& lut = tinybvh_compact8_lut;
+	const uint32_t a = doSplit ? 2 : 1, end[2] = { p.left + p.n[0] + p.n[a], p.right + p.n[3] + p.n[3 + a] }; // this slice's output runs
+	const uint32_t fused[2] = { plan[0].fused ? 255u : 0u, plan[1].fused ? 255u : 0u };
+	const __m256 flip8 = _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f ), none8 = _mm256_set1_ps( -BVH_FAR );
+	const __m256 pos2L8 = _mm256_set1_ps( plan[0].pos2 ), pos2R8 = _mm256_set1_ps( plan[1].pos2 );
+	const __m256 posL8 = _mm256_set1_ps( plan[0].pos2 * 0.5f ), posR8 = _mm256_set1_ps( plan[1].pos2 * 0.5f );
+	const __m256i axisL8 = _mm256_set1_epi32( (int)plan[0].axis ), axisR8 = _mm256_set1_epi32( (int)plan[1].axis ), one8 = _mm256_set1_epi32( 1 );
+	const __m256i lane8 = _mm256_setr_epi32( 0, 1, 2, 3, 4, 5, 6, 7 );
+	__m256 box8[2][2] = { { none8, none8 }, { none8, none8 } }, cen8[2] = { none8, none8 }; // sets and centroid bounds, BinBox layout
+	const float* frag = (const float*)fragment;
+	uint32_t i = lo;
+	// gather offsets are fragment index * 8 floats, in 31 bits.
+	if (allocatedNodes / 2 < (1u << 28)) for (; i + 8 <= hi; i += 8)
+	{
+		uint64_t m64;
+		memcpy( &m64, mask + i, 8 );
+		if (doSplit && (m64 & 0x0c0c0c0c0c0c0c0cull))
+		{
+			for (uint32_t j = 0; j < 8; j++) BonsaiHQDistributeFrag( e, st, mask, maskOut, i + j, axis, pos2, doSplit, plan, next );
+			continue;
+		}
+		const uint32_t* idx = primIdx + i;
+		const __m256i idx8 = _mm256_loadu_si256( (const __m256i*)idx );
+		const __m256i side8 = _mm256_cmpeq_epi32( _mm256_and_si256( _mm256_cvtepu8_epi32( _mm_loadl_epi64( (const __m128i*)(mask + i) ) ), one8 ), one8 );
+		const uint32_t right = (uint32_t)_mm256_movemask_ps( _mm256_castsi256_ps( side8 ) ), sel[2] = { ~right & 255u, right };
+		// rows in BinBox layout, and their doubled centroids as [-c2 | c2], c2 = bmin + bmax.
+		__m256 row[8], cen[8];
+		for (uint32_t j = 0; j < 8; j++)
+		{
+			const __m256 r = tinybvh_load8( fragment + idx[j] );
+			row[j] = _mm256_xor_ps( r, flip8 ), cen[j] = _mm256_xor_ps( _mm256_add_ps( r, _mm256_permute2f128_ps( r, r, 1 ) ), flip8 );
+		}
+		// each lane against the plane of its child; bit j of cat[k][s]: lane j is in child k, side s.
+		uint32_t cat[2][2] = { { 0, 0 }, { 0, 0 } }, straddle = 0, cright = 0;
+		if (fused[0] | fused[1])
+		{
+			const __m256 s8 = _mm256_castsi256_ps( side8 );
+			const __m256i offs8 = _mm256_add_epi32( _mm256_slli_epi32( idx8, 3 ), _mm256_blendv_epi8( axisL8, axisR8, side8 ) );
+			const __m256 bmin8 = _mm256_i32gather_ps( frag, offs8, 4 ), bmax8 = _mm256_i32gather_ps( frag + 4, offs8, 4 );
+			const __m256 cpos8 = _mm256_blendv_ps( posL8, posR8, s8 );
+			cright = (uint32_t)_mm256_movemask_ps( _mm256_cmp_ps( _mm256_add_ps( bmin8, bmax8 ), _mm256_blendv_ps( pos2L8, pos2R8, s8 ), _CMP_GE_OQ ) );
+			const uint32_t lanes = (sel[0] & fused[0]) | (sel[1] & fused[1]);
+			straddle = lanes & (uint32_t)_mm256_movemask_ps( _mm256_and_ps( _mm256_cmp_ps( bmin8, cpos8, _CMP_LT_OQ ), _mm256_cmp_ps( bmax8, cpos8, _CMP_GT_OQ ) ) );
+			for (uint32_t k = 0; k < 2; k++)
+				cat[k][0] = sel[k] & fused[k] & ~straddle & ~cright, cat[k][1] = sel[k] & fused[k] & ~straddle & cright;
+		}
+		// mask bytes: bit j of 'cright' becomes byte j.
+		const uint64_t spread = ((uint64_t)cright * 0x0101010101010101ull) & 0x8040201008040201ull;
+		const uint64_t bytes = ((spread + 0x7f7f7f7f7f7f7f7full) >> 7) & 0x0101010101010101ull;
+		const __m128i bytes16 = _mm_loadl_epi64( (const __m128i*) & bytes );
+		for (uint32_t k = 0; k < 2; k++) if (sel[k])
+		{
+			const uint32_t n = lut.count[sel[k]], at = e.at[k];
+			const __m128i order16 = _mm_loadl_epi64( (const __m128i*) & lut.order[sel[k]] );
+			const __m256i out8 = _mm256_permutevar8x32_epi32( idx8, _mm256_cvtepu8_epi32( order16 ) );
+			if (at + 8 <= end[k]) _mm256_storeu_si256( (__m256i*)(st.idxTmp + at), out8 );
+			else _mm256_maskstore_epi32( (int*)(st.idxTmp + at), _mm256_cmpgt_epi32( _mm256_set1_epi32( (int)n ), lane8 ), out8 );
+			cen8[k] = tinybvh_maxrows8( cen8[k], cen, sel[k] );
+			e.at[k] = at + n;
+			if (!fused[k]) continue;
+			const __m128i out16 = _mm_shuffle_epi8( bytes16, order16 );
+			if (at + 8 <= end[k]) _mm_storel_epi64( (__m128i*)(maskOut + at), out16 );
+			else { uint64_t b; _mm_storel_epi64( (__m128i*) & b, out16 ); memcpy( maskOut + at, &b, n ); }
+			box8[k][0] = tinybvh_maxrows8( box8[k][0], row, cat[k][0] ), next[k].n[0] += lut.count[cat[k][0]];
+			box8[k][1] = tinybvh_maxrows8( box8[k][1], row, cat[k][1] ), next[k].n[3] += lut.count[cat[k][1]];
+			for (uint32_t b = straddle & sel[k]; b; b &= b - 1)
+			{
+				const uint32_t j = tinybvh_ctz( b );
+				maskOut[at + lut.count[sel[k] & ((1u << j) - 1)]] = BonsaiHQClassifyFrag( fragment[idx[j]], plan[k].axis, plan[k].pos2, next[k] );
+			}
+		}
+	}
+	for (; i < hi; i++) BonsaiHQDistributeFrag( e, st, mask, maskOut, i, axis, pos2, doSplit, plan, next );
+	// fold the register accumulators into e and the children's sets.
+	for (uint32_t k = 0; k < 2; k++)
+	{
+		ALIGNED( 32 ) BVHBinBox<float> b;
+		_mm256_store_ps( &b.negMin.x, cen8[k] );
+		e.cmin2[k] = tinybvh_min( e.cmin2[k], -b.negMin ), e.cmax2[k] = tinybvh_max( e.cmax2[k], b.bmax );
+		if (fused[k]) for (uint32_t side = 0; side < 2; side++) _mm256_store_ps( &b.negMin.x, box8[k][side] ), BinBoxMerge( next[k].box[3 * side], b );
+	}
+	BonsaiHQDistributeEnd( e, p );
+}
+
+// EmitNode, AVX2.
+template <> void impl::BVH4_CPU<float, uint32_t>::EmitNode( impl::MBVH<4, float, uint32_t>& src, const uint32_t* base, uint32_t n )
+{
+	const MBVH<4, float, uint32_t>::MBVHNode& orig = src.mbvhNode[n];
+	if (orig.isLeaf()) return; // leaves are emitted as part of their parent
+	BVHNode* newNode = (BVHNode*)(bvh4Data + base[n]);
+	memset( newNode, 0, sizeof( BVHNode ) );
+	// lane q is octant q; per axis, the octant's bit selects +min or -max.
+	const __m256 bit0 = _mm256_castsi256_ps( _mm256_setr_epi32( 0, -1, 0, -1, 0, -1, 0, -1 ) );
+	const __m256 bit1 = _mm256_castsi256_ps( _mm256_setr_epi32( 0, 0, -1, -1, 0, 0, -1, -1 ) );
+	const __m256 bit2 = _mm256_castsi256_ps( _mm256_setr_epi32( 0, 0, 0, 0, -1, -1, -1, -1 ) );
+	const __m256i keyMask = _mm256_set1_epi32( (int32_t)0xfffffff8 ), flip = _mm256_set1_epi32( 0x7fffffff );
+	__m256i k[4];
+	for (int32_t i = 0; i < 4; i++)
+	{
+		if (orig.child[i] == 0) // empty slot: the same far key in every octant.
+		{
+			k[i] = _mm256_set1_epi32( (int32_t)((tinybvh_as_uint( 1e30f ) & 0xfffffffc) + i) );
+			continue;
+		}
+		const MBVH<4, float, uint32_t>::MBVHNode& c = src.mbvhNode[orig.child[i]];
+		const __m256 tx = _mm256_blendv_ps( _mm256_set1_ps( -c.aabbMax.x ), _mm256_set1_ps( c.aabbMin.x ), bit0 );
+		const __m256 ty = _mm256_blendv_ps( _mm256_set1_ps( -c.aabbMax.y ), _mm256_set1_ps( c.aabbMin.y ), bit1 );
+		const __m256 tz = _mm256_blendv_ps( _mm256_set1_ps( -c.aabbMax.z ), _mm256_set1_ps( c.aabbMin.z ), bit2 );
+		const __m256 dist = _mm256_add_ps( _mm256_add_ps( tx, ty ), tz );
+		const __m256i key = _mm256_or_si256( _mm256_and_si256( _mm256_castps_si256( dist ), keyMask ), _mm256_set1_epi32( i ) );
+		k[i] = _mm256_xor_si256( key, _mm256_and_si256( _mm256_srai_epi32( key, 31 ), flip ) ); // see below
+	}
+	// the generic network, larger key first, on every octant at once.
+#define TINYBVH_SORT8( a, b ) { const __m256i t = _mm256_max_epi32( k[a], k[b] ); k[b] = _mm256_min_epi32( k[a], k[b] ); k[a] = t; }
+	TINYBVH_SORT8( 0, 2 ); TINYBVH_SORT8( 1, 3 ); TINYBVH_SORT8( 0, 1 ); TINYBVH_SORT8( 2, 3 ); TINYBVH_SORT8( 1, 2 );
+#undef TINYBVH_SORT8
+	// perm[i] holds the child at sorted position i for all eight octants, 2 bits each.
+	const __m256i three = _mm256_set1_epi32( 3 ), shift = _mm256_setr_epi32( 0, 2, 4, 6, 8, 10, 12, 14 );
+	for (int32_t i = 0; i < 4; i++)
+	{
+		const __m256i lane = _mm256_and_si256( _mm256_xor_si256( k[i], _mm256_srai_epi32( k[i], 31 ) ), three ); // unflip
+		const __m256i t = _mm256_sllv_epi32( lane, shift );
+		__m128i s = _mm_or_si128( _mm256_castsi256_si128( t ), _mm256_extracti128_si256( t, 1 ) );
+		s = _mm_or_si128( s, _mm_shuffle_epi32( s, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+		s = _mm_or_si128( s, _mm_shuffle_epi32( s, _MM_SHUFFLE( 2, 3, 0, 1 ) ) );
+		newNode->perm[i] = (uint32_t)_mm_cvtsi128_si32( s );
+	}
+	// fill remaining fields. Leaf blocks sit directly behind the node, in child order.
+	constexpr uint32_t NODE_BLOCKS = sizeof( BVHNode ) / 64, LEAF_BLOCKS = sizeof( BVHTri4Leaf ) / 64;
+	uint32_t leafBlock = base[n] + NODE_BLOCKS;
+	int32_t cidx = 0;
+	for (int32_t i = 0; i < 4; i++) if (orig.child[i])
+	{
+		const MBVH<4, float, uint32_t>::MBVHNode& child = src.mbvhNode[orig.child[i]];
+		newNode->xmin[cidx] = child.aabbMin.x, newNode->xmax[cidx] = child.aabbMax.x;
+		newNode->ymin[cidx] = child.aabbMin.y, newNode->ymax[cidx] = child.aabbMax.y;
+		newNode->zmin[cidx] = child.aabbMin.z, newNode->zmax[cidx] = child.aabbMax.z;
+		if (child.isLeaf())
+		{
+			newNode->child[cidx] = leafBlock + LEAF_BIT;
+			BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + leafBlock);
+			leafBlock += LEAF_BLOCKS;
+			// four triangles as rows (the last repeats if there are fewer), then one
+			// transpose per vertex quantity turns them into the leaf's columns.
+			__m128 v0[4], e1[4], e2[4];
+			for (uint32_t l = 0; l < 4; l++)
+			{
+				const uint32_t prim = src.bvh.primIdx[child.firstTri + tinybvh_min( l, child.triCount - 1 )];
+				uint32_t i0, i1, i2;
+				GET_PRIM_INDICES_I0_I1_I2( src.bvh, prim );
+				v0[l] = tinybvh_load4( &src.bvh.verts[i0] );
+				e1[l] = _mm_sub_ps( tinybvh_load4( &src.bvh.verts[i1] ), v0[l] );
+				e2[l] = _mm_sub_ps( tinybvh_load4( &src.bvh.verts[i2] ), v0[l] );
+				leaf->primIdx[l] = prim;
+			}
+			_MM_TRANSPOSE4_PS( v0[0], v0[1], v0[2], v0[3] );
+			_MM_TRANSPOSE4_PS( e1[0], e1[1], e1[2], e1[3] );
+			_MM_TRANSPOSE4_PS( e2[0], e2[1], e2[2], e2[3] );
+			tinybvh_store4( leaf->v0x, v0[0] ), tinybvh_store4( leaf->v0y, v0[1] ), tinybvh_store4( leaf->v0z, v0[2] );
+			tinybvh_store4( leaf->e1x, e1[0] ), tinybvh_store4( leaf->e1y, e1[1] ), tinybvh_store4( leaf->e1z, e1[2] );
+			tinybvh_store4( leaf->e2x, e2[0] ), tinybvh_store4( leaf->e2y, e2[1] ), tinybvh_store4( leaf->e2z, e2[2] );
+		}
+		else newNode->child[cidx] = base[orig.child[i]]; // address is already known
+		cidx++;
+	}
+	for (; cidx < 4; cidx++)
+		newNode->xmin[cidx] = bvh_far<float>, newNode->xmax[cidx] = -bvh_far<float>,
+		newNode->ymin[cidx] = bvh_far<float>, newNode->ymax[cidx] = -bvh_far<float>,
+		newNode->zmin[cidx] = bvh_far<float>, newNode->zmax[cidx] = -bvh_far<float>,
+		newNode->child[cidx] |= EMPTY_BIT;
+}
+
+#endif // BVH_USEAVX2
+
+#ifdef BVH_USEAVX
+// BinBox helpers, AVX.
+template <> void impl::BVH<float, uint32_t>::BinBoxClear( BVHBinBox<float>& b )
+{
+	_mm256_store_ps( &b.negMin.x, _mm256_set1_ps( -bvh_far<float> ) );
+}
+template <> void impl::BVH<float, uint32_t>::BinBoxMerge( BVHBinBox<float>& b, const BVHBinBox<float>& o )
+{
+	_mm256_store_ps( &b.negMin.x, _mm256_max_ps( _mm256_load_ps( &b.negMin.x ), _mm256_load_ps( &o.negMin.x ) ) );
+}
+template <> void impl::BVH<float, uint32_t>::BinBoxAddFrag( BVHBinBox<float>& b, const Fragment& f )
+{
+	// lanes 3 and 7 pick up primIdx and clipped; they are never read back.
+	_mm256_store_ps( &b.negMin.x, _mm256_max_ps( _mm256_load_ps( &b.negMin.x ),
+		_mm256_xor_ps( tinybvh_load8( &f.bmin ), _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f ) ) ) );
+}
+template <> void impl::BVH<float, uint32_t>::BinBoxAdd( BVHBinBox<float>& b, const bvhvec3& mn, const bvhvec3& mx )
+{
+	const __m128 mn4 = _mm_xor_ps( _mm_setr_ps( mn.x, mn.y, mn.z, 0 ), _mm_set1_ps( -0.0f ) );
+	const __m128 mx4 = _mm_setr_ps( mx.x, mx.y, mx.z, 0 );
+	_mm256_store_ps( &b.negMin.x, _mm256_max_ps( _mm256_load_ps( &b.negMin.x ),
+		_mm256_insertf128_ps( _mm256_castps128_ps256( mn4 ), mx4, 1 ) ) );
+}
+#endif
+
+// ClipFragToBins, SSE version.
+template <> void impl::BVH<float, uint32_t>::ClipFragToBins( const Fragment& orig, const int32_t bin1,
+	const int32_t bin2, const uint32_t axis, const float nodeMin, const float planeDist,
+	BVHBinBox<float>* sbinBox ) const
+{
+	__m128 vert4[4], left4[5], right4[4];
+	uint32_t n = 3;
+	const uint32_t vidx = orig.primIdx * 3;
+	// vertex w may carry integer payload, which reads as a denormal float; clear it.
+	if (!vertIdx)
+		vert4[0] = _mm_and_ps( tinybvh_load4( &verts[vidx] ), bvhc_mask3() ),
+		vert4[1] = _mm_and_ps( tinybvh_load4( &verts[vidx + 1] ), bvhc_mask3() ),
+		vert4[2] = _mm_and_ps( tinybvh_load4( &verts[vidx + 2] ), bvhc_mask3() );
+	else
+		vert4[0] = _mm_and_ps( tinybvh_load4( &verts[vertIdx[vidx]] ), bvhc_mask3() ),
+		vert4[1] = _mm_and_ps( tinybvh_load4( &verts[vertIdx[vidx + 1]] ), bvhc_mask3() ),
+		vert4[2] = _mm_and_ps( tinybvh_load4( &verts[vertIdx[vidx + 2]] ), bvhc_mask3() );
+	// lane selector for 'axis', used to pin a split vertex exactly onto its plane.
+	ALIGNED( 16 ) static const uint32_t laneBits[3][4] = { { 0xffffffff, 0, 0, 0 }, { 0, 0xffffffff, 0, 0 }, { 0, 0, 0xffffffff, 0 } };
+	const __m128 axisSel4 = tinybvh_load4( laneBits[axis] );
+	const __m128 origMin4 = tinybvh_load4( &orig.bmin ), origMax4 = tinybvh_load4( &orig.bmax );
+	for (int32_t j = bin1 - 1; j <= bin2 && n > 0; j++)
+	{
+		const float pos = nodeMin + planeDist * (j + 1);
+		const __m128 pos4 = _mm_set1_ps( pos );
+		uint32_t nl = 0, nr = 0;
+		for (uint32_t k = 0; k < n; k++)
+		{
+			const uint32_t k1 = k + 1 == n ? 0 : k + 1;
+			const float ca = tinybvh_getlane_f( &vert4[k], axis ), cb = tinybvh_getlane_f( &vert4[k1], axis );
+			const bool ina = ca <= pos, inb = cb <= pos;
+			if (ina) left4[nl++] = vert4[k]; else right4[nr++] = vert4[k];
+			if (ina == inb) continue;
+			const __m128 a4 = vert4[k], b4 = vert4[k1], t4 = _mm_set1_ps( (pos - ca) / (cb - ca) );
+			__m128 c4 = _mm_add_ps( a4, _mm_mul_ps( t4, _mm_sub_ps( b4, a4 ) ) );
+			c4 = _mm_blendv_ps( c4, pos4, axisSel4 ); // exactly on the split plane
+			left4[nl++] = c4, right4[nr++] = c4;
+		}
+		if (j >= bin1 && nl > 0)
+		{
+			// close bin j with the bounds of the part behind the plane.
+			__m128 bmin4 = left4[0], bmax4 = left4[0];
+			for (uint32_t k = 1; k < nl; k++) bmin4 = _mm_min_ps( bmin4, left4[k] ), bmax4 = _mm_max_ps( bmax4, left4[k] );
+			// a fragment that was split earlier is confined to its own box.
+			if (orig.clipped) bmin4 = _mm_max_ps( bmin4, origMin4 ), bmax4 = _mm_min_ps( bmax4, origMax4 );
+			ALIGNED( 16 ) float bn[4], bx[4];
+			tinybvh_store4( bn, bmin4 ), tinybvh_store4( bx, bmax4 );
+			const float ex = bx[0] - bn[0], ey = bx[1] - bn[1], ez = bx[2] - bn[2];
+			if (ex * ey + ey * ez + ez * ex > 0)
+			{
+			#ifdef BVH_USEAVX
+				const __m256 box8 = _mm256_insertf128_ps( _mm256_castps128_ps256( _mm_xor_ps( bmin4, _mm_set1_ps( -0.0f ) ) ), bmax4, 1 );
+				_mm256_store_ps( &sbinBox[j].negMin.x, _mm256_max_ps( _mm256_load_ps( &sbinBox[j].negMin.x ), box8 ) );
+			#else
+				BinBoxAdd( sbinBox[j], bvhvec3( bn[0], bn[1], bn[2] ), bvhvec3( bx[0], bx[1], bx[2] ) );
+			#endif
+			}
+		}
+		if (j == bin2) break;
+		memcpy( vert4, right4, nr * sizeof( __m128 ) );
+		n = nr;
+	}
 }
 
 // SplitFrag: cut a fragment in two new fragments. Based on madmann91 code.
-template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const
+template <> uint32_t impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fragment& left, Fragment& right, const uint32_t axis, const float pos ) const
 {
 	__m128 lbmin4, lbmax4, rbmin4, rbmax4;
 	lbmin4 = _mm_set1_ps( BVH_FAR ), rbmin4 = lbmin4;
@@ -102,14 +487,15 @@ template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fr
 	const uint32_t vidx = orig.primIdx * 3;
 	if (!vertIdx) v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
 	else v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
-	const __m128 v0_4 = tinybvh_load4( &v0 ), v1_4 = tinybvh_load4( &v1 ), v2_4 = tinybvh_load4( &v2 );
+	v0.w = v1.w = v2.w = 0; // w may hold payload that reads as a denormal; see ClipFragToBins.
+	const __m128 v04 = tinybvh_load4( &v0 ), v14 = tinybvh_load4( &v1 ), v24 = tinybvh_load4( &v2 );
 	const bool l0 = v0[axis] <= pos, l1 = v1[axis] <= pos, l2 = v2[axis] <= pos;
-	if (l0) lbmin4 = _mm_min_ps( lbmin4, v0_4 ), lbmax4 = _mm_max_ps( lbmax4, v0_4 );
-	else rbmin4 = _mm_min_ps( rbmin4, v0_4 ), rbmax4 = _mm_max_ps( rbmax4, v0_4 );
-	if (l1) lbmin4 = _mm_min_ps( lbmin4, v1_4 ), lbmax4 = _mm_max_ps( lbmax4, v1_4 );
-	else rbmin4 = _mm_min_ps( rbmin4, v1_4 ), rbmax4 = _mm_max_ps( rbmax4, v1_4 );
-	if (l2) lbmin4 = _mm_min_ps( lbmin4, v2_4 ), lbmax4 = _mm_max_ps( lbmax4, v2_4 );
-	else rbmin4 = _mm_min_ps( rbmin4, v2_4 ), rbmax4 = _mm_max_ps( rbmax4, v2_4 );
+	if (l0) lbmin4 = _mm_min_ps( lbmin4, v04 ), lbmax4 = _mm_max_ps( lbmax4, v04 );
+	else rbmin4 = _mm_min_ps( rbmin4, v04 ), rbmax4 = _mm_max_ps( rbmax4, v04 );
+	if (l1) lbmin4 = _mm_min_ps( lbmin4, v14 ), lbmax4 = _mm_max_ps( lbmax4, v14 );
+	else rbmin4 = _mm_min_ps( rbmin4, v14 ), rbmax4 = _mm_max_ps( rbmax4, v14 );
+	if (l2) lbmin4 = _mm_min_ps( lbmin4, v24 ), lbmax4 = _mm_max_ps( lbmax4, v24 );
+	else rbmin4 = _mm_min_ps( rbmin4, v24 ), rbmax4 = _mm_max_ps( rbmax4, v24 );
 	bvhvec4 c; __m128 c4;
 	if (l0 ^ l1)
 		c = v0 + (pos - v0[axis]) / (v1[axis] - v0[axis]) * (v1 - v0), c[axis] = pos, c4 = tinybvh_load4( &c ),
@@ -132,69 +518,7 @@ template <> bool impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig, Fr
 	tinybvh_store4( &left.bmax, lbmax4 ), tinybvh_store4( &right.bmax, rbmax4 );
 	left.primIdx = right.primIdx = orig.primIdx;
 	left.clipped = right.clipped = true;
-	return tinybvh_halfarea( left.bmax - left.bmin ) > 0 && tinybvh_halfarea( right.bmax - right.bmin ) > 0;
-}
-
-// ClipFrag: clip a fragment for binning.
-template <> bool impl::BVH<float, uint32_t>::ClipFrag( const Fragment& orig, Fragment& newFrag, bvhvec3 bmin, bvhvec3 bmax, const uint32_t axis ) const
-{
-	__m128 t1min4, t1max4, t2min4, t2max4;
-	t1min4 = t2min4 = _mm_set1_ps( BVH_FAR );
-	t1max4 = t2max4 = _mm_set1_ps( -BVH_FAR );
-	bvhvec4 v0, v1, v2;
-	const uint32_t vidx = orig.primIdx * 3;
-	if (!vertIdx) v0 = verts[vidx], v1 = verts[vidx + 1], v2 = verts[vidx + 2];
-	else v0 = verts[vertIdx[vidx]], v1 = verts[vertIdx[vidx + 1]], v2 = verts[vertIdx[vidx + 2]];
-	const __m128 v0_4 = tinybvh_load4( &v0 ), v1_4 = tinybvh_load4( &v1 ), v2_4 = tinybvh_load4( &v2 );
-	const float left = bmin[axis], right = bmax[axis];
-	// clip against min bounds
-	bool in0 = v0[axis] >= left, in1 = v1[axis] >= left, in2 = v2[axis] >= left;
-	if (in0) t1min4 = _mm_min_ps( t1min4, v0_4 ), t1max4 = _mm_max_ps( t1max4, v0_4 );
-	if (in1) t1min4 = _mm_min_ps( t1min4, v1_4 ), t1max4 = _mm_max_ps( t1max4, v1_4 );
-	if (in2) t1min4 = _mm_min_ps( t1min4, v2_4 ), t1max4 = _mm_max_ps( t1max4, v2_4 );
-	bvhvec4 c; __m128 c4;
-	if (in0 ^ in1)
-		c = v0 + (left - v0[axis]) / (v1[axis] - v0[axis]) * (v1 - v0), c[axis] = left, c4 = tinybvh_load4( &c ),
-		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 ),
-		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 );
-	if (in1 ^ in2)
-		c = v1 + (left - v1[axis]) / (v2[axis] - v1[axis]) * (v2 - v1), c[axis] = left, c4 = tinybvh_load4( &c ),
-		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 ),
-		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 );
-	if (in2 ^ in0)
-		c = v2 + (left - v2[axis]) / (v0[axis] - v2[axis]) * (v0 - v2), c[axis] = left, c4 = tinybvh_load4( &c ),
-		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 ),
-		t1min4 = _mm_min_ps( t1min4, c4 ), t1max4 = _mm_max_ps( t1max4, c4 );
-	// clip against max bounds
-	in0 = v0[axis] <= right, in1 = v1[axis] <= right, in2 = v2[axis] <= right;
-	if (in0) t2min4 = _mm_min_ps( t2min4, v0_4 ), t2max4 = _mm_max_ps( t2max4, v0_4 );
-	if (in1) t2min4 = _mm_min_ps( t2min4, v1_4 ), t2max4 = _mm_max_ps( t2max4, v1_4 );
-	if (in2) t2min4 = _mm_min_ps( t2min4, v2_4 ), t2max4 = _mm_max_ps( t2max4, v2_4 );
-	if (in0 ^ in1)
-		c = v0 + (right - v0[axis]) / (v1[axis] - v0[axis]) * (v1 - v0), c[axis] = right, c4 = tinybvh_load4( &c ),
-		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 ),
-		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 );
-	if (in1 ^ in2)
-		c = v1 + (right - v1[axis]) / (v2[axis] - v1[axis]) * (v2 - v1), c[axis] = right, c4 = tinybvh_load4( &c ),
-		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 ),
-		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 );
-	if (in2 ^ in0)
-		c = v2 + (right - v2[axis]) / (v0[axis] - v2[axis]) * (v0 - v2), c[axis] = right, c4 = tinybvh_load4( &c ),
-		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 ),
-		t2min4 = _mm_min_ps( t2min4, c4 ), t2max4 = _mm_max_ps( t2max4, c4 );
-	__m128 finalmin4, finalmax4;
-	if (orig.clipped) // clip against orig box
-		finalmin4 = _mm_max_ps( _mm_max_ps( t1min4, t2min4 ), _mm_and_ps( tinybvh_load4( &orig.bmin ), bvhc_mask3() ) ),
-		finalmax4 = _mm_min_ps( _mm_min_ps( t1max4, t2max4 ), _mm_and_ps( tinybvh_load4( &orig.bmax ), bvhc_mask3() ) );
-	else
-		finalmin4 = _mm_max_ps( t1min4, t2min4 ),
-		finalmax4 = _mm_min_ps( t1max4, t2max4 );
-	tinybvh_store4( &newFrag.bmin, finalmin4 );
-	tinybvh_store4( &newFrag.bmax, finalmax4 );
-	newFrag.primIdx = orig.primIdx;
-	newFrag.clipped = true;
-	const float sa = tinybvh_halfarea( newFrag.bmax - newFrag.bmin );
-	return sa > 0;
+	return SplitFragMask( left, right );
 }
 
 // SSE box tests for BVH::EPOArea.
@@ -218,7 +542,7 @@ inline bool tinybvh_tri_inside_box( const bvhvec4& v0, const bvhvec4& v1, const 
 #define SSE_HIT( s ) ((m >> s) & 1)
 #define SSE_PUSH( c, s ) { nodeStack[stackPtr] = c; distStack[stackPtr] = tminSorted[s]; stackPtr++; }
 
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
+template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	ALIGNED( 64 ) float distStack[TINYBVH_STACK_SIZE * 2];
@@ -320,10 +644,10 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<fl
 		const __m128 qz4 = _mm_fmsub_ps( sx4, _mm_load_ps( leaf->e1y ), _mm_mul_ps( sy4, _mm_load_ps( leaf->e1x ) ) );
 		const __m128 qx4 = _mm_fmsub_ps( sy4, _mm_load_ps( leaf->e1z ), _mm_mul_ps( sz4, _mm_load_ps( leaf->e1y ) ) );
 		const __m128 qy4 = _mm_fmsub_ps( sz4, _mm_load_ps( leaf->e1x ), _mm_mul_ps( sx4, _mm_load_ps( leaf->e1z ) ) );
-		const __m128 inv_det4 = _mm_div_ps( one4, det4 );
-		const __m128 u4 = _mm_mul_ps( _mm_fmadd_ps( sz4, hz4, _mm_fmadd_ps( sx4, hx4, _mm_mul_ps( sy4, hy4 ) ) ), inv_det4 );
-		const __m128 v4 = _mm_mul_ps( _mm_fmadd_ps( dz4, qz4, _mm_fmadd_ps( dx4, qx4, _mm_mul_ps( dy4, qy4 ) ) ), inv_det4 );
-		const __m128 ta4 = _mm_mul_ps( _mm_fmadd_ps( _mm_load_ps( leaf->e2z ), qz4, _mm_fmadd_ps( _mm_load_ps( leaf->e2x ), qx4, _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), inv_det4 );
+		const __m128 invDet4 = _mm_div_ps( one4, det4 );
+		const __m128 u4 = _mm_mul_ps( _mm_fmadd_ps( sz4, hz4, _mm_fmadd_ps( sx4, hx4, _mm_mul_ps( sy4, hy4 ) ) ), invDet4 );
+		const __m128 v4 = _mm_mul_ps( _mm_fmadd_ps( dz4, qz4, _mm_fmadd_ps( dx4, qx4, _mm_mul_ps( dy4, qy4 ) ) ), invDet4 );
+		const __m128 ta4 = _mm_mul_ps( _mm_fmadd_ps( _mm_load_ps( leaf->e2z ), qz4, _mm_fmadd_ps( _mm_load_ps( leaf->e2x ), qx4, _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), invDet4 );
 	#else
 		const __m128 hx4 = _mm_sub_ps( _mm_mul_ps( dy4, _mm_load_ps( leaf->e2z ) ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
 		const __m128 hy4 = _mm_sub_ps( _mm_mul_ps( dz4, _mm_load_ps( leaf->e2x ) ), _mm_mul_ps( dx4, _mm_load_ps( leaf->e2z ) ) );
@@ -333,10 +657,10 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<fl
 		const __m128 qz4 = _mm_sub_ps( _mm_mul_ps( sx4, _mm_load_ps( leaf->e1y ) ), _mm_mul_ps( sy4, _mm_load_ps( leaf->e1x ) ) );
 		const __m128 qx4 = _mm_sub_ps( _mm_mul_ps( sy4, _mm_load_ps( leaf->e1z ) ), _mm_mul_ps( sz4, _mm_load_ps( leaf->e1y ) ) );
 		const __m128 qy4 = _mm_sub_ps( _mm_mul_ps( sz4, _mm_load_ps( leaf->e1x ) ), _mm_mul_ps( sx4, _mm_load_ps( leaf->e1z ) ) );
-		const __m128 inv_det4 = _mm_div_ps( one4, det4 );
-		const __m128 u4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( sz4, hz4 ), _mm_add_ps( _mm_mul_ps( sx4, hx4 ), _mm_mul_ps( sy4, hy4 ) ) ), inv_det4 );
-		const __m128 v4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( dz4, qz4 ), _mm_add_ps( _mm_mul_ps( dx4, qx4 ), _mm_mul_ps( dy4, qy4 ) ) ), inv_det4 );
-		const __m128 ta4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2z ), qz4 ), _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2x ), qx4 ), _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), inv_det4 );
+		const __m128 invDet4 = _mm_div_ps( one4, det4 );
+		const __m128 u4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( sz4, hz4 ), _mm_add_ps( _mm_mul_ps( sx4, hx4 ), _mm_mul_ps( sy4, hy4 ) ) ), invDet4 );
+		const __m128 v4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( dz4, qz4 ), _mm_add_ps( _mm_mul_ps( dx4, qx4 ), _mm_mul_ps( dy4, qy4 ) ) ), invDet4 );
+		const __m128 ta4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2z ), qz4 ), _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2x ), qx4 ), _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), invDet4 );
 	#endif
 		const __m128 mask1 = _mm_and_ps( _mm_cmpge_ps( u4, zero4 ), _mm_cmpge_ps( v4, zero4 ) );
 		const __m128 mask2 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
@@ -346,20 +670,10 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<fl
 		// evaluate opacity map, if present (SSE version).
 		if (opmap) if (imask)
 		{
-			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
-			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
-			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
-			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
-			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
-			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+			tinybvh_opmap_idx4( u4, v4, opmapN, idx );
 			// proceed with scalar code for gather operation - TODO: better approach?
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = 0xffffffff;
 			// combine
 			combined = _mm_and_ps( combined, tinybvh_load4( omask ) );
 			imask = _mm_movemask_ps( combined );
@@ -370,7 +684,7 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<fl
 			// compute broadcasted horizontal minimum of dist4
 			const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
 			const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
-			const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
+			const uint32_t lane = tinybvh_bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
 			// update hit record
 			const __m128 _d4 = dist4;
 			const float t = tinybvh_getlane_f( &_d4, lane );
@@ -396,7 +710,7 @@ the_end:
 
 #undef SSE_PUSH
 
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const
+template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	int32_t stackPtr = 0;
@@ -469,10 +783,10 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<float
 		const __m128 qz4 = _mm_fmsub_ps( sx4, _mm_load_ps( leaf->e1y ), _mm_mul_ps( sy4, _mm_load_ps( leaf->e1x ) ) );
 		const __m128 qx4 = _mm_fmsub_ps( sy4, _mm_load_ps( leaf->e1z ), _mm_mul_ps( sz4, _mm_load_ps( leaf->e1y ) ) );
 		const __m128 qy4 = _mm_fmsub_ps( sz4, _mm_load_ps( leaf->e1x ), _mm_mul_ps( sx4, _mm_load_ps( leaf->e1z ) ) );
-		const __m128 inv_det4 = _mm_div_ps( one4, det4 );
-		const __m128 u4 = _mm_mul_ps( _mm_fmadd_ps( sz4, hz4, _mm_fmadd_ps( sx4, hx4, _mm_mul_ps( sy4, hy4 ) ) ), inv_det4 );
-		const __m128 v4 = _mm_mul_ps( _mm_fmadd_ps( dz4, qz4, _mm_fmadd_ps( dx4, qx4, _mm_mul_ps( dy4, qy4 ) ) ), inv_det4 );
-		const __m128 ta4 = _mm_mul_ps( _mm_fmadd_ps( _mm_load_ps( leaf->e2z ), qz4, _mm_fmadd_ps( _mm_load_ps( leaf->e2x ), qx4, _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), inv_det4 );
+		const __m128 invDet4 = _mm_div_ps( one4, det4 );
+		const __m128 u4 = _mm_mul_ps( _mm_fmadd_ps( sz4, hz4, _mm_fmadd_ps( sx4, hx4, _mm_mul_ps( sy4, hy4 ) ) ), invDet4 );
+		const __m128 v4 = _mm_mul_ps( _mm_fmadd_ps( dz4, qz4, _mm_fmadd_ps( dx4, qx4, _mm_mul_ps( dy4, qy4 ) ) ), invDet4 );
+		const __m128 ta4 = _mm_mul_ps( _mm_fmadd_ps( _mm_load_ps( leaf->e2z ), qz4, _mm_fmadd_ps( _mm_load_ps( leaf->e2x ), qx4, _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), invDet4 );
 	#else
 		const __m128 hx4 = _mm_sub_ps( _mm_mul_ps( dy4, _mm_load_ps( leaf->e2z ) ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
 		const __m128 hy4 = _mm_sub_ps( _mm_mul_ps( dz4, _mm_load_ps( leaf->e2x ) ), _mm_mul_ps( dx4, _mm_load_ps( leaf->e2z ) ) );
@@ -482,10 +796,10 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<float
 		const __m128 qz4 = _mm_sub_ps( _mm_mul_ps( sx4, _mm_load_ps( leaf->e1y ) ), _mm_mul_ps( sy4, _mm_load_ps( leaf->e1x ) ) );
 		const __m128 qx4 = _mm_sub_ps( _mm_mul_ps( sy4, _mm_load_ps( leaf->e1z ) ), _mm_mul_ps( sz4, _mm_load_ps( leaf->e1y ) ) );
 		const __m128 qy4 = _mm_sub_ps( _mm_mul_ps( sz4, _mm_load_ps( leaf->e1x ) ), _mm_mul_ps( sx4, _mm_load_ps( leaf->e1z ) ) );
-		const __m128 inv_det4 = _mm_div_ps( one4, det4 );
-		const __m128 u4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( sz4, hz4 ), _mm_add_ps( _mm_mul_ps( sx4, hx4 ), _mm_mul_ps( sy4, hy4 ) ) ), inv_det4 );
-		const __m128 v4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( dz4, qz4 ), _mm_add_ps( _mm_mul_ps( dx4, qx4 ), _mm_mul_ps( dy4, qy4 ) ) ), inv_det4 );
-		const __m128 ta4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2z ), qz4 ), _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2x ), qx4 ), _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), inv_det4 );
+		const __m128 invDet4 = _mm_div_ps( one4, det4 );
+		const __m128 u4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( sz4, hz4 ), _mm_add_ps( _mm_mul_ps( sx4, hx4 ), _mm_mul_ps( sy4, hy4 ) ) ), invDet4 );
+		const __m128 v4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( dz4, qz4 ), _mm_add_ps( _mm_mul_ps( dx4, qx4 ), _mm_mul_ps( dy4, qy4 ) ) ), invDet4 );
+		const __m128 ta4 = _mm_mul_ps( _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2z ), qz4 ), _mm_add_ps( _mm_mul_ps( _mm_load_ps( leaf->e2x ), qx4 ), _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), invDet4 );
 	#endif
 		const __m128 mask1 = _mm_and_ps( _mm_cmpge_ps( u4, zero4 ), _mm_cmpge_ps( v4, zero4 ) );
 		const __m128 mask2 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
@@ -496,20 +810,10 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<float
 		{
 			if (!opmap) return true;
 			// evaluate opacity map, SSE version.
-			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
-			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
-			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
-			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
-			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4];
-			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+			tinybvh_opmap_idx4( u4, v4, opmapN, idx );
 			// proceed with scalar code for gather operation - TODO: better approach?
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
 		}
 		// we continue.
 		if (!stackPtr) return false;
@@ -524,6 +828,7 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<float
 
 TINYBVH_FORCEINLINE __m256 bvhc_max8() { return _mm256_set1_ps( -BVH_FAR ); }
 TINYBVH_FORCEINLINE __m256 bvhc_signFlip8() { return _mm256_setr_ps( -0.0f, -0.0f, -0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f ); }
+TINYBVH_FORCEINLINE __m256 bvhc_xyz8() { return _mm256_castsi256_ps( _mm256_setr_epi32( -1, -1, -1, 0, -1, -1, -1, 0 ) ); }
 
 // Fast threaded AVX binned-SAH-builder.
 // This code produces BVHs nearly identical to reference, but much faster.
@@ -541,10 +846,27 @@ TINYBVH_FORCEINLINE float halfArea( const __m256& a /* a contains aabb itself, w
 	return LANE( v, 0 ) + LANE( v, 1 ) + LANE( v, 2 );
 #endif
 }
-
-#define PROCESS_PLANE( a, pos, ANLR, lN, rN, lb, rb ) if (lN != 0 && rN != 0) { \
-	ANLR = halfArea( lb ) * (float)lN + halfArea( rb ) * (float)rN; if (ANLR < splitCost) \
-	splitCost = ANLR, bestAxis = a, bestPos = pos, bestLBox = lb, bestRBox = rb; }
+// half areas of 8 boxes in the same format, one per lane.
+TINYBVH_FORCEINLINE __m256 halfArea8( const __m256& b0, const __m256& b1, const __m256& b2, const __m256& b3,
+	const __m256& b4, const __m256& b5, const __m256& b6, const __m256& b7 )
+{
+	// extents of boxes k and k + 4 share a register; a 4x4 transpose per half gives x, y and z.
+	const __m256 v0 = _mm256_add_ps( _mm256_permute2f128_ps( b0, b4, 0x20 ), _mm256_permute2f128_ps( b0, b4, 0x31 ) );
+	const __m256 v1 = _mm256_add_ps( _mm256_permute2f128_ps( b1, b5, 0x20 ), _mm256_permute2f128_ps( b1, b5, 0x31 ) );
+	const __m256 v2 = _mm256_add_ps( _mm256_permute2f128_ps( b2, b6, 0x20 ), _mm256_permute2f128_ps( b2, b6, 0x31 ) );
+	const __m256 v3 = _mm256_add_ps( _mm256_permute2f128_ps( b3, b7, 0x20 ), _mm256_permute2f128_ps( b3, b7, 0x31 ) );
+	const __m256 t0 = _mm256_unpacklo_ps( v0, v1 ), t1 = _mm256_unpackhi_ps( v0, v1 );
+	const __m256 t2 = _mm256_unpacklo_ps( v2, v3 ), t3 = _mm256_unpackhi_ps( v2, v3 );
+	const __m256 x = _mm256_shuffle_ps( t0, t2, _MM_SHUFFLE( 1, 0, 1, 0 ) );
+	const __m256 y = _mm256_shuffle_ps( t0, t2, _MM_SHUFFLE( 3, 2, 3, 2 ) );
+	const __m256 z = _mm256_shuffle_ps( t1, t3, _MM_SHUFFLE( 1, 0, 1, 0 ) );
+	return _mm256_add_ps( _mm256_add_ps( _mm256_mul_ps( x, y ), _mm256_mul_ps( y, z ) ), _mm256_mul_ps( z, x ) );
+}
+// 8 counts as floats; lane k holds count k.
+TINYBVH_FORCEINLINE __m256 sweepLanes( const __m128i lo /* counts 0..3 */, const __m128i hi /* counts 4..7 */ )
+{
+	return _mm256_insertf128_ps( _mm256_castps128_ps256( _mm_cvtepi32_ps( lo ) ), _mm_cvtepi32_ps( hi ), 1 );
+}
 #if defined _MSC_VER
 #pragma warning ( push )
 #pragma warning( disable:4701 ) // "potentially uninitialized local variable 'bestLBox' used"
@@ -556,20 +878,11 @@ TINYBVH_FORCEINLINE float halfArea( const __m256& a /* a contains aabb itself, w
 
 // bin one slice of a node's fragment range; scheduled via the parallel_for hook.
 static constexpr uint32_t AVXCOUNTSTRIDE = 32; // 32 * 4 bytes = 128 bytes.
-struct ALIGNED( 64 ) SliceBounds { float bmin[4], bmax[4]; char pad[32]; };
-struct BuildAVXFragSliceArgs
+// Store a fragment's bounds, with primIdx and clipped = 0 in lane 3.
+static TINYBVH_FORCEINLINE void tinybvh_store_frag( void* frag, const __m128 bmin4, const __m128 bmax4, const uint32_t prim )
 {
-	BVH* bvh;
-	const uint32_t triCount, sliceSize, slices, * indices, stride4;
-	const int8_t* vertData;
-	SliceBounds* slice;
-	void* frags;
-};
-void impl::BuildAVXFragSlice( uint32_t i, void* payload )
-{
-	BuildAVXFragSliceArgs* a = (BuildAVXFragSliceArgs*)payload;
-	const uint32_t first = a->sliceSize * i, last = i == (a->slices - 1) ? a->triCount : (first + a->sliceSize);
-	a->bvh->PrepareSIMDBuildFragSlice( first, last, a->indices, a->vertData, a->stride4, a->frags, a->slice[i].bmin, a->slice[i].bmax );
+	tinybvh_store4( frag, _mm_castsi128_ps( _mm_insert_epi32( _mm_castps_si128( bmin4 ), (int)prim, 3 ) ) );
+	tinybvh_store4( (char*)frag + 16, _mm_blend_ps( bmax4, _mm_setzero_ps(), 8 ) );
 }
 template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const uint32_t first, const uint32_t last,
 	const uint32_t* indices, const int8_t* vertData, const uint32_t stride4, void* frags, float* rootMin, float* rootMax )
@@ -584,8 +897,7 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const ui
 		const __m128 v1 = tinybvh_load4( vertData + (size_t)(i1 * stride4) * 16 );
 		const __m128 v2 = tinybvh_load4( vertData + (size_t)(i2 * stride4) * 16 );
 		const __m128 t1 = _mm_min_ps( _mm_min_ps( v0, v1 ), v2 ), t2 = _mm_max_ps( _mm_max_ps( v0, v1 ), v2 );
-		tinybvh_store4( &frag[i].bmin, t1 ), tinybvh_store4( &frag[i].bmax, t2 );
-		rmin = _mm_min_ps( rmin, t1 ), rmax = _mm_max_ps( rmax, t2 );
+		tinybvh_store_frag( frag + i, t1, t2, i ), rmin = _mm_min_ps( rmin, t1 ), rmax = _mm_max_ps( rmax, t2 );
 		primIdx[i] = i;
 	}
 	else for (uint32_t i = first; i < last; i++)
@@ -594,80 +906,52 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const ui
 		const __m128 v1 = tinybvh_load4( vertData + (size_t)((i * 3 + 1) * stride4) * 16 );
 		const __m128 v2 = tinybvh_load4( vertData + (size_t)((i * 3 + 2) * stride4) * 16 );
 		const __m128 t1 = _mm_min_ps( _mm_min_ps( v0, v1 ), v2 ), t2 = _mm_max_ps( _mm_max_ps( v0, v1 ), v2 );
-		tinybvh_store4( &frag[i].bmin, t1 ), tinybvh_store4( &frag[i].bmax, t2 );
-		rmin = _mm_min_ps( rmin, t1 ), rmax = _mm_max_ps( rmax, t2 );
+		tinybvh_store_frag( frag + i, t1, t2, i ), rmin = _mm_min_ps( rmin, t1 ), rmax = _mm_max_ps( rmax, t2 );
 		primIdx[i] = i;
 	}
 	tinybvh_store4( rootMin, rmin ), tinybvh_store4( rootMax, rmax ); // slices are cache line separated; no false sharing.
 }
 
-template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims )
+template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slice& vertices, const uint32_t* indices, const uint32_t prims, const uint32_t extraFrags )
 {
 	BVH_FATAL_ERROR_IF( vertices.count == 0, "BVH::PrepareSIMDBuild( .. ), primCount == 0." );
 	BVH_FATAL_ERROR_IF( vertices.stride & 15, "BVH::PrepareSIMDBuild( .. ), stride must be multiple of 16." );
-	// some constants
-	static const __m128 min4 = _mm_set1_ps( BVH_FAR ), max4 = _mm_set1_ps( -BVH_FAR );
 	// reset node pool
 	const uint32_t primCount = prims > 0 ? prims : vertices.count / 3;
-	const uint32_t splitBudget = settings.usePresplitting ? ((int)(primCount * settings.presplitFactor)) : 0;
-	const uint32_t spaceNeeded = (primCount + splitBudget) * 2; // upper limit
-	// a rebuild is unsafe once the tree has been converted, whether or not we reallocate.
-	BVH_FATAL_ERROR_IF( allocatedNodes > 0 && !rebuildable, "BVH::PrepareSIMDBuild( .. ), bvh not rebuildable." );
-	if (allocatedNodes < spaceNeeded)
-	{
-		AlignedFree( bvhNode );
-		AlignedFree( primIdx );
-		AlignedFree( fragment );
-		bvhNode = (BVHNode*)AlignedAlloc( spaceNeeded * sizeof( BVHNode ) );
-		allocatedNodes = spaceNeeded;
-		primIdx = (uint32_t*)AlignedAlloc( (primCount + splitBudget) * sizeof( uint32_t ) );
-		memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // avoid crash in refit.
-		fragment = (Fragment*)AlignedAlloc( (primCount + splitBudget) * sizeof( Fragment ) );
-	}
+	const uint32_t splitBudget = SIMDPresplit() ? ((int)(primCount * settings.presplitFactor)) : 0;
+	// extraFrags: room for fragments created during the build (Bonsai HQ splits as it partitions).
+	const uint32_t fragCap = primCount + splitBudget + extraFrags;
+	ReserveNodes( fragCap * 2 );
 	triCount = primCount;
-	verts = vertices; // note: we're not copying this data; don't delete.
-	vertIdx = (uint32_t*)indices;
+	SetInput( vertices, indices ); // note: we're not copying this data; don't delete.
 	const int8_t* vertData = verts.data;
 	// prepare threading
-	threadedBuild = false;
-#ifdef ENABLE_THREADED_BUILDS
-	if (triCount >= MT_BUILD_THRESHOLD && context.spawn && context.barrier)
-		threadedBuild = true, atomicNewNodePtr = ContextNew<std::atomic<uint32_t>>( 2u );
-#endif
-	// initialize fragments
-	__m128 rootMin = min4, rootMax = max4;
-	uint32_t stride4 = verts.stride / 16;
-	BVH_FATAL_ERROR_IF( primCount == 0, "BVH::PrepareSIMDBuild( .. ), primCount == 0." );
-	// build the BVH over indexed triangles
+	newNodePtr = 2, threadedBuild = UseThreads( triCount ), StartNodeCounter();
 	if (threadedBuild)
 	{
-		constexpr int slices = 4;
-		ALIGNED( 64 ) SliceBounds slice[slices]; // one cache line per slice; no false sharing.
-		BuildAVXFragSliceArgs args = { this, triCount, triCount / slices, slices, indices, stride4, vertData, slice, fragment };
-		tinybvh_parallel_for( context, slices, &BuildAVXFragSlice, &args );
-		rootMin = tinybvh_load4( slice[0].bmin ), rootMax = tinybvh_load4( slice[0].bmax );
-		for (int i = 1; i < slices; i++)
-			rootMin = _mm_min_ps( rootMin, tinybvh_load4( slice[i].bmin ) ), rootMax = _mm_max_ps( rootMax, tinybvh_load4( slice[i].bmax ) );
+		// scratch for the parallel partition of large nodes; released in BuildSIMDFinalize.
+		AlignedFree( scratchPad );
+		scratchPad = (uint32_t*)AlignedAlloc( (primCount + splitBudget) * sizeof( uint32_t ) );
 	}
-	else
+	// initialize fragments
+	const uint32_t stride4 = verts.stride / 16, slices = TaskCount( threadedBuild, triCount, MT_PREP_TASK_PRIMS, MT_PREP_MAX_TASKS );
+	BVHSliceBounds<bvhvec4> slice[MT_PREP_MAX_TASKS];
+	ParallelFor( threadedBuild, slices, [&]( uint32_t i )
 	{
-		ALIGNED( 16 ) float rmin[4], rmax[4];
-		PrepareSIMDBuildFragSlice( 0, triCount, indices, vertData, stride4, (void*)fragment, rmin, rmax );
-		rootMin = tinybvh_load4( rmin ), rootMax = tinybvh_load4( rmax );
-	}
+		PrepareSIMDBuildFragSlice( SliceStart( triCount, i, slices ), SliceStart( triCount, i + 1, slices ), indices, vertData, stride4, fragment, &slice[i].bmin.x, &slice[i].bmax.x );
+	} );
+	__m128 rootMin = tinybvh_load4( &slice[0].bmin ), rootMax = tinybvh_load4( &slice[0].bmax );
+	for (uint32_t i = 1; i < slices; i++)
+		rootMin = _mm_min_ps( rootMin, tinybvh_load4( &slice[i].bmin ) ), rootMax = _mm_max_ps( rootMax, tinybvh_load4( &slice[i].bmax ) );
 	BVHNode& root = bvhNode[0];
 	root.aabbMin = tinybvh_bitcast<bvhvec4>( rootMin ), root.aabbMax = tinybvh_bitcast<bvhvec4>( rootMax );
 	// presplitting
 	uint32_t fragCount = primCount;
-	if (settings.usePresplitting)
-	{
-		for (uint32_t i = 0; i < primCount; i++) fragment[i].primIdx = i, fragment[i].clipped = 0;
-		fragCount = Presplit();
-	}
+	if (SIMDPresplit()) fragCount = Presplit();
 	// finalize root node
 	root.leftFirst = 0, root.triCount = idxCount = triCount = fragCount;
 	// reset node pool
-	newNodePtr = 2, bvh_over_indices = indices != nullptr;
+	bvhOverIndices = indices != nullptr;
 	// all set; actual build happens in BVH::BuildSIMDSubtree.
 }
 
@@ -676,28 +960,24 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t fi
 {
 	__m256* binbox = (__m256*)binboxes;
 	const __m128 nmin4 = tinybvh_load4( nmin ), rpd4 = tinybvh_load4( rpd );
-	// A Fragment is 32 bytes and holds bmin/primIdx followed by bmax/clipped, so
-	// it can be read as a single 8-wide vector, or as two 4-wide bounds.
 	memset( count, 0, 3 * AVXBINS * 4 ); // exactly 96 bytes
 	for (uint32_t i = 0; i < 3 * AVXBINS; i++) binbox[i] = bvhc_max8();
 	if (first >= last) return; // empty slice; 'last - 1' below would wrap.
 	uint32_t fi = primIdx[first];
-	__m256 r0, r1, r2, f = _mm256_xor_ps( tinybvh_load8( fragment + fi ), bvhc_signFlip8() );
+	__m256 r0, r1, r2, f = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + fi ), bvhc_signFlip8() ), bvhc_xyz8() );
 	const __m128i zero4i = _mm_setzero_si128();
-	__m128i bc4 = _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_add_ps(
-		tinybvh_load4( &fragment[fi].bmax ), tinybvh_load4( &fragment[fi].bmin ) ), nmin4 ), rpd4 ) ), zero4i );
+	const __m128i max4i = _mm_set1_epi32( AVXBINS - 1 );
+	__m128i bc4 = _mm_min_epi32( _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_sub_ps(
+		_mm256_extractf128_ps( f, 1 ), _mm256_castps256_ps128( f ) ), nmin4 ), rpd4 ) ), zero4i ), max4i );
 	uint32_t i0 = TINYBVH_LANE0( bc4 ), i1 = TINYBVH_LANE1( bc4 ), i2 = TINYBVH_LANE2( bc4 ), * ti = primIdx + first + 1;
 	for (uint32_t i = first; i < last - 1; i++)
 	{
-		uint32_t fid = *ti++;
-	#if defined __GNUC__ || _MSC_VER < 1920
-		if (fid >= triCount) fid = triCount - 1; // never happens but g++ *and* vs2017 need this to not crash...
-	#endif
+		const uint32_t fid = *ti++;
 		const __m256 b0 = binbox[i0], b1 = binbox[AVXBINS + i1], b2 = binbox[2 * AVXBINS + i2];
-		const __m128 frmin = tinybvh_load4( &fragment[fid].bmin ), frmax = tinybvh_load4( &fragment[fid].bmax );
 		r0 = _mm256_max_ps( b0, f ), r1 = _mm256_max_ps( b1, f ), r2 = _mm256_max_ps( b2, f );
-		bc4 = _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_add_ps( frmax, frmin ), nmin4 ), rpd4 ) ), zero4i );
-		f = _mm256_xor_ps( tinybvh_load8( fragment + fid ), bvhc_signFlip8() );
+		f = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + fid ), bvhc_signFlip8() ), bvhc_xyz8() );
+		bc4 = _mm_min_epi32( _mm_max_epi32( _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( _mm_sub_ps(
+			_mm256_extractf128_ps( f, 1 ), _mm256_castps256_ps128( f ) ), nmin4 ), rpd4 ) ), zero4i ), max4i );
 		count[i0]++, count[AVXBINS + i1]++, count[AVXBINS * 2 + i2]++;
 		binbox[i0] = r0, i0 = TINYBVH_LANE0( bc4 );
 		binbox[AVXBINS + i1] = r1, i1 = TINYBVH_LANE1( bc4 );
@@ -714,37 +994,21 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t fi
 void impl::BVHBuildAVXSubtree( void* payload )
 {
 	impl::BVHBuildSubtreeArgs<float, uint32_t>* a = (impl::BVHBuildSubtreeArgs<float, uint32_t>*)payload;
-	a->bvh->BuildSIMDSubtree( a->node, a->depth );
+	a->bvh->BuildSIMDSubtree( a->node, a->depth, true, a->allowSlices );
 }
-// bin one slice of a node's fragment range; scheduled via the parallel_for hook.
-struct BVHBuildAVXBinSliceArgs
-{
-	BVH* bvh;
-	uint32_t leftFirst, triCount, sliceSize, slices;
-	__m256* slicebinbox;				// base of slices x (3*AVXBINS) bin boxes
-	uint32_t* slicecount;				// base of slices x AVXCOUNTSTRIDE counts
-	__m128 nmin4, rpd4;
-};
-void impl::BVHBuildAVXBinSlice( uint32_t i, void* payload )
-{
-	BVHBuildAVXBinSliceArgs* a = (BVHBuildAVXBinSliceArgs*)payload;
-	const uint32_t first = a->leftFirst + a->sliceSize * i;
-	const uint32_t last = i == (a->slices - 1) ? (a->leftFirst + a->triCount) : (first + a->sliceSize);
-	a->bvh->BuildSIMDBinTask( first, last, a->slicebinbox + i * 3 * AVXBINS,
-		a->slicecount + i * AVXCOUNTSTRIDE, (const float*)&a->nmin4, (const float*)&a->rpd4 );
-}
-template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth )
+template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth, bool allowTasks, bool allowSlices )
 {
 	// aligned data
-	constexpr uint32_t maxSlices = 24;
-	const uint32_t slices = maxSlices - 2 * depth;
+	constexpr uint32_t maxSlices = MT_SIMD_MAX_SLICES;
 	ALIGNED( 64 ) __m256 slicebinbox[maxSlices][3 * AVXBINS];
 	ALIGNED( 64 ) uint32_t slicecount[maxSlices][AVXCOUNTSTRIDE]; // padded: see AVXCOUNTSTRIDE
 	ALIGNED( 64 ) __m256 bestLBox, bestRBox;			// 64 bytes
+	uint32_t sliceLeft[maxSlices];					// per-slice left count of a parallel partition
+	ALIGNED( 64 ) __m256 sliceBox[maxSlices][2];	// per-slice child boxes of a parallel partition
 	__m256* binbox = slicebinbox[0];					// slot 0 doubles as the reduce target
 	uint32_t* count = slicecount[0];
 	// subdivide recursively
-	ALIGNED( 64 ) uint32_t task[TINYBVH_STACK_SIZE], taskCount = 0;
+	ALIGNED( 64 ) uint32_t task[TINYBVH_STACK_SIZE], taskDepth[TINYBVH_STACK_SIZE], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f;
 	while (1)
@@ -752,22 +1016,45 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 		while (1)
 		{
 			BVHNode& node = bvhNode[nodeIdx];
+			if (node.triCount < 2) break; // a single primitive is always a leaf.
+			const uint32_t slices = maxSlices > 2 * depth ? maxSlices - 2 * depth : 1;
 			const float SAV = node.SurfaceArea();
 			if (SAV == 0) break; // can't split an infinitely small node.
-			const __m128 nodeMin4 = tinybvh_load4( &bvhNode[nodeIdx].aabbMin );
-			const __m128 nodeMax4 = tinybvh_load4( &bvhNode[nodeIdx].aabbMax );
+			if (node.triCount == 2)
+			{
+				// two primitives: the only split puts one in each child, so score it directly, without
+				// bins. The children hold a single primitive each: leaves, created here, never visited.
+				const uint32_t first = node.leftFirst;
+				const __m256 b0 = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + primIdx[first] ), bvhc_signFlip8() ), bvhc_xyz8() );
+				const __m256 b1 = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + primIdx[first + 1] ), bvhc_signFlip8() ), bvhc_xyz8() );
+				const float rSAV = 1.0f / SAV, splitCost = c_trav + c_int * rSAV * (halfArea( b0 ) + halfArea( b1 ));
+				if (splitCost >= 2.0f * c_int) break; // not splitting is better.
+				const uint32_t n = AllocNodePair();
+				tinybvh_store8( &bvhNode[n], _mm256_xor_ps( b0, bvhc_signFlip8() ) );
+				bvhNode[n].leftFirst = first, bvhNode[n].triCount = 1;
+				tinybvh_store8( &bvhNode[n + 1], _mm256_xor_ps( b1, bvhc_signFlip8() ) );
+				bvhNode[n + 1].leftFirst = first + 1, bvhNode[n + 1].triCount = 1;
+				node.leftFirst = n, node.triCount = 0;
+				break;
+			}
+			// lane 3 holds leftFirst / triCount: clear it, as above, to keep denormals out.
+			const __m128 nodeMin4 = _mm_and_ps( tinybvh_load4( &bvhNode[nodeIdx].aabbMin ), bvhc_mask3() );
+			const __m128 nodeMax4 = _mm_and_ps( tinybvh_load4( &bvhNode[nodeIdx].aabbMax ), bvhc_mask3() );
 			// find optimal object split
 			const __m128 d4 = _mm_blendv_ps( bvhc_min1(), _mm_sub_ps( nodeMax4, nodeMin4 ), bvhc_mask3() );
 			const __m128 nmin4 = _mm_add_ps( nodeMin4, nodeMin4 );
 			const __m128 rpd4 = _mm_and_ps( _mm_div_ps( bvhc_binmul3(), d4 ), _mm_cmpneq_ps( d4, _mm_setzero_ps() ) );
 			// implementation of Section 4.1 of "Parallel Spatial Splits in Bounding Volume Hierarchies":
 			// main loop operates on two fragments to minimize dependencies and maximize ILP.
-			if (threadedBuild && node.triCount > MT_BUILD_THRESHOLD)
+			const bool sliced = threadedBuild && allowTasks && allowSlices && slices > 1 && node.triCount > MT_SIMD_SLICE_THRESHOLD;
+			const uint32_t first0 = node.leftFirst, count0 = node.triCount; // slice s: [first0 + SliceStart( count0, s, slices ), ..)
+			if (sliced)
 			{
-				const uint32_t sliceSize = node.triCount / slices;
-				BVHBuildAVXBinSliceArgs args = { this, node.leftFirst, node.triCount, sliceSize, slices,
-					slicebinbox[0], slicecount[0], nmin4, rpd4 };
-				tinybvh_parallel_for( context, slices, &BVHBuildAVXBinSlice, &args );
+				tinybvh_parallel_for( context, slices, [&]( uint32_t i )
+				{
+					BuildSIMDBinTask( first0 + SliceStart( count0, i, slices ), first0 + SliceStart( count0, i + 1, slices ),
+						slicebinbox[i], slicecount[i], (const float*)&nmin4, (const float*)&rpd4 );
+				} );
 				// combine results from slices; slice-major, so each slice is a linear sweep.
 				for (uint32_t slice = 1; slice < slices; slice++)
 				{
@@ -787,89 +1074,132 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			const __m256* bb = binbox;
 			for (int32_t a = 0; a < 3; a++, bb += AVXBINS) if ((node.aabbMax[a] - node.aabbMin[a]) > minDim[a])
 			{
-				// hardcoded bin processing for AVXBINS == 8
-				assert( AVXBINS == 8 );
+				// all 7 planes at once: lane k holds plane k, i.e. bins 0..k left, k+1..7 right.
+				static_assert( AVXBINS == 8, "the sweep evaluates 7 planes in one __m256" );
+				const __m256 l0 = bb[0], l1 = _mm256_max_ps( l0, bb[1] ), l2 = _mm256_max_ps( l1, bb[2] ), l3 = _mm256_max_ps( l2, bb[3] );
+				const __m256 l4 = _mm256_max_ps( l3, bb[4] ), l5 = _mm256_max_ps( l4, bb[5] ), l6 = _mm256_max_ps( l5, bb[6] );
+				const __m256 r6 = bb[7], r5 = _mm256_max_ps( r6, bb[6] ), r4 = _mm256_max_ps( r5, bb[5] ), r3 = _mm256_max_ps( r4, bb[4] );
+				const __m256 r2 = _mm256_max_ps( r3, bb[3] ), r1 = _mm256_max_ps( r2, bb[2] ), r0 = _mm256_max_ps( r1, bb[1] );
+				const __m256 AL = halfArea8( l0, l1, l2, l3, l4, l5, l6, l6 ), AR = halfArea8( r0, r1, r2, r3, r4, r5, r6, r6 );
+				// left counts are prefix sums over the bins; lane 7 gets all of them, so it never qualifies.
 				const uint32_t* cnt = count + a * AVXBINS;
-				const uint32_t lN0 = cnt[0], rN0 = cnt[7];
-				const __m256 lb0 = bb[0], rb0 = bb[7];
-				const uint32_t lN1 = lN0 + cnt[1], rN1 = rN0 + cnt[6], lN2 = lN1 + cnt[2];
-				const uint32_t rN2 = rN1 + cnt[5], lN3 = lN2 + cnt[3], rN3 = rN2 + cnt[4];
-				const __m256 lb1 = _mm256_max_ps( lb0, bb[1] ), rb1 = _mm256_max_ps( rb0, bb[6] );
-				const __m256 lb2 = _mm256_max_ps( lb1, bb[2] ), rb2 = _mm256_max_ps( rb1, bb[5] );
-				const __m256 lb3 = _mm256_max_ps( lb2, bb[3] ), rb3 = _mm256_max_ps( rb2, bb[4] );
-				const uint32_t lN4 = lN3 + cnt[4], rN4 = rN3 + cnt[3], lN5 = lN4 + cnt[5];
-				const uint32_t rN5 = rN4 + cnt[2], lN6 = lN5 + cnt[6], rN6 = rN5 + cnt[1];
-				const __m256 lb4 = _mm256_max_ps( lb3, bb[4] ), rb4 = _mm256_max_ps( rb3, bb[3] );
-				const __m256 lb5 = _mm256_max_ps( lb4, bb[5] ), rb5 = _mm256_max_ps( rb4, bb[2] );
-				const __m256 lb6 = _mm256_max_ps( lb5, bb[6] ), rb6 = _mm256_max_ps( rb5, bb[1] );
-				float ANLR3 = BVH_FAR; PROCESS_PLANE( a, 3, ANLR3, lN3, rN3, lb3, rb3 ); // most likely split
-				float ANLR2 = BVH_FAR; PROCESS_PLANE( a, 2, ANLR2, lN2, rN4, lb2, rb4 );
-				float ANLR4 = BVH_FAR; PROCESS_PLANE( a, 4, ANLR4, lN4, rN2, lb4, rb2 );
-				float ANLR5 = BVH_FAR; PROCESS_PLANE( a, 5, ANLR5, lN5, rN1, lb5, rb1 );
-				float ANLR1 = BVH_FAR; PROCESS_PLANE( a, 1, ANLR1, lN1, rN5, lb1, rb5 );
-				float ANLR0 = BVH_FAR; PROCESS_PLANE( a, 0, ANLR0, lN0, rN6, lb0, rb6 );
-				float ANLR6 = BVH_FAR; PROCESS_PLANE( a, 6, ANLR6, lN6, rN0, lb6, rb0 ); // least likely split
+				__m128i lo = _mm_loadu_si128( (const __m128i*)cnt ), hi = _mm_loadu_si128( (const __m128i*)(cnt + 4) );
+				lo = _mm_add_epi32( lo, _mm_slli_si128( lo, 4 ) ), lo = _mm_add_epi32( lo, _mm_slli_si128( lo, 8 ) );
+				hi = _mm_add_epi32( hi, _mm_slli_si128( hi, 4 ) ), hi = _mm_add_epi32( hi, _mm_slli_si128( hi, 8 ) );
+				hi = _mm_add_epi32( hi, _mm_shuffle_epi32( lo, _MM_SHUFFLE( 3, 3, 3, 3 ) ) );
+				const __m128i all = _mm_shuffle_epi32( hi, _MM_SHUFFLE( 3, 3, 3, 3 ) );
+				const __m256 NL = sweepLanes( lo, hi ), NR = sweepLanes( _mm_sub_epi32( all, lo ), _mm_sub_epi32( all, hi ) );
+				const __m256 empty = _mm256_or_ps( _mm256_cmp_ps( NL, _mm256_setzero_ps(), _CMP_EQ_OQ ), _mm256_cmp_ps( NR, _mm256_setzero_ps(), _CMP_EQ_OQ ) );
+				const __m256 cost = _mm256_blendv_ps( _mm256_add_ps( _mm256_mul_ps( AL, NL ), _mm256_mul_ps( AR, NR ) ), _mm256_set1_ps( BVH_FAR ), empty );
+				__m256 best = _mm256_min_ps( cost, _mm256_permute_ps( cost, _MM_SHUFFLE( 2, 3, 0, 1 ) ) );
+				best = _mm256_min_ps( best, _mm256_permute_ps( best, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+				best = _mm256_min_ps( best, _mm256_permute2f128_ps( best, best, 1 ) );
+				const float axisCost = _mm_cvtss_f32( _mm256_castps256_ps128( best ) );
+				if (axisCost < splitCost)
+				{
+					const uint32_t lane = tinybvh_bfind( (uint32_t)_mm256_movemask_ps( _mm256_cmp_ps( cost, best, _CMP_EQ_OQ ) ) );
+					splitCost = axisCost, bestAxis = a, bestPos = lane;
+				}
 			}
 			splitCost = c_trav + c_int * rSAV * splitCost;
 			const float noSplitCost = (float)node.triCount * c_int;
 			if (splitCost >= noSplitCost) break; // not splitting is better.
 			const float rpd = tinybvh_getlane_f( &rpd4, bestAxis ), nmin = tinybvh_getlane_f( &nmin4, bestAxis );
-			uint32_t i = node.leftFirst, j = node.leftFirst + node.triCount;
-			for (uint32_t k = 0; k < node.triCount; k++)
+			uint32_t i = node.leftFirst;
+			if (sliced)
 			{
-				const uint32_t fr = primIdx[i];
-				const int32_t bi = tinybvh_max( 0, (int32_t)((fragment[fr].bmax[bestAxis] + fragment[fr].bmin[bestAxis] - nmin) * rpd) );
-				if ((uint32_t)bi <= bestPos) i++; else
+				// parallel partition, over the slices used for binning.
+				tinybvh_parallel_for( context, slices, [&]( uint32_t s )
 				{
-					const uint32_t t = primIdx[--j];
-					primIdx[j] = fr, primIdx[i] = t;
+					const uint32_t first = first0 + SliceStart( count0, s, slices ), last = first0 + SliceStart( count0, s + 1, slices );
+					uint32_t l = first, r = last;
+					const __m256 empty8 = bvhc_max8();
+					__m256 lbox8 = empty8, rbox8 = empty8;
+					for (uint32_t k = first; k < last; k++)
+					{
+						const uint32_t fr = primIdx[k];
+						const int32_t bi = tinybvh_max( 0, (int32_t)((fragment[fr].bmax[bestAxis] + fragment[fr].bmin[bestAxis] - nmin) * rpd) );
+						const uint32_t isLeft = (uint32_t)bi <= bestPos ? 1 : 0;
+						scratchPad[l] = fr, scratchPad[r - 1] = fr; // branchless: one of the two is final
+						l += isLeft, r -= 1 - isLeft;
+						// child boxes from the fragments as partitioned, not from the bins.
+						const __m256 f8 = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + fr ), bvhc_signFlip8() ), bvhc_xyz8() );
+						const __m256 left8 = _mm256_castsi256_ps( _mm256_set1_epi32( -(int32_t)isLeft ) );
+						lbox8 = _mm256_max_ps( lbox8, _mm256_blendv_ps( empty8, f8, left8 ) );
+						rbox8 = _mm256_max_ps( rbox8, _mm256_blendv_ps( f8, empty8, left8 ) );
+					}
+					sliceLeft[s] = l - first, sliceBox[s][0] = lbox8, sliceBox[s][1] = rbox8;
+				} );
+				uint32_t leftTotal = 0;
+				bestLBox = sliceBox[0][0], bestRBox = sliceBox[0][1];
+				for (uint32_t s = 0; s < slices; s++) leftTotal += sliceLeft[s];
+				for (uint32_t s = 1; s < slices; s++)
+					bestLBox = _mm256_max_ps( bestLBox, sliceBox[s][0] ), bestRBox = _mm256_max_ps( bestRBox, sliceBox[s][1] );
+				tinybvh_parallel_for( context, slices, [&]( uint32_t s )
+				{
+					const uint32_t first = first0 + SliceStart( count0, s, slices ), last = first0 + SliceStart( count0, s + 1, slices );
+					uint32_t leftDst = first0, rightDst = first0 + leftTotal + (first - first0);
+					for (uint32_t t = 0; t < s; t++) leftDst += sliceLeft[t], rightDst -= sliceLeft[t];
+					const uint32_t leftN = sliceLeft[s], rightN = last - first - leftN;
+					memcpy( primIdx + leftDst, scratchPad + first, leftN * sizeof( uint32_t ) );
+					memcpy( primIdx + rightDst, scratchPad + first + leftN, rightN * sizeof( uint32_t ) );
+				} );
+				i = first0 + leftTotal;
+			}
+			else
+			{
+				// in-place partition without branching.
+				const __m256 empty8 = bvhc_max8();
+				__m256 lbox8 = empty8, rbox8 = empty8;
+				uint32_t* idx = primIdx + node.leftFirst, l = 0;
+				for (uint32_t k = 0; k < node.triCount; k++)
+				{
+					const uint32_t fr = idx[k];
+					const __m256 f8 = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + fr ), bvhc_signFlip8() ), bvhc_xyz8() );
+					const int32_t bi = tinybvh_max( 0, (int32_t)((fragment[fr].bmax[bestAxis] + fragment[fr].bmin[bestAxis] - nmin) * rpd) );
+					const uint32_t isLeft = (uint32_t)bi <= bestPos ? 1 : 0;
+					const __m256 left8 = _mm256_castsi256_ps( _mm256_set1_epi32( -(int32_t)isLeft ) );
+					lbox8 = _mm256_max_ps( lbox8, _mm256_blendv_ps( empty8, f8, left8 ) );
+					rbox8 = _mm256_max_ps( rbox8, _mm256_blendv_ps( f8, empty8, left8 ) );
+					idx[k] = idx[l], idx[l] = fr, l += isLeft;
 				}
+				i = node.leftFirst + l;
+				bestLBox = lbox8, bestRBox = rbox8;
 			}
 			// create child nodes and recurse
 			const uint32_t leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
-			uint32_t n;
-		#ifdef ENABLE_THREADED_BUILDS
-			if (threadedBuild) n = atomicNewNodePtr->fetch_add( 2 ); else n = newNodePtr, newNodePtr += 2;
-		#else
-			n = newNodePtr, newNodePtr += 2;
-		#endif
+			const uint32_t n = AllocNodePair();
 			tinybvh_store8( &bvhNode[n], _mm256_xor_ps( bestLBox, bvhc_signFlip8() ) );
 			bvhNode[n].leftFirst = node.leftFirst, bvhNode[n].triCount = leftCount;
 			node.leftFirst = n, node.triCount = 0;
 			tinybvh_store8( &bvhNode[n + 1], _mm256_xor_ps( bestRBox, bvhc_signFlip8() ) );
 			bvhNode[n + 1].leftFirst = i, bvhNode[n + 1].triCount = rightCount;
-			const bool spawnThreads = tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS && depth < MT_SPAWN_DEPTH && threadedBuild;
-			if (!spawnThreads) task[taskCount++] = n + 1, nodeIdx = n; else
+			const bool spawnThreads = tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS && depth < MT_SPAWN_DEPTH && threadedBuild && allowTasks;
+			if (!spawnThreads) task[taskCount] = n + 1, taskDepth[taskCount++] = depth + 1, nodeIdx = n; else
 			{
 				// spawn the larger subtree, continue with the small one; root barrier joins.
-				impl::BVHBuildSubtreeArgs<float, uint32_t> a = { this, leftCount > rightCount ? n : (n + 1), depth + 1 };
+				impl::BVHBuildSubtreeArgs<float, uint32_t> a = { this, leftCount > rightCount ? n : (n + 1), depth + 1, allowSlices };
 				tinybvh_spawn( context, &BVHBuildAVXSubtree, &a, sizeof( a ) );
 				nodeIdx = leftCount > rightCount ? (n + 1) : n;
 			}
+			depth++; // both children sit one level below the node just split
 		}
 		// fetch subdivision task from stack
 		if (taskCount == 0) break;
-		nodeIdx = task[--taskCount];
+		nodeIdx = task[--taskCount], depth = taskDepth[taskCount];
 	}
 }
 
 template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize()
 {
-#ifdef ENABLE_THREADED_BUILDS
-	if (threadedBuild)
-	{
-		tinybvh_barrier( context ); // wait for all spawned subtrees
-		newNodePtr = atomicNewNodePtr->load();
-		ContextDelete( atomicNewNodePtr );
-	}
-#endif
+	if (threadedBuild) StopNodeCounter(), AlignedFree( scratchPad ), scratchPad = 0;
 	// tree has been built.
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
-	refittable = settings.usePresplitting ? false : true; // only if not using spatial splits
-	may_have_holes = false; // there are no holes in the list of nodes.
+	refittable = !SIMDPresplit(); // only if not using spatial splits
+	hasHoles = false, orderedNodes = true; // there are no holes in the list of nodes.
 	usedNodes = newNodePtr;
-	if (settings.usePresplitting) // finalize indices in index array
+	if (SIMDPresplit()) // finalize indices in index array
 	{
 		for (uint32_t i = 0; i < triCount; i++) primIdx[i] = fragment[primIdx[i]].primIdx;
 		if (settings.presplitPostPass) PresplitPostPass();
@@ -952,9 +1282,7 @@ ALIGNED( 64 ) static const uint32_t idxLUT256[256][8] = {
 	{ 0,1,0,0,0,0,0,0 }, { 1,0,0,0,0,0,0,0 }, { 0,0,0,0,0,0,0,0 }, { 0,0,0,0,0,0,0,0 }
 };
 
-#if 0
-
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
+template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 4 /* wide trees push more nodes per step */ + 8];
 	ALIGNED( 64 ) float distStack[TINYBVH_STACK_SIZE * 4 + 8];
@@ -962,7 +1290,6 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 	__m256 t8 = _mm256_set1_ps( ray.hit.t );
 	int32_t stackPtr = 0;
 	uint32_t nodeIdx = 0;
-	constexpr int signShift = (posX ? 3 : 0) + (posY ? 6 : 0) + (posZ ? 12 : 0);
 	const __m256 rx8 = _mm256_set1_ps( ray.O.x * ray.rD.x ), rdx8 = _mm256_set1_ps( ray.rD.x );
 	const __m256 ry8 = _mm256_set1_ps( ray.O.y * ray.rD.y ), rdy8 = _mm256_set1_ps( ray.rD.y );
 	const __m256 rz8 = _mm256_set1_ps( ray.O.z * ray.rD.z ), rdz8 = _mm256_set1_ps( ray.rD.z );
@@ -992,181 +1319,7 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 			const __m256 tmax = _mm256_min_ps( _mm256_min_ps( tx2, ty2 ), _mm256_min_ps( tz2, t8 ) );
 			const __m256 mask8 = _mm256_cmp_ps( tmin, tmax, _CMP_LE_OQ );
 			const uint32_t mask = _mm256_movemask_ps( mask8 );
-			const uint32_t validNodes = __popc( mask );
-			if (validNodes == 1)
-			{
-				const uint32_t lane = __bfind( mask );
-				nodeIdx = n->child[lane];
-			}
-			else if (validNodes > 0)
-			{
-				const __m256i index = _mm256_srli_epi32( _mm256_load_si256( (const __m256i*)n->perm ), signShift );
-				const uint32_t m = _mm256_movemask_ps( _mm256_permutevar8x32_ps( mask8, index ) );
-				const __m256i c8 = _mm256_permutevar8x32_epi32( _mm256_load_si256( (const __m256i*)n->child ), index );
-				nodeIdx = (uint32_t)_mm_cvtsi128_si32( _mm256_castsi256_si128(
-					_mm256_permutevar8x32_epi32( c8, _mm256_set1_epi32( (int32_t)__bfind( m ) ) ) ) );
-				// start the fill for the child we are about to descend into; the LUT
-				// load, two permutes and two stores below hide the L1/L2 latency.
-				_mm_prefetch( (const char*)(bvh8Data + (nodeIdx & 0x1fffffff)), _MM_HINT_T0 );
-				const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - m] );
-				const __m256 dist8 = _mm256_permutevar8x32_ps( _mm256_permutevar8x32_ps( tmin, index ), cpi );
-				const __m256i child8 = _mm256_permutevar8x32_epi32( c8, cpi );
-				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), child8 );
-				_mm256_storeu_ps( distStack + stackPtr, dist8 );
-				stackPtr += validNodes - 1;
-			#ifdef _DEBUG
-				BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_STACK_SIZE * 4 - 8, "BVH8_CPU::Intersect, traversal stack overflow." );
-			#endif
-			}
-			else
-			{
-				if (!stackPtr) ISUNLIKELY goto the_end;
-				nodeIdx = nodeStack[--stackPtr];
-			}
-		}
-		if (stackPtr) ISLIKELY
-		{
-			const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
-			_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
-			_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
-		}
-		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
-		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
-		const __m128 hx4 = _mm_fmsub_ps( dy4, _mm_load_ps( leaf->e2z ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
-		const __m128 hy4 = _mm_fmsub_ps( dz4, _mm_load_ps( leaf->e2x ), _mm_mul_ps( dx4, _mm_load_ps( leaf->e2z ) ) );
-		const __m128 hz4 = _mm_fmsub_ps( dx4, _mm_load_ps( leaf->e2y ), _mm_mul_ps( dy4, _mm_load_ps( leaf->e2x ) ) );
-		const __m128 sx4 = _mm_sub_ps( ox4, _mm_load_ps( leaf->v0x ) ), sy4 = _mm_sub_ps( oy4, _mm_load_ps( leaf->v0y ) );
-		const __m128 sz4 = _mm_sub_ps( oz4, _mm_load_ps( leaf->v0z ) );
-		const __m128 det4 = _mm_fmadd_ps( _mm_load_ps( leaf->e1z ), hz4, _mm_fmadd_ps( _mm_load_ps( leaf->e1x ), hx4, _mm_mul_ps( _mm_load_ps( leaf->e1y ), hy4 ) ) );
-		const __m128 qz4 = _mm_fmsub_ps( sx4, _mm_load_ps( leaf->e1y ), _mm_mul_ps( sy4, _mm_load_ps( leaf->e1x ) ) );
-		const __m128 qx4 = _mm_fmsub_ps( sy4, _mm_load_ps( leaf->e1z ), _mm_mul_ps( sz4, _mm_load_ps( leaf->e1y ) ) );
-		const __m128 qy4 = _mm_fmsub_ps( sz4, _mm_load_ps( leaf->e1x ), _mm_mul_ps( sx4, _mm_load_ps( leaf->e1z ) ) );
-		const __m128 inv_det4 = _mm_div_ps( one4, det4 );
-		const __m128 u4 = _mm_mul_ps( _mm_fmadd_ps( sz4, hz4, _mm_fmadd_ps( sx4, hx4, _mm_mul_ps( sy4, hy4 ) ) ), inv_det4 );
-		const __m128 v4 = _mm_mul_ps( _mm_fmadd_ps( dz4, qz4, _mm_fmadd_ps( dx4, qx4, _mm_mul_ps( dy4, qy4 ) ) ), inv_det4 );
-		const __m128 ta4 = _mm_mul_ps( _mm_fmadd_ps( _mm_load_ps( leaf->e2z ), qz4, _mm_fmadd_ps( _mm_load_ps( leaf->e2x ), qx4, _mm_mul_ps( _mm_load_ps( leaf->e2y ), qy4 ) ) ), inv_det4 );
-		const __m128 mask1 = _mm_cmpge_ps( u4, _mm_setzero_ps() ), mask2 = _mm_cmpge_ps( v4, _mm_setzero_ps() );
-		const __m128 mask3 = _mm_cmple_ps( _mm_add_ps( u4, v4 ), one4 );
-		const __m128 mask4 = _mm_cmpgt_ps( ta4, _mm_setzero_ps() );
-		const __m128 mask5 = _mm_cmplt_ps( ta4, _mm256_castps256_ps128( t8 ) );
-		__m128 combined = _mm_and_ps( _mm_and_ps( _mm_and_ps( mask1, mask2 ), _mm_and_ps( mask3, mask4 ) ), mask5 );
-		uint32_t imask = _mm_movemask_ps( combined );
-		if (imask)
-		{
-			// evaluate opacity map, if present (SSE version).
-			if (opmap) ISUNLIKELY
-			{
-				const __m128 fN4 = _mm_set1_ps( (float)opmapN );
-				const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
-				const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
-				const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-				const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
-				const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
-				uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
-				tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
-				// proceed with scalar code for gather operation - TODO: better approach?
-				for (int i = 0; i < 4; i++) if (imask & (1 << i))
-				{
-					uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-					if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
-				}
-				// combine
-				combined = _mm_and_ps( combined, tinybvh_load4( omask ) );
-				imask = _mm_movemask_ps( combined );
-			}
-			if (imask)
-			{
-				// compute broadcasted horizontal minimum of dist4
-				const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
-				const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
-				const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
-				const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
-				// update hit record.
-				const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
-				const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
-				ray.hit.t = t;
-				ray.hit.u = _mm_cvtss_f32( _mm_permutevar_ps( u4, lane4 ) );
-				ray.hit.v = _mm_cvtss_f32( _mm_permutevar_ps( v4, lane4 ) );
-			#if INST_IDX_BITS == 32
-				ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
-			#else
-				ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
-			#endif
-				t8 = _mm256_set1_ps( t );
-				// compress stack
-				int32_t outStackPtr = 0;
-				for (int32_t i = 0; i < stackPtr; i += 8)
-				{
-					const int32_t numItems = tinybvh_min( 8, stackPtr - i );
-					const __m256i valid8 = _mm256_cmpgt_epi32( _mm256_set1_epi32( numItems ), lane8 );
-					__m256i node8 = _mm256_maskload_epi32( (const int32_t*)(nodeStack + i), valid8 );
-					__m256 dist8 = _mm256_maskload_ps( distStack + i, valid8 );
-					const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) ) & ((1u << numItems) - 1);
-					const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
-					dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
-					_mm256_storeu_ps( distStack + outStackPtr, dist8 );
-					_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
-					outStackPtr += __popc( mask );
-				}
-				stackPtr = outStackPtr;
-			}
-		}
-		if (!stackPtr) ISUNLIKELY break;
-		nodeIdx = nodeStack[--stackPtr];
-	}
-the_end:
-#ifdef _DEBUG
-	return steps;
-#else
-	return 0;
-#endif
-}
-
-#else
-
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const
-{
-	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 4 /* wide trees push more nodes per step */ + 8];
-	ALIGNED( 64 ) float distStack[TINYBVH_STACK_SIZE * 4 + 8];
-	const __m256 zero8 = _mm256_setzero_ps();
-	__m256 t8 = _mm256_set1_ps( ray.hit.t );
-	int32_t stackPtr = 0;
-	uint32_t nodeIdx = 0;
-	const __m256 rx8 = _mm256_set1_ps( ray.O.x * ray.rD.x ), rdx8 = _mm256_set1_ps( ray.rD.x );
-	const __m256 ry8 = _mm256_set1_ps( ray.O.y * ray.rD.y ), rdy8 = _mm256_set1_ps( ray.rD.y );
-	const __m256 rz8 = _mm256_set1_ps( ray.O.z * ray.rD.z ), rdz8 = _mm256_set1_ps( ray.rD.z );
-	const __m256i lane8 = _mm256_setr_epi32( 0, 1, 2, 3, 4, 5, 6, 7 );
-#ifdef BVH8_SORTING_NETWORK
-	const __m256i sentinel8 = _mm256_setr_epi32( (int32_t)0x80000000, (int32_t)0x80000001,
-		(int32_t)0x80000002, (int32_t)0x80000003, (int32_t)0x80000004, (int32_t)0x80000005,
-		(int32_t)0x80000006, (int32_t)0x80000007 );
-#endif
-	const __m128 ox4 = _mm_set1_ps( ray.O.x ), oy4 = _mm_set1_ps( ray.O.y ), oz4 = _mm_set1_ps( ray.O.z );
-	const __m128 dx4 = _mm_set1_ps( ray.D.x ), dy4 = _mm_set1_ps( ray.D.y ), dz4 = _mm_set1_ps( ray.D.z );
-	const __m128 one4 = _mm_set1_ps( 1 ), inf4 = _mm_set1_ps( 1e34f );
-#ifdef _DEBUG
-	// sorry, not even this can be tolerated in this function. Only in debug.
-	uint32_t steps = 0;
-#endif
-	while (1)
-	{
-		while (!(nodeIdx & LEAF_BIT)) ISLIKELY
-		{
-		#ifdef _DEBUG
-			steps++;
-		#endif
-			const BVHNode* n = (BVHNode*)(bvh8Data + nodeIdx);
-			const __m256 tx1 = _mm256_fmsub_ps( _mm256_load_ps( posX ? n->xmin : n->xmax ), rdx8, rx8 );
-			const __m256 ty1 = _mm256_fmsub_ps( _mm256_load_ps( posY ? n->ymin : n->ymax ), rdy8, ry8 );
-			const __m256 tz1 = _mm256_fmsub_ps( _mm256_load_ps( posZ ? n->zmin : n->zmax ), rdz8, rz8 );
-			const __m256 tx2 = _mm256_fmsub_ps( _mm256_load_ps( posX ? n->xmax : n->xmin ), rdx8, rx8 );
-			const __m256 ty2 = _mm256_fmsub_ps( _mm256_load_ps( posY ? n->ymax : n->ymin ), rdy8, ry8 );
-			const __m256 tz2 = _mm256_fmsub_ps( _mm256_load_ps( posZ ? n->zmax : n->zmin ), rdz8, rz8 );
-			const __m256 tmin = _mm256_max_ps( _mm256_max_ps( tx1, ty1 ), _mm256_max_ps( tz1, zero8 ) );
-			const __m256 tmax = _mm256_min_ps( _mm256_min_ps( tx2, ty2 ), _mm256_min_ps( tz2, t8 ) );
-			const __m256 mask8 = _mm256_cmp_ps( tmin, tmax, _CMP_LE_OQ );
-			const uint32_t mask = _mm256_movemask_ps( mask8 );
-			const uint32_t validNodes = __popc( mask );
+			const uint32_t validNodes = tinybvh_popc( mask );
 		#ifdef BVH8_USE_PREFETCHING
 			// prefetch child data. only incoherent rays benefit.
 			for (uint32_t m = mask; m; m &= m - 1)
@@ -1184,7 +1337,7 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 		#endif
 			if (validNodes == 1)
 			{
-				const uint32_t lane = __bfind( mask );
+				const uint32_t lane = tinybvh_bfind( mask );
 				nodeIdx = n->child[lane];
 			}
 		#ifdef BVH8_2VALIDNODES
@@ -1192,7 +1345,7 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 			{
 				// The highest and lowest set bits identify the two children independently.
 				// This avoids both the sorting network and dependent bit scans.
-				const uint32_t lane0 = __bfind( mask );
+				const uint32_t lane0 = tinybvh_bfind( mask );
 			#if defined _MSC_VER && !defined __clang__
 				unsigned long lane1;
 				_BitScanForward( &lane1, mask );
@@ -1209,22 +1362,6 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 		#endif
 			else if (validNodes > 0)
 			{
-			#ifndef BVH8_SORTING_NETWORK
-				constexpr int signShift = (posX ? 3 : 0) + (posY ? 6 : 0) + (posZ ? 12 : 0);
-				const __m256i index = _mm256_srli_epi32( _mm256_load_si256( (const __m256i*)n->perm ), signShift );
-				const uint32_t m = _mm256_movemask_ps( _mm256_permutevar8x32_ps( mask8, index ) );
-				const __m256i c8 = _mm256_permutevar8x32_epi32( _mm256_load_si256( (const __m256i*)n->child ), index );
-				nodeIdx = (uint32_t)_mm_cvtsi128_si32( _mm256_castsi256_si128(
-					_mm256_permutevar8x32_epi32( c8, _mm256_set1_epi32( (int32_t)__bfind( m ) ) ) ) );
-				// start the fill for the child we are about to descend into; the LUT
-				// load, two permutes and two stores below hide the L1/L2 latency.
-				_mm_prefetch( (const char*)(bvh8Data + (nodeIdx & 0x1fffffff)), _MM_HINT_T0 );
-				const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - m] );
-				const __m256 dist8 = _mm256_permutevar8x32_ps( _mm256_permutevar8x32_ps( tmin, index ), cpi );
-				const __m256i child8 = _mm256_permutevar8x32_epi32( c8, cpi );
-				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), child8 );
-				_mm256_storeu_ps( distStack + stackPtr, dist8 );
-			#else
 				// use a sorting network to sort by entry distance.
 				__m256i d = _mm256_or_si256( _mm256_and_si256( _mm256_castps_si256( tmin ), _mm256_set1_epi32( -8 ) ), lane8 );
 				d = _mm256_blendv_epi8( _mm256_set1_epi32( 0x7fffffff ), d, _mm256_castps_si256( mask8 ) );
@@ -1245,7 +1382,6 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 				const __m256i order = _mm256_permutevar8x32_epi32( d, _mm256_sub_epi32( _mm256_set1_epi32( validNodes - 1 ), lane8 ) );
 				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), _mm256_permutevar8x32_epi32( _mm256_load_si256( (const __m256i*)n->child ), order ) );
 				_mm256_storeu_ps( distStack + stackPtr, _mm256_permutevar8x32_ps( tmin, order ) );
-			#endif
 				stackPtr += validNodes - 1;
 			}
 			else
@@ -1257,16 +1393,16 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 			BVH_FATAL_ERROR_IF( stackPtr > TINYBVH_STACK_SIZE * 4 - 8, "BVH8_CPU::Intersect, traversal stack overflow." );
 		#endif
 		}
-	#ifdef BVH8_USE_PREFETCHING
-		if (stackPtr) ISLIKELY
-		{
-			// prefetch the next node - only divergent rays benefit.
-			const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
-			_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
-			_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
-		}
-	#endif
-		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
+		#ifdef BVH8_USE_PREFETCHING
+			if (stackPtr) ISLIKELY
+			{
+				// prefetch the next node - only divergent rays benefit.
+				const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
+				_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 64, _MM_HINT_T0 );
+				_mm_prefetch( next + 128, _MM_HINT_T0 ), _mm_prefetch( next + 192, _MM_HINT_T0 );
+			}
+		#endif
+				// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
 		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, _mm_load_ps( leaf->e2z ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
 		const __m128 hy4 = _mm_fmsub_ps( dz4, _mm_load_ps( leaf->e2x ), _mm_mul_ps( dx4, _mm_load_ps( leaf->e2z ) ) );
@@ -1291,27 +1427,17 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 		uint32_t imask = _mm_movemask_ps( combined );
 		if (imask)
 		{
-			const __m128 inv_det4 = _mm_div_ps( one4, absDet4 );
-			const __m128 u4 = _mm_mul_ps( U4, inv_det4 );
-			const __m128 v4 = _mm_mul_ps( V4, inv_det4 );
-			const __m128 ta4 = _mm_mul_ps( T4, inv_det4 );
+			const __m128 invDet4 = _mm_div_ps( one4, absDet4 );
+			const __m128 u4 = _mm_mul_ps( U4, invDet4 );
+			const __m128 v4 = _mm_mul_ps( V4, invDet4 );
+			const __m128 ta4 = _mm_mul_ps( T4, invDet4 );
 			// evaluate opacity map, if present (SSE version).
 			if (opmap) ISUNLIKELY
 			{
-				const __m128 fN4 = _mm_set1_ps( (float)opmapN );
-				const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( u4, v4 ), fN4 ) );
-				const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, u4 ), fN4 ) );
-				const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-				const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( v4, fN4 ) );
-				const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
 				uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
-				tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+				tinybvh_opmap_idx4( u4, v4, opmapN, idx );
 				// proceed with scalar code for gather operation - TODO: better approach?
-				for (int i = 0; i < 4; i++) if (imask & (1 << i))
-				{
-					uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-					if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = 0xffffffff;
-				}
+				for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = 0xffffffff;
 				// combine
 				combined = _mm_and_ps( combined, tinybvh_load4( omask ) );
 				imask = _mm_movemask_ps( combined );
@@ -1322,7 +1448,7 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 				const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
 				const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
 				const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
-				const uint32_t lane = __bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
+				const uint32_t lane = tinybvh_bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
 				// update hit record.
 				const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
 				const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
@@ -1348,7 +1474,7 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH8_CPU<fl
 					dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
 					_mm256_storeu_ps( distStack + outStackPtr, dist8 );
 					_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
-					outStackPtr += __popc( mask );
+					outStackPtr += tinybvh_popc( mask );
 				}
 				stackPtr = outStackPtr;
 			}
@@ -1364,9 +1490,7 @@ the_end:
 #endif
 }
 
-#endif
-
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const
+template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 4 /* wide trees push more nodes per step */ + 8];
 	int32_t stackPtr = 0;
@@ -1396,16 +1520,16 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH8_CPU<float
 			const __m256 tmax = _mm256_min_ps( _mm256_min_ps( tx2, ty2 ), _mm256_min_ps( tz2, t8 ) );
 			const __m256 mask8 = _mm256_cmp_ps( tmin, tmax, _CMP_LE_OQ );
 			const uint32_t mask = _mm256_movemask_ps( mask8 );
-			const uint32_t validNodes = __popc( mask );
+			const uint32_t validNodes = tinybvh_popc( mask );
 			if (validNodes == 1)
 			{
-				const uint32_t lane = __bfind( mask );
+				const uint32_t lane = tinybvh_bfind( mask );
 				nodeIdx = n->child[lane];
 			}
 			else if (validNodes > 0)
 			{
 				nodeIdx = (uint32_t)_mm_cvtsi128_si32( _mm256_castsi256_si128(
-					_mm256_permutevar8x32_epi32( c8, _mm256_set1_epi32( (int32_t)__bfind( mask ) ) ) ) );
+					_mm256_permutevar8x32_epi32( c8, _mm256_set1_epi32( (int32_t)tinybvh_bfind( mask ) ) ) ) );
 				const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
 				const __m256i child8 = _mm256_permutevar8x32_epi32( c8, cpi );
 				_mm256_storeu_si256( (__m256i*)(nodeStack + stackPtr), child8 );
@@ -1453,23 +1577,13 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH8_CPU<float
 		{
 			if (!opmap) return true;
 			// evaluate opacity map, SSE version.
-			const __m128 inv_det4 = _mm_div_ps( one4, det4 );
-			const __m128 bu4 = _mm_mul_ps( nu4, inv_det4 ), bv4 = _mm_mul_ps( nv4, inv_det4 );
-			const __m128 fN4 = _mm_set1_ps( (float)opmapN );
-			const __m128i row4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_add_ps( bu4, bv4 ), fN4 ) );
-			const __m128i dia4 = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( one4, bu4 ), fN4 ) );
-			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-			const __m128i v1 = _mm_cvttps_epi32( _mm_mul_ps( bv4, fN4 ) );
-			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
+			const __m128 invDet4 = _mm_div_ps( one4, det4 );
+			const __m128 bu4 = _mm_mul_ps( nu4, invDet4 ), bv4 = _mm_mul_ps( nv4, invDet4 );
 			uint32_t idx[4];
-			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+			tinybvh_opmap_idx4( bu4, bv4, opmapN, idx );
 			// proceed with scalar code for gather operation - TODO: better approach?
 			const uint32_t imask = _mm_movemask_ps( combined );
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
 		}
 		// continue
 		if (!stackPtr) ISUNLIKELY return false;
@@ -1479,17 +1593,6 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH8_CPU<float
 
 // WiVeC bundle traversal, AVX2. Fuetterling et al., HPG 2017, section 4, and
 // rend.c's intersect_pckts_blas / intersect_pckts_tlas. Closest hit only.
-
-static TINYBVH_FORCEINLINE uint32_t tinybvh_ctz( uint32_t x ) // lowest set bit
-{
-#if defined _MSC_VER && !defined __clang__
-	unsigned long i;
-	_BitScanForward( &i, x );
-	return (uint32_t)i;
-#else
-	return (uint32_t)__builtin_ctz( x );
-#endif
-}
 
 // RayBundle: the rays of one IntersectBundle call, in SoA form.
 struct ALIGNED( 64 ) RayBundle
@@ -1512,7 +1615,7 @@ struct ALIGNED( 64 ) RayBundle
 			(rdy[l + i] >= 0 ? 2 : 0) + (rdz[l + i] >= 0 ? 4 : 0))) return -1;
 		return o;
 	}
-	void SetRay( const uint32_t s, const Ray& ray )
+	void SetRay( const uint32_t s, const Ray & ray )
 	{
 		ox[s] = ray.O.x, oy[s] = ray.O.y, oz[s] = ray.O.z;
 		dx[s] = ray.D.x, dy[s] = ray.D.y, dz[s] = ray.D.z;
@@ -1524,7 +1627,7 @@ struct ALIGNED( 64 ) RayBundle
 		prim[s] = ray.hit.prim & PRIM_IDX_MASK, inst[s] = ray.hit.prim & ~PRIM_IDX_MASK;
 	#endif
 	}
-	void GetHit( const uint32_t s, Ray& ray ) const
+	void GetHit( const uint32_t s, Ray & ray ) const
 	{
 		ray.hit.t = t[s], ray.hit.u = u[s], ray.hit.v = v[s];
 	#if INST_IDX_BITS == 32
@@ -1534,8 +1637,8 @@ struct ALIGNED( 64 ) RayBundle
 	#endif
 	}
 	// Build the object space counterpart of the listed packets for one instance.
-	void TransformTo( RayBundle& dst, const uint32_t* pk, const uint32_t n,
-		const bvhmat4& inv, const uint32_t instance ) const
+	void TransformTo( RayBundle & dst, const uint32_t * pk, const uint32_t n,
+		const bvhmat4 & inv, const uint32_t instance ) const
 	{
 		for (uint32_t i = 0; i < n; i++) for (uint32_t k = 0; k < 8; k++)
 		{
@@ -1552,7 +1655,7 @@ struct ALIGNED( 64 ) RayBundle
 		dst.packets = n, dst.instIdx = instance, dst.mask = mask;
 	}
 	// Take back whatever the object space bundle found; true if anything moved.
-	bool MergeHits( const RayBundle& o )
+	bool MergeHits( const RayBundle & o )
 	{
 		bool improved = false;
 		for (uint32_t d = 0, e = o.packets * 8; d < e; d++)
@@ -1567,8 +1670,7 @@ struct ALIGNED( 64 ) RayBundle
 
 static int32_t tinybvh_trace_packets( const BVHBase* bvh, RayBundle& b, const uint32_t* pk, const uint32_t n );
 
-template <bool posX, bool posY, bool posZ>
-static TINYBVH_FORCEINLINE float tinybvh_interval_slab( const bvhvec3& bmin, const bvhvec3& bmax,
+PER_OCTANT static TINYBVH_FORCEINLINE float tinybvh_interval_slab( const bvhvec3& bmin, const bvhvec3& bmax,
 	const float* rdMin, const float* rdMax, const float* roMin, const float* roMax, const float tfar )
 {
 	const float ex = posX ? bmin.x : bmax.x, ey = posY ? bmin.y : bmax.y, ez = posZ ? bmin.z : bmax.z;
@@ -1582,19 +1684,6 @@ static TINYBVH_FORCEINLINE float tinybvh_interval_slab( const bvhvec3& bmin, con
 	const float tmin = tinybvh_max( tinybvh_max( x1, y1 ), tinybvh_max( z1, 0.0f ) );
 	const float tmax = tinybvh_min( tinybvh_min( x2, y2 ), tinybvh_min( z2, tfar ) );
 	return tmin <= tmax ? tmin : BVH_FAR;
-}
-
-// Trace one ray through a blas of any layout.
-static int32_t tinybvh_blas_intersect( const BVHBase* blas, Ray& ray )
-{
-	if (blas->layout == LAYOUT_BVH) return ((BVH*)blas)->Intersect( ray );
-#ifdef ENABLE_VOXEL_SUPPORT
-	if (blas->layout == LAYOUT_VOXELSET) return ((VoxelSet*)blas)->Intersect( ray );
-#endif
-	if (blas->layout == LAYOUT_BVH4_CPU) return ((BVH4_CPU*)blas)->Intersect( ray );
-	if (blas->layout == LAYOUT_BVH8_AVX2) return ((BVH8_CPU*)blas)->Intersect( ray );
-	assert( !"unsupported BLAS layout" );
-	return 0;
 }
 
 // Trace selected packets one ray at a time - whenever we can't do packet traversal.
@@ -1712,8 +1801,12 @@ static TINYBVH_FORCEINLINE uint32_t tinybvh_leaftris( const uint32_t* primIdx )
 		_mm256_and_ps( _mm256_cmp_ps( _mm256_add_ps( bu8, bv8 ), one8, _CMP_LE_OQ ), \
 		_mm256_and_ps( _mm256_cmp_ps( bt8, zero8, _CMP_GT_OQ ), _mm256_cmp_ps( bt8, tcur8, _CMP_LT_OQ ) ) ) );
 
-template <bool posX, bool posY, bool posZ>
-static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
+#if defined __GNUC__ && !defined __clang__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+
+PER_OCTANT static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
 {
 	using BVHNode = BVH4_CPU::BVHNode;
 	// an opacity map needs a per-lane gather in the leaf; not worth vectorizing.
@@ -1726,7 +1819,7 @@ static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uin
 	uint32_t nodeIdx = 0, fpi = 0, active = (1u << n) - 1;
 	const __m256 zero8 = _mm256_setzero_ps(), one8 = _mm256_set1_ps( 1.0f );
 	const __m256i instIdx8 = _mm256_set1_epi32( (int32_t)b.instIdx );
-	TINYBVH_BUNDLE_SETUP
+	TINYBVH_BUNDLE_SETUP;
 	const __m128 rdxMin4 = tinybvh_lo4( tinybvh_hmin8( rdxMin ) ), rdxMax4 = tinybvh_lo4( tinybvh_hmax8( rdxMax ) );
 	const __m128 rdyMin4 = tinybvh_lo4( tinybvh_hmin8( rdyMin ) ), rdyMax4 = tinybvh_lo4( tinybvh_hmax8( rdyMax ) );
 	const __m128 rdzMin4 = tinybvh_lo4( tinybvh_hmin8( rdzMin ) ), rdzMax4 = tinybvh_lo4( tinybvh_hmax8( rdzMax ) );
@@ -1774,7 +1867,7 @@ static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uin
 				for (uint32_t i = 0; i < triCount; i++)
 				{
 					TINYBVH_PACKET_TRI( i )
-					if (!_mm256_movemask_ps( hit8 )) continue;
+						if (!_mm256_movemask_ps( hit8 )) continue;
 					if (!packetHit)
 					{
 						u8 = _mm256_load_ps( b.u + l ), v8 = _mm256_load_ps( b.v + l );
@@ -1829,8 +1922,7 @@ static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uin
 					if (!isLeaf) break;
 				}
 				if (++i == n) i = 0;
-			}
-			while (i != first);
+			} while (i != first);
 			if (!entering) continue;
 			nodeIdx = child, fpi = firstHit, active = entering;
 			break;
@@ -1839,8 +1931,7 @@ static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uin
 }
 
 // Ray bundle traversal - TLAS level.
-template <bool posX, bool posY, bool posZ>
-static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
+PER_OCTANT static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
 {
 	using BVHNode = BVH::BVHNode;
 	uint32_t nodeStack[TINYBVH_STACK_SIZE], fpiStack[TINYBVH_STACK_SIZE];
@@ -1850,7 +1941,7 @@ static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, const uint32_t
 	int32_t stackPtr = 0, steps = 0;
 	uint32_t nodeIdx = 0, fpi = 0, active = (1u << n) - 1;
 	const __m256 zero8 = _mm256_setzero_ps();
-	TINYBVH_BUNDLE_SETUP
+	TINYBVH_BUNDLE_SETUP;
 	// the TLAS node test is scalar, so reduce the interval ray all the way down.
 	float rdMin[3], rdMax[3], roMin[3], roMax[3], tfar;
 	_mm_store_ss( rdMin + 0, tinybvh_lo4( tinybvh_hmin8( rdxMin ) ) ), _mm_store_ss( rdMax + 0, tinybvh_lo4( tinybvh_hmax8( rdxMax ) ) );
@@ -1921,14 +2012,17 @@ static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, const uint32_t
 					if (!isLeaf) break;
 				}
 				if (++i == n) i = 0;
-			}
-			while (i != first);
+			} while (i != first);
 			if (!entering) continue;
 			nodeIdx = entry, fpi = firstHit, active = entering;
 			break;
 		}
 	}
 }
+
+#if defined __GNUC__ && !defined __clang__
+#pragma GCC diagnostic pop
+#endif
 
 // Octant dispatch for the bundle kernels.
 #define OCTANT_DISPATCH_BUNDLE( kernel, o, ... ) \
@@ -1991,18 +2085,6 @@ template <> int32_t impl::BVH<float, uint32_t>::IntersectBundle( Ray* rays ) con
 // Bundle traversal for occlusion rays.
 
 static int32_t tinybvh_occlude_packets( const BVHBase* bvh, RayBundle& b, const uint32_t* pk, const uint32_t n );
-
-static bool tinybvh_blas_occluded( const BVHBase* blas, const Ray& ray )
-{
-	if (blas->layout == LAYOUT_BVH) return ((BVH*)blas)->IsOccluded( ray );
-#ifdef ENABLE_VOXEL_SUPPORT
-	if (blas->layout == LAYOUT_VOXELSET) return ((VoxelSet*)blas)->IsOccluded( ray );
-#endif
-	if (blas->layout == LAYOUT_BVH4_CPU) return ((BVH4_CPU*)blas)->IsOccluded( ray );
-	if (blas->layout == LAYOUT_BVH8_AVX2) return ((BVH8_CPU*)blas)->IsOccluded( ray );
-	assert( !"unsupported BLAS layout" );
-	return false;
-}
 
 static int32_t tinybvh_packets_occluded_per_ray( const BVHBase* bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
 {
@@ -2088,8 +2170,7 @@ static TINYBVH_FORCEINLINE __m256 tinybvh_lanemask8( const uint32_t m )
 			rzMin = _mm256_min_ps( rzMin, qz ), rzMax = _mm256_max_ps( rzMax, qz ); \
 		tmax8 = _mm256_max_ps( tmax8, tcur[i] ); }
 
-template <bool posX, bool posY, bool posZ>
-static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
+PER_OCTANT static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
 {
 	using BVHNode = BVH4_CPU::BVHNode;
 	if (bvh.opmap) ISUNLIKELY return tinybvh_packets_occluded_per_ray( &bvh, b, pk, n );
@@ -2102,7 +2183,7 @@ static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle& b, const u
 	uint32_t nodeIdx = 0, fpi = 0, alive = 0, active;
 	const __m256 zero8 = _mm256_setzero_ps(), minusOne8 = _mm256_set1_ps( -1.0f );
 	const __m256 sign8 = _mm256_set1_ps( -0.0f );
-	TINYBVH_BUNDLE_SETUP_ANY
+	TINYBVH_BUNDLE_SETUP_ANY;
 	if (!alive) return 0;
 	active = alive;
 	const __m128 rdxMin4 = tinybvh_lo4( tinybvh_hmin8( rdxMin ) ), rdxMax4 = tinybvh_lo4( tinybvh_hmax8( rdxMax ) );
@@ -2149,7 +2230,7 @@ static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle& b, const u
 				for (uint32_t j = 0; j < triCount; j++)
 				{
 					TINYBVH_PACKET_TRI_ANY( j )
-					const uint32_t hit = (uint32_t)_mm256_movemask_ps( hit8 );
+						const uint32_t hit = (uint32_t)_mm256_movemask_ps( hit8 );
 					if (!hit) continue;
 					b.occluded[pk[i]] |= (uint8_t)hit, retired = true;
 					tcur8 = _mm256_blendv_ps( tcur8, minusOne8, hit8 );
@@ -2191,8 +2272,7 @@ static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle& b, const u
 					if (!isLeaf) break;
 				}
 				if (++i == n) i = 0;
-			}
-			while (i != first);
+			} while (i != first);
 			if (!entering) continue;
 			nodeIdx = child, fpi = firstHit, active = entering;
 			break;
@@ -2200,8 +2280,7 @@ static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle& b, const u
 	}
 }
 
-template <bool posX, bool posY, bool posZ>
-static int32_t tinybvh_occluded_tlas( const BVH& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
+PER_OCTANT static int32_t tinybvh_occluded_tlas( const BVH& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
 {
 	using BVHNode = BVH::BVHNode;
 	uint32_t nodeStack[TINYBVH_STACK_SIZE], fpiStack[TINYBVH_STACK_SIZE];
@@ -2212,7 +2291,7 @@ static int32_t tinybvh_occluded_tlas( const BVH& bvh, RayBundle& b, const uint32
 	int32_t stackPtr = 0, steps = 0;
 	uint32_t nodeIdx = 0, fpi = 0, alive = 0, active;
 	const __m256 zero8 = _mm256_setzero_ps(), minusOne8 = _mm256_set1_ps( -1.0f );
-	TINYBVH_BUNDLE_SETUP_ANY
+	TINYBVH_BUNDLE_SETUP_ANY;
 	if (!alive) return 0;
 	active = alive;
 	float rdMin[3], rdMax[3], roMin[3], roMax[3], tfar;
@@ -2297,8 +2376,7 @@ static int32_t tinybvh_occluded_tlas( const BVH& bvh, RayBundle& b, const uint32
 					if (!isLeaf) break;
 				}
 				if (++i == n) i = 0;
-			}
-			while (i != first);
+			} while (i != first);
 			if (!entering) continue;
 			nodeIdx = entry, fpi = firstHit, active = entering;
 			break;

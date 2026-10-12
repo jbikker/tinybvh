@@ -135,13 +135,13 @@ static void TestIndexedGeometry()
 	}
 
 	// index buffer (indexed mesh) and expanded soup (non-indexed), same prim order.
-	uint32_t* indices = new uint32_t[triCount * 3];
+	uint64_t* indices = new uint64_t[triCount * 3];
 	bvhdbl3* soup = new bvhdbl3[triCount * 3];
 	int t = 0;
 	for (int j = 0; j < G - 1; j++) for (int i = 0; i < G - 1; i++)
 	{
-		const uint32_t a = j * G + i, b = j * G + i + 1, c = (j + 1) * G + i, d = (j + 1) * G + i + 1;
-		const uint32_t tris[2][3] = { { a, b, c }, { b, d, c } };
+		const uint64_t a = j * G + i, b = j * G + i + 1, c = (j + 1) * G + i, d = (j + 1) * G + i + 1;
+		const uint64_t tris[2][3] = { { a, b, c }, { b, d, c } };
 		for (int k = 0; k < 2; k++, t++) for (int v = 0; v < 3; v++)
 		{
 			indices[t * 3 + v] = tris[k][v];

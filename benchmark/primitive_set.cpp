@@ -17,8 +17,8 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 		// load raw vertex data for Crytek's Sponza
 		AddMesh( "./testdata/cryteksponza.bin" );
 		camPos[0] = bvhvec3( -15.24f, 21.5f, 2.54f ), camDir[0] = tinybvh_normalize( bvhvec3( 0.826f, -0.438f, -0.356f ) );
-		camPos[1] = bvhvec3( -34, 5, 11.26f ), camDir[1] = tinybvh_normalize( bvhvec3( 0.9427, 0.0292, -0.3324 ) );
-		camPos[2] = bvhvec3( -1.3, 4.96, 12.28 ), camDir[2] = tinybvh_normalize( bvhvec3( -0.9886, 0.0507, -0.1419 ) );
+		camPos[1] = bvhvec3( -34, 5, 11.26f ), camDir[1] = tinybvh_normalize( bvhvec3( 0.9427f, 0.0292f, -0.3324f ) );
+		camPos[2] = bvhvec3( -1.3, 4.96, 12.28 ), camDir[2] = tinybvh_normalize( bvhvec3( -0.9886f, 0.0507f, -0.1419f ) );
 	}
 	else if (scene == Scene::BISTRO_EXTERIOR)
 	{
@@ -28,6 +28,14 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 		camPos[0] = bvhvec3( -24.2f, -8.2f, -2.0f ), camDir[0] = tinybvh_normalize( bvhvec3( -13.55f, -8.26f, -1.74f ) - camPos[0] );
 		camPos[1] = bvhvec3( -19.8f, 16.4f, -9.3f ), camDir[1] = tinybvh_normalize( bvhvec3( -15.17f, -9.57f, -11.34f ) - camPos[1] );
 		camPos[2] = bvhvec3( 30.9f, 1.4f, 26.2f ), camDir[2] = tinybvh_normalize( bvhvec3( 26.74f, -3.48f, 21.52f ) - camPos[2] );
+	}
+	else if (scene == Scene::SAN_MIGUEL)
+	{
+		// load 30 million triangles for San Miguel
+		AddMesh( "./testdata/sanmiguel.bin" );
+		camPos[0] = bvhvec3( 24.53f, 7.66f, -1.15f ), camDir[0] = tinybvh_normalize( bvhvec3( -0.93f, -0.09f, -0.35f ) );
+		camPos[1] = bvhvec3( 21.93f, 1.49f, 11.84f ), camDir[1] = tinybvh_normalize( bvhvec3( -0.56f, 0.10f, -0.82f ) );
+		camPos[2] = bvhvec3( 25.33f, 9.69f, -0.10f ), camDir[2] = tinybvh_normalize( bvhvec3( -0.33f, -0.46f, 0.83f ) );
 	}
 	else if (scene == CONFERENCE_ROOM)
 	{
@@ -73,6 +81,12 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	{
 		strncpy( desc, "Bistro Exterior", 128 ); 
 		strncpy( shrt, "bistro", 64 ); 
+		break;
+	}
+	case Scene::SAN_MIGUEL: 
+	{
+		strncpy( desc, "San Miguel", 128 ); 
+		strncpy( shrt, "sanmiguel", 64 ); 
 		break;
 	}
 	case Scene::CONFERENCE_ROOM: 

@@ -9,12 +9,14 @@ enum BuildFlags : int {
 	SIMDBUILD = 2,
 	FULLSWEEP = 4,
 	LBVH = 8,
-	PRESPLIT = 16,
-	SPATIALSPLITS = 32,
-	OPTIMIZE = 64,
-	LOW = 128, // low, medium, high: For Embree and Madmann91.
-	MEDIUM = 256,
-	HIGH = 512 
+	BONSAI = 16,
+	HPLOC = 32,
+	PRESPLIT = 64,
+	SPATIALSPLITS = 128,
+	OPTIMIZE = 256,
+	LOW = 512, // low, medium, high: For Embree and Madmann91.
+	MEDIUM = 1024,
+	HIGH = 2048 
 };
 
 enum BVHLayout
@@ -26,6 +28,7 @@ enum BVHLayout
 	GPU_BVH,	// BVH2 optimized for GPU traversal
 	GPU_BVH4,	// BVH4 optimized for GPU traversal
 	CWBVH,		// 'Compressed Wide BVH'
+	AMD_HWRT,	// Native AMD format
 	MADMANN91,	// for reference: latest madmann91 BVH lib
 	EMBREE		// for reference: latest Embree lib.
 };

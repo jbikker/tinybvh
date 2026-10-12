@@ -13,8 +13,12 @@
 namespace tinybvh {
 
 // Specializations provided by this header.
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const;
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const;
+template <> void impl::BVH<double, uint64_t>::BinBoxClear( BVHBinBox<double>& b );
+template <> void impl::BVH<double, uint64_t>::BinBoxMerge( BVHBinBox<double>& b, const BVHBinBox<double>& o );
+template <> void impl::BVH<double, uint64_t>::BinBoxAddFrag( BVHBinBox<double>& b, const Fragment& f );
+template <> void impl::BVH<double, uint64_t>::BinBoxAdd( BVHBinBox<double>& b, const bvhdbl3& mn, const bvhdbl3& mx );
+template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const;
+template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const;
 
 } // namespace tinybvh
 
@@ -34,6 +38,41 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<doubl
 
 namespace tinybvh {
 
+// BinBox helpers, NEON, double precision.
+template <> void impl::BVH<double, uint64_t>::BinBoxClear( BVHBinBox<double>& b )
+{
+	const float64x2_t far2 = vdupq_n_f64( -bvh_far<double> );
+	double* p = (double*)&b.negMin;
+	vst1q_f64( p, far2 ), vst1q_f64( p + 2, far2 ), vst1q_f64( p + 4, far2 ), vst1q_f64( p + 6, far2 );
+}
+template <> void impl::BVH<double, uint64_t>::BinBoxMerge( BVHBinBox<double>& b, const BVHBinBox<double>& o )
+{
+	double* p = (double*)&b.negMin; const double* q = (const double*)&o.negMin;
+	vst1q_f64( p, vmaxq_f64( vld1q_f64( p ), vld1q_f64( q ) ) );
+	vst1q_f64( p + 2, vmaxq_f64( vld1q_f64( p + 2 ), vld1q_f64( q + 2 ) ) );
+	vst1q_f64( p + 4, vmaxq_f64( vld1q_f64( p + 4 ), vld1q_f64( q + 4 ) ) );
+	vst1q_f64( p + 6, vmaxq_f64( vld1q_f64( p + 6 ), vld1q_f64( q + 6 ) ) );
+}
+template <> void impl::BVH<double, uint64_t>::BinBoxAddFrag( BVHBinBox<double>& b, const Fragment& f )
+{
+	// lanes 3 and 7 pick up primIdx and clipped; they are never read back.
+	double* p = (double*)&b.negMin; const double* q = (const double*)&f.bmin;
+	vst1q_f64( p, vmaxq_f64( vld1q_f64( p ), vnegq_f64( vld1q_f64( q ) ) ) );
+	vst1q_f64( p + 2, vmaxq_f64( vld1q_f64( p + 2 ), vnegq_f64( vld1q_f64( q + 2 ) ) ) );
+	vst1q_f64( p + 4, vmaxq_f64( vld1q_f64( p + 4 ), vld1q_f64( q + 4 ) ) );
+	vst1q_f64( p + 6, vmaxq_f64( vld1q_f64( p + 6 ), vld1q_f64( q + 6 ) ) );
+}
+template <> void impl::BVH<double, uint64_t>::BinBoxAdd( BVHBinBox<double>& b, const bvhdbl3& mn, const bvhdbl3& mx )
+{
+	double* p = (double*)&b.negMin;
+	const double farVal = -bvh_far<double>;
+	ALIGNED( 32 ) const double src[8] = { -mn.x, -mn.y, -mn.z, farVal, mx.x, mx.y, mx.z, farVal };
+	vst1q_f64( p, vmaxq_f64( vld1q_f64( p ), vld1q_f64( src ) ) );
+	vst1q_f64( p + 2, vmaxq_f64( vld1q_f64( p + 2 ), vld1q_f64( src + 2 ) ) );
+	vst1q_f64( p + 4, vmaxq_f64( vld1q_f64( p + 4 ), vld1q_f64( src + 4 ) ) );
+	vst1q_f64( p + 6, vmaxq_f64( vld1q_f64( p + 6 ), vld1q_f64( src + 6 ) ) );
+}
+
 // BVH4_CPU<double> traversal, NEON version.
 // ----------------------------------------------------------------------------
 // Direct translation of the NEON single precision kernel. Every 4xFP32 operation
@@ -51,10 +90,22 @@ TINYBVH_FORCEINLINE int32x4_t neon_cvt4_s32_f64( const float64x2_t a, const floa
 	return vuzp1q_s32( vreinterpretq_s32_s64( vcvtq_s64_f64( a ) ), vreinterpretq_s32_s64( vcvtq_s64_f64( b ) ) );
 }
 
+// Opacity micro maps: the micro-triangle indices for four barycentric pairs; see tinybvh_opmap_index.
+static TINYBVH_FORCEINLINE void tinybvh_opmap_idx4( const float64x2_t ua, const float64x2_t ub, const float64x2_t va, const float64x2_t vb, const uint32_t N, uint32_t* idx )
+{
+	const float64x2_t fN2 = vdupq_n_f64( (double)N ), one2 = vdupq_n_f64( 1.0 );
+	const int32x4_t row4 = neon_cvt4_s32_f64( vmulq_f64( vaddq_f64( ua, va ), fN2 ), vmulq_f64( vaddq_f64( ub, vb ), fN2 ) );
+	const int32x4_t dia4 = neon_cvt4_s32_f64( vmulq_f64( vsubq_f64( one2, ua ), fN2 ), vmulq_f64( vsubq_f64( one2, ub ), fN2 ) );
+	const int32x4_t v0 = vmulq_s32( row4, row4 );
+	const int32x4_t v1 = neon_cvt4_s32_f64( vmulq_f64( va, fN2 ), vmulq_f64( vb, fN2 ) );
+	const int32x4_t v2 = vsubq_s32( dia4, vsubq_s32( vdupq_n_s32( N - 1 ), row4 ) );
+	vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
+}
+
 #define NEON_HIT( s ) ((m64 >> (16 * s)) & 1)
 #define NEON_PUSH( c, l ) { nodeStack[stackPtr] = c; distStack[stackPtr] = tmin4[l]; stackPtr++; }
 
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const
+template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	ALIGNED( 64 ) double distStack[TINYBVH_STACK_SIZE * 2];
@@ -155,13 +206,13 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<do
 		const float64x2_t qza = vfmsq_f64( vmulq_f64( sxa, e1ya ), sya, e1xa ), qzb = vfmsq_f64( vmulq_f64( sxb, e1yb ), syb, e1xb );
 		const float64x2_t qxa = vfmsq_f64( vmulq_f64( sya, e1za ), sza, e1ya ), qxb = vfmsq_f64( vmulq_f64( syb, e1zb ), szb, e1yb );
 		const float64x2_t qya = vfmsq_f64( vmulq_f64( sza, e1xa ), sxa, e1za ), qyb = vfmsq_f64( vmulq_f64( szb, e1xb ), sxb, e1zb );
-		const float64x2_t inv_deta = vdivq_f64( one2, deta ), inv_detb = vdivq_f64( one2, detb );
-		const float64x2_t ua = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( sya, hya ), sxa, hxa ), sza, hza ), inv_deta );
-		const float64x2_t ub = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( syb, hyb ), sxb, hxb ), szb, hzb ), inv_detb );
-		const float64x2_t va = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qya ), dx2, qxa ), dz2, qza ), inv_deta );
-		const float64x2_t vb = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qyb ), dx2, qxb ), dz2, qzb ), inv_detb );
-		const float64x2_t taa = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2ya, qya ), e2xa, qxa ), e2za, qza ), inv_deta );
-		const float64x2_t tab = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2yb, qyb ), e2xb, qxb ), e2zb, qzb ), inv_detb );
+		const float64x2_t invDetA = vdivq_f64( one2, deta ), invDetB = vdivq_f64( one2, detb );
+		const float64x2_t ua = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( sya, hya ), sxa, hxa ), sza, hza ), invDetA );
+		const float64x2_t ub = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( syb, hyb ), sxb, hxb ), szb, hzb ), invDetB );
+		const float64x2_t va = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qya ), dx2, qxa ), dz2, qza ), invDetA );
+		const float64x2_t vb = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qyb ), dx2, qxb ), dz2, qzb ), invDetB );
+		const float64x2_t taa = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2ya, qya ), e2xa, qxa ), e2za, qza ), invDetA );
+		const float64x2_t tab = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2yb, qyb ), e2xb, qxb ), e2zb, qzb ), invDetB );
 		const uint64x2_t mask1a = vandq_u64( vcgeq_f64( ua, zero2 ), vcgeq_f64( va, zero2 ) ), mask1b = vandq_u64( vcgeq_f64( ub, zero2 ), vcgeq_f64( vb, zero2 ) );
 		const uint64x2_t mask2a = vcleq_f64( vaddq_f64( ua, va ), one2 ), mask2b = vcleq_f64( vaddq_f64( ub, vb ), one2 );
 		const uint64x2_t mask3a = vandq_u64( vcltq_f64( taa, t2 ), vcgtq_f64( taa, zero2 ) ), mask3b = vandq_u64( vcltq_f64( tab, t2 ), vcgtq_f64( tab, zero2 ) );
@@ -170,21 +221,11 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<do
 		// evaluate opacity map, if present (NEON version).
 		if (opmap) if (imask)
 		{
-			const float64x2_t fN2 = vdupq_n_f64( (double)opmapN );
-			const int32x4_t row4 = neon_cvt4_s32_f64( vmulq_f64( vaddq_f64( ua, va ), fN2 ), vmulq_f64( vaddq_f64( ub, vb ), fN2 ) );
-			const int32x4_t dia4 = neon_cvt4_s32_f64( vmulq_f64( vsubq_f64( one2, ua ), fN2 ), vmulq_f64( vsubq_f64( one2, ub ), fN2 ) );
-			const int32x4_t v0 = vmulq_s32( row4, row4 );
-			const int32x4_t v1 = neon_cvt4_s32_f64( vmulq_f64( va, fN2 ), vmulq_f64( vb, fN2 ) );
-			const int32x4_t v2 = vsubq_s32( dia4, vsubq_s32( vdupq_n_s32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4];
 			uint64_t omask[4] = { 0, 0, 0, 0 };
-			vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
+			tinybvh_opmap_idx4( ua, ub, va, vb, opmapN, idx );
 			// gather the opacity bits with scalar loads
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = ~0ull;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = ~0ull;
 			// combine
 			combineda = vandq_u64( combineda, vld1q_u64( omask ) ), combinedb = vandq_u64( combinedb, vld1q_u64( omask + 2 ) );
 			imask = neon_movemask_popc( neon_narrow_mask( combineda, combinedb ) ) & 15;
@@ -194,7 +235,7 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<do
 			const float64x2_t dista = vbslq_f64( combineda, taa, inf2 ), distb = vbslq_f64( combinedb, tab, inf2 );
 			const double t = vminvq_f64( vminq_f64( dista, distb ) );
 			const uint32x4_t eq4 = neon_narrow_mask( vceqq_f64( dista, vdupq_n_f64( t ) ), vceqq_f64( distb, vdupq_n_f64( t ) ) );
-			const uint32_t lane = __bfind( neon_movemask_popc( eq4 ) & 15 );
+			const uint32_t lane = tinybvh_bfind( neon_movemask_popc( eq4 ) & 15 );
 			// update hit record
 			ray.hit.t = t, ray.hit.u = tinybvh_getlane_d( lane < 2 ? &ua : &ub, lane & 1 ), ray.hit.v = tinybvh_getlane_d( lane < 2 ? &va : &vb, lane & 1 );
 			ray.SetHitPrim( leaf->primIdx[lane] );
@@ -215,7 +256,7 @@ the_end:
 #undef NEON_HIT
 #define NEON_HIT( l ) ((m64 >> (16 * l)) & 1)
 
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const
+template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	int32_t stackPtr = 0;
@@ -289,13 +330,13 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<doubl
 		const float64x2_t qza = vfmsq_f64( vmulq_f64( sxa, e1ya ), sya, e1xa ), qzb = vfmsq_f64( vmulq_f64( sxb, e1yb ), syb, e1xb );
 		const float64x2_t qxa = vfmsq_f64( vmulq_f64( sya, e1za ), sza, e1ya ), qxb = vfmsq_f64( vmulq_f64( syb, e1zb ), szb, e1yb );
 		const float64x2_t qya = vfmsq_f64( vmulq_f64( sza, e1xa ), sxa, e1za ), qyb = vfmsq_f64( vmulq_f64( szb, e1xb ), sxb, e1zb );
-		const float64x2_t inv_deta = vdivq_f64( one2, deta ), inv_detb = vdivq_f64( one2, detb );
-		const float64x2_t ua = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( sya, hya ), sxa, hxa ), sza, hza ), inv_deta );
-		const float64x2_t ub = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( syb, hyb ), sxb, hxb ), szb, hzb ), inv_detb );
-		const float64x2_t va = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qya ), dx2, qxa ), dz2, qza ), inv_deta );
-		const float64x2_t vb = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qyb ), dx2, qxb ), dz2, qzb ), inv_detb );
-		const float64x2_t taa = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2ya, qya ), e2xa, qxa ), e2za, qza ), inv_deta );
-		const float64x2_t tab = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2yb, qyb ), e2xb, qxb ), e2zb, qzb ), inv_detb );
+		const float64x2_t invDetA = vdivq_f64( one2, deta ), invDetB = vdivq_f64( one2, detb );
+		const float64x2_t ua = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( sya, hya ), sxa, hxa ), sza, hza ), invDetA );
+		const float64x2_t ub = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( syb, hyb ), sxb, hxb ), szb, hzb ), invDetB );
+		const float64x2_t va = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qya ), dx2, qxa ), dz2, qza ), invDetA );
+		const float64x2_t vb = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( dy2, qyb ), dx2, qxb ), dz2, qzb ), invDetB );
+		const float64x2_t taa = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2ya, qya ), e2xa, qxa ), e2za, qza ), invDetA );
+		const float64x2_t tab = vmulq_f64( vfmaq_f64( vfmaq_f64( vmulq_f64( e2yb, qyb ), e2xb, qxb ), e2zb, qzb ), invDetB );
 		const uint64x2_t mask1a = vandq_u64( vcgeq_f64( ua, zero2 ), vcgeq_f64( va, zero2 ) ), mask1b = vandq_u64( vcgeq_f64( ub, zero2 ), vcgeq_f64( vb, zero2 ) );
 		const uint64x2_t mask2a = vcleq_f64( vaddq_f64( ua, va ), one2 ), mask2b = vcleq_f64( vaddq_f64( ub, vb ), one2 );
 		const uint64x2_t mask3a = vandq_u64( vcltq_f64( taa, t2 ), vcgtq_f64( taa, zero2 ) ), mask3b = vandq_u64( vcltq_f64( tab, t2 ), vcgtq_f64( tab, zero2 ) );
@@ -305,20 +346,10 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<doubl
 		{
 			if (!opmap) return true;
 			// evaluate opacity map, NEON version.
-			const float64x2_t fN2 = vdupq_n_f64( (double)opmapN );
-			const int32x4_t row4 = neon_cvt4_s32_f64( vmulq_f64( vaddq_f64( ua, va ), fN2 ), vmulq_f64( vaddq_f64( ub, vb ), fN2 ) );
-			const int32x4_t dia4 = neon_cvt4_s32_f64( vmulq_f64( vsubq_f64( one2, ua ), fN2 ), vmulq_f64( vsubq_f64( one2, ub ), fN2 ) );
-			const int32x4_t v0 = vmulq_s32( row4, row4 );
-			const int32x4_t v1 = neon_cvt4_s32_f64( vmulq_f64( va, fN2 ), vmulq_f64( vb, fN2 ) );
-			const int32x4_t v2 = vsubq_s32( dia4, vsubq_s32( vdupq_n_s32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4];
-			vst1q_u32( idx, vreinterpretq_u32_s32( vaddq_s32( vaddq_s32( v0, v1 ), v2 ) ) );
+			tinybvh_opmap_idx4( ua, ub, va, vb, opmapN, idx );
 			// gather the opacity bits with scalar loads
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
 		}
 		// we continue.
 		if (!stackPtr) return false;

@@ -23,6 +23,7 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 	if (layout == GPU_BVH) bvh = new BVH_GPU();
 	if (layout == GPU_BVH4) bvh = new BVH4_GPU();
 	if (layout == CWBVH) bvh = new BVH8_CWBVH();
+	if (layout == AMD_HWRT) bvh = new BVH4_AMD_HW();
 	// set specified flags
 	if (bvh)
 	{
@@ -30,12 +31,17 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		bvh->settings.useSpatialSplits = false;
 		bvh->settings.presplitPostPass = false;
 		bvh->settings.useFullSweep = false;
-		bvh->settings.useSIMDifavailable = false;
+		bvh->settings.binnedBVH = false;
+		bvh->settings.useHPLOC = false;
+		bvh->settings.useSIMDifavailable = true;
+		bvh->settings.enableThreading = true;
+		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
 		if (flags & BuildFlags::FULLSWEEP) bvh->settings.useFullSweep = true;
-		// if (flags & BuildFlags::LBVH) bvh->settings.useLBVH = true;
+		else if (flags & BuildFlags::HPLOC) bvh->settings.useHPLOC = true;
+		else if (!(flags & BuildFlags::BONSAI)) bvh->settings.binnedBVH = true;
 		if (flags & BuildFlags::PRESPLIT) bvh->settings.usePresplitting = true;
 		if (flags & BuildFlags::SIMDBUILD) bvh->settings.useSIMDifavailable = true;
-		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
+		if (flags & BuildFlags::OPTIMIZE) bvh->settings.postOptimize = true;
 	}
 	// fix flags for Embree / Madmann91
 	if (layout == EMBREE || layout == MADMANN91)
@@ -47,62 +53,68 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 	{
 	case BVH2: 
 	{
-		strncpy( desc, "2-wide BVH", 128 ); 
-		strncpy( shrt, "BVH2", 128 ); 
+		strncpy( desc, "2-wide BVH", sizeof( desc ) ); 
+		strncpy( shrt, "BVH2", 60 ); 
 		break;
 	}
 	case BVH4: 
 	{
-		strncpy( desc, "4-wide BVH", 128 ); 
-		strncpy( shrt, "BVH4", 128 ); 
+		strncpy( desc, "4-wide BVH", sizeof( desc ) ); 
+		strncpy( shrt, "BVH4", sizeof( shrt ) ); 
 		break;
 	}
 	case BVH4_WIVE: 
 	{
-		strncpy( desc, "SSE 4-wide CPU BVH", 128 ); 
-		strncpy( shrt, "WiVe4", 128 ); 
+		strncpy( desc, "SSE 4-wide CPU BVH", sizeof( desc ) ); 
+		strncpy( shrt, "WiVe4", sizeof( shrt ) ); 
 		break;
 	}
 	case BVH8_WIVE: 
 	{
-		strncpy( desc, "AVX2 8-wide CPU BVH", 128 ); 
-		strncpy( shrt, "Wive8", 128 ); 
+		strncpy( desc, "AVX2 8-wide CPU BVH", sizeof( desc ) ); 
+		strncpy( shrt, "Wive8", sizeof( shrt ) ); 
 		break;
 	}
 	case GPU_BVH: 
 	{
-		strncpy( desc, "2-wide GPU BVH", 128 ); 
-		strncpy( shrt, "GPUBVH2", 128 ); 
+		strncpy( desc, "2-wide GPU BVH", sizeof( desc ) ); 
+		strncpy( shrt, "GPUBVH2", sizeof( shrt ) ); 
 		break;
 	}
 	case GPU_BVH4: 
 	{
-		strncpy( desc, "4-wide GPU BVH", 128 ); 
-		strncpy( shrt, "GPUBVH4", 128 ); 
+		strncpy( desc, "4-wide GPU BVH", sizeof( desc ) ); 
+		strncpy( shrt, "GPUBVH4", sizeof( shrt ) ); 
 		break;
 	}
 	case CWBVH: 
 	{
-		strncpy( desc, "8-wide CWBVH", 128 ); 
-		strncpy( shrt, "CWBVH", 128 ); 
+		strncpy( desc, "8-wide CWBVH", sizeof( desc ) ); 
+		strncpy( shrt, "CWBVH", sizeof( shrt ) ); 
+		break;
+	}
+	case AMD_HWRT:
+	{
+		strncpy( desc, "4-wide AMD BVH", sizeof( desc ) ); 
+		strncpy( shrt, "AMD4", sizeof( shrt ) ); 
 		break;
 	}
 	case MADMANN91: 
 	{
-		strncpy( desc, "madmann91 BVH", 128 ); 
-		strncpy( shrt, "MM'91", 128 ); 
+		strncpy( desc, "madmann91 BVH", sizeof( desc ) ); 
+		strncpy( shrt, "MM'91", sizeof( shrt ) ); 
 		break;
 	}
 	case EMBREE:
 	{
-		strncpy( desc, "embree4 BVH", 128 ); 
-		strncpy( shrt, "Embree", 128 ); 
+		strncpy( desc, "embree4 BVH", sizeof( desc ) ); 
+		strncpy( shrt, "Embree", sizeof( shrt ) ); 
 		break;
 	}
 	default: 
 	{
-		strncpy( desc, "UNKNOWN LAYOUT", 128 );
-		strncpy( shrt, "Unkown", 128 ); 
+		strncpy( desc, "UNKNOWN LAYOUT", sizeof( desc ) );
+		strncpy( shrt, "Unkown", sizeof( shrt ) ); 
 		break;
 	}
 	}
@@ -116,6 +128,8 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		else if (f & BuildFlags::INDEXED) { strncat( desc, "indexed", 100 ); strncat( flagShrt, "I", 32 ); f -= BuildFlags::INDEXED; }
 		else if (f & BuildFlags::FULLSWEEP) { strncat( desc, "full-sweep", 100 ); strncat( flagShrt, "F", 32 ); f -= BuildFlags::FULLSWEEP; }
 		else if (f & BuildFlags::LBVH) { strncat( desc, "LBVH", 100 ); strncat( flagShrt, "L", 32 ); f -= BuildFlags::LBVH; }
+		else if (f & BuildFlags::BONSAI) { strncat( desc, "Bonsai", 100 ); strncat( flagShrt, "B", 32 ); f -= BuildFlags::BONSAI; }
+		else if (f & BuildFlags::HPLOC) { strncat( desc, "H-PLOC", 100 ); strncat( flagShrt, "H", 32 ); f -= BuildFlags::HPLOC; }
 		else if (f & BuildFlags::SPATIALSPLITS) { strncat( desc, "SBVH", 100 ); strncat( flagShrt, "S", 32 ); f -= BuildFlags::SPATIALSPLITS; }
 		else if (f & BuildFlags::PRESPLIT) { strncat( desc, "presplit", 100 ); strncat( flagShrt, "P", 32 ); f -= BuildFlags::PRESPLIT; }
 		else if (f & BuildFlags::OPTIMIZE) { strncat( desc, "optimize", 100 ); strncat( flagShrt, "O", 32 ); f -= BuildFlags::OPTIMIZE; }
@@ -147,14 +161,6 @@ void AccStruc::PrepareBuild()
 BVHBase* AccStruc::Build( PrimitiveSet* prims )
 {
 	primSet = prims;
-	if (bvh)
-	{
-		if (flags & BuildFlags::SPATIALSPLITS) bvh->settings.useSpatialSplits = true;
-		if (flags & BuildFlags::SIMDBUILD) bvh->settings.useSIMDifavailable = true;
-		if (flags & BuildFlags::PRESPLIT) bvh->settings.usePresplitting = true;
-		if (flags & BuildFlags::FULLSWEEP) bvh->settings.useFullSweep = true;
-		if (flags & BuildFlags::OPTIMIZE) bvh->settings.postOptimize = true, bvh->settings.optimizeIterations = 100;
-	}
 	switch (layout)
 	{
 	case BVH2:
@@ -162,6 +168,7 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 		BVH* accstruc = (BVH*)bvh;
 		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
+		if (flags & HPLOC) accstruc->MergeLeafs();
 		break;
 	}
 #if 0
@@ -204,6 +211,13 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	case CWBVH:
 	{
 		BVH8_CWBVH* accstruc = (BVH8_CWBVH*)bvh;
+		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		else accstruc->Build( primSet->verts, primSet->primCount );
+		break;
+	}
+	case AMD_HWRT:
+	{
+		BVH4_AMD_HW* accstruc = (BVH4_AMD_HW*)bvh;
 		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
@@ -261,6 +275,7 @@ float AccStruc::SAHCost()
 	case GPU_BVH:return ((BVH_GPU*)bvh)->SAHCost();
 	case GPU_BVH4: return ((BVH4_GPU*)bvh)->SAHCost();
 	case CWBVH: return ((BVH8_CWBVH*)bvh)->SAHCost();
+	case AMD_HWRT: return ((BVH4_AMD_HW*)bvh)->SAHCost();
 	case MADMANN91:
 	{
 		// directly walk the madmann91 bvh to calculate its SAH cost.
@@ -306,39 +321,32 @@ float AccStruc::EPOCost()
 	case GPU_BVH:return ((BVH_GPU*)bvh)->bvh.EPOCost();
 	case GPU_BVH4: return ((BVH4_GPU*)bvh)->bvh4.bvh.EPOCost();
 	case CWBVH: return ((BVH8_CWBVH*)bvh)->bvh8.bvh.EPOCost();
+	case AMD_HWRT: return ((BVH4_AMD_HW*)bvh)->bvh4.bvh.EPOCost();
 	default: return 0; // unsupported layout. See note in constructor.
 	}
 	// note: there is (intentionally) no full class derivation in tinybvh.
 	// We thus have to specialize here for each possible layout.
 }
 
-struct BatchIntersectArgs { AccStruc* accstruc; char* rayData; int rayCount; int slices; int sliceSize; };
-static void IntersectBatchSlice( uint32_t i, void* payload )
-{
-	BatchIntersectArgs* a = (BatchIntersectArgs*)payload;
-	int size = a->sliceSize;
-	if (i == a->slices - 1) size = a->rayCount - (a->slices - 1) * a->sliceSize;
-	a->accstruc->IntersectBatch( a->rayData + a->sliceSize * i * 64, size );
-}
 void AccStruc::IntersectBatchMT( char* rayData, int rayCount )
 {
 	int slices = std::thread::hardware_concurrency() * 4;
 	int sliceSize = rayCount / slices;
-	BatchIntersectArgs args = { this, rayData, rayCount, slices, sliceSize };
-	tinybvh_parallel_for( context, slices, &IntersectBatchSlice, &args );
+	tinybvh_parallel_for( context, slices, [&]( uint32_t i )
+	{
+		// the last slice takes the remainder.
+		int size = sliceSize;
+		if ((int)i == slices - 1) size = rayCount - (slices - 1) * sliceSize;
+		IntersectBatch( rayData + sliceSize * i * 64, size );
+	} );
 }
 
-static void IntersectBatchPacketsSlice( uint32_t i, void* payload )
-{
-	BatchIntersectArgs* a = (BatchIntersectArgs*)payload;
-	a->accstruc->IntersectBatchPackets( a->rayData + a->sliceSize * i * 64, a->sliceSize );
-}
 void AccStruc::IntersectBatchMTPackets( char* rayData, int rayCount )
 {
 	constexpr int slices = 64; // intentional power of 2 so we always get bundles of 64N.
 	int sliceSize = rayCount / slices;
-	BatchIntersectArgs args = { this, rayData, rayCount, slices, sliceSize };
-	tinybvh_parallel_for( context, slices, &IntersectBatchPacketsSlice, &args );
+	tinybvh_parallel_for( context, slices, [&]( uint32_t i )
+		{ IntersectBatchPackets( rayData + sliceSize * i * 64, sliceSize ); } );
 }
 
 float AccStruc::IntersectBatch( char* rayData, int rayCount )
@@ -437,6 +445,22 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 		}
 		break;
 	}
+	case AMD_HWRT:
+	{
+		// TODO: we're simply intersecting the underlying bvh for now.
+		BVH4_AMD_HW* accstruc = (BVH4_AMD_HW*)bvh;
+		if (rayCount == 1)
+		{
+			accstruc->bvh4.bvh.Intersect( ((Ray*)rayData)[0] );
+			dist = ((Ray*)rayData)[0].hit.t, ((Ray*)rayData)[0].hit.t = origDist; // reset
+		}
+		else for (int i = 0; i < rayCount; i++, rayData += 64)
+		{
+			accstruc->bvh4.bvh.Intersect( ((Ray*)rayData)[0] );
+			((Ray*)rayData)[0].hit.t = origDist; // reset
+		}
+		break;
+	}
 	case MADMANN91:
 	{
 		// for this experiment we use ideal circumstances for the Manmann91 library:
@@ -454,7 +478,10 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 			madmannbvh.intersect<false, false>( ray, madmannbvh.get_root().index, stack, [&]( size_t begin, size_t end )
 				{
 					for (size_t i = begin; i < end; ++i)
-						if (hit = precomputed_tris[i].intersect( ray )) prim_id = i, std::tie( ray.tmax, u, v ) = *hit;
+					{
+						hit = precomputed_tris[i].intersect( ray );
+						if (hit) prim_id = i, std::tie( ray.tmax, u, v ) = *hit;
+					}
 					return prim_id != invalid_id;
 				} );
 		}
@@ -497,7 +524,7 @@ float AccStruc::IntersectBatchPackets( char* rayData, int rayCount )
 		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
 		{
 			char* rd = rayData + i * 64;
-			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( batch + j, rd, 64 );
+			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( (char*)(batch + j), rd, 64 );
 			accstruc->IntersectBundle( batch );
 		}
 		break;
@@ -508,30 +535,19 @@ float AccStruc::IntersectBatchPackets( char* rayData, int rayCount )
 	return dist;
 }
 
-struct BatchOcclusionArgs { AccStruc* accstruc; char* rayData; int rayCount; int sliceSize; };
-static void OcclusionBatchSlice( uint32_t i, void* payload )
-{
-	BatchOcclusionArgs* a = (BatchOcclusionArgs*)payload;
-	a->accstruc->OcclusionBatch( a->rayData + a->sliceSize * i * 64, a->sliceSize );
-}
 void AccStruc::OcclusionBatchMT( char* rayData, int rayCount )
 {
 	int slices = std::thread::hardware_concurrency() * 4;
 	int sliceSize = rayCount / slices;
-	BatchIntersectArgs args = { this, rayData, rayCount, sliceSize };
-	tinybvh_parallel_for( context, slices, &OcclusionBatchSlice, &args );
-}
-static void OcclusionBatchPacketsSlice( uint32_t i, void* payload )
-{
-	BatchOcclusionArgs* a = (BatchOcclusionArgs*)payload;
-	a->accstruc->OcclusionBatchPackets( a->rayData + a->sliceSize * i * 64, a->sliceSize );
+	tinybvh_parallel_for( context, slices, [&]( uint32_t i )
+		{ OcclusionBatch( rayData + sliceSize * i * 64, sliceSize ); } );
 }
 void AccStruc::OcclusionBatchMTPackets( char* rayData, int rayCount )
 {
 	constexpr int slices = 64; // intentional power of 2 so we always get bundles of 64N.
 	int sliceSize = rayCount / slices;
-	BatchIntersectArgs args = { this, rayData, rayCount, sliceSize };
-	tinybvh_parallel_for( context, slices, &OcclusionBatchPacketsSlice, &args );
+	tinybvh_parallel_for( context, slices, [&]( uint32_t i )
+		{ OcclusionBatchPackets( rayData + sliceSize * i * 64, sliceSize ); } );
 }
 
 void AccStruc::OcclusionBatch( char* rayData, int rayCount )
@@ -572,6 +588,12 @@ void AccStruc::OcclusionBatch( char* rayData, int rayCount )
 	{
 		BVH8_CWBVH* accstruc = (BVH8_CWBVH*)bvh;
 		for (int i = 0; i < rayCount; i++, rayData += 64) accstruc->IsOccluded( ((Ray*)rayData)[0] );
+		break;
+	}
+	case AMD_HWRT:
+	{
+		BVH4_AMD_HW* accstruc = (BVH4_AMD_HW*)bvh;
+		for (int i = 0; i < rayCount; i++, rayData += 64) accstruc->bvh4.bvh.IsOccluded( ((Ray*)rayData)[0] );
 		break;
 	}
 	case MADMANN91:
@@ -626,7 +648,7 @@ void AccStruc::OcclusionBatchPackets( char* rayData, int rayCount )
 		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
 		{
 			char* rd = rayData + i * 64;
-			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( batch + j, rd, 64 );
+			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( (char*)(batch + j), rd, 64 );
 			accstruc->IsOccludedBundle( batch, occluded );
 		}
 		break;

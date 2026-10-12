@@ -1,7 +1,7 @@
 // Benchmark Suite for TinyBVH. Work in Progress.
 // Construct experiments using:
 // - BVH layout:  
-//   { BVH2, BVH4_WIVE, BVH8_WIVE, GPU_BVH, GPU_BVH4, CWBVH, MADDMAN91, EMBREE } a.k.a. { 0 .. 7 };
+//   { BVH2, BVH4_WIVE, BVH8_WIVE, GPU_BVH, GPU_BVH4, CWBVH, AMD_HWRT, MADDMAN91, EMBREE } a.k.a. { 0 .. 8 };
 // - Build flags: NO_FLAGS or 
 //   { INDEXED, SIMDBUILD, FULLSWEEP, PRESPLIT, SPATIALSPLITS, OPTIMIZE } and combinations thereof;
 // - Scene: 
@@ -27,13 +27,31 @@ int main()
 	InitOpenCL(); // does nothing if disabled; see tools.cpp
 	vector<Experiment*> experiment;
 	// construct list of experiments
-	Scene scene = CRYTEK_SPONZA;
+	Scene scene = CRYTEK_SPONZA; // SAN_MIGUEL;
 
-#if 0 // run one block at a time to reduce throttling effects.
+#if 0
+
+	// profiling the spatial split builder
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
+
+#endif
+
+#if 1 // run one block at a time to reduce throttling effects.
 
 	// 1. BVH construction
 	// PART 1 - TinyBVH, from ultra-fast to ultra-quality
 	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene ) );
+	experiment.push_back( new Experiment( BVH2, BONSAI, scene ) );
+	experiment.push_back( new Experiment( BVH2, BONSAI|SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH2, BONSAI|SPATIALSPLITS|OPTIMIZE, scene ) );
+	experiment.push_back( new Experiment( BVH2, HPLOC, scene ) );
 	experiment.push_back( new Experiment( BVH2, PRESPLIT, scene ) );
 	experiment.push_back( new Experiment( BVH2, FULLSWEEP, scene ) );
 	experiment.push_back( new Experiment( BVH2, SPATIALSPLITS, scene ) );
@@ -46,10 +64,15 @@ int main()
 	experiment.push_back( new Experiment( MADMANN91, LOW, scene ) );
 	experiment.push_back( new Experiment( MADMANN91, MEDIUM, scene ) );
 	experiment.push_back( new Experiment( MADMANN91, HIGH, scene ) );
+	// PART 4 - Derived layouts
+	experiment.push_back( new Experiment( BVH4_WIVE, SIMDBUILD, scene ) );
+	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS, scene ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SIMDBUILD, scene ) );
+	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS, scene ) );
 
 #endif
 
-#if 1
+#if 0
 
 	// 2. CPU BVH traversal
 	// PART 1 - TinyBVH, from default bvh via quick bvh builds to ultra-quality
@@ -149,26 +172,31 @@ int main()
 #if 0
 
 	// 4. GPU TRAVERSAL
-	experiment.push_back( new Experiment( GPU_BVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH4, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH4, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH4, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH4, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH4, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
-	experiment.push_back( new Experiment( CWBVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
-	experiment.push_back( new Experiment( CWBVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
-	experiment.push_back( new Experiment( CWBVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
-	experiment.push_back( new Experiment( CWBVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
-	experiment.push_back( new Experiment( CWBVH, PRESPLIT|SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH4, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
+	experiment.push_back( new Experiment( AMD_HWRT, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( AMD_HWRT, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
+	experiment.push_back( new Experiment( AMD_HWRT, SPATIALSPLITS|OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
+	experiment.push_back( new Experiment( AMD_HWRT, SPATIALSPLITS|OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( AMD_HWRT, SPATIALSPLITS|OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
 
 #endif
 
 	// run experiments
-	for( int i = 0; i < experiment.size(); i++ ) experiment[i]->Run();
+	for( size_t i = 0; i < experiment.size(); i++ ) experiment[i]->Run();
 	// all done.
 	return 0;
 }

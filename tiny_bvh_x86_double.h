@@ -13,8 +13,12 @@
 namespace tinybvh {
 
 // Specializations provided by this header.
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const;
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const;
+template <> void impl::BVH<double, uint64_t>::BinBoxClear( BVHBinBox<double>& b );
+template <> void impl::BVH<double, uint64_t>::BinBoxMerge( BVHBinBox<double>& b, const BVHBinBox<double>& o );
+template <> void impl::BVH<double, uint64_t>::BinBoxAddFrag( BVHBinBox<double>& b, const Fragment& f );
+template <> void impl::BVH<double, uint64_t>::BinBoxAdd( BVHBinBox<double>& b, const bvhdbl3& mn, const bvhdbl3& mx );
+template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const;
+template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const;
 
 } // namespace tinybvh
 
@@ -34,6 +38,43 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<doubl
 
 namespace tinybvh {
 
+// Opacity micro maps: the micro-triangle indices for four barycentric pairs; see tinybvh_opmap_index.
+static TINYBVH_FORCEINLINE void tinybvh_opmap_idx4( const __m256d u4, const __m256d v4, const uint32_t N, uint32_t* idx )
+{
+	const __m256d fN4 = _mm256_set1_pd( (double)N );
+	const __m128i row4 = _mm256_cvttpd_epi32( _mm256_mul_pd( _mm256_add_pd( u4, v4 ), fN4 ) );
+	const __m128i dia4 = _mm256_cvttpd_epi32( _mm256_mul_pd( _mm256_sub_pd( _mm256_set1_pd( 1.0 ), u4 ), fN4 ) );
+	const __m128i v0 = _mm_mullo_epi32( row4, row4 );
+	const __m128i v1 = _mm256_cvttpd_epi32( _mm256_mul_pd( v4, fN4 ) );
+	const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( N - 1 ), row4 ) );
+	tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+}
+
+// BinBox helpers, AVX2, double precision.
+template <> void impl::BVH<double, uint64_t>::BinBoxClear( BVHBinBox<double>& b )
+{
+	const __m256d far4 = _mm256_set1_pd( -bvh_far<double> );
+	_mm256_store_pd( (double*)&b.negMin, far4 ), _mm256_store_pd( (double*)&b.bmax, far4 );
+}
+template <> void impl::BVH<double, uint64_t>::BinBoxMerge( BVHBinBox<double>& b, const BVHBinBox<double>& o )
+{
+	_mm256_store_pd( (double*)&b.negMin, _mm256_max_pd( _mm256_load_pd( (const double*)&b.negMin ), _mm256_load_pd( (const double*)&o.negMin ) ) );
+	_mm256_store_pd( (double*)&b.bmax, _mm256_max_pd( _mm256_load_pd( (const double*)&b.bmax ), _mm256_load_pd( (const double*)&o.bmax ) ) );
+}
+template <> void impl::BVH<double, uint64_t>::BinBoxAddFrag( BVHBinBox<double>& b, const Fragment& f )
+{
+	const __m256d negMin4 = _mm256_xor_pd( _mm256_load_pd( (const double*)&f.bmin ), _mm256_set1_pd( -0.0 ) );
+	_mm256_store_pd( (double*)&b.negMin, _mm256_max_pd( _mm256_load_pd( (const double*)&b.negMin ), negMin4 ) );
+	_mm256_store_pd( (double*)&b.bmax, _mm256_max_pd( _mm256_load_pd( (const double*)&b.bmax ), _mm256_load_pd( (const double*)&f.bmax ) ) );
+}
+template <> void impl::BVH<double, uint64_t>::BinBoxAdd( BVHBinBox<double>& b, const bvhdbl3& mn, const bvhdbl3& mx )
+{
+	const __m256d negMin4 = _mm256_setr_pd( -mn.x, -mn.y, -mn.z, -bvh_far<double> );
+	const __m256d max4 = _mm256_setr_pd( mx.x, mx.y, mx.z, -bvh_far<double> );
+	_mm256_store_pd( (double*)&b.negMin, _mm256_max_pd( _mm256_load_pd( (const double*)&b.negMin ), negMin4 ) );
+	_mm256_store_pd( (double*)&b.bmax, _mm256_max_pd( _mm256_load_pd( (const double*)&b.bmax ), max4 ) );
+}
+
 // BVH4_CPU<double> traversal, AVX2 version.
 // ----------------------------------------------------------------------------
 // Direct translation of the single precision SSE kernel to 256-bit registers.
@@ -41,7 +82,7 @@ namespace tinybvh {
 #define AVX_HIT( l ) ((m >> l) & 1)
 #define AVX_PUSH( c, l ) { nodeStack[stackPtr] = c; distStack[stackPtr] = tmin4[l]; stackPtr++; }
 
-template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const
+template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant( Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	ALIGNED( 64 ) double distStack[TINYBVH_STACK_SIZE * 2];
@@ -124,10 +165,10 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<do
 		const __m256d qz4 = _mm256_fmsub_pd( sx4, _mm256_load_pd( leaf->e1y ), _mm256_mul_pd( sy4, _mm256_load_pd( leaf->e1x ) ) );
 		const __m256d qx4 = _mm256_fmsub_pd( sy4, _mm256_load_pd( leaf->e1z ), _mm256_mul_pd( sz4, _mm256_load_pd( leaf->e1y ) ) );
 		const __m256d qy4 = _mm256_fmsub_pd( sz4, _mm256_load_pd( leaf->e1x ), _mm256_mul_pd( sx4, _mm256_load_pd( leaf->e1z ) ) );
-		const __m256d inv_det4 = _mm256_div_pd( one4, det4 );
-		const __m256d u4 = _mm256_mul_pd( _mm256_fmadd_pd( sz4, hz4, _mm256_fmadd_pd( sx4, hx4, _mm256_mul_pd( sy4, hy4 ) ) ), inv_det4 );
-		const __m256d v4 = _mm256_mul_pd( _mm256_fmadd_pd( dz4, qz4, _mm256_fmadd_pd( dx4, qx4, _mm256_mul_pd( dy4, qy4 ) ) ), inv_det4 );
-		const __m256d ta4 = _mm256_mul_pd( _mm256_fmadd_pd( _mm256_load_pd( leaf->e2z ), qz4, _mm256_fmadd_pd( _mm256_load_pd( leaf->e2x ), qx4, _mm256_mul_pd( _mm256_load_pd( leaf->e2y ), qy4 ) ) ), inv_det4 );
+		const __m256d invDet4 = _mm256_div_pd( one4, det4 );
+		const __m256d u4 = _mm256_mul_pd( _mm256_fmadd_pd( sz4, hz4, _mm256_fmadd_pd( sx4, hx4, _mm256_mul_pd( sy4, hy4 ) ) ), invDet4 );
+		const __m256d v4 = _mm256_mul_pd( _mm256_fmadd_pd( dz4, qz4, _mm256_fmadd_pd( dx4, qx4, _mm256_mul_pd( dy4, qy4 ) ) ), invDet4 );
+		const __m256d ta4 = _mm256_mul_pd( _mm256_fmadd_pd( _mm256_load_pd( leaf->e2z ), qz4, _mm256_fmadd_pd( _mm256_load_pd( leaf->e2x ), qx4, _mm256_mul_pd( _mm256_load_pd( leaf->e2y ), qy4 ) ) ), invDet4 );
 		const __m256d mask1 = _mm256_and_pd( _mm256_cmp_pd( u4, zero4, _CMP_GE_OQ ), _mm256_cmp_pd( v4, zero4, _CMP_GE_OQ ) );
 		const __m256d mask2 = _mm256_cmp_pd( _mm256_add_pd( u4, v4 ), one4, _CMP_LE_OQ );
 		const __m256d mask3 = _mm256_and_pd( _mm256_cmp_pd( ta4, t4, _CMP_LT_OQ ), _mm256_cmp_pd( ta4, zero4, _CMP_GT_OQ ) );
@@ -136,21 +177,11 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<do
 		// evaluate opacity map, if present (AVX2 version).
 		if (opmap) if (imask)
 		{
-			const __m256d fN4 = _mm256_set1_pd( (double)opmapN );
-			const __m128i row4 = _mm256_cvttpd_epi32( _mm256_mul_pd( _mm256_add_pd( u4, v4 ), fN4 ) );
-			const __m128i dia4 = _mm256_cvttpd_epi32( _mm256_mul_pd( _mm256_sub_pd( one4, u4 ), fN4 ) );
-			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-			const __m128i v1 = _mm256_cvttpd_epi32( _mm256_mul_pd( v4, fN4 ) );
-			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4];
 			uint64_t omask[4] = { 0, 0, 0, 0 };
-			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+			tinybvh_opmap_idx4( u4, v4, opmapN, idx );
 			// gather the opacity bits with scalar loads
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) omask[i] = ~0ull;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = ~0ull;
 			// combine
 			combined = _mm256_and_pd( combined, _mm256_castsi256_pd( tinybvh_load8i( omask ) ) );
 			imask = _mm256_movemask_pd( combined );
@@ -161,7 +192,7 @@ template <> template <bool posX, bool posY, bool posZ> int32_t impl::BVH4_CPU<do
 			// compute broadcasted horizontal minimum of dist4
 			const __m256d a = _mm256_min_pd( dist4, _mm256_permute2f128_pd( dist4, dist4, 1 ) );
 			const __m256d c = _mm256_min_pd( a, _mm256_permute_pd( a, 5 ) );
-			const uint32_t lane = __bfind( _mm256_movemask_pd( _mm256_cmp_pd( c, dist4, _CMP_EQ_OQ ) ) );
+			const uint32_t lane = tinybvh_bfind( _mm256_movemask_pd( _mm256_cmp_pd( c, dist4, _CMP_EQ_OQ ) ) );
 			// update hit record
 			const double t = _mm256_cvtsd_f64( c );
 			ray.hit.t = t, ray.hit.u = tinybvh_getlane_d( &u4, lane ), ray.hit.v = tinybvh_getlane_d( &v4, lane );
@@ -181,7 +212,7 @@ the_end:
 
 #undef AVX_PUSH
 
-template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const
+template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( const Ray& ray ) const
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	int32_t stackPtr = 0;
@@ -244,10 +275,10 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<doubl
 		const __m256d qz4 = _mm256_fmsub_pd( sx4, _mm256_load_pd( leaf->e1y ), _mm256_mul_pd( sy4, _mm256_load_pd( leaf->e1x ) ) );
 		const __m256d qx4 = _mm256_fmsub_pd( sy4, _mm256_load_pd( leaf->e1z ), _mm256_mul_pd( sz4, _mm256_load_pd( leaf->e1y ) ) );
 		const __m256d qy4 = _mm256_fmsub_pd( sz4, _mm256_load_pd( leaf->e1x ), _mm256_mul_pd( sx4, _mm256_load_pd( leaf->e1z ) ) );
-		const __m256d inv_det4 = _mm256_div_pd( one4, det4 );
-		const __m256d u4 = _mm256_mul_pd( _mm256_fmadd_pd( sz4, hz4, _mm256_fmadd_pd( sx4, hx4, _mm256_mul_pd( sy4, hy4 ) ) ), inv_det4 );
-		const __m256d v4 = _mm256_mul_pd( _mm256_fmadd_pd( dz4, qz4, _mm256_fmadd_pd( dx4, qx4, _mm256_mul_pd( dy4, qy4 ) ) ), inv_det4 );
-		const __m256d ta4 = _mm256_mul_pd( _mm256_fmadd_pd( _mm256_load_pd( leaf->e2z ), qz4, _mm256_fmadd_pd( _mm256_load_pd( leaf->e2x ), qx4, _mm256_mul_pd( _mm256_load_pd( leaf->e2y ), qy4 ) ) ), inv_det4 );
+		const __m256d invDet4 = _mm256_div_pd( one4, det4 );
+		const __m256d u4 = _mm256_mul_pd( _mm256_fmadd_pd( sz4, hz4, _mm256_fmadd_pd( sx4, hx4, _mm256_mul_pd( sy4, hy4 ) ) ), invDet4 );
+		const __m256d v4 = _mm256_mul_pd( _mm256_fmadd_pd( dz4, qz4, _mm256_fmadd_pd( dx4, qx4, _mm256_mul_pd( dy4, qy4 ) ) ), invDet4 );
+		const __m256d ta4 = _mm256_mul_pd( _mm256_fmadd_pd( _mm256_load_pd( leaf->e2z ), qz4, _mm256_fmadd_pd( _mm256_load_pd( leaf->e2x ), qx4, _mm256_mul_pd( _mm256_load_pd( leaf->e2y ), qy4 ) ) ), invDet4 );
 		const __m256d mask1 = _mm256_and_pd( _mm256_cmp_pd( u4, zero4, _CMP_GE_OQ ), _mm256_cmp_pd( v4, zero4, _CMP_GE_OQ ) );
 		const __m256d mask2 = _mm256_cmp_pd( _mm256_add_pd( u4, v4 ), one4, _CMP_LE_OQ );
 		const __m256d mask3 = _mm256_and_pd( _mm256_cmp_pd( ta4, t4, _CMP_LT_OQ ), _mm256_cmp_pd( ta4, zero4, _CMP_GT_OQ ) );
@@ -257,20 +288,10 @@ template <> template <bool posX, bool posY, bool posZ> bool impl::BVH4_CPU<doubl
 		{
 			if (!opmap) return true;
 			// evaluate opacity map, AVX2 version.
-			const __m256d fN4 = _mm256_set1_pd( (double)opmapN );
-			const __m128i row4 = _mm256_cvttpd_epi32( _mm256_mul_pd( _mm256_add_pd( u4, v4 ), fN4 ) );
-			const __m128i dia4 = _mm256_cvttpd_epi32( _mm256_mul_pd( _mm256_sub_pd( one4, u4 ), fN4 ) );
-			const __m128i v0 = _mm_mullo_epi32( row4, row4 );
-			const __m128i v1 = _mm256_cvttpd_epi32( _mm256_mul_pd( v4, fN4 ) );
-			const __m128i v2 = _mm_sub_epi32( dia4, _mm_sub_epi32( _mm_set1_epi32( opmapN - 1 ), row4 ) );
 			uint32_t idx[4];
-			tinybvh_store4i( idx, _mm_add_epi32( _mm_add_epi32( v0, v1 ), v2 ) );
+			tinybvh_opmap_idx4( u4, v4, opmapN, idx );
 			// gather the opacity bits with scalar loads
-			for (int i = 0; i < 4; i++) if (imask & (1 << i))
-			{
-				uint32_t* om = opmap + leaf->primIdx[i] * ((opmapN * opmapN + 31) >> 5);
-				if (om[idx[i] >> 5] & (1 << (idx[i] & 31))) return true;
-			}
+			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
 		}
 		// we continue.
 		if (!stackPtr) return false;

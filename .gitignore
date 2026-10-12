@@ -21,6 +21,7 @@ errorlog.txt
 *.xlsx
 *.pptx
 *.fxh
+*.spv
 *.cso
 cache/ibl.dat
 external/glm

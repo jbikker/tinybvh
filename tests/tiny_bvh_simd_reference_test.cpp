@@ -11,7 +11,6 @@
 // own comparison.
 
 #define TINYBVH_IMPLEMENTATION
-// #define USE_DEPRECATED_LAYOUT // enables BVH_SoA
 #include "tiny_bvh.h"
 #include <cstdio>
 #include <type_traits>
@@ -25,9 +24,6 @@ using BVHBaseS = impl::BVHBase<float, uint64_t>;
 using BLASInstanceS = impl::BLASInstance<float, uint64_t>;
 using BVH4_CPUS = impl::BVH4_CPU<float, uint64_t>;
 using BVH8_CPUS = impl::BVH8_CPU<float, uint64_t>;
-#ifdef USE_DEPRECATED_LAYOUT
-using BVH_SoAS = impl::BVH_SoA<float, uint64_t>;
-#endif
 #ifdef DOUBLE_PRECISION_SUPPORT
 using BVH4_CPUDS = impl::BVH4_CPU<double, uint32_t>;
 #endif
@@ -45,6 +41,7 @@ struct Scene
 	std::vector<bvhvec4> verts;		// three vertices per triangle, or the shared vertices of the grid
 	std::vector<bvhdbl3> dverts;	// the same vertices in double precision
 	std::vector<uint32_t> indices;	// empty for a triangle soup
+	std::vector<uint64_t> indices64;	// the same indices, for the 64-bit instantiations
 	std::vector<uint32_t> opmap;	// opacity micro maps, opmapN^2 bits per triangle
 	uint32_t triCount = 0, opmapN = 0;
 };
@@ -77,6 +74,7 @@ static Scene MakeGrid( const int res, uint32_t seed )
 	}
 	s.triCount = res * res * 2;
 	for (const bvhvec4& v : s.verts) s.dverts.push_back( bvhdbl3( v ) );
+	for (const uint32_t i : s.indices) s.indices64.push_back( i );
 	return s;
 }
 
@@ -88,12 +86,24 @@ static void AddOpacityMaps( Scene& s, const uint32_t N, uint32_t seed )
 	for (uint32_t& w : s.opmap) w = tinybvh_rnduint( seed );
 }
 
+// The accelerators expose 'Vertex' but not their index type, so recover it from
+// the class template arguments. 'Build' takes the index buffer as 'Index*', which
+// is uint64_t for the <*, uint64_t> instantiations and uint32_t for the rest.
+template <class Acc> struct IndexTypeOf;
+template <template <class, class> class C, class F, class I> struct IndexTypeOf<C<F, I>> { using type = I; };
+template <class Acc> using IndexTypeFor = typename IndexTypeOf<Acc>::type;
+
 template <class Acc> static void Build( Acc& acc, const Scene& s )
 {
+	using Index = IndexTypeFor<Acc>;
 	acc.settings.useSIMDifavailable = false; // the reference builder gives both sides the same tree
 	const auto* verts = [&]() { if constexpr (std::is_same_v<typename Acc::Vertex, bvhvec4>) return s.verts.data(); else return s.dverts.data(); }();
-	if (s.indices.empty()) acc.Build( verts, s.triCount );
-	else acc.Build( verts, s.indices.data(), s.triCount );
+	if (s.indices.empty()) acc.Build( verts, (Index)s.triCount );
+	else
+	{
+		const auto* indices = [&]() { if constexpr (std::is_same_v<Index, uint32_t>) return s.indices.data(); else return s.indices64.data(); }();
+		acc.Build( verts, indices, (Index)s.triCount );
+	}
 	if (s.opmapN) acc.SetOpacityMicroMaps( (uint32_t*)s.opmap.data(), s.opmapN );
 }
 
@@ -204,9 +214,19 @@ static void CompareBuilders( const Scene& s )
 		CompareRays<Ray, Ray>( "BuildSIMD versus reference builder", simd, reference );
 	}
 #endif
-	// The SBVH builder clips fragments with SSE code on x86 and scalar code elsewhere.
+	// The default HQ builder is Bonsai HQ, which has no scalar counterpart on the
+	// <float, uint64_t> side: compare its hits against the reference builder instead.
+	{
+		BVH bonsai;
+		bonsai.BuildHQ( s.verts.data(), s.triCount );
+		CompareRays<Ray, Ray>( "BuildHQ (Bonsai HQ) versus reference builder", bonsai, reference );
+	}
+	// The binned SBVH builder clips fragments with SSE code on x86 and scalar code
+	// elsewhere. Request it explicitly on both sides, so that the two trees differ in
+	// the fragment clipping only and may be compared structurally.
 	BVH hq;
 	BVHS hqS;
+	hq.settings.binnedBVH = hqS.settings.binnedBVH = true;
 	hq.BuildHQ( s.verts.data(), s.triCount ), hqS.BuildHQ( s.verts.data(), s.triCount );
 	if (hq.usedNodes != hqS.usedNodes || fabsf( hq.SAHCost() - hqS.SAHCost() ) > 1e-3f * hq.SAHCost())
 		g_failures++, printf( "FAIL: BuildHQ, SIMD tree has %u nodes, SAH %.4f; scalar tree has %llu nodes, SAH %.4f\n",
@@ -256,10 +276,6 @@ int main()
 	CompareLayouts<BVH8_CPU, BVH8_CPUS>( "BVH8_CPU, indexed grid", grid );
 	CompareLayouts<BVH8_CPU, BVH8_CPUS>( "BVH8_CPU, opacity maps", mapped );
 	CompareTLAS<BVH8_CPU, BVH8_CPUS>( "TLAS over BVH8_CPU", soup );
-#ifdef USE_DEPRECATED_LAYOUT
-	CompareLayouts<BVH_SoA, BVH_SoAS>( "BVH_SoA, soup", soup );
-	CompareLayouts<BVH_SoA, BVH_SoAS>( "BVH_SoA, indexed grid", grid );
-#endif
 #ifdef DOUBLE_PRECISION_SUPPORT
 	CompareLayouts<BVH4_Double, BVH4_CPUDS>( "BVH4_Double, soup", soup );
 	CompareLayouts<BVH4_Double, BVH4_CPUDS>( "BVH4_Double, indexed grid", grid );
