@@ -925,10 +925,12 @@ public:
 	void ReleaseOwnership();
 	// reset to a pristine empty object, freeing nothing, with 'ctx' installed
 	void DropReference( BVHContext ctx = {} );
-	void Save( const char* fileName );
+	void Save( const char* fileName, const bool includeGeometry = true );
 	bool Load( const char* fileName, const Vertex* vertices, const Index primCount );
 	bool Load( const char* fileName, const Vertex* vertices, const Index* indices, const Index primCount );
 	bool Load( const char* fileName, const Slice& vertices, const Index* indices = 0, const Index primCount = 0 );
+	bool Load( const char* fileName ); // for a file saved with its geometry; see Save.
+	void FreeGeometry();
 	void BuildQuick( const Vertex* vertices, const Index primCount );
 	void BuildQuick( const Slice& vertices );
 	void Build( const Vertex* vertices, const Index primCount );
@@ -1073,6 +1075,7 @@ public:
 	// Basic BVH data
 	Slice verts = {};				// pointer to input primitive array: 3 vertices per tri.
 	Index* vertIdx = 0;			// vertex indices, only used in case the BVH is built over indexed prims.
+	bool ownsGeometry = false;	// set by Load when the geometry came out of the file rather than the caller.
 	Index* primIdx = 0;				// primitive index array; capacity >= allocatedNodes / 2, see below.
 	BLASInstance* instList = 0;		// instance array, for top-level acceleration structure.
 	BVHBase<Float, Index>** blasList = 0; // blas array, for TLAS traversal.
@@ -2151,7 +2154,17 @@ TEMPLATED BVH<Float, Index>& BVH<Float, Index>::operator=( BVH&& other ) noexcep
 TEMPLATED void BVH<Float, Index>::ReleaseOwnership()
 {
 	bvhNode = 0, primIdx = 0, fragment = 0;
+	verts = Slice( nullptr, 0, 0 ), vertIdx = 0, ownsGeometry = false; // the new owner holds these now
 	allocatedNodes = usedNodes = triCount = idxCount = 0;
+}
+
+// FreeGeometry: release vertex data that came out of a file. Caller-supplied geometry is
+// never ours and is left alone.
+TEMPLATED void BVH<Float, Index>::FreeGeometry()
+{
+	if (!ownsGeometry) return;
+	AlignedFree( (void*)verts.data ), AlignedFree( vertIdx );
+	verts = Slice( nullptr, 0, 0 ), vertIdx = 0, ownsGeometry = false;
 }
 
 TEMPLATED void BVH<Float, Index>::DropReference( BVHContext ctx )
@@ -2162,6 +2175,7 @@ TEMPLATED void BVH<Float, Index>::DropReference( BVHContext ctx )
 
 TEMPLATED BVH<Float, Index>::~BVH()
 {
+	FreeGeometry();
 	AlignedFree( bvhNode );
 	bvhNode = 0;
 	AlignedFree( primIdx );
@@ -2170,7 +2184,7 @@ TEMPLATED BVH<Float, Index>::~BVH()
 	fragment = 0;
 }
 
-TEMPLATED void BVH<Float, Index>::Save( const char* fileName )
+TEMPLATED void BVH<Float, Index>::Save( const char* fileName, const bool includeGeometry )
 {
 	// saving is easy, it's the loading that will be complex.
 	std::fstream s{ fileName, s.binary | s.out };
@@ -2180,8 +2194,20 @@ TEMPLATED void BVH<Float, Index>::Save( const char* fileName )
 	s.write( (char*)this, sizeof( BVH ) );
 	s.write( (char*)bvhNode, usedNodes * sizeof( BVHNode ) );
 	s.write( (char*)primIdx, idxCount * sizeof( Index ) );
+	// Geometry.
+	const uint32_t vertCount = (includeGeometry && verts) ? verts.count : 0;
+	const uint32_t idxEntries = (vertCount && vertIdx) ? (uint32_t)(triCount * 3) : 0;
+	s.write( (char*)&vertCount, sizeof( uint32_t ) );
+	s.write( (char*)&idxEntries, sizeof( uint32_t ) );
+	for (uint32_t i = 0; i < vertCount; i++)
+	{
+		const Vertex v = verts[i];
+		s.write( (char*)&v, sizeof( Vertex ) );
+	}
+	if (idxEntries) s.write( (char*)vertIdx, idxEntries * sizeof( Index ) );
 }
 
+TEMPLATED bool BVH<Float, Index>::Load( const char* f ) { return Load( f, Slice( nullptr, 0, 0 ) ); }
 TEMPLATED bool BVH<Float, Index>::Load( const char* f, const Vertex* v, const Index p ) { return Load( f, Slice( v, p * 3, sizeof( Vertex ) ) ); }
 TEMPLATED bool BVH<Float, Index>::Load( const char* f, const Vertex* v, const Index* i, const Index p ) { return Load( f, Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 TEMPLATED bool BVH<Float, Index>::Load( const char* fileName, const Slice& vertices, const Index* indices, const Index primCount )
@@ -2192,20 +2218,25 @@ TEMPLATED bool BVH<Float, Index>::Load( const char* fileName, const Slice& verti
 	BVHContext ctxBackup = context;
 	uint32_t* opmapBackup = opmap, opmapNBackup = opmapN;
 	bool expectIndexed = (indices != nullptr);
+	const bool useFileGeometry = !vertices && !indices; // no geometry handed in: take the file's
 	uint32_t header;
 	Index fileTriCount;
 	s.read( (char*)&header, sizeof( uint32_t ) );
 	if (header != this->CacheHeader()) return false;
 	s.read( (char*)&fileTriCount, sizeof( Index ) );
+	if (!useFileGeometry)
+	{
 	if (expectIndexed && fileTriCount != primCount) return false;
 	if (!expectIndexed && fileTriCount != vertices.count / 3) return false;
+	}
+	FreeGeometry();
 	AlignedFree( bvhNode );
 	AlignedFree( primIdx );
 	AlignedFree( fragment );
 	s.read( (char*)this, sizeof( BVH ) );
 	const bool fileIsIndexed = (vertIdx != nullptr);
 	const bool fileIsTLAS = (blasList != nullptr || instList != nullptr);
-	bvhNode = 0, primIdx = 0, fragment = 0;
+	bvhNode = 0, primIdx = 0, fragment = 0, ownsGeometry = false;
 	verts = Slice( nullptr, 0, 0 ), vertIdx = 0;
 	instList = 0, blasList = 0, blasCount = 0;
 	customIntersect = 0, customIsOccluded = 0, customUserdata = 0;
@@ -2216,6 +2247,7 @@ TEMPLATED bool BVH<Float, Index>::Load( const char* fileName, const Slice& verti
 	for (int32_t a = 0; a < 3; a++) sortedIdx[a] = 0, sortedBnds[a] = 0;
 	context = ctxBackup; // can't load context; function pointers will differ.
 	opmap = opmapBackup, opmapN = opmapNBackup; // opacity maps are caller-owned; keep what was set.
+	if (useFileGeometry) expectIndexed = fileIsIndexed;
 	if (expectIndexed != fileIsIndexed || fileIsTLAS)
 	{
 		// not the geometry we expected, or a TLAS, which we can't load/save;
@@ -2228,8 +2260,28 @@ TEMPLATED bool BVH<Float, Index>::Load( const char* fileName, const Slice& verti
 	fragment = 0; // no need for this in a BVH that can't be rebuilt.
 	s.read( (char*)bvhNode, usedNodes * sizeof( BVHNode ) );
 	s.read( (char*)primIdx, idxCount * sizeof( Index ) );
-	verts = vertices; // we can't load vertices since the BVH doesn't own this data.
-	vertIdx = (Index*)indices;
+	uint32_t vertCount = 0, idxEntries = 0;
+	s.read( (char*)&vertCount, sizeof( uint32_t ) );
+	s.read( (char*)&idxEntries, sizeof( uint32_t ) );
+	if (!useFileGeometry)
+	{
+		// the caller's geometry wins; step over what the file carries.
+		verts = vertices, vertIdx = (Index*)indices;
+		s.seekg( (std::streamoff)vertCount * sizeof( Vertex ) + (std::streamoff)idxEntries * sizeof( Index ), std::ios::cur );
+	}
+	else
+	{
+		if (vertCount == 0) { allocatedNodes = usedNodes = triCount = idxCount = 0; return false; }
+		Vertex* v = (Vertex*)AlignedAlloc( vertCount * sizeof( Vertex ) );
+		s.read( (char*)v, vertCount * sizeof( Vertex ) );
+		verts = Slice( v, vertCount, sizeof( Vertex ) );
+		if (idxEntries)
+		{
+			vertIdx = (Index*)AlignedAlloc( idxEntries * sizeof( Index ) );
+			s.read( (char*)vertIdx, idxEntries * sizeof( Index ) );
+		}
+		ownsGeometry = true;
+	}
 	// all ok.
 	return true;
 }
@@ -2240,6 +2292,8 @@ TEMPLATED void BVH<Float, Index>::Build( const Vertex* v, const Index* i, const 
 TEMPLATED void BVH<Float, Index>::Build( const Vertex* v, const Index p ) { Build( Slice( v, p * 3, sizeof( Vertex ) ) ); }
 TEMPLATED void BVH<Float, Index>::Build( const Slice& vertices, const Index* indices, Index prims )
 {
+	// A rebuild from the geometry we loaded is legal, so only release what is being replaced.
+	if (ownsGeometry && vertices.data != verts.data) FreeGeometry();
 #ifdef SLICEDUMP
 	// this code dumps the passed geometry data to a file - for debugging only.
 	std::fstream df{ "dump.bin", df.binary | df.out };
