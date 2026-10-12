@@ -27,35 +27,52 @@ THE SOFTWARE.
 // Use this in *one* .c or .cpp
 //   #define TINYSCENE_IMPLEMENTATION
 //   #include "tiny_scene.h"
+//
+// Requires C++17: class Scene stores its pools in static inline data members.
 
 // tinyscene can use custom vector types by defining TINYSCENE_USE_CUSTOM_VECTOR_TYPES
-// once before inclusion. To define custom vector types create a tinybvh namespace with
-// the appropriate using directives, e.g.:
+// once before inclusion. To define custom vector types create a tinyscene namespace
+// with a using directive for *each* of the eight types below, e.g.:
 //	 namespace tinyscene
 //   {
 //     using ts_int2 = math::int2;
 //     using ts_int3 = math::int3;
 //     using ts_uint2 = math::uint2;
-//     using ts_uint2 = math::uint3;
-//     using ts_uint2 = math::uint4;
+//     using ts_uint4 = math::uint4;
 //     using ts_vec2 = math::float2;
 //     using ts_vec3 = math::float3;
 //     using ts_vec4 = math::float4;
+//     using ts_mat4 = math::mat4;
 //   }
 //
 //	 #define TINYSCENE_USE_CUSTOM_VECTOR_TYPES
 //   #include <tiny_scene.h>
+//
+// The substituted types must provide the members and operators the originals do:
+// .x/.y/.z/.w for the vectors, operator[] for ts_vec2/3/4 and ts_mat4, 16 floats
+// in row-major order for ts_mat4, and the arithmetic operators used below.
+// Note that ts_quat, ts_uchar4 and ts_aabb are *not* substitutable: they are
+// tinyscene types regardless of this define.
 
-// tiny_scene.h depends on tiny_obj_loader, tiny_gltf and stb_image.
+// tiny_scene.h depends on tiny_bvh, tiny_obj_loader, tiny_gltf and stb_image.
 // If you already implement these elsewhere, use the following defines
 // to supress duplicate implementation in this header file.
 
-// #define TINYSCENE_TINYOBJ_AREADY_IMPLEMENTED
+// #define TINYSCENE_TINYBVH_ALREADY_IMPLEMENTED
+// #define TINYSCENE_TINYOBJ_ALREADY_IMPLEMENTED
 // #define TINYSCENE_TINYGLTF_ALREADY_IMPLEMENTED
 // #define TINYSCENE_STBIMAGE_ALREADY_IMPLEMENTED
 
+// access the tinybvh implementation; tinybvh types are used in the classes below.
+// note: tiny_bvh.h guards its interface and its implementation separately, so a
+// prior plain include of tiny_bvh.h does not prevent the implementation here.
+#if defined TINYSCENE_IMPLEMENTATION && !defined TINYSCENE_TINYBVH_ALREADY_IMPLEMENTED
+#define TINYBVH_IMPLEMENTATION
+#endif
+#include "tiny_bvh.h"
+
 // access syoyo's tiny_obj and tiny_gltf implementations
-#if defined TINYSCENE_IMPLEMENTATION && !defined TINYSCENE_TINYOBJ_AREADY_IMPLEMENTED
+#if defined TINYSCENE_IMPLEMENTATION && !defined TINYSCENE_TINYOBJ_ALREADY_IMPLEMENTED
 #define TINYOBJLOADER_IMPLEMENTATION
 #endif
 #include "tiny_obj_loader.h"
@@ -109,56 +126,74 @@ THE SOFTWARE.
 #define GPU_RIGID			3	// BVH will be built as tinybvh::BVH8_GPU::BuildHQ(..) - for opacity maps
 #define GPU_STATIC			4	// BVH will be built as tinybvh::BVH8_CWBVH::BuildHQ(..) - for fast traversal
 
-namespace tinyscene
-{
+// Standard headers used below.
+#include <cassert>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <algorithm>
+#include <string>
+#include <vector>
 
-// aligned memory allocation -  copy of the same construct in tinybvh, in a different namespace.
-inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alignment - 1)) & ~(alignment - 1); }
-#ifndef _ALIGNED_ALLOC
+// aligned memory allocation; follows the construct in tinybvh, in a different
+// namespace. An application can override the allocator by defining both
+// TINYSCENE_ALIGNED_ALLOC(alignment,size) and TINYSCENE_ALIGNED_FREE(ptr).
+#if defined(TINYSCENE_ALIGNED_ALLOC) != defined(TINYSCENE_ALIGNED_FREE)
+#error "Define both TINYSCENE_ALIGNED_ALLOC and TINYSCENE_ALIGNED_FREE, or neither."
+#endif
+#ifdef _MSC_VER
+#define TINYSCENE_ALIGNED( x ) __declspec( align( x ) )
+#else
+#define TINYSCENE_ALIGNED( x ) __attribute__( ( aligned( x ) ) )
+#endif
+#ifndef TINYSCENE_ALIGNED_ALLOC
 #ifdef _MSC_VER // Visual Studio / C11
-#define ALIGNED( x ) __declspec( align( x ) )
-#define _ALIGNED_ALLOC(alignment,size) _aligned_malloc( make_multiple_of( size, alignment ), alignment )
-#define _ALIGNED_FREE(ptr) _aligned_free( ptr )
+#define TINYSCENE_ALIGNED_ALLOC(alignment,size) _aligned_malloc( make_multiple_of( size, alignment ), alignment )
+#define TINYSCENE_ALIGNED_FREE(ptr) _aligned_free( ptr )
 #else // EMSCRIPTEN / gcc / clang / Android
-#define ALIGNED( x ) __attribute__( ( aligned( x ) ) )
 #if !defined TINYBVH_NO_SIMD && (defined __x86_64__ || defined _M_X64 || defined __wasm_simd128__ || defined __wasm_relaxed_simd__)
 #include <xmmintrin.h>
-#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment )
-#define _ALIGNED_FREE(ptr) _mm_free( ptr )
+#define TINYSCENE_ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment )
+#define TINYSCENE_ALIGNED_FREE(ptr) _mm_free( ptr )
 #elif defined(__ANDROID__)
 #include <malloc.h>
 #include <android/api-level.h>
-// Android API 28+ supports aligned_alloc, but older versions (like API 24) 
+// Android API 28+ supports aligned_alloc, but older versions (like API 24)
 // require memalign for aligned memory.
 #if defined(__ANDROID_API__) && (__ANDROID_API__ >= 28) // Modern Android (9.0+)
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
+#define TINYSCENE_ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
 #else // Legacy Android
-#define _ALIGNED_ALLOC(alignment,size) memalign( alignment, make_multiple_of( size, alignment ) )
+#define TINYSCENE_ALIGNED_ALLOC(alignment,size) memalign( alignment, make_multiple_of( size, alignment ) )
 #endif
-#define _ALIGNED_FREE(ptr) free( ptr )
+#define TINYSCENE_ALIGNED_FREE(ptr) free( ptr )
 #elif defined(__EMSCRIPTEN__) || defined(__APPLE__) || defined(__aarch64__)
 // Emscripten and Apple strictly follow C11 aligned_alloc
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
-#define _ALIGNED_FREE(ptr) free( ptr )
+#define TINYSCENE_ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
+#define TINYSCENE_ALIGNED_FREE(ptr) free( ptr )
 #elif defined(__GNUC__)
 #ifdef __linux__
-#define _ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
+#define TINYSCENE_ALIGNED_ALLOC(alignment,size) aligned_alloc( alignment, make_multiple_of( size, alignment ) )
 #else
-#define _ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment );
+#define TINYSCENE_ALIGNED_ALLOC(alignment,size) _mm_malloc( make_multiple_of( size, alignment ), alignment )
 #endif
-#define _ALIGNED_FREE(ptr) free( ptr )
+#define TINYSCENE_ALIGNED_FREE(ptr) free( ptr )
 #else
 // Fallback
-#define _ALIGNED_ALLOC(alignment,size) malloc( size )
-#define _ALIGNED_FREE(ptr) free( ptr )
+#define TINYSCENE_ALIGNED_ALLOC(alignment,size) malloc( size )
+#define TINYSCENE_ALIGNED_FREE(ptr) free( ptr )
 #endif
 #endif
 #endif
-inline void* malloc64( size_t size, void* = nullptr ) { return size == 0 ? 0 : _ALIGNED_ALLOC( 64, size ); }
-inline void free64( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
-// cleanup defines
-#undef _ALIGNED_ALLOC
-#undef _ALIGNED_FREE
+
+namespace tinyscene
+{
+
+inline size_t make_multiple_of( size_t x, size_t alignment ) { return (x + (alignment - 1)) & ~(alignment - 1); }
+inline void* malloc64( size_t size, void* = nullptr ) { return size == 0 ? 0 : TINYSCENE_ALIGNED_ALLOC( 64, size ); }
+inline void free64( void* ptr, void* = nullptr ) { TINYSCENE_ALIGNED_FREE( ptr ); }
 
 #ifndef TINYSCENE_USE_CUSTOM_VECTOR_TYPES
 
@@ -166,7 +201,7 @@ inline void free64( void* ptr, void* = nullptr ) { _ALIGNED_FREE( ptr ); }
 // something external. TODO: 'bring your own vector type' as in tiny_bvh.h.
 
 struct ts_vec3;
-struct ALIGNED( 16 ) ts_vec4
+struct TINYSCENE_ALIGNED( 16 ) ts_vec4
 {
 	// vector naming is designed to not cause any name clashes.
 	ts_vec4() = default;
@@ -179,7 +214,7 @@ struct ALIGNED( 16 ) ts_vec4
 	union { struct { float x, y, z, w; }; float cell[4]; };
 };
 
-struct ALIGNED( 8 ) ts_vec2
+struct TINYSCENE_ALIGNED( 8 ) ts_vec2
 {
 	ts_vec2() = default;
 	ts_vec2( const float a, const float b ) : x( a ), y( b ) {}
@@ -280,16 +315,10 @@ inline ts_vec3 operator/( float b, const ts_vec3& a ) { return ts_vec3( b / a.x,
 inline ts_vec4 operator/( float b, const ts_vec4& a ) { return ts_vec4( b / a.x, b / a.y, b / a.z, b / a.w ); }
 inline void operator*=( ts_vec3& a, const float b ) { a.x *= b; a.y *= b; a.z *= b; }
 
-#ifndef TINYSCENE_IMPLEMENTATION
-
-ts_vec4::ts_vec4( const ts_vec3& a ) { x = a.x, y = a.y, z = a.z, w = 0; }
-ts_vec4::ts_vec4( const ts_vec3& a, const float b ) { x = a.x, y = a.y, z = a.z, w = b; }
-
-#endif
+inline ts_vec4::ts_vec4( const ts_vec3& a ) { x = a.x, y = a.y, z = a.z, w = 0; }
+inline ts_vec4::ts_vec4( const ts_vec3& a, const float b ) { x = a.x, y = a.y, z = a.z, w = b; }
 
 #endif // TINYSCENE_USE_CUSTOM_VECTOR_TYPES
-
-#include <vector>
 
 struct ts_uchar4
 {
@@ -326,7 +355,7 @@ public:
 
 //  +-----------------------------------------------------------------------------+
 //  |  FatTri                                                                     |
-//  |  Full triangle data (for shading only), carefully layed out.          LH2'25|
+//  |  Full triangle data (for shading only), carefully layed out.          LH2'26|
 //  +-----------------------------------------------------------------------------+
 class FatTri
 {
@@ -347,9 +376,9 @@ public:
 	ts_vec3 vertex1; float u1_2;		// vertex 1 position + second layer u1
 	ts_vec3 vertex2; float u2_2;		// vertex 2 position + second layer u2
 	// 64 bytes of data needed for normal mapping, anisotropic, multi-texture etc.
-	ts_vec3 T;							// 12 bytes for tangent vector
+	ts_vec3 T;							// 12 bytes for tangent ::std::vector
 	float area;							// 4 bytes for triangle area
-	ts_vec3 B;							// 12 bytes for bitangent vector
+	ts_vec3 B;							// 12 bytes for bitangent ::std::vector
 	float invArea;						// 4 bytes for reciprocal triangle area
 	ts_vec3 alpha;						// better spot than vertex0..2.w for reasons
 	float LOD;							// for MIP mapping
@@ -361,7 +390,7 @@ public:
 
 //  +-----------------------------------------------------------------------------+
 //  |  SkyDome                                                                    |
-//  |  Stores data for a HDR sky dome.                                      LH2'25|
+//  |  Stores data for a HDR sky dome.                                      LH2'26|
 //  +-----------------------------------------------------------------------------+
 class SkyDome
 {
@@ -378,7 +407,7 @@ public:
 
 //  +-----------------------------------------------------------------------------+
 //  |  Skin                                                                       |
-//  |  Skin data storage.                                                   LH2'25|
+//  |  Skin data storage.                                                   LH2'26|
 //  +-----------------------------------------------------------------------------+
 class Skin
 {
@@ -393,7 +422,7 @@ public:
 
 //  +-----------------------------------------------------------------------------+
 //  |  Mesh                                                                       |
-//  |  Mesh data storage.                                                   LH2'25|
+//  |  Mesh data storage.                                                   LH2'26|
 //  +-----------------------------------------------------------------------------+
 class Mesh
 {
@@ -449,7 +478,7 @@ public:
 	uint32_t* omaps = 0;				// at N=32: 1024 bit / 128 byte per triangle
 	::std::vector<ts_vec3> vertexNormals;	// vertex normals, 1 per vertex
 	::std::vector<int> materialList;	// list of materials used by the mesh; used to efficiently track light changes
-	::std::vector<ts_vec4> original;	// skinning: base pose; will be transformed into vector vertices
+	::std::vector<ts_vec4> original;	// skinning: base pose; will be transformed into ::std::vector vertices
 	::std::vector<ts_vec3> origNormal;	// skinning: base pose normals
 	::std::vector<ts_uint4> joints;		// skinning: joints
 	::std::vector<ts_vec4> weights;		// skinning: joint weights
@@ -461,7 +490,7 @@ public:
 
 //  +-----------------------------------------------------------------------------+
 //  |  Node                                                                       |
-//  |  Simple node for construction of a scene graph for the scene.         LH2'25|
+//  |  Simple node for construction of a scene graph for the scene.         LH2'26|
 //  +-----------------------------------------------------------------------------+
 class Node
 {
@@ -502,7 +531,7 @@ protected:
 //  |  Material                                                                   |
 //  |  Full material definition, which contains everything that can be read from  |
 //  |  a gltf file. Will need to be digested to something more practical for      |
-//  |  rendering: For that there is 'Material'.                             LH2'25|
+//  |  rendering: For that there is 'Material'.                             LH2'26|
 //  +-----------------------------------------------------------------------------+
 class Material
 {
@@ -524,21 +553,21 @@ public:
 		ts_vec2 uvoffset = ts_vec2( 0 );		// uv coordinate offset
 		ts_uint2 size = ts_uint2( 0 );			// texture dimensions
 		// a parameter that has not been specified has a -1 textureID and a 1e-32f value
-		bool Specified() { return value.x != 1e32f || value.y != 1e32f || value.z != 1e32f || textureID != -1; }
+		bool Specified() const { return value.x != 1e-32f || value.y != 1e-32f || value.z != 1e-32f || textureID != -1; }
 		ts_vec3& operator()() { return value; }
 	};
 	struct ScalarValue
 	{
 		ScalarValue() = default;
 		ScalarValue( const float f ) : value( f ) {}
-		float value = 1e-32f;				// default value if map is absent; 1e32 means: not set
+		float value = 1e-32f;				// default value if map is absent; 1e-32 means: not set
 		int textureID = -1;					// texture ID; -1 denotes empty slot
 		int component = 0;					// 0 = x, 1 = y, 2 = z, 3 = w
 		float scale = 1;					// map values will be scaled by this
 		ts_vec2 uvscale = ts_vec2( 1 );		// uv coordinate scale
 		ts_vec2 uvoffset = ts_vec2( 0 );	// uv coordinate offset
 		ts_uint2 size = ts_uint2( 0 );		// texture dimensions
-		bool Specified() { return value != 1e32f || textureID != -1; }
+		bool Specified() const { return value != 1e-32f || textureID != -1; }
 		float& operator()() { return value; }
 	};
 	enum
@@ -581,7 +610,7 @@ private:
 //  +-----------------------------------------------------------------------------+
 //  |  Material                                                                   |
 //  |  Material definition. This is the version for actual rendering; it stores   |
-//  |  a subset of the full data of a Material.                             LH2'25|
+//  |  a subset of the full data of a Material.                             LH2'26|
 //  +-----------------------------------------------------------------------------+
 class RenderMaterial
 {
@@ -612,7 +641,7 @@ public:
 
 //  +-----------------------------------------------------------------------------+
 //  |  Animation                                                                  |
-//  |  Animation definition.                                                LH2'25|
+//  |  Animation definition.                                                LH2'26|
 //  +-----------------------------------------------------------------------------+
 class Animation
 {
@@ -665,7 +694,7 @@ public:
 //  |  - A file name does not uniquely identify a texture: the file may be        |
 //  |    different between folders, and the texture may have been loaded with     |
 //  |    'modFlags'. Instead, a texture is uniquely identified by its full file   |
-//  |    name, including path, as well as the mods field.                   LH2'25|
+//  |    name, including path, as well as the mods field.                   LH2'26|
 //  +-----------------------------------------------------------------------------+
 class Texture
 {
@@ -706,7 +735,7 @@ public:
 
 //  +-----------------------------------------------------------------------------+
 //  |  TriLight                                                                   |
-//  |  Light triangle.                                                      LH2'25|
+//  |  Light triangle.                                                      LH2'26|
 //  +-----------------------------------------------------------------------------+
 class TriLight
 {
@@ -729,7 +758,7 @@ public:
 
 //  +-----------------------------------------------------------------------------+
 //  |  PointLight                                                                 |
-//  |  Point light definition.                                              LH2'25|
+//  |  Point light definition.                                              LH2'26|
 //  +-----------------------------------------------------------------------------+
 class PointLight
 {
@@ -762,7 +791,7 @@ public:
 
 //  +-----------------------------------------------------------------------------+
 //  |  DirectionalLight                                                           |
-//  |  Directional light definition.                                        LH2'25|
+//  |  Directional light definition.                                        LH2'26|
 //  +-----------------------------------------------------------------------------+
 class DirectionalLight
 {
@@ -778,7 +807,7 @@ public:
 //  +-----------------------------------------------------------------------------+
 //  |  Scene                                                                      |
 //  |  Module for scene I/O and host-side management.                             |
-//  |  This is a pure static class; we will not have more than one scene.   LH2'25|
+//  |  This is a pure static class; we will not have more than one scene.   LH2'26|
 //  +-----------------------------------------------------------------------------+
 class Scene
 {
@@ -822,7 +851,7 @@ public:
 	static int AddChildNode( const int parentNodeId, const int childNodeId );
 	static int GetChildId( const int parentId, const int childIdx );
 	static int AddInstance( const int nodeId );
-	static void RemoveNode( const int instId );
+	static void RemoveNode( const int nodeId );
 	static int AddMaterial( Material* material );
 	static int AddMaterial( const ts_vec3 color, const char* name = 0 );
 	static int AddPointLight( const ts_vec3 pos, const ts_vec3 radiance );
@@ -872,6 +901,14 @@ public:
 #else
 #define SCENE_FATAL_ERROR_IF(c,s) if (c) { fprintf( stderr, \
 	"Fatal error in tiny_scene.h, line %i:\n%s\n", __LINE__, s ); exit( 1 ); }
+#endif
+
+#ifdef _WIN32
+#include <direct.h>
+#define getcwd _getcwd // stupid MSFT "deprecation" warning
+#define chdir _chdir
+#else
+#include <unistd.h>
 #endif
 
 namespace tinyscene {
@@ -945,17 +982,18 @@ inline ts_vec3 ts_transform_vector( const ts_vec3& v, const ts_mat4& T )
 }
 inline float ts_min( const float a, const float b ) { return a < b ? a : b; }
 inline float ts_max( const float a, const float b ) { return a > b ? a : b; }
+inline int32_t ts_min( const int32_t a, const int32_t b ) { return a < b ? a : b; }
+inline int32_t ts_max( const int32_t a, const int32_t b ) { return a > b ? a : b; }
+inline uint32_t ts_min( const uint32_t a, const uint32_t b ) { return a < b ? a : b; }
+inline uint32_t ts_max( const uint32_t a, const uint32_t b ) { return a > b ? a : b; }
 inline ts_vec3 ts_min( const ts_vec3& a, const ts_vec3& b ) { return ts_vec3( ts_min( a.x, b.x ), ts_min( a.y, b.y ), ts_min( a.z, b.z ) ); }
 inline ts_vec3 ts_max( const ts_vec3& a, const ts_vec3& b ) { return ts_vec3( ts_max( a.x, b.x ), ts_max( a.y, b.y ), ts_max( a.z, b.z ) ); }
 
 // basic 16-bit float support
-static uint32_t ts_as_uint( const float x ) { return *(uint32_t*)&x; }
-float ts_as_float( const uint32_t x ) { return *(float*)&x; }
-float ts_half_to_float( const uint16_t x ) {
-	const uint32_t e = (x & 0x7C00) >> 10, m = (x & 0x03FF) << 13, v = ts_as_uint( (float)m ) >> 23;
-	return ts_as_float( (x & 0x8000) << 16 | (e != 0) * ((e + 112) << 23 | m) | ((e == 0) & (m != 0)) *
-		((v - 37) << 23 | ((m << (150 - v)) & 0x007FE000)) );
-}
+// note: via memcpy; reading a float through a uint32_t lvalue (or the reverse)
+// breaks strict aliasing, and tinyscene is built with -Ofast in places.
+static uint32_t ts_as_uint( const float x ) { uint32_t r; ::memcpy( &r, &x, 4 ); return r; }
+float ts_as_float( const uint32_t x ) { float r; ::memcpy( &r, &x, 4 ); return r; }
 uint16_t ts_float_to_half( const float x )
 {
 	const uint32_t b = ts_as_uint( x ) + 0x00001000, e = (b & 0x7F800000) >> 23, m = b & 0x007FFFFF;
@@ -966,7 +1004,7 @@ uint16_t ts_float_to_half( const float x )
 void ts_aabb::grow( const ts_vec3& p )
 {
 	bmin = ts_min( bmin, p );
-	bmax = ts_max( bmin, p );
+	bmax = ts_max( bmax, p );
 }
 
 ts_quat ts_quat::slerp( const ts_quat& a, const ts_quat& b, const float t )
@@ -1012,24 +1050,49 @@ void RenderMaterial::SetTransmittance( ts_vec3 t )
 	transmittance_b = ts_float_to_half( t.z );
 }
 
-#ifdef _WIN32
-#include <direct.h>
-#define getcwd _getcwd // stupid MSFT "deprecation" warning
-#define chdir _chdir
-#elif
-#include <unistd.h>
-#endif
-#include <thread>
-
 // 'declaration of x hides previous local declaration'
-#pragma warning( disable: 4456)
+#ifdef _MSC_VER
+#pragma warning( push )
+#pragma warning( disable: 4456 )
+#endif
 
-// bring std
-using namespace ::std;
+//  +-----------------------------------------------------------------------------+
+//  |  Path helpers                                                               |
+//  |  Note: file names are never case folded; only extensions are, and only for  |
+//  |  comparison. Case folding a path breaks every case sensitive file system.   |
+//  +-----------------------------------------------------------------------------+
+static ::std::string ts_combine_path( const char* dir, const char* file )
+{
+	// an empty or absent directory yields the file name unchanged.
+	if (!dir || !*dir) return ::std::string( file );
+	::std::string combined( dir );
+	const char last = combined[combined.size() - 1];
+	if (last != '/' && last != '\\') combined += "/";
+	return combined + ::std::string( file );
+}
+static ::std::string ts_extension( const ::std::string& fileName )
+{
+	// returns the lowercased extension of a file name, without the dot.
+	const size_t dot = fileName.find_last_of( "." );
+	if (dot == ::std::string::npos) return ::std::string();
+	::std::string ext = fileName.substr( dot + 1 );
+	for (size_t l = ext.size(), i = 0; i < l; i++)
+		if (ext[i] >= 'A' && ext[i] <= 'Z') ext[i] -= 'Z' - 'z';
+	return ext;
+}
+static void ts_split_path( const char* fullName, ::std::string& dir, ::std::string& file )
+{
+	// splits a path into a directory and a file name; a path without a separator
+	// yields an empty directory and the full name as the file name.
+	const ::std::string path( fullName );
+	const size_t slash = path.find_last_of( "/\\" );
+	if (slash == ::std::string::npos) dir.clear(), file = path;
+	else dir = path.substr( 0, slash ), file = path.substr( slash + 1 );
+}
 
 //  +-----------------------------------------------------------------------------+
 //  |  SkyDome::Load                                                              |
-//  |  Load a skydome.                                                      LH2'25|
+//  |  Load a skydome.                                                      LH2'26|
 //  +-----------------------------------------------------------------------------+
 void SkyDome::Load( const char* filename, const ts_vec3 scale )
 {
@@ -1077,7 +1140,7 @@ void SkyDome::Load( const char* filename, const ts_vec3 scale )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Skin::Skin                                                                 |
-//  |  Constructor.                                                         LH2'25|
+//  |  Constructor.                                                         LH2'26|
 //  +-----------------------------------------------------------------------------+
 Skin::Skin( const ::tinygltf::Skin& gltfSkin, const ::tinygltf::Model& gltfModel, const int nodeBase )
 {
@@ -1086,7 +1149,7 @@ Skin::Skin( const ::tinygltf::Skin& gltfSkin, const ::tinygltf::Model& gltfModel
 
 //  +-----------------------------------------------------------------------------+
 //  |  Skin::Skin                                                                 |
-//  |  Constructor.                                                         LH2'25|
+//  |  Constructor.                                                         LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Skin::ConvertFromGLTFSkin( const ::tinygltf::Skin& gltfSkin, const ::tinygltf::Model& gltfModel, const int nodeBase )
 {
@@ -1102,7 +1165,7 @@ void Skin::ConvertFromGLTFSkin( const ::tinygltf::Skin& gltfSkin, const ::tinygl
 		::memcpy( inverseBindMatrices.data(), &buffer.data[accessor.byteOffset + bufferView.byteOffset], accessor.count * sizeof( ts_mat4 ) );
 		jointMat.resize( accessor.count );
 		// convert gltf's column-major to row-major
-		for (int k = 0; k < accessor.count; k++)
+		for (size_t k = 0; k < accessor.count; k++)
 		{
 			ts_mat4 M = inverseBindMatrices[k];
 			for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) inverseBindMatrices[k].cell[j * 4 + i] = M.cell[i * 4 + j];
@@ -1112,7 +1175,7 @@ void Skin::ConvertFromGLTFSkin( const ::tinygltf::Skin& gltfSkin, const ::tinygl
 
 //  +-----------------------------------------------------------------------------+
 //  |  Mesh::Mesh                                                                 |
-//  |  Constructors.                                                        LH2'25|
+//  |  Constructors.                                                        LH2'26|
 //  +-----------------------------------------------------------------------------+
 Mesh::Mesh( const int triCount )
 {
@@ -1127,7 +1190,7 @@ Mesh::Mesh( const char* file, const char* dir, const float scale, const bool fla
 	blas.bvhType = Scene::defaultBVHType;
 }
 
-Mesh::Mesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygltf::Model& gltfModel, const vector<int>& matIdx, const int materialOverride )
+Mesh::Mesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygltf::Model& gltfModel, const ::std::vector<int>& matIdx, const int materialOverride )
 {
 	ConvertFromGTLFMesh( gltfMesh, gltfModel, matIdx, materialOverride );
 	blas.bvhType = Scene::defaultBVHType;
@@ -1135,40 +1198,38 @@ Mesh::Mesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygltf::Model& gltfModel
 
 //  +-----------------------------------------------------------------------------+
 //  |  Mesh::LoadGeometry                                                         |
-//  |  Load geometry data from disk. Obj files only.                        LH2'25|
+//  |  Load geometry data from disk. Obj files only.                        LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Mesh::LoadGeometry( const char* file, const char* dir, const float scale, const bool flatShaded )
 {
 	// process supplied file name
 	ts_mat4 T; // assume these are initialized to identity.
 	T[0] = T[5] = T[10] = scale, T[15] = 1; // scaling matrix
-	string combined = string( dir ) + (dir[strlen( dir ) - 1] == '/' ? "" : "/") + string( file );
-	for (int l = (int)combined.size(), i = 0; i < l; i++) if (combined[i] >= 'A' && combined[i] <= 'Z') combined[i] -= 'Z' - 'z';
-	string extension = (combined.find_last_of( "." ) != string::npos) ? combined.substr( combined.find_last_of( "." ) + 1 ) : "";
-	if (extension.compare( "obj" ) != 0) SCENE_FATAL_ERROR( "Unsupported extension in file" );
+	::std::string combined = ts_combine_path( dir, file );
+	if (ts_extension( combined ).compare( "obj" ) != 0) SCENE_FATAL_ERROR( "Unsupported extension in file" );
 	LoadGeometryFromOBJ( combined.c_str(), dir, T, flatShaded );
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  Mesh::LoadGeometryFromObj                                                  |
-//  |  Load an obj file using tinyobj.                                      LH2'25|
+//  |  Load an obj file using tinyobj.                                      LH2'26|
 //  +-----------------------------------------------------------------------------+
-void Mesh::LoadGeometryFromOBJ( const string& file, const char* directory, const ts_mat4& T, const bool flatShaded )
+void Mesh::LoadGeometryFromOBJ( const ::std::string& file, const char* directory, const ts_mat4& T, const bool flatShaded )
 {
 	// load obj file
 	::tinyobj::attrib_t attrib;
-	vector<::tinyobj::shape_t> shapes;
-	vector<::tinyobj::material_t> materials;
-	map<string, uint32_t> textures;
-	string err, warn;
+	::std::vector<::tinyobj::shape_t> shapes;
+	::std::vector<::tinyobj::material_t> materials;
+	::std::string err, warn;
 	::tinyobj::LoadObj( &attrib, &shapes, &materials, &err, &warn, file.c_str(), directory );
 	SCENE_FATAL_ERROR_IF( err.size() > 0 || shapes.size() == 0, "tinyobj failed to load obj" /* , file.c_str(), err.c_str() */ );
 	// material offset: if we loaded an object before this one, material indices should not start at 0.
 	int matIdxOffset = (int)Scene::materials.size();
 	// process materials
 	char currDir[1024];
-	getcwd( currDir, 1024 ); // GetCurrentDirectory( 1024, currDir );
-	chdir( directory ); // SetCurrentDirectory( directory );
+	// only switch directories if we actually have one, and only restore if we switched.
+	const bool dirChanged = directory && *directory &&
+		getcwd( currDir, 1024 ) != 0 && chdir( directory ) == 0;
 	materialList.clear();
 	materialList.reserve( materials.size() );
 	for (auto& mtl : materials)
@@ -1182,14 +1243,14 @@ void Mesh::LoadGeometryFromOBJ( const string& file, const char* directory, const
 		Scene::materials.push_back( material );
 		materialList.push_back( material->ID );
 	}
-	chdir( currDir );
+	if (dirChanged) chdir( currDir );
 	// calculate values for consistent normal interpolation
 	const uint32_t verts = (uint32_t)attrib.normals.size() / 3;
-	vector<float> alphas;
+	::std::vector<float> alphas;
 	alphas.resize( verts, 1.0f ); // we will have one alpha value per unique vertex normal
 	for (uint32_t s = (uint32_t)shapes.size(), i = 0; i < s; i++)
 	{
-		vector<::tinyobj::index_t>& indices = shapes[i].mesh.indices;
+		::std::vector<::tinyobj::index_t>& indices = shapes[i].mesh.indices;
 		if (flatShaded) for (uint32_t s = (uint32_t)indices.size(), f = 0; f < s; f++) alphas[indices[f].normal_index] = 1; else
 		{
 			for (uint32_t s = (uint32_t)indices.size(), f = 0; f < s; f += 3)
@@ -1228,7 +1289,7 @@ void Mesh::LoadGeometryFromOBJ( const string& file, const char* directory, const
 	int toReserve = 0;
 	for (auto& shape : shapes) toReserve += (int)shape.mesh.indices.size();
 	vertices.reserve( toReserve );
-	for (auto& shape : shapes) for (int f = 0; f < shape.mesh.indices.size(); f += 3)
+	for (auto& shape : shapes) for (size_t f = 0; f < shape.mesh.indices.size(); f += 3)
 	{
 		const uint32_t idx0 = shape.mesh.indices[f + 0].vertex_index;
 		const uint32_t idx1 = shape.mesh.indices[f + 1].vertex_index;
@@ -1250,7 +1311,7 @@ void Mesh::LoadGeometryFromOBJ( const string& file, const char* directory, const
 	triangles.resize( vertices.size() / 3 );
 	for (int s = (int)shapes.size(), face = 0, i = 0; i < s; i++)
 	{
-		vector<::tinyobj::index_t>& indices = shapes[i].mesh.indices;
+		::std::vector<::tinyobj::index_t>& indices = shapes[i].mesh.indices;
 		for (int s = (int)shapes[i].mesh.indices.size(), f = 0; f < s; f += 3, face++)
 		{
 			FatTri& tri = triangles[face];
@@ -1317,9 +1378,9 @@ void Mesh::LoadGeometryFromOBJ( const string& file, const char* directory, const
 
 //  +-----------------------------------------------------------------------------+
 //  |  Mesh::ConvertFromGTLFMesh                                                  |
-//  |  Convert a gltf mesh to a Mesh.                                       LH2'25|
+//  |  Convert a gltf mesh to a Mesh.                                       LH2'26|
 //  +-----------------------------------------------------------------------------+
-void Mesh::ConvertFromGTLFMesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygltf::Model& gltfModel, const vector<int>& matIdx, const int materialOverride )
+void Mesh::ConvertFromGTLFMesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygltf::Model& gltfModel, const ::std::vector<int>& matIdx, const int materialOverride )
 {
 	const int targetCount = (int)gltfMesh.weights.size();
 	for (auto& prim : gltfMesh.primitives)
@@ -1332,25 +1393,25 @@ void Mesh::ConvertFromGTLFMesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygl
 		const int byteStride = accessor.ByteStride( view );
 		const size_t count = accessor.count;
 		// allocate the index array in the pointer-to-base declared in the parent scope
-		vector<int> tmpIndices;
-		vector<ts_vec3> tmpNormals, tmpVertices;
-		vector<ts_vec2> tmpUvs, tmpUv2s /* texture layer 2 */;
-		vector<ts_uint4> tmpJoints;
-		vector<ts_vec4> tmpWeights, tmpTs;
+		::std::vector<int> tmpIndices;
+		::std::vector<ts_vec3> tmpNormals, tmpVertices;
+		::std::vector<ts_vec2> tmpUvs, tmpUv2s /* texture layer 2 */;
+		::std::vector<ts_uint4> tmpJoints;
+		::std::vector<ts_vec4> tmpWeights, tmpTs;
 		switch (accessor.componentType)
 		{
-		case TINYGLTF_COMPONENT_TYPE_BYTE: for (int k = 0; k < count; k++, a += byteStride) tmpIndices.push_back( *((char*)a) ); break;
-		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: for (int k = 0; k < count; k++, a += byteStride) tmpIndices.push_back( *((uint8_t*)a) ); break;
-		case TINYGLTF_COMPONENT_TYPE_SHORT: for (int k = 0; k < count; k++, a += byteStride) tmpIndices.push_back( *((short*)a) ); break;
-		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: for (int k = 0; k < count; k++, a += byteStride) tmpIndices.push_back( *((uint16_t*)a) ); break;
-		case TINYGLTF_COMPONENT_TYPE_INT: for (int k = 0; k < count; k++, a += byteStride) tmpIndices.push_back( *((int*)a) ); break;
-		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT: for (int k = 0; k < count; k++, a += byteStride) tmpIndices.push_back( *((uint32_t*)a) ); break;
+		case TINYGLTF_COMPONENT_TYPE_BYTE: for (size_t k = 0; k < count; k++, a += byteStride) tmpIndices.push_back( *((char*)a) ); break;
+		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: for (size_t k = 0; k < count; k++, a += byteStride) tmpIndices.push_back( *((uint8_t*)a) ); break;
+		case TINYGLTF_COMPONENT_TYPE_SHORT: for (size_t k = 0; k < count; k++, a += byteStride) tmpIndices.push_back( *((short*)a) ); break;
+		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: for (size_t k = 0; k < count; k++, a += byteStride) tmpIndices.push_back( *((uint16_t*)a) ); break;
+		case TINYGLTF_COMPONENT_TYPE_INT: for (size_t k = 0; k < count; k++, a += byteStride) tmpIndices.push_back( *((int*)a) ); break;
+		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT: for (size_t k = 0; k < count; k++, a += byteStride) tmpIndices.push_back( *((uint32_t*)a) ); break;
 		default: break;
 		}
 		// turn into faces - re-arrange the indices so that it describes a simple list of triangles
 		if (prim.mode == TINYGLTF_MODE_TRIANGLE_FAN)
 		{
-			vector<int> fan = move( tmpIndices );
+			::std::vector<int> fan = ::std::move( tmpIndices );
 			tmpIndices.clear();
 			for (size_t s = fan.size(), i = 2; i < s; i++)
 			{
@@ -1361,7 +1422,7 @@ void Mesh::ConvertFromGTLFMesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygl
 		}
 		else if (prim.mode == TINYGLTF_MODE_TRIANGLE_STRIP)
 		{
-			vector<int> strip = move( tmpIndices );
+			::std::vector<int> strip = ::std::move( tmpIndices );
 			tmpIndices.clear();
 			for (size_t s = strip.size(), i = 2; i < s; i++)
 			{
@@ -1382,8 +1443,8 @@ void Mesh::ConvertFromGTLFMesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygl
 			const size_t count = attribAccessor.count;
 			if (attribute.first == "POSITION")
 			{
-				ts_vec3 boundsMin = ts_vec3( (float)attribAccessor.minValues[0], (float)attribAccessor.minValues[1], (float)attribAccessor.minValues[2] );
-				ts_vec3 boundsMax = ts_vec3( (float)attribAccessor.maxValues[0], (float)attribAccessor.maxValues[1], (float)attribAccessor.maxValues[2] );
+				// note: attribAccessor.minValues / .maxValues hold the position bounds;
+				// tinyscene derives its own bounds from the vertices, so they are unused.
 				if (attribAccessor.type == TINYGLTF_TYPE_VEC3)
 					if (attribAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT)
 						for (size_t i = 0; i < count; i++, a += byte_stride) tmpVertices.push_back( *((ts_vec3*)a) );
@@ -1456,10 +1517,10 @@ void Mesh::ConvertFromGTLFMesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygl
 			else if (attribute.first == "TEXCOORD_2") { /* TODO */ }
 			else if (attribute.first == "TEXCOORD_3") { /* TODO */ }
 			else if (attribute.first == "TEXCOORD_4") { /* TODO */ }
-			else { assert( false ); /* unkown property */ }
+			else { /* an attribute tinyscene does not use; ignore it. */ }
 		}
 		// obtain morph targets
-		vector<Pose> tmpPoses;
+		::std::vector<Pose> tmpPoses;
 		if (targetCount > 0)
 		{
 			// store base pose
@@ -1479,7 +1540,7 @@ void Mesh::ConvertFromGTLFMesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygl
 				const ::tinygltf::Accessor accessor = gltfModel.accessors[target.second];
 				const ::tinygltf::BufferView& view = gltfModel.bufferViews[accessor.bufferView];
 				const float* a = (const float*)(gltfModel.buffers[view.buffer].data.data() + view.byteOffset + accessor.byteOffset);
-				for (int j = 0; j < accessor.count; j++)
+				for (size_t j = 0; j < accessor.count; j++)
 				{
 					ts_vec3 v = ts_vec3( a[j * 3], a[j * 3 + 1], a[j * 3 + 2] );
 					if (target.first == "POSITION") tmpPoses[i + 1].positions.push_back( v );
@@ -1498,15 +1559,15 @@ void Mesh::ConvertFromGTLFMesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygl
 //  |  Mesh::BuildFromIndexedData                                                 |
 //  |  We use non-indexed triangles, so three subsequent vertices form a tri,     |
 //  |  to skip one indirection during intersection. glTF and obj store indexed    |
-//  |  data, which we now convert to the final representation.              LH2'25|
+//  |  data, which we now convert to the final representation.              LH2'26|
 //  +-----------------------------------------------------------------------------+
-void Mesh::BuildFromIndexedData( const vector<int>& tmpIndices, const vector<ts_vec3>& tmpVertices,
-	const vector<ts_vec3>& tmpNormals, const vector<ts_vec2>& tmpUvs, const vector<ts_vec2>& tmpUv2s,
-	const vector<ts_vec4>& /* tmpTs */, const vector<Pose>& tmpPoses,
-	const vector<ts_uint4>& tmpJoints, const vector<ts_vec4>& tmpWeights, const int materialIdx )
+void Mesh::BuildFromIndexedData( const ::std::vector<int>& tmpIndices, const ::std::vector<ts_vec3>& tmpVertices,
+	const ::std::vector<ts_vec3>& tmpNormals, const ::std::vector<ts_vec2>& tmpUvs, const ::std::vector<ts_vec2>& tmpUv2s,
+	const ::std::vector<ts_vec4>& /* tmpTs */, const ::std::vector<Pose>& tmpPoses,
+	const ::std::vector<ts_uint4>& tmpJoints, const ::std::vector<ts_vec4>& tmpWeights, const int materialIdx )
 {
 	// calculate values for consistent normal interpolation
-	vector<float> tmpAlphas;
+	::std::vector<float> tmpAlphas;
 	tmpAlphas.resize( tmpVertices.size(), 1.0f ); // we will have one alpha value per unique vertex
 	for (size_t s = tmpIndices.size(), i = 0; i < s; i += 3)
 	{
@@ -1666,7 +1727,7 @@ void Mesh::BuildFromIndexedData( const vector<int>& tmpIndices, const vector<ts_
 //  |  Mesh::BuildMaterialList                                                    |
 //  |  Update the list of materials used by this mesh. We will use this list to   |
 //  |  efficiently find meshes using a specific material, which in turn is useful |
-//  |  when a material becomes emissive or non-emissive.                    LH2'25|
+//  |  when a material becomes emissive or non-emissive.                    LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Mesh::BuildMaterialList()
 {
@@ -1687,7 +1748,7 @@ void Mesh::BuildMaterialList()
 
 //  +-----------------------------------------------------------------------------+
 //  |  Mesh::CreateOpacityMicroMaps                                               |
-//  |  Fill the opacity micro maps vector.                                  LH2'25|
+//  |  Fill the opacity micro maps vector.                                  LH2'26|
 //  +-----------------------------------------------------------------------------+
 void CreateOpacityMicroMap( Mesh* mesh, const int N, const int first, const int last )
 {
@@ -1701,7 +1762,7 @@ void CreateOpacityMicroMap( Mesh* mesh, const int N, const int first, const int 
 		const uint32_t matIdx = tri.material;
 		const Material* material = Scene::materials[matIdx];
 		Texture* tex = 0;
-		if (material->color.textureID > 1)
+		if (material->color.textureID > -1)
 		{
 			tex = Scene::textures[material->color.textureID];
 			if (!tex->idata) tex = 0; // can't use hdr textures for now.
@@ -1723,8 +1784,8 @@ void CreateOpacityMicroMap( Mesh* mesh, const int N, const int first, const int 
 				const int idx = (row * row) + int( v * fN ) + (diag - (N - 1 - row));
 				const float tu = u * u1 + v * u2 + (1 - u - v) * u0;
 				const float tv = u * v1 + v * v2 + (1 - u - v) * v0;
-				const int iu = min( iw - 1, (int)((tu - floorf( tu )) * w) );
-				const int iv = min( ih - 1, (int)((tv - floorf( tv )) * h) );
+				const int iu = ts_min( iw - 1, (int)((tu - floorf( tu )) * w) );
+				const int iv = ts_min( ih - 1, (int)((tv - floorf( tv )) * h) );
 				const uint32_t pixel = ((uint32_t*)tex->idata)[iu + iv * iw];
 				if ((pixel >> 24) > 2) map[idx >> 5] |= 1 << (idx & 31);
 			}
@@ -1739,16 +1800,17 @@ void Mesh::CreateOpacityMicroMaps( const int N /* defaults to 32, for 32 * 32 = 
 	uint32_t dwordsPerTri = (N * N + 31) >> 5;
 	omaps = (uint32_t*)malloc64( triangles.size() * dwordsPerTri * 4 );
 	omapN = N;
-	constexpr int slices = 32;
-	const int slice = (int)triangles.size() / slices;
-	vector<thread> jobs;
-	for (int i = 0; i < slices; i++)
+	constexpr uint32_t triPerSlice = 32;
+	const uint32_t triCount = (uint32_t)triangles.size();
+	const uint32_t slices = (triCount + triPerSlice - 1) / triPerSlice;
+	Mesh* mesh = this;
+	tinybvh::BVHContext ctx;
+	tinybvh::tinybvh_parallel_for( ctx, slices, [&]( const uint32_t s )
 	{
-		const int first = i * slice;
-		const int last = (i == (slices - 1)) ? (int)triangles.size() : (first + slice);
-		jobs.emplace_back( std::thread( &CreateOpacityMicroMap, this, N, first, last ) );
-	}
-	for (int i = 0; i < slices; i++) jobs[i].join();
+		const uint32_t first = s * triPerSlice;
+		const uint32_t last = first + triPerSlice > triCount ? triCount : first + triPerSlice;
+		CreateOpacityMicroMap( mesh, N, (int)first, (int)last );
+	} );
 	hasOpacityMicroMaps = true;
 	printf( "done.\n" );
 }
@@ -1756,9 +1818,9 @@ void Mesh::CreateOpacityMicroMaps( const int N /* defaults to 32, for 32 * 32 = 
 //  +-----------------------------------------------------------------------------+
 //  |  Mesh::SetPose                                                              |
 //  |  Update the geometry data in this mesh using the weights from the node,     |
-//  |  and update all dependent data.                                       LH2'25|
+//  |  and update all dependent data.                                       LH2'26|
 //  +-----------------------------------------------------------------------------+
-void Mesh::SetPose( const vector<float>& w )
+void Mesh::SetPose( const ::std::vector<float>& w )
 {
 	assert( w.size() == poses.size() - 1 /* first pose is base pose */ );
 	const int weightCount = (int)w.size();
@@ -1790,7 +1852,7 @@ void Mesh::SetPose( const vector<float>& w )
 //  +-----------------------------------------------------------------------------+
 //  |  Mesh::SetPose                                                              |
 //  |  Update the geometry data in this mesh using a skin.                        |
-//  |  Called from RenderSystem::UpdateSceneGraph, for skinned mesh nodes.  LH2'25|
+//  |  Called from RenderSystem::UpdateSceneGraph, for skinned mesh nodes.  LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Mesh::SetPose( const Skin* skin )
 {
@@ -1850,7 +1912,7 @@ static FatTri TransformedFatTri( FatTri* tri, ts_mat4 T )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Node::Node                                                                 |
-//  |  Constructors.                                                        LH2'25|
+//  |  Constructors.                                                        LH2'26|
 //  +-----------------------------------------------------------------------------+
 Node::Node( const tinygltf::Node& gltfNode, const int nodeBase, const int meshBase, const int skinBase )
 {
@@ -1868,7 +1930,7 @@ Node::Node( const int meshIdx, const ts_mat4& transform )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Node::~Node                                                                |
-//  |  Destructor.                                                          LH2'25|
+//  |  Destructor.                                                          LH2'26|
 //  +-----------------------------------------------------------------------------+
 Node::~Node()
 {
@@ -1883,9 +1945,12 @@ Node::~Node()
 			if (material->IsEmissive())
 			{
 				// mesh contains an emissive material; remove related area lights
-				vector<TriLight*>& lightList = Scene::triLights;
-				for (int s = (int)lightList.size(), i = 0; i < s; i++)
-					if (lightList[i]->instIdx == ID) lightList.erase( lightList.begin() + i-- );
+				::std::vector<TriLight*>& lightList = Scene::triLights;
+				for (int i = 0; i < (int)lightList.size(); i++) if (lightList[i]->instIdx == ID)
+				{
+					delete lightList[i];
+					lightList.erase( lightList.begin() + i-- );
+				}
 			}
 		}
 	}
@@ -1893,7 +1958,7 @@ Node::~Node()
 
 //  +-----------------------------------------------------------------------------+
 //  |  Node::ConvertFromGLTFNode                                                  |
-//  |  Create a node from a GLTF node.                                      LH2'25|
+//  |  Create a node from a GLTF node.                                      LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Node::ConvertFromGLTFNode( const tinygltf::Node& gltfNode, const int nodeBase, const int meshBase, const int skinBase )
 {
@@ -1944,7 +2009,7 @@ void Node::ConvertFromGLTFNode( const tinygltf::Node& gltfNode, const int nodeBa
 
 //  +-----------------------------------------------------------------------------+
 //  |  Node::UpdateTransformFromTRS                                               |
-//  |  Process T, R, S data to localTransform.                              LH2'25|
+//  |  Process T, R, S data to localTransform.                              LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Node::UpdateTransformFromTRS()
 {
@@ -1964,7 +2029,7 @@ void Node::UpdateTransformFromTRS()
 //  |  Node::Update                                                               |
 //  |  Calculates the combined transform for this node and recurses into the      |
 //  |  child nodes. If a change is detected, the light triangles are updated      |
-//  |  as well.                                                             LH2'25|
+//  |  as well.                                                             LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Node::Update( const ts_mat4& T )
 {
@@ -2136,10 +2201,13 @@ void Node::Update( const ts_mat4& T )
 		}
 		tinybvh::BLASInstance& instance = Scene::instPool[instanceID];
 		bool transformChanged = false;
-		for (int i = 0; i < 16; i++) if (instance.transform[i] != combinedTransform[i]) transformChanged = true;
+		for (int i = 0; i < 16 && !transformChanged; i++)
+			transformChanged = instance.transform[i] != combinedTransform[i];
 		if (transformChanged)
 		{
-			instance.transform = *(tinybvh::bvhmat4*)&combinedTransform;
+			// note: element-wise; ts_mat4 and tinybvh::bvhmat4 are unrelated types,
+			// and either may be replaced by a custom type with a different layout.
+			for (int i = 0; i < 16; i++) instance.transform[i] = combinedTransform[i];
 			instance.Update( mesh->blas.dynamicBVH /* type doesn't matter */ );
 		}
 	}
@@ -2148,7 +2216,7 @@ void Node::Update( const ts_mat4& T )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Node::PrepareLights                                                        |
-//  |  Detects emissive triangles and creates light triangles for them.     LH2'25|
+//  |  Detects emissive triangles and creates light triangles for them.     LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Node::PrepareLights()
 {
@@ -2187,7 +2255,7 @@ void Node::PrepareLights()
 //  +-----------------------------------------------------------------------------+
 //  |  Node::UpdateLights                                                         |
 //  |  Update light triangles belonging to this instance after the tansform for   |
-//  |  the node changed.                                                    LH2'25|
+//  |  the node changed.                                                    LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Node::UpdateLights()
 {
@@ -2208,7 +2276,7 @@ void Node::UpdateLights()
 
 //  +-----------------------------------------------------------------------------+
 //  |  Material::ConvertFrom                                                      |
-//  |  Converts a tinyobjloader material to an LH2 Material.                LH2'25|
+//  |  Converts a tinyobjloader material to an LH2 Material.                LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Material::ConvertFrom( const ::tinyobj::material_t& original )
 {
@@ -2250,9 +2318,9 @@ void Material::ConvertFrom( const ::tinyobj::material_t& original )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Material::ConvertFrom                                                      |
-//  |  Converts a tinygltf material to an LH2 Material.                     LH2'25|
+//  |  Converts a tinygltf material to an LH2 Material.                     LH2'26|
 //  +-----------------------------------------------------------------------------+
-void Material::ConvertFrom( const tinygltf::Material& original, const vector<int>& texIdx )
+void Material::ConvertFrom( const tinygltf::Material& original, const ::std::vector<int>& texIdx )
 {
 	name = original.name;
 	flags |= Material::FROM_MTL; // this material will be serialized on exit.
@@ -2330,9 +2398,9 @@ void Material::ConvertFrom( const tinygltf::Material& original, const vector<int
 
 //  +-----------------------------------------------------------------------------+
 //  |  RenderMaterial::RenderMaterial                                             |
-//  |  Constructor.                                                         LH2'25|
+//  |  Constructor.                                                         LH2'26|
 //  +-----------------------------------------------------------------------------+
-RenderMaterial::RenderMaterial( const Material* source, const vector<int>& offsets )
+RenderMaterial::RenderMaterial( const Material* source, const ::std::vector<int>& offsets )
 {
 #define TOCHAR(a) ((uint32_t)((a)*255.0f))
 #define TOUINT4(a,b,c,d) (TOCHAR(a)+(TOCHAR(b)<<8)+(TOCHAR(c)<<16)+(TOCHAR(d)<<24))
@@ -2342,7 +2410,7 @@ RenderMaterial::RenderMaterial( const Material* source, const vector<int>& offse
 	parameters.x = TOUINT4( source->metallic.value, source->subsurface.value, source->specular.value, source->roughness.value );
 	parameters.y = TOUINT4( source->specularTint.value, source->anisotropic.value, source->sheen.value, source->sheenTint.value );
 	parameters.z = TOUINT4( source->clearcoat.value, source->clearcoatGloss.value, source->transmission.value, 0 );
-	parameters.w = *((uint32_t*)&source->eta);
+	parameters.w = ts_as_uint( source->eta.value );
 	if (source->color.textureID != -1) tex0 = MakeMap( source->color, offsets );
 	if (source->detailColor.textureID != -1) tex1 = MakeMap( source->detailColor, offsets );
 	if (source->normals.textureID != -1) nmap0 = MakeMap( source->normals, offsets );
@@ -2351,7 +2419,7 @@ RenderMaterial::RenderMaterial( const Material* source, const vector<int>& offse
 	// if (source->specular.textureID != -1) smap = MakeMap( source->specular, offsets ); // TODO
 	bool hdr = false;
 	if (source->color.textureID != -1) if (Scene::textures[source->color.textureID]->flags & Texture::HDR) hdr = true;
-	flags = (source->eta.value < 1 ? ISDIELECTRIC : 0) +
+	flags = ((source->eta.Specified() && source->eta.value < 1) ? ISDIELECTRIC : 0) +
 		(source->color.textureID != -1 ? HASDIFFUSEMAP : 0) + (hdr ? DIFFUSEMAPISHDR : 0) +
 		(source->normals.textureID != -1 ? HASNORMALMAP : 0) +
 		(source->specular.textureID != -1 ? HASSPECULARITYMAP : 0) +
@@ -2365,14 +2433,14 @@ RenderMaterial::RenderMaterial( const Material* source, const vector<int>& offse
 //  |  RenderMaterial::MakeMap                                                    |
 //  |  Helper function: Converts a spatially varying (i.e., texture-mapped)       |
 //  |  ts_vec3 material property into a 'Map', which is a compact representation  |
-//  |  for rendering.                                                       LH2'25|
+//  |  for rendering.                                                       LH2'26|
 //  +-----------------------------------------------------------------------------+
-RenderMaterial::Map RenderMaterial::MakeMap( Material::vec3Value source, const vector<int>& offsets )
+RenderMaterial::Map RenderMaterial::MakeMap( Material::vec3Value source, const ::std::vector<int>& offsets )
 {
 	Map map;
 	Texture* texture = Scene::textures[source.textureID];
 	map.width = (uint16_t)texture->width;
-	map.height = (uint16_t)texture->width;
+	map.height = (uint16_t)texture->height;
 	map.uscale = ts_float_to_half( source.uvscale.x );
 	map.vscale = ts_float_to_half( source.uvscale.y );
 	map.uoffs = ts_float_to_half( source.uvoffset.x );
@@ -2383,7 +2451,7 @@ RenderMaterial::Map RenderMaterial::MakeMap( Material::vec3Value source, const v
 
 //  +-----------------------------------------------------------------------------+
 //  |  Animation::Sampler::Sampler                                                |
-//  |  Constructor.                                                         LH2'25|
+//  |  Constructor.                                                         LH2'26|
 //  +-----------------------------------------------------------------------------+
 Animation::Sampler::Sampler( const tinygltf::AnimationSampler& gltfSampler, const tinygltf::Model& gltfModel )
 {
@@ -2392,7 +2460,7 @@ Animation::Sampler::Sampler( const tinygltf::AnimationSampler& gltfSampler, cons
 
 //  +-----------------------------------------------------------------------------+
 //  |  Animation::Sampler::ConvertFromGLTFSampler                                 |
-//  |  Convert a gltf animation sampler.                                    LH2'25|
+//  |  Convert a gltf animation sampler.                                    LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Animation::Sampler::ConvertFromGLTFSampler( const tinygltf::AnimationSampler& gltfSampler, const tinygltf::Model& gltfModel )
 {
@@ -2402,18 +2470,20 @@ void Animation::Sampler::ConvertFromGLTFSampler( const tinygltf::AnimationSample
 	else if (gltfSampler.interpolation == "CUBICSPLINE") interpolation = SPLINE;
 	else /* if (gltfSampler.interpolation == "LINEAR" ) */ interpolation = LINEAR;
 	// extract animation times
-	auto inputAccessor = gltfModel.accessors[gltfSampler.input];
+	// note: references, not copies - gltfModel.buffers holds the whole binary blob,
+	// which was previously duplicated twice per sampler.
+	const ::tinygltf::Accessor& inputAccessor = gltfModel.accessors[gltfSampler.input];
 	assert( inputAccessor.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT );
-	auto bufferView = gltfModel.bufferViews[inputAccessor.bufferView];
-	auto buffer = gltfModel.buffers[bufferView.buffer];
-	const float* a = (const float*)(buffer.data.data() + bufferView.byteOffset + inputAccessor.byteOffset);
-	size_t count = inputAccessor.count;
-	for (int i = 0; i < count; i++) t.push_back( a[i] );
+	const ::tinygltf::BufferView& inputView = gltfModel.bufferViews[inputAccessor.bufferView];
+	const ::tinygltf::Buffer& inputBuffer = gltfModel.buffers[inputView.buffer];
+	const float* a = (const float*)(inputBuffer.data.data() + inputView.byteOffset + inputAccessor.byteOffset);
+	const size_t count = inputAccessor.count;
+	for (size_t i = 0; i < count; i++) t.push_back( a[i] );
 	// extract animation keys
-	auto outputAccessor = gltfModel.accessors[gltfSampler.output];
-	bufferView = gltfModel.bufferViews[outputAccessor.bufferView];
-	buffer = gltfModel.buffers[bufferView.buffer];
-	const uint8_t* b = (const uint8_t*)(buffer.data.data() + bufferView.byteOffset + outputAccessor.byteOffset);
+	const ::tinygltf::Accessor& outputAccessor = gltfModel.accessors[gltfSampler.output];
+	const ::tinygltf::BufferView& outputView = gltfModel.bufferViews[outputAccessor.bufferView];
+	const ::tinygltf::Buffer& outputBuffer = gltfModel.buffers[outputView.buffer];
+	const uint8_t* b = (const uint8_t*)(outputBuffer.data.data() + outputView.byteOffset + outputAccessor.byteOffset);
 	if (outputAccessor.type == TINYGLTF_TYPE_VEC3)
 	{
 		// b is an array of floats (for scale or translation)
@@ -2429,38 +2499,38 @@ void Animation::Sampler::ConvertFromGLTFSampler( const tinygltf::AnimationSample
 		switch (outputAccessor.componentType)
 		{
 		case TINYGLTF_COMPONENT_TYPE_FLOAT: for (int k = 0; k < N; k++, b += 4) fdata.push_back( *((float*)b) ); break;
-		case TINYGLTF_COMPONENT_TYPE_BYTE: for (int k = 0; k < N; k++, b++) fdata.push_back( max( *((char*)b) / 127.0f, -1.0f ) ); break;
-		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: for (int k = 0; k < N; k++, b++) fdata.push_back( *((char*)b) / 255.0f ); break;
-		case TINYGLTF_COMPONENT_TYPE_SHORT: for (int k = 0; k < N; k++, b += 2) fdata.push_back( max( *((char*)b) / 32767.0f, -1.0f ) ); break;
-		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: for (int k = 0; k < N; k++, b += 2) fdata.push_back( *((char*)b) / 65535.0f ); break;
+		case TINYGLTF_COMPONENT_TYPE_BYTE: for (int k = 0; k < N; k++, b++) fdata.push_back( ts_max( *((int8_t*)b) / 127.0f, -1.0f ) ); break;
+		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: for (int k = 0; k < N; k++, b++) fdata.push_back( *((uint8_t*)b) / 255.0f ); break;
+		case TINYGLTF_COMPONENT_TYPE_SHORT: for (int k = 0; k < N; k++, b += 2) fdata.push_back( ts_max( *((int16_t*)b) / 32767.0f, -1.0f ) ); break;
+		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: for (int k = 0; k < N; k++, b += 2) fdata.push_back( *((uint16_t*)b) / 65535.0f ); break;
 		}
 		for (int i = 0; i < N; i++) floatKey.push_back( fdata[i] );
 	}
 	else if (outputAccessor.type == TINYGLTF_TYPE_VEC4)
 	{
 		// b can be FLOAT, BYTE, UBYTE, SHORT or uint16_t... (for rotation)
-		vector<float> fdata;
+		::std::vector<float> fdata;
 		const int N = (int)outputAccessor.count * 4;
 		switch (outputAccessor.componentType)
 		{
 		case TINYGLTF_COMPONENT_TYPE_FLOAT: for (int k = 0; k < N; k++, b += 4) fdata.push_back( *((float*)b) ); break;
-		case TINYGLTF_COMPONENT_TYPE_BYTE: for (int k = 0; k < N; k++, b++) fdata.push_back( max( *((char*)b) / 127.0f, -1.0f ) ); break;
-		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: for (int k = 0; k < N; k++, b++) fdata.push_back( *((char*)b) / 255.0f ); break;
-		case TINYGLTF_COMPONENT_TYPE_SHORT: for (int k = 0; k < N; k++, b += 2) fdata.push_back( max( *((char*)b) / 32767.0f, -1.0f ) ); break;
-		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: for (int k = 0; k < N; k++, b += 2) fdata.push_back( *((char*)b) / 65535.0f ); break;
+		case TINYGLTF_COMPONENT_TYPE_BYTE: for (int k = 0; k < N; k++, b++) fdata.push_back( ts_max( *((int8_t*)b) / 127.0f, -1.0f ) ); break;
+		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: for (int k = 0; k < N; k++, b++) fdata.push_back( *((uint8_t*)b) / 255.0f ); break;
+		case TINYGLTF_COMPONENT_TYPE_SHORT: for (int k = 0; k < N; k++, b += 2) fdata.push_back( ts_max( *((int16_t*)b) / 32767.0f, -1.0f ) ); break;
+		case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: for (int k = 0; k < N; k++, b += 2) fdata.push_back( *((uint16_t*)b) / 65535.0f ); break;
 		}
-		for (int i = 0; i < outputAccessor.count; i++)
+		for (size_t i = 0; i < outputAccessor.count; i++)
 		{
 			for (int j = 0; j < 4; j++) if (fpclassify( fdata[i * 4 + j] ) == FP_SUBNORMAL) fdata[i * 4 + j] = 0;
 			vec4Key.push_back( ts_quat( fdata[i * 4 + 3], fdata[i * 4], fdata[i * 4 + 1], fdata[i * 4 + 2] ) );
 		}
 	}
-	else assert( false );
+	else { /* an accessor type tinyscene does not sample; leave the keys empty. */ }
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  Sampler::SampleFloat, SampleVec3, SampleVec4                               |
-//  |  Get a value from the sampler.                                        LH2'25|
+//  |  Get a value from the sampler.                                        LH2'26|
 //  +-----------------------------------------------------------------------------+
 float Animation::Sampler::SampleFloat( float currentTime, int k, int i, int count ) const
 {
@@ -2533,7 +2603,7 @@ ts_quat Animation::Sampler::SampleQuat( float currentTime, int k ) const
 		key.ts_normalize();
 		break;
 	}
-#endif
+	#endif
 	case STEP:
 		key = vec4Key[k];
 		break;
@@ -2547,7 +2617,7 @@ ts_quat Animation::Sampler::SampleQuat( float currentTime, int k ) const
 
 //  +-----------------------------------------------------------------------------+
 //  |  Animation::Channel::Channel                                                |
-//  |  Constructor.                                                         LH2'25|
+//  |  Constructor.                                                         LH2'26|
 //  +-----------------------------------------------------------------------------+
 Animation::Channel::Channel( const tinygltf::AnimationChannel& gltfChannel, const int nodeBase )
 {
@@ -2556,7 +2626,7 @@ Animation::Channel::Channel( const tinygltf::AnimationChannel& gltfChannel, cons
 
 //  +-----------------------------------------------------------------------------+
 //  |  Animation::Channel::ConvertFromGLTFChannel                                 |
-//  |  Convert a gltf animation channel.                                    LH2'25|
+//  |  Convert a gltf animation channel.                                    LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Animation::Channel::ConvertFromGLTFChannel( const tinygltf::AnimationChannel& gltfChannel, const int nodeBase )
 {
@@ -2570,7 +2640,7 @@ void Animation::Channel::ConvertFromGLTFChannel( const tinygltf::AnimationChanne
 
 //  +-----------------------------------------------------------------------------+
 //  |  Animation::Channel::Update                                                 |
-//  |  Advance channel animation time.                                      LH2'25|
+//  |  Advance channel animation time.                                      LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Animation::Channel::Update( const float dt, const Sampler* sampler )
 {
@@ -2635,7 +2705,7 @@ void Animation::Channel::Update( const float dt, const Sampler* sampler )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Animation::Animation                                                       |
-//  |  Constructor.                                                         LH2'25|
+//  |  Constructor.                                                         LH2'26|
 //  +-----------------------------------------------------------------------------+
 Animation::Animation( tinygltf::Animation& gltfAnim, tinygltf::Model& gltfModel, const int nodeBase )
 {
@@ -2644,44 +2714,44 @@ Animation::Animation( tinygltf::Animation& gltfAnim, tinygltf::Model& gltfModel,
 
 //  +-----------------------------------------------------------------------------+
 //  |  Animation::ConvertFromGLTFAnim                                             |
-//  |  Convert a gltf animation.                                            LH2'25|
+//  |  Convert a gltf animation.                                            LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Animation::ConvertFromGLTFAnim( tinygltf::Animation& gltfAnim, tinygltf::Model& gltfModel, const int nodeBase )
 {
-	for (int i = 0; i < gltfAnim.samplers.size(); i++) sampler.push_back( new Sampler( gltfAnim.samplers[i], gltfModel ) );
-	for (int i = 0; i < gltfAnim.channels.size(); i++) channel.push_back( new Channel( gltfAnim.channels[i], nodeBase ) );
+	for (size_t i = 0; i < gltfAnim.samplers.size(); i++) sampler.push_back( new Sampler( gltfAnim.samplers[i], gltfModel ) );
+	for (size_t i = 0; i < gltfAnim.channels.size(); i++) channel.push_back( new Channel( gltfAnim.channels[i], nodeBase ) );
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  Animation::SetTime                                                         |
-//  |  Set the animation timers of all channels to a specific value.        LH2'25|
+//  |  Set the animation timers of all channels to a specific value.        LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Animation::SetTime( const float t )
 {
-	for (int i = 0; i < channel.size(); i++) channel[i]->SetTime( t );
+	for (size_t i = 0; i < channel.size(); i++) channel[i]->SetTime( t );
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  Animation::Reset                                                           |
-//  |  Reset the animation timers of all channels.                          LH2'25|
+//  |  Reset the animation timers of all channels.                          LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Animation::Reset()
 {
-	for (int i = 0; i < channel.size(); i++) channel[i]->Reset();
+	for (size_t i = 0; i < channel.size(); i++) channel[i]->Reset();
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  Animation::Update                                                          |
-//  |  Advance channel animation timers.                                    LH2'25|
+//  |  Advance channel animation timers.                                    LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Animation::Update( const float dt )
 {
-	for (int i = 0; i < channel.size(); i++) channel[i]->Update( dt, sampler[channel[i]->samplerIdx] );
+	for (size_t i = 0; i < channel.size(); i++) channel[i]->Update( dt, sampler[channel[i]->samplerIdx] );
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  Texture::Texture                                                           |
-//  |  Constructor.                                                         LH2'25|
+//  |  Constructor.                                                         LH2'26|
 //  +-----------------------------------------------------------------------------+
 Texture::Texture( const char* fileName, const uint32_t modFlags )
 {
@@ -2691,7 +2761,7 @@ Texture::Texture( const char* fileName, const uint32_t modFlags )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Texture::sRGBtoLinear                                                      |
-//  |  Convert sRGB data to linear color space.                             LH2'25|
+//  |  Convert sRGB data to linear color space.                             LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Texture::sRGBtoLinear( uint8_t* pixels, const uint32_t size, const uint32_t stride )
 {
@@ -2706,9 +2776,9 @@ void Texture::sRGBtoLinear( uint8_t* pixels, const uint32_t size, const uint32_t
 //  +-----------------------------------------------------------------------------+
 //  |  Texture::Equals                                                            |
 //  |  Returns true if the fields that identify the texture are identical to the  |
-//  |  supplied values. Used for texture reuse by the Scene object.         LH2'25|
+//  |  supplied values. Used for texture reuse by the Scene object.         LH2'26|
 //  +-----------------------------------------------------------------------------+
-bool Texture::Equals( const std::string& o, const uint32_t m )
+bool Texture::Equals( const ::std::string& o, const uint32_t m )
 {
 	if (mods != m) return false;
 	if (o.compare( origin )) return false;
@@ -2718,7 +2788,7 @@ bool Texture::Equals( const std::string& o, const uint32_t m )
 //  +-----------------------------------------------------------------------------+
 //  |  Texture::PixelsNeeded                                                      |
 //  |  Helper function that determines the number of pixels that should be        |
-//  |  allocated for the given width, height and MIP level count.           LH2'25|
+//  |  allocated for the given width, height and MIP level count.           LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Texture::PixelsNeeded( int w, int h, const int l /* >= 1; includes base layer */ ) const
 {
@@ -2729,13 +2799,13 @@ int Texture::PixelsNeeded( int w, int h, const int l /* >= 1; includes base laye
 
 //  +-----------------------------------------------------------------------------+
 //  |  Texture::ConstructMIPmaps                                                  |
-//  |  Generate MIP levels for a loaded texture.                            LH2'25|
+//  |  Generate MIP levels for a loaded texture.                            LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Texture::ConstructMIPmaps()
 {
 	uint32_t* src = (uint32_t*)idata;
 	uint32_t* dst = src + width * height;
-	int pw = width, w = width >> 1, ph = height, h = height >> 1;
+	int pw = width, w = width >> 1, h = height >> 1;
 	for (int i = 1; i < MIPLEVELCOUNT; i++)
 	{
 		// reduce
@@ -2745,31 +2815,31 @@ void Texture::ConstructMIPmaps()
 			const uint32_t src1 = src[x * 2 + 1 + (y * 2) * pw];
 			const uint32_t src2 = src[x * 2 + (y * 2 + 1) * pw];
 			const uint32_t src3 = src[x * 2 + 1 + (y * 2 + 1) * pw];
-			const uint32_t a = min( min( (src0 >> 24) & 255, (src1 >> 24) & 255 ), min( (src2 >> 24) & 255, (src3 >> 24) & 255 ) );
+			const uint32_t a = ts_min( ts_min( (src0 >> 24) & 255, (src1 >> 24) & 255 ), ts_min( (src2 >> 24) & 255, (src3 >> 24) & 255 ) );
 			const uint32_t r = ((src0 >> 16) & 255) + ((src1 >> 16) & 255) + ((src2 >> 16) & 255) + ((src3 >> 16) & 255);
 			const uint32_t g = ((src0 >> 8) & 255) + ((src1 >> 8) & 255) + ((src2 >> 8) & 255) + ((src3 >> 8) & 255);
 			const uint32_t b = (src0 & 255) + (src1 & 255) + (src2 & 255) + (src3 & 255);
 			dst[x + y * w] = (a << 24) + ((r >> 2) << 16) + ((g >> 2) << 8) + (b >> 2);
 		}
 		// next layer
-		src = dst, dst += w * h, pw = w, ph = h, w >>= 1, h >>= 1;
+		src = dst, dst += w * h, pw = w, w >>= 1, h >>= 1;
 	}
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  Texture::Load                                                              |
-//  |  Load texture data from disk.                                         LH2'25|
+//  |  Load texture data from disk.                                         LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Texture::Load( const char* fileName, const uint32_t modFlags, bool normalMap )
 {
 #ifdef CACHEIMAGES
 	// see if we can load a cached version
-	if (strlen( fileName ) > 4) if (fileName[strlen( fileName ) - 4] == '.')
+	if (strlen( fileName ) > 4 && strlen( fileName ) < 1000) if (fileName[strlen( fileName ) - 4] == '.')
 	{
 		char binFile[1024];
 		::memcpy( binFile, fileName, strlen( fileName ) + 1 );
 		binFile[strlen( fileName ) - 4] = 0;
-		strcat_s( binFile, ".bin" );
+		strcat( binFile, ".bin" );
 		FILE* f;
 	#ifdef _MSC_VER
 		fopen_s( &f, binFile, "rb" );
@@ -2805,6 +2875,7 @@ void Texture::Load( const char* fileName, const uint32_t modFlags, bool normalMa
 				mods = modFlags;
 				return;
 			}
+			::fclose( f ); // version mismatch; fall through to a regular load
 		}
 	}
 #endif
@@ -2825,7 +2896,13 @@ void Texture::Load( const char* fileName, const uint32_t modFlags, bool normalMa
 		for (int i = 1; i < MIPLEVELCOUNT; i++) pixels += (w * h) >> i;
 		idata = (ts_uchar4*)malloc64( pixels * sizeof( uint32_t ) );
 		const int s = w * h;
-		for (int i = 0; i < s; i++) ((uint32_t*)idata)[i] = (data[i * n + 0] << 16) + (data[i * n + 1] << 8) + data[i * n + 2];
+		// note: alpha must be stored; ConstructMIPmaps and the opacity micro maps read it.
+		for (int i = 0; i < s; i++)
+		{
+			const uint32_t r = data[i * n], g = n > 2 ? data[i * n + 1] : r, b = n > 2 ? data[i * n + 2] : r;
+			const uint32_t a = n == 2 ? data[i * n + 1] : (n == 4 ? data[i * n + 3] : 255);
+			((uint32_t*)idata)[i] = (a << 24) + (r << 16) + (g << 8) + b;
+		}
 		stbi_image_free( data );
 		flags |= LDR, width = w, height = h;
 		// perform sRGB -> linear conversion if requested
@@ -2837,13 +2914,13 @@ void Texture::Load( const char* fileName, const uint32_t modFlags, bool normalMa
 	if (normalMap) flags |= NORMALMAP;
 #ifdef CACHEIMAGES
 	// prepare binary blob to be faster next time
-	if (strlen( fileName ) > 4) if (fileName[strlen( fileName ) - 4] == '.')
+	if (strlen( fileName ) > 4 && strlen( fileName ) < 1000) if (fileName[strlen( fileName ) - 4] == '.')
 	{
 		char binFile[1024];
 		::memcpy( binFile, fileName, strlen( fileName ) + 1 );
 		binFile[strlen( fileName ) - 4] = 0;
-		strcat_s( binFile, ".bin" );
-		FILE* f = fopen( binFile, "rb" );
+		strcat( binFile, ".bin" );
+		FILE* f = fopen( binFile, "wb" );
 		if (f)
 		{
 			uint32_t version = BINTEXFILEVERSION;
@@ -2865,11 +2942,11 @@ void Texture::Load( const char* fileName, const uint32_t modFlags, bool normalMa
 
 //  +-----------------------------------------------------------------------------+
 //  |  Texture::BumpToNormalMap                                                   |
-//  |  Convert a bumpmap to a normalmap.                                    LH2'25|
+//  |  Convert a bumpmap to a normalmap.                                    LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Texture::BumpToNormalMap( float heightScale )
 {
-	uint8_t* normalMap = new uint8_t[width * height * 4];
+	::std::vector<uint8_t> normalMap( (size_t)width * height * 4 );
 	const float stepZ = 1.0f / 255.0f;
 	for (uint32_t i = 0; i < width* height; i++)
 	{
@@ -2888,13 +2965,12 @@ void Texture::BumpToNormalMap( float heightScale )
 		normalMap[i * 4 + 2] = (uint8_t)round( (normal.z * 0.5 + 0.5) * 255 );
 		normalMap[i * 4 + 3] = 255;
 	}
-	if (width * height > 0) memcpy( idata, normalMap, width * height * 4 );
-	delete normalMap;
+	if (width * height > 0) ::memcpy( idata, normalMap.data(), (size_t)width * height * 4 );
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  TriLight::TriLight                                                         |
-//  |  Constructor.                                                         LH2'25|
+//  |  Constructor.                                                         LH2'26|
 //  +-----------------------------------------------------------------------------+
 TriLight::TriLight( FatTri* origTri, int origIdx, int origInstance )
 {
@@ -2916,7 +2992,7 @@ TriLight::TriLight( FatTri* origTri, int origIdx, int origInstance )
 }
 
 //  +-----------------------------------------------------------------------------+
-//  |  Scene::~Scene                                                        LH2'25|
+//  |  Scene::~Scene                                                        LH2'26|
 //  +-----------------------------------------------------------------------------+
 Scene::~Scene()
 {
@@ -2929,7 +3005,7 @@ Scene::~Scene()
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddMesh                                                             |
-//  |  Add an existing Mesh to the list of meshes and return the mesh ID.   LH2'25|
+//  |  Add an existing Mesh to the list of meshes and return the mesh ID.   LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::AddMesh( Mesh* mesh )
 {
@@ -2948,17 +3024,14 @@ int Scene::AddMesh( Mesh* mesh )
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddMesh                                                             |
 //  |  Create a mesh specified by a file name and data dir, apply a scale, add    |
-//  |  the mesh to the list of meshes and return the mesh ID.               LH2'25|
+//  |  the mesh to the list of meshes and return the mesh ID.               LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::AddMesh( const char* objFile, const float scale, const bool flatShaded )
 {
 	// extract directory from specified file name
-	char* tmp = new char[strlen( objFile ) + 1];
-	memcpy( tmp, objFile, strlen( objFile ) + 1 );
-	char* lastSlash = tmp, * pos = tmp;
-	while (*pos) { if (*pos == '/' || *pos == '\\') lastSlash = pos; pos++; }
-	*lastSlash = 0;
-	return AddMesh( lastSlash + 1, tmp, scale, flatShaded );
+	::std::string dir, file;
+	ts_split_path( objFile, dir, file );
+	return AddMesh( file.c_str(), dir.c_str(), scale, flatShaded );
 }
 int Scene::AddMesh( const char* objFile, const char* dir, const float scale, const bool flatShaded )
 {
@@ -2969,7 +3042,7 @@ int Scene::AddMesh( const char* objFile, const char* dir, const float scale, con
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddMesh                                                             |
 //  |  Create a mesh with the specified amount of triangles without actually      |
-//  |  setting the triangles. Set these via the AddTriToMesh function.      LH2'25|
+//  |  setting the triangles. Set these via the AddTriToMesh function.      LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::AddMesh( const int triCount )
 {
@@ -2979,7 +3052,7 @@ int Scene::AddMesh( const int triCount )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddTriToMesh                                                        |
-//  |  Add a single triangle to a mesh.                                     LH2'25|
+//  |  Add a single triangle to a mesh.                                     LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Scene::AddTriToMesh( const int meshId, const ts_vec3& v0, const ts_vec3& v1, const ts_vec3& v2, const int matId )
 {
@@ -3001,19 +3074,14 @@ void Scene::AddTriToMesh( const int meshId, const ts_vec3& v0, const ts_vec3& v1
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddScene                                                            |
 //  |  Loads a collection of meshes from a gltf file. An instance and a scene     |
-//  |  graph node is created for each mesh.                                 LH2'25|
+//  |  graph node is created for each mesh.                                 LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::AddScene( const char* sceneFile, const ts_mat4& transform )
 {
 	// extract directory from specified file name
-	char* tmp = new char[strlen( sceneFile ) + 1];
-	::memcpy( tmp, sceneFile, strlen( sceneFile ) + 1 );
-	char* lastSlash = tmp, * pos = tmp;
-	while (*pos) { if (*pos == '/' || *pos == '\\') lastSlash = pos; pos++; }
-	*lastSlash = 0;
-	int retVal = AddScene( lastSlash + 1, tmp, transform );
-	delete tmp;
-	return retVal;
+	::std::string dir, file;
+	ts_split_path( sceneFile, dir, file );
+	return AddScene( file.c_str(), dir.c_str(), transform );
 }
 int Scene::AddScene( const char* sceneFile, const float scale )
 {
@@ -3030,45 +3098,41 @@ int Scene::AddScene( const char* sceneFile, const char* dir, const ts_mat4& tran
 	const int retVal = (int)nodePool.size();
 	const int nodeBase = (int)nodePool.size() + 1;
 	// load gltf file
-	string cleanFileName = string( dir ) + (dir[strlen( dir ) - 1] == '/' ? "" : "/") + string( sceneFile );
+	::std::string cleanFileName = ts_combine_path( dir, sceneFile );
 	tinygltf::Model gltfModel;
 	tinygltf::TinyGLTF loader;
-	std::string err, warn;
+	::std::string err, warn;
 	bool ret = false;
-	if (cleanFileName.size() > 4)
+	const ::std::string extension = ts_extension( cleanFileName );
+	if (extension.compare( "obj" ) == 0)
 	{
-		string extension4 = cleanFileName.substr( cleanFileName.size() - 5, 5 );
-		string extension3 = cleanFileName.substr( cleanFileName.size() - 4, 4 );
-		if (extension3.compare( ".obj" ) == 0)
-		{
-			// ugly to have this here, but it sure does make it easier to make a scene
-			// out of a single .obj file...
-			ts_vec3 scale3( transform.cell[0], transform.cell[5], transform.cell[10] );
-			float scale = (scale3.x == scale3.y && scale3.y == scale3.z) ? scale3.x : 1.0f;
-			uint32_t meshId = AddMesh( sceneFile, dir, scale );
-			ts_mat4 S;
-			S[0] = S[5] = S[10] = 1.0f / scale;
-			AddInstance( AddNode( new Node( meshId, transform * S ) ) );
-			return retVal;
-		}
-		else if (extension4.compare( ".gltf" ) == 0)
-		{
-			ret = loader.LoadASCIIFromFile( &gltfModel, &err, &warn, cleanFileName.c_str() );
-		}
-		else if (extension3.compare( ".bin" ) == 0 || extension3.compare( ".glb" ) == 0)
-		{
-			ret = loader.LoadBinaryFromFile( &gltfModel, &err, &warn, cleanFileName.c_str() );
-		}
+		// ugly to have this here, but it sure does make it easier to make a scene
+		// out of a single .obj file...
+		ts_vec3 scale3( transform.cell[0], transform.cell[5], transform.cell[10] );
+		float scale = (scale3.x == scale3.y && scale3.y == scale3.z) ? scale3.x : 1.0f;
+		const int meshId = AddMesh( sceneFile, dir, scale );
+		ts_mat4 S;
+		S[0] = S[5] = S[10] = 1.0f / scale;
+		AddInstance( AddNode( new Node( meshId, transform * S ) ) );
+		return retVal;
+	}
+	else if (extension.compare( "gltf" ) == 0)
+	{
+		ret = loader.LoadASCIIFromFile( &gltfModel, &err, &warn, cleanFileName.c_str() );
+	}
+	else if (extension.compare( "bin" ) == 0 || extension.compare( "glb" ) == 0)
+	{
+		ret = loader.LoadBinaryFromFile( &gltfModel, &err, &warn, cleanFileName.c_str() );
 	}
 	if (!warn.empty()) printf( "Warn: %s\n", warn.c_str() );
 	if (!err.empty()) printf( "Err: %s\n", err.c_str() );
 	SCENE_FATAL_ERROR_IF( !ret, "could not load glTF file" /* , cleanFileName.c_str() */ );
 	// convert textures
-	vector<int> texIdx;
+	::std::vector<int> texIdx;
 	for (size_t s = gltfModel.textures.size(), i = 0; i < s; i++)
 	{
 		char t[1024];
-		sprintf_s( t, "%s-%s-%03i", dir, sceneFile, (int)i );
+		snprintf( t, sizeof( t ), "%s-%s-%03i", dir, sceneFile, (int)i );
 		int textureID = FindTextureID( t );
 		if (textureID != -1)
 		{
@@ -3095,11 +3159,11 @@ int Scene::AddScene( const char* sceneFile, const char* dir, const ts_mat4& tran
 		}
 	}
 	// convert materials
-	vector<int> matIdx;
+	::std::vector<int> matIdx;
 	for (size_t s = gltfModel.materials.size(), i = 0; i < s; i++)
 	{
 		char t[1024];
-		sprintf_s( t, "%s-%s-%03i", dir, sceneFile, (int)i );
+		snprintf( t, sizeof( t ), "%s-%s-%03i", dir, sceneFile, (int)i );
 		int matID = FindMaterialIDByOrigin( t );
 		if (matID != -1)
 		{
@@ -3136,7 +3200,7 @@ int Scene::AddScene( const char* sceneFile, const char* dir, const ts_mat4& tran
 		}
 		strcat( fileID, "_9999" );
 		for (int d = 1000, i = 0; i < 4; i++, d /= 10) fileID[strlen( fileID ) - 4 + i] = (newMesh->ID / d) % 10 + '0';
-		newMesh->fileName = string( fileID );
+		newMesh->fileName = ::std::string( fileID );
 		meshPool.push_back( newMesh );
 	}
 	// push an extra node that holds a transform for the gltf scene
@@ -3176,7 +3240,7 @@ int Scene::AddScene( const char* sceneFile, const char* dir, const ts_mat4& tran
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddQuad                                                             |
 //  |  Create a mesh that consists of two triangles, described by a normal, a     |
-//  |  centroid position and a material.                                    LH2'25|
+//  |  centroid position and a material.                                    LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::AddQuad( ts_vec3 N, const ts_vec3 pos, const float width, const float height, const int matId, const int meshID )
 {
@@ -3231,18 +3295,20 @@ int Scene::AddQuad( ts_vec3 N, const ts_vec3 pos, const float width, const float
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddInstance                                                         |
-//  |  Add an instance of an existing mesh to the scene.                    LH2'25|
+//  |  Add an instance of an existing mesh to the scene.                          |
+//  |  Note: the returned index is a position in Scene::rootNodes, which is not    |
+//  |  the same thing as Node::instanceID, a position in Scene::instPool.   LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::AddInstance( const int nodeId )
 {
-	const uint32_t instId = (uint32_t)rootNodes.size();
+	const uint32_t rootIdx = (uint32_t)rootNodes.size();
 	rootNodes.push_back( nodeId );
-	return instId;
+	return (int)rootIdx;
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddNode                                                             |
-//  |  Add a node to the scene.                                             LH2'25|
+//  |  Add a node to the scene.                                             LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::AddNode( Node* newNode )
 {
@@ -3253,7 +3319,7 @@ int Scene::AddNode( Node* newNode )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddChildNode                                                        |
-//  |  Add a child to a node.                                               LH2'25|
+//  |  Add a child to a node.                                               LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::AddChildNode( const int parentNodeId, const int childNodeId )
 {
@@ -3264,7 +3330,7 @@ int Scene::AddChildNode( const int parentNodeId, const int childNodeId )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::GetChildId                                                          |
-//  |  Get the node index of a child of a node.                             LH2'25|
+//  |  Get the node index of a child of a node.                             LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::GetChildId( const int parentId, const int childIdx )
 {
@@ -3277,7 +3343,7 @@ int Scene::GetChildId( const int parentId, const int childIdx )
 //  |  This also removes the node from the rootNodes vector. Note that this will  |
 //  |  only work correctly if the node is not part of a hierarchy, which is the   |
 //  |  case for nodes that have been created using AddInstance.                   |
-//  |  TODO: This will not delete any textures or materials.                LH2'25|
+//  |  TODO: This will not delete any textures or materials.                LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Scene::RemoveNode( const int nodeId )
 {
@@ -3290,13 +3356,13 @@ void Scene::RemoveNode( const int nodeId )
 	}
 	// delete the instance
 	Node* node = nodePool[nodeId];
-	nodePool[nodeId] = 0; // safe; we only access the nodes vector indirectly.
+	nodePool[nodeId] = 0; // safe; we only access the nodes ::std::vector indirectly.
 	delete node;
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::FindTextureID                                                       |
-//  |  Return a texture ID if it already exists.                            LH2'25|
+//  |  Return a texture ID if it already exists.                            LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::FindTextureID( const char* name )
 {
@@ -3307,9 +3373,9 @@ int Scene::FindTextureID( const char* name )
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::FindOrCreateTexture                                                 |
 //  |  Return a texture: if it already exists, return the existing texture (after |
-//  |  increasing its refCount), otherwise, create a new texture.           LH2'25|
+//  |  increasing its refCount), otherwise, create a new texture.           LH2'26|
 //  +-----------------------------------------------------------------------------+
-int Scene::FindOrCreateTexture( const string& origin, const uint32_t modFlags )
+int Scene::FindOrCreateTexture( const ::std::string& origin, const uint32_t modFlags )
 {
 	// search list for existing texture
 	for (auto texture : textures) if (texture->Equals( origin, modFlags ))
@@ -3324,9 +3390,9 @@ int Scene::FindOrCreateTexture( const string& origin, const uint32_t modFlags )
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::FindOrCreateMaterial                                                |
 //  |  Return a material: if it already exists, return the existing material      |
-//  |  (after increasing its refCount), otherwise, create a new texture.    LH2'25|
+//  |  (after increasing its refCount), otherwise, create a new texture.    LH2'26|
 //  +-----------------------------------------------------------------------------+
-int Scene::FindOrCreateMaterial( const string& name )
+int Scene::FindOrCreateMaterial( const ::std::string& name )
 {
 	// search list for existing texture
 	for (auto material : materials) if (material->name.compare( name ) == 0)
@@ -3344,7 +3410,7 @@ int Scene::FindOrCreateMaterial( const string& name )
 //  |  Scene::FindOrCreateMaterialCopy                                            |
 //  |  Create an untextured material, based on an existing material. This copy is |
 //  |  to be used for a triangle that only reads a single texel from a texture;   |
-//  |  using a single color is more efficient.                              LH2'25|
+//  |  using a single color is more efficient.                              LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::FindOrCreateMaterialCopy( const int matID, const uint32_t color )
 {
@@ -3375,7 +3441,7 @@ int Scene::FindOrCreateMaterialCopy( const int matID, const uint32_t color )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::FindMaterialID                                                      |
-//  |  Find the ID of a material with the specified name.                   LH2'25|
+//  |  Find the ID of a material with the specified name.                   LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::FindMaterialID( const char* name )
 {
@@ -3385,7 +3451,7 @@ int Scene::FindMaterialID( const char* name )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::FindMaterialIDByOrigin                                              |
-//  |  Find the ID of a material with the specified origin.                 LH2'25|
+//  |  Find the ID of a material with the specified origin.                 LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::FindMaterialIDByOrigin( const char* name )
 {
@@ -3396,7 +3462,7 @@ int Scene::FindMaterialIDByOrigin( const char* name )
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::FindNextMaterialID                                                  |
 //  |  Find the ID of a material with the specified name, with an ID greater than |
-//  |  the specified one. Used to find materials with the same name.        LH2'25|
+//  |  the specified one. Used to find materials with the same name.        LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::FindNextMaterialID( const char* name, const int matID )
 {
@@ -3407,7 +3473,7 @@ int Scene::FindNextMaterialID( const char* name, const int matID )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::FindNode                                                            |
-//  |  Find the ID of a node with the specified name.                       LH2'25|
+//  |  Find the ID of a node with the specified name.                       LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::FindNode( const char* name )
 {
@@ -3418,7 +3484,7 @@ int Scene::FindNode( const char* name )
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::CreateOpacityMicroMaps                                              |
 //  |  process all meshes in the specified subtree and produce opacity            |
-//  |  maps for them.                                                       LH2'25|
+//  |  maps for them.                                                       LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Scene::CreateOpacityMicroMaps( const int nodeId, const int N )
 {
@@ -3430,7 +3496,7 @@ void Scene::CreateOpacityMicroMaps( const int nodeId, const int N )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::SetBVHType                                                          |
-//  |  set the BVH type for the meshes in a subtree.                        LH2'25|
+//  |  set the BVH type for the meshes in a subtree.                        LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Scene::SetBVHType( const int nodeId, const int t )
 {
@@ -3442,7 +3508,7 @@ void Scene::SetBVHType( const int nodeId, const int t )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::FindMeshNode                                                        |
-//  |  Find in a subtree the node that references the specified mesh.       LH2'25|
+//  |  Find in a subtree the node that references the specified mesh.       LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::FindMeshNode( const int nodeId, const int meshId )
 {
@@ -3459,20 +3525,21 @@ int Scene::FindMeshNode( const int nodeId, const int meshId )
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::CollapseMeshes                                                      |
 //  |  Combine all meshes in this subtree into a single one.                      |
-//  |  Returns the node index of the mesh.                                  LH2'25|
+//  |  Returns the node index of the mesh.                                  LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::CollapseMeshes( const int subtreeRoot )
 {
 	// count triangles in subtree
-	int triCount = 0, firstMesh = -1, firstNode = -1, stack[128], stackPtr = 0;
+	int triCount = 0, firstMesh = -1, firstNode = -1;
 	bool badMesh = false;
+	::std::vector<int> stack; // note: not a fixed size array; subtrees can be arbitrarily wide.
 	int nodeId = subtreeRoot;
 	printf( "collapsing subtree into single mesh... " );
 	while (1)
 	{
 		Node* node = nodePool[nodeId];
 		int m = node->meshID;
-		if (m > -1)
+		if (m > -1 && meshPool[m])
 		{
 			if (meshPool[m]->joints.size() > 0 || meshPool[m]->omaps != 0)
 			{
@@ -3483,17 +3550,19 @@ int Scene::CollapseMeshes( const int subtreeRoot )
 			triCount += (int)meshPool[m]->triangles.size();
 			if (firstMesh == -1) firstMesh = m, firstNode = nodeId;
 		}
-		for (int id : node->childIdx) stack[stackPtr++] = id;
-		if (stackPtr == 0) break;
-		nodeId = stack[--stackPtr];
+		for (int id : node->childIdx) stack.push_back( id );
+		if (stack.empty()) break;
+		nodeId = stack.back(), stack.pop_back();
 	}
 	// safety net
 	if (triCount == 0 /* no meshes in subtree */ || badMesh /* issues */) return 0;
-	// make room for extra data in 'firstMesh'
+	// make room for extra data in 'firstMesh'; note: reserve, not resize - the
+	// mesh already holds its own share of triCount and the rest is appended below.
 	Mesh* first = meshPool[firstMesh];
-	first->vertices.resize( triCount * 3 );
-	first->triangles.resize( triCount );
+	first->vertices.reserve( triCount * 3 );
+	first->triangles.reserve( triCount );
 	// append data from all meshes in subtree and delete them.
+	stack.clear();
 	nodeId = subtreeRoot;
 	while (1)
 	{
@@ -3501,24 +3570,20 @@ int Scene::CollapseMeshes( const int subtreeRoot )
 		int m = node->meshID;
 		if (m > -1 && m != firstMesh)
 		{
+			// note: may already be 0 if a second node referenced the same mesh.
 			Mesh* second = meshPool[m];
+			if (second)
+			{
 			first->vertices.insert( first->vertices.end(), second->vertices.begin(), second->vertices.end() );
 			first->triangles.insert( first->triangles.end(), second->triangles.begin(), second->triangles.end() );
-			second->ID = -1; // mesh will not be included in BVH builds.
+				meshPool[m] = 0; // mesh will not be included in BVH builds.
+				delete second;
+			}
 			node->meshID = -1;
-			// erase storage of second node
-			second->vertices.clear();
-			second->triangles.clear();
-			second->materialList.clear();
-			meshPool[m] = 0;
-		#if 0
-			// erasing it from the meshPool messes up our administration..
-			meshPool.erase( std::find( meshPool.begin(), meshPool.end(), second ) );
-		#endif
 		}
-		for (int id : node->childIdx) stack[stackPtr++] = id;
-		if (stackPtr == 0) break;
-		nodeId = stack[--stackPtr];
+		for (int id : node->childIdx) stack.push_back( id );
+		if (stack.empty()) break;
+		nodeId = stack.back(), stack.pop_back();
 	}
 	// renumber mesh 'first'
 	for (int i = 0; i < (int)meshPool.size(); i++) if (meshPool[i] == first)
@@ -3526,6 +3591,7 @@ int Scene::CollapseMeshes( const int subtreeRoot )
 		first->ID = i;
 		nodePool[firstNode]->meshID = i;
 	}
+	first->geomChanged = true; // geometry changed; the blas must be rebuilt.
 	// all done!
 	printf( "done.\n" );
 	return firstMesh;
@@ -3533,38 +3599,38 @@ int Scene::CollapseMeshes( const int subtreeRoot )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::SetNodeTransform                                                    |
-//  |  Set the local transform for the specified node.                      LH2'25|
+//  |  Set the local transform for the specified node.                      LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Scene::SetNodeTransform( const int nodeId, const ts_mat4& transform )
 {
-	if (nodeId < 0 || nodeId >= nodePool.size()) return;
+	if (nodeId < 0 || nodeId >= (int)nodePool.size()) return;
 	nodePool[nodeId]->localTransform = transform;
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::GetNodeTransform                                                    |
-//  |  Set the local transform for the specified node.                      LH2'25|
+//  |  Set the local transform for the specified node.                      LH2'26|
 //  +-----------------------------------------------------------------------------+
 const ts_mat4& Scene::GetNodeTransform( const int nodeId )
 {
 	static ts_mat4 dummyIdentity;
-	if (nodeId < 0 || nodeId >= nodePool.size()) return dummyIdentity;
+	if (nodeId < 0 || nodeId >= (int)nodePool.size()) return dummyIdentity;
 	return nodePool[nodeId]->localTransform;
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::ResetAnimation                                                      |
-//  |  Reset the indicated animation.                                       LH2'25|
+//  |  Reset the indicated animation.                                       LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Scene::ResetAnimation( const int animId )
 {
-	if (animId < 0 || animId >= animations.size()) return;
+	if (animId < 0 || animId >= (int)animations.size()) return;
 	animations[animId]->Reset();
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::ResetAnimations                                                     |
-//  |  Reset all animations.                                                LH2'25|
+//  |  Reset all animations.                                                LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Scene::ResetAnimations()
 {
@@ -3573,20 +3639,20 @@ void Scene::ResetAnimations()
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::ResetAnimation                                                      |
-//  |  Update the indicated animation.                                      LH2'25|
+//  |  Update the indicated animation.                                      LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Scene::UpdateAnimation( const int animId, const float dt )
 {
-	if (animId < 0 || animId >= animations.size()) return;
+	if (animId < 0 || animId >= (int)animations.size()) return;
 	animations[animId]->Update( dt );
 }
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::CreateTexture                                                       |
 //  |  Return a texture. Create it anew, even if a texture with the same origin   |
-//  |  already exists.                                                      LH2'25|
+//  |  already exists.                                                      LH2'26|
 //  +-----------------------------------------------------------------------------+
-int Scene::CreateTexture( const string& origin, const uint32_t modFlags )
+int Scene::CreateTexture( const ::std::string& origin, const uint32_t modFlags )
 {
 	// create a new texture
 	Texture* newTexture = new Texture( origin.c_str(), modFlags );
@@ -3597,12 +3663,12 @@ int Scene::CreateTexture( const string& origin, const uint32_t modFlags )
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddMaterial                                                         |
 //  |  Adds an existing Material* and returns the ID. If the material             |
-//  |  with that pointer is already added, it is not added again.           LH2'25|
+//  |  with that pointer is already added, it is not added again.           LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::AddMaterial( Material* material )
 {
-	auto res = find( materials.begin(), materials.end(), material );
-	if (res != materials.end()) return (int)distance( materials.begin(), res );
+	auto res = ::std::find( materials.begin(), materials.end(), material );
+	if (res != materials.end()) return (int)::std::distance( materials.begin(), res );
 	int matid = (int)materials.size();
 	materials.push_back( material );
 	return matid;
@@ -3610,7 +3676,7 @@ int Scene::AddMaterial( Material* material )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddMaterial                                                         |
-//  |  Create a material, with a limited set of parameters.                 LH2'25|
+//  |  Create a material, with a limited set of parameters.                 LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::AddMaterial( const ts_vec3 color, const char* name )
 {
@@ -3622,7 +3688,7 @@ int Scene::AddMaterial( const ts_vec3 color, const char* name )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddPointLight                                                       |
-//  |  Create a point light and add it to the scene.                        LH2'25|
+//  |  Create a point light and add it to the scene.                        LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::AddPointLight( const ts_vec3 pos, const ts_vec3 radiance )
 {
@@ -3636,7 +3702,7 @@ int Scene::AddPointLight( const ts_vec3 pos, const ts_vec3 radiance )
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddSpotLight                                                        |
-//  |  Create a spot light and add it to the scene.                         LH2'25|
+//  |  Create a spot light and add it to the scene.                         LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::AddSpotLight( const ts_vec3 pos, const ts_vec3 direction, const float inner, const float outer, const ts_vec3 radiance )
 {
@@ -3653,7 +3719,7 @@ int Scene::AddSpotLight( const ts_vec3 pos, const ts_vec3 direction, const float
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::AddDirectionalLight                                                 |
-//  |  Create a directional light and add it to the scene.                  LH2'25|
+//  |  Create a directional light and add it to the scene.                  LH2'26|
 //  +-----------------------------------------------------------------------------+
 int Scene::AddDirectionalLight( const ts_vec3 direction, const ts_vec3 radiance )
 {
@@ -3667,7 +3733,7 @@ int Scene::AddDirectionalLight( const ts_vec3 direction, const ts_vec3 radiance 
 
 //  +-----------------------------------------------------------------------------+
 //  |  Scene::UpdateSceneGraph (formerly in RenderSystem)                         |
-//  |  Walk the scene graph, updating all node matrices.                    LH2'25|
+//  |  Walk the scene graph, updating all node matrices.                    LH2'26|
 //  +-----------------------------------------------------------------------------+
 void Scene::UpdateSceneGraph( const float deltaTime )
 {
@@ -3682,28 +3748,31 @@ void Scene::UpdateSceneGraph( const float deltaTime )
 		node->Update( T /* start with an identity matrix */ );
 	}
 	// update tlas
-	static tinybvh::BVHBase** bvhList = 0;
-	static uint32_t bvhListSize = 0;
-	if (bvhListSize != meshPool.size())
+	static ::std::vector<tinybvh::BVHBase*> bvhList;
+	if (bvhList.size() != meshPool.size())
 	{
-		delete bvhList;
-		bvhList = new tinybvh::BVHBase * [meshPool.size()];
-		for (int i = 0; i < meshPool.size(); i++) if (meshPool[i])
+		// note: assign, so entries for empty mesh slots are null rather than garbage.
+		bvhList.assign( meshPool.size(), nullptr );
+		for (size_t i = 0; i < meshPool.size(); i++) if (meshPool[i])
 			bvhList[i] = meshPool[i]->blas.dynamicBVH;
-		bvhListSize = (uint32_t)meshPool.size();
 	}
+	const uint32_t bvhListSize = (uint32_t)bvhList.size();
 	if (defaultBVHType == GPU_DYNAMIC || defaultBVHType == GPU_RIGID || defaultBVHType == GPU_STATIC)
 	{
 		if (!gpuTlas) gpuTlas = new tinybvh::BVH_GPU();
-		gpuTlas->Build( instPool.data(), (uint32_t)instPool.size(), bvhList, bvhListSize );
+		gpuTlas->Build( instPool.data(), (uint32_t)instPool.size(), bvhList.data(), bvhListSize );
 	}
 	else
 	{
 		if (!tlas) tlas = new tinybvh::BVH();
-		tlas->Build( instPool.data(), (uint32_t)instPool.size(), bvhList, bvhListSize );
+		tlas->Build( instPool.data(), (uint32_t)instPool.size(), bvhList.data(), bvhListSize );
 	}
 }
 
 } // namespace tinyscene
+
+#ifdef _MSC_VER
+#pragma warning( pop ) // 4456
+#endif
 
 #endif // TINYSCENE_IMPLEMENTATION

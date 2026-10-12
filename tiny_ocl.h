@@ -1,4 +1,4 @@
-﻿/*
+/*
 The MIT License (MIT)
 
 Copyright (c) 2024-2026, Jacco Bikker / Breda University of Applied Sciences.
@@ -641,15 +641,15 @@ Buffer::Buffer( unsigned int N, void* ptr, unsigned int t )
 // ----------------------------------------------------------------------------
 Buffer::~Buffer()
 {
-		if (ownData)
-		{
-			OpenCL::GetInstance()->AlignedFree( hostBuffer );
-			hostBuffer = 0;
-		}
+	if (ownData)
+	{
+		OpenCL::GetInstance()->AlignedFree( hostBuffer );
+		hostBuffer = 0;
+	}
 	if (deviceBuffer)
 	{
-		clReleaseMemObject( deviceBuffer );
-		deviceBuffer = 0;
+	clReleaseMemObject( deviceBuffer );
+	deviceBuffer = 0;
 	}
 }
 
@@ -757,9 +757,9 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 	{
 	#ifdef _MSC_VER
 		if (!_stricmp( file, loadedKernels[i]->sourceFile ))
-		#else
+	#else
 		if (!strcasecmp( file, loadedKernels[i]->sourceFile ))
-		#endif
+	#endif
 		{
 			cl_int error;
 			program = loadedKernels[i]->program;

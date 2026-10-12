@@ -2290,8 +2290,8 @@ TEMPLATED void BVH<Float, Index>::Save( const char* fileName, const bool include
 	s.write( (char*)bvhNode, usedNodes * sizeof( BVHNode ) );
 	s.write( (char*)primIdx, idxCount * sizeof( Index ) );
 	// Geometry.
-	const uint32_t vertCount = (includeGeometry && verts) ? verts.count : 0;
-	const uint32_t idxEntries = (vertCount && vertIdx) ? (uint32_t)(triCount * 3) : 0;
+	const uint32_t vertCount = (uint32_t)((includeGeometry && verts) ? verts.count : 0);
+	const uint32_t idxEntries = (uint32_t)((vertCount && vertIdx) ? (uint32_t)(triCount * 3) : 0);
 	s.write( (char*)&vertCount, sizeof( uint32_t ) );
 	s.write( (char*)&idxEntries, sizeof( uint32_t ) );
 	for (uint32_t i = 0; i < vertCount; i++)
