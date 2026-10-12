@@ -929,7 +929,8 @@ public:
 	bool Load( const char* fileName, const Vertex* vertices, const Index primCount );
 	bool Load( const char* fileName, const Vertex* vertices, const Index* indices, const Index primCount );
 	bool Load( const char* fileName, const Slice& vertices, const Index* indices = 0, const Index primCount = 0 );
-	bool Load( const char* fileName ); // for a file saved with its geometry; see Save.
+	// Load: build a BVH straight from a file saved with its geometry; see Save.
+	static BVH Load( const char* fileName );
 	void FreeGeometry();
 	void BuildQuick( const Vertex* vertices, const Index primCount );
 	void BuildQuick( const Slice& vertices );
@@ -1193,6 +1194,7 @@ public:
 	void BuildHQ( const bvhvec4* vertices, const Index* indices, const Index primCount );
 	void BuildHQ( const Slice& vertices, const Index* indices, const Index primCount );
 	void Optimize( const uint32_t iterations = 25, bool extreme = false );
+	static BVH_GPU Load( const char* fileName );
 	Float SAHCost( const Index nodeIdx = 0 ) { return bvh.SAHCost( nodeIdx ); }
 	void ConvertFrom( const BVH& original, bool compact = true );
 	int32_t Intersect( Ray& ray ) const;
@@ -1347,6 +1349,7 @@ public:
 	void Optimize( const uint32_t iterations = 25, bool extreme = false );
 	void Refit( const Index nodeIdx = 0 );
 	Index LeafCount( const Index nodeIdx = 0 ) const;
+	static MBVH Load( const char* fileName );
 	Float SAHCost( const Index nodeIdx = 0 ) const;
 	void ConvertFrom( BVH& original, bool compact = true );
 	// pass 3 of ConvertFrom, split so each output level can be decoded in parallel.
@@ -1378,6 +1381,7 @@ TEMPLATED class BVH4_GPU : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
+	using typename Base::BVH;
 	using typename Base::Vec3;
 	using typename Base::Slice;
 	using typename Base::Ray;
@@ -1428,6 +1432,7 @@ public:
 	void BuildHQ( const Slice& vertices );
 	void BuildHQ( const bvhvec4* vertices, const Index* indices, const Index primCount );
 	void BuildHQ( const Slice& vertices, const Index* indices, const Index primCount );
+	static BVH4_GPU Load( const char* fileName );
 	void Optimize( const uint32_t iterations = 25, bool extreme = false );
 	void ConvertFrom( const MBVH<4, Float, Index>& original, bool compact = true );
 	Float SAHCost( const Index nodeIdx = 0 ) const { return bvh4.SAHCost( nodeIdx ); }
@@ -1447,6 +1452,7 @@ TEMPLATED class BVH4_AMD_HW : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
+	using typename Base::BVH;
 	using Base::allocatedNodes;
 	using Base::c_int;
 	using Base::c_trav;
@@ -1501,6 +1507,7 @@ public:
 	void BuildHQ( const Slice& vertices );
 	void BuildHQ( const bvhvec4* vertices, const Index* indices, const Index primCount );
 	void BuildHQ( const Slice& vertices, const Index* indices, const Index primCount );
+	static BVH4_AMD_HW Load( const char* fileName );
 	void Optimize( const uint32_t iterations = 25, bool extreme = false );
 	void ConvertFrom( const MBVH<4, Float, Index>& original );
 	Float SAHCost( const Index nodeIdx = 0 ) const { return bvh4.SAHCost( nodeIdx ); }
@@ -1522,6 +1529,7 @@ TEMPLATED class BVH4_CPU : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
+	using typename Base::BVH;
 	using Base::opmap;
 	using Base::opmapN;
 	using typename Base::Vec3;
@@ -1577,6 +1585,7 @@ public:
 	void BuildHQ( const Slice& vertices, const Index* indices, Index prims );
 	void Optimize( const uint32_t iterations, bool extreme );
 	void Refit();
+	static BVH4_CPU Load( const char* fileName );
 	Float SAHCost( const Index nodeIdx ) const;
 	void ConvertFrom( MBVH<4, Float, Index>& original, bool leavesMerged = false );
 	int32_t Intersect( Ray& ray ) const;
@@ -1601,6 +1610,7 @@ TEMPLATED class BVH8_CWBVH : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
+	using typename Base::BVH;
 	using typename Base::Vec3;
 	using typename Base::Slice;
 	using typename Base::Ray;
@@ -1633,6 +1643,7 @@ public:
 	void BuildHQ( const Slice& vertices );
 	void BuildHQ( const bvhvec4* vertices, const Index* indices, const Index primCount );
 	void BuildHQ( const Slice& vertices, const Index* indices, const Index primCount );
+	static BVH8_CWBVH Load( const char* fileName );
 	void Optimize( const uint32_t iterations = 25, bool extreme = false );
 	void ConvertFrom( const MBVH<8, Float, Index>& original, bool compact = true );
 	Float SAHCost( const Index nodeIdx = 0 ) const;
@@ -1720,6 +1731,7 @@ TEMPLATED class BVH8_CPU : public BVHBase<Float, Index>
 {
 public:
 	using Base = BVHBase<Float, Index>;
+	using typename Base::BVH;
 	using Base::opmap;
 	using Base::opmapN;
 	using typename Base::Vec3;
@@ -1783,6 +1795,7 @@ public:
 	void BuildHQ( const Slice& vertices, const Index* indices, Index prims );
 	void Optimize( const uint32_t iterations, bool extreme );
 	void Refit();
+	static BVH8_CPU Load( const char* fileName );
 	Float SAHCost( const Index nodeIdx ) const;
 	void ConvertFrom( MBVH<8, Float, Index>& original, bool leavesMerged = false );
 	int32_t Intersect( Ray& ray ) const;
@@ -2207,7 +2220,6 @@ TEMPLATED void BVH<Float, Index>::Save( const char* fileName, const bool include
 	if (idxEntries) s.write( (char*)vertIdx, idxEntries * sizeof( Index ) );
 }
 
-TEMPLATED bool BVH<Float, Index>::Load( const char* f ) { return Load( f, Slice( nullptr, 0, 0 ) ); }
 TEMPLATED bool BVH<Float, Index>::Load( const char* f, const Vertex* v, const Index p ) { return Load( f, Slice( v, p * 3, sizeof( Vertex ) ) ); }
 TEMPLATED bool BVH<Float, Index>::Load( const char* f, const Vertex* v, const Index* i, const Index p ) { return Load( f, Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 TEMPLATED bool BVH<Float, Index>::Load( const char* fileName, const Slice& vertices, const Index* indices, const Index primCount )
@@ -7949,6 +7961,132 @@ TEMPLATED int32_t BVH<Float, Index>::IsOccludedBundle( Ray* rays, bool* occluded
 	int32_t cost = 0;
 	for (uint32_t i = 0; i < TINYBVH_BUNDLE_RAYS; i++) occluded[i] = IsOccluded( rays[i] ), cost++;
 	return cost;
+}
+
+// Static BVH Load implementations
+// ----------------------------------------------------------------------------
+
+// tinybvh_peek_cache: first two fields of a cache file, without disturbing anything.
+template <typename Index> inline bool tinybvh_peek_cache( const char* fileName, uint32_t& header, Index& triCount )
+{
+	std::fstream s{ fileName, s.binary | s.in };
+	if (!s) return false;
+	s.read( (char*)&header, sizeof( uint32_t ) );
+	s.read( (char*)&triCount, sizeof( Index ) );
+	return !!s;
+}
+
+TEMPLATED BVH<Float, Index> BVH<Float, Index>::Load( const char* fileName )
+{
+	BVH result;
+	result.Load( fileName, Slice( nullptr, 0, 0 ), 0, 0 );
+	return result;
+}
+
+TEMPLATED BVH_GPU<Float, Index> BVH_GPU<Float, Index>::Load( const char* fileName )
+{
+	BVH_GPU result;
+	BVH src = BVH::Load( fileName );
+	if (src.usedNodes == 0) return result;
+	result.PassSettingsTo( result.bvh );
+	result.bvh = tinybvh_move( src );
+	result.ConvertFrom( result.bvh, false );
+	result.bvh = BVH( result.context ); // traversal runs on orderedVerts; the tree is spent
+	return result;
+}
+
+TEMPLATED_M MBVH<M, Float, Index> MBVH<M, Float, Index>::Load( const char* fileName )
+{
+	MBVH result;
+	BVH src = BVH::Load( fileName );
+	if (src.usedNodes == 0) return result;
+	result.bvh = tinybvh_move( src );
+	result.ConvertFrom( result.bvh );
+	// An MBVH keeps its source: its leaves index that tree's primIdx array, and the collapse to
+	// a CPU layout runs CombineLeafs over the binary nodes. The layouts built on top of this one
+	// release the whole chain once they are done with it.
+	return result;
+}
+
+TEMPLATED BVH4_GPU<Float, Index> BVH4_GPU<Float, Index>::Load( const char* fileName )
+{
+	BVH4_GPU result;
+	BVH src = BVH::Load( fileName );
+	if (src.usedNodes == 0) return result;
+	result.PassSettingsTo( result.bvh4 ), result.PassSettingsTo( result.bvh4.bvh );
+	result.bvh4.bvh = tinybvh_move( src );
+	result.bvh4.ConvertFrom( result.bvh4.bvh );
+	result.ConvertFrom( result.bvh4, true );
+	result.bvh4 = MBVH<4, Float, Index>( result.context );
+	return result;
+}
+
+TEMPLATED BVH4_AMD_HW<Float, Index> BVH4_AMD_HW<Float, Index>::Load( const char* fileName )
+{
+	BVH4_AMD_HW result;
+	BVH src = BVH::Load( fileName );
+	if (src.usedNodes == 0) return result;
+	result.PassSettingsTo( result.bvh4 ), result.PassSettingsTo( result.bvh4.bvh );
+	result.bvh4.bvh = tinybvh_move( src );
+	result.bvh4.bvh.SplitLeafs( 1 );
+	result.bvh4.leafPrimLimit = 0;
+	result.bvh4.ConvertFrom( result.bvh4.bvh );
+	result.ConvertFrom( result.bvh4 );
+	result.bvh4 = MBVH<4, Float, Index>( result.context );
+	return result;
+}
+
+TEMPLATED BVH4_CPU<Float, Index> BVH4_CPU<Float, Index>::Load( const char* fileName )
+{
+	BVH4_CPU result;
+	uint32_t header = 0;
+	Index tris = 0;
+	if (!tinybvh_peek_cache( fileName, header, tris )) return result;
+	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
+	BVH src = BVH::Load( fileName );
+	if (src.usedNodes == 0) return result;
+	result.PassSettingsTo( result.bvh4 ), result.PassSettingsTo( result.bvh4.bvh );
+	result.bvh4.bvh = tinybvh_move( src );
+	// ConvertFrom collapses from the binary tree itself, so the bvh4 nodes are built on the way.
+	result.ConvertFrom( result.bvh4 );
+	result.bvh4 = MBVH<4, Float, Index>( result.context );
+	return result;
+}
+
+TEMPLATED BVH8_CWBVH<Float, Index> BVH8_CWBVH<Float, Index>::Load( const char* fileName )
+{
+	BVH8_CWBVH result;
+	uint32_t header = 0;
+	Index tris = 0;
+	if (!tinybvh_peek_cache( fileName, header, tris )) return result;
+	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
+	BVH src = BVH::Load( fileName );
+	if (src.usedNodes == 0) return result;
+	result.PassSettingsTo( result.bvh8 ), result.PassSettingsTo( result.bvh8.bvh );
+	result.bvh8.bvh = tinybvh_move( src );
+	result.bvh8.bvh.CombineLeafs( 3 ); // a cwbvh leaf slot holds at most 3 prims
+	result.bvh8.bvh.SplitLeafs( 3 );
+	result.bvh8.leafPrimLimit = 3;
+	result.bvh8.ConvertFrom( result.bvh8.bvh, true );
+	result.ConvertFrom( result.bvh8, true );
+	result.bvh8 = MBVH<8, Float, Index>( result.context );
+	return result;
+}
+
+TEMPLATED BVH8_CPU<Float, Index> BVH8_CPU<Float, Index>::Load( const char* fileName )
+{
+	BVH8_CPU result;
+	uint32_t header = 0;
+	Index tris = 0;
+	if (!tinybvh_peek_cache( fileName, header, tris )) return result;
+	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
+	BVH src = BVH::Load( fileName );
+	if (src.usedNodes == 0) return result;
+	result.PassSettingsTo( result.bvh8 ), result.PassSettingsTo( result.bvh8.bvh );
+	result.bvh8.bvh = tinybvh_move( src );
+	result.ConvertFrom( result.bvh8 );
+	result.bvh8 = MBVH<8, Float, Index>( result.context );
+	return result;
 }
 
 } // namespace impl
