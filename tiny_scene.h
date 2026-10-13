@@ -437,6 +437,8 @@ public:
 		// tinybvh::BVH8_CWBVH for static / rigid geometry - targetted at GPU rendering.
 		// Default is dynamic / CPU; rigid is restrictive but much faster to trace.
 		uint32_t bvhType = BVH_DYNAMIC;
+		// type the blas in the union below was actually created as.
+		uint32_t builtType = BVH_DYNAMIC;
 		union
 		{
 			tinybvh::BVH* dynamicBVH = 0;
@@ -449,6 +451,20 @@ public:
 			tinybvh::BVH_GPU* rigidGPU;
 			tinybvh::BVH8_CWBVH* staticGPU;
 		};
+		void Clear()
+		{
+			// delete the blas through the pointer type it was created with.
+			switch (builtType)
+			{
+			case BVH_DYNAMIC: delete dynamicBVH; break;
+			case BVH_RIGID: delete rigidBVH; break;
+			case GPU_DYNAMIC: delete dynamicGPU; break;
+			case GPU_RIGID: delete rigidGPU; break;
+			case GPU_STATIC: delete staticGPU; break;
+			default: break;
+			}
+			dynamicBVH = 0, builtType = bvhType;
+		}
 	};
 	// constructor / destructor
 	Mesh() = default;
@@ -504,7 +520,8 @@ public:
 	void ConvertFromGLTFNode( const ::tinygltf::Node& gltfNode, const int nodeBase, const int meshBase, const int skinBase );
 	void Update( const ts_mat4& T );	// recursively update the transform of this node and its children
 	void UpdateTransformFromTRS();		// process T, R, S data to localTransform
-	void PrepareLights();				// create light trianslges from detected emissive triangles
+	void PrepareLights();				// create light triangles from detected emissive triangles
+	void RemoveLights();				// retire the light triangles created for this node
 	void UpdateLights();				// fix light triangles when the transform changes
 	// data members
 	::std::string name;					// node name as specified in the GLTF file
@@ -869,7 +886,8 @@ public:
 	static inline ::std::vector<Animation*> animations;		// all scene animations
 	static inline ::std::vector<Material*> materials;		// all scene materials
 	static inline ::std::vector<Texture*> textures;			// all scene textures
-	static inline ::std::vector<TriLight*> triLights;		// light emitting triangles
+	static inline ::std::vector<TriLight*> triLights;		// light emitting triangles; may contain empty slots
+	static inline ::std::vector<int> freeLightSlots;		// vacated triLights slots; see Node::RemoveLights
 	static inline ::std::vector<PointLight*> pointLights;	// scene point lights
 	static inline ::std::vector<SpotLight*> spotLights;		// scene spot lights
 	static inline ::std::vector<DirectionalLight*> directionalLights;	// scene directional lights
@@ -1251,7 +1269,13 @@ void Mesh::LoadGeometryFromOBJ( const ::std::string& file, const char* directory
 	for (uint32_t s = (uint32_t)shapes.size(), i = 0; i < s; i++)
 	{
 		::std::vector<::tinyobj::index_t>& indices = shapes[i].mesh.indices;
-		if (flatShaded) for (uint32_t s = (uint32_t)indices.size(), f = 0; f < s; f++) alphas[indices[f].normal_index] = 1; else
+		if (flatShaded)
+		{
+			// note: an obj without vertex normals yields a normal_index of -1 for every index, and an empty alphas array.
+			for (uint32_t s = (uint32_t)indices.size(), f = 0; f < s; f++)
+				if (indices[f].normal_index > -1) alphas[indices[f].normal_index] = 1;
+		}
+		else
 		{
 			for (uint32_t s = (uint32_t)indices.size(), f = 0; f < s; f += 3)
 			{
@@ -1549,9 +1573,20 @@ void Mesh::ConvertFromGTLFMesh( const ::tinygltf::Mesh& gltfMesh, const ::tinygl
 				}
 			}
 		}
+		// determine the material for this primitive.
+		int primMaterial = materialOverride;
+		if (primMaterial == -1)
+		{
+			if (prim.material > -1 && prim.material < (int)matIdx.size()) primMaterial = matIdx[prim.material];
+			else
+			{
+				primMaterial = Scene::FindMaterialID( "default" );
+				if (primMaterial == -1) primMaterial = Scene::AddMaterial( ts_vec3( 1 ), "default" );
+			}
+		}
 		// all data has been read; add triangles to the Mesh
 		BuildFromIndexedData( tmpIndices, tmpVertices, tmpNormals, tmpUvs, tmpUv2s, tmpTs, tmpPoses,
-			tmpJoints, tmpWeights, materialOverride == -1 ? matIdx[prim.material] : materialOverride );
+			tmpJoints, tmpWeights, primMaterial );
 	}
 }
 
@@ -1924,8 +1959,6 @@ Node::Node( const int meshIdx, const ts_mat4& transform )
 	// setup a node based on a mesh index and a transform
 	meshID = meshIdx;
 	localTransform = transform;
-	// process light emitting surfaces
-	PrepareLights();
 }
 
 //  +-----------------------------------------------------------------------------+
@@ -1934,26 +1967,10 @@ Node::Node( const int meshIdx, const ts_mat4& transform )
 //  +-----------------------------------------------------------------------------+
 Node::~Node()
 {
-	if (meshID > -1 && hasLights)
-	{
-		// this node is an instance and has emissive materials;
-		// remove the relevant area lights.
-		Mesh* mesh = Scene::meshPool[meshID];
-		for (auto materialIdx : mesh->materialList)
-		{
-			Material* material = Scene::materials[materialIdx];
-			if (material->IsEmissive())
-			{
-				// mesh contains an emissive material; remove related area lights
-				::std::vector<TriLight*>& lightList = Scene::triLights;
-				for (int i = 0; i < (int)lightList.size(); i++) if (lightList[i]->instIdx == ID)
-				{
-					delete lightList[i];
-					lightList.erase( lightList.begin() + i-- );
-				}
-			}
-		}
-	}
+	// disable the tlas instance of this node, if it has one.
+	if (instanceID > -1 && instanceID < (int)Scene::instPool.size()) Scene::instPool[instanceID].mask = 0;
+	// retire the area lights that were created for this node.
+	if (hasLights) RemoveLights();
 }
 
 //  +-----------------------------------------------------------------------------+
@@ -2003,8 +2020,6 @@ void Node::ConvertFromGLTFNode( const tinygltf::Node& gltfNode, const int nodeBa
 	}
 	// if we got T, R and/or S, reconstruct final matrix
 	if (buildFromTRS) UpdateTransformFromTRS();
-	// process light emitting surfaces
-	PrepareLights();
 }
 
 //  +-----------------------------------------------------------------------------+
@@ -2042,10 +2057,10 @@ void Node::Update( const ts_mat4& T )
 	for (int s = (int)childIdx.size(), i = 0; i < s; i++)
 	{
 		Node* child = Scene::nodePool[childIdx[i]];
-		child->Update( combinedTransform );
+		if (child) child->Update( combinedTransform ); // note: may have been removed.
 	}
-	// update animations
-	if (meshID > -1)
+	// update animations.
+	if (meshID > -1 && Scene::meshPool[meshID])
 	{
 		Mesh* mesh = Scene::meshPool[meshID];
 		if (morphed /* true if bone weights were affected by animation channel */)
@@ -2061,11 +2076,13 @@ void Node::Update( const ts_mat4& T )
 			for (int s = (int)skin->joints.size(), j = 0; j < s; j++)
 			{
 				Node* jointNode = Scene::nodePool[skin->joints[j]];
+				if (!jointNode) continue;
 				skin->jointMat[j] = invTransform * jointNode->combinedTransform * skin->inverseBindMatrices[j];
 			}
 			mesh->SetPose( skin ); // TODO: I hope this doesn't overwrite SetPose(weights) ?
 		}
-		// update blas
+		// update blas. Note: a blas that was built as a different type can not be reused.
+		if (mesh->blas.builtType != mesh->blas.bvhType) mesh->blas.Clear(), mesh->geomChanged = true;
 		if (mesh->geomChanged)
 		{
 			switch (mesh->blas.bvhType)
@@ -2190,6 +2207,7 @@ void Node::Update( const ts_mat4& T )
 				// .. invalid bvh type.
 				break;
 			}
+			mesh->blas.builtType = mesh->blas.bvhType;
 			mesh->geomChanged = false;
 		}
 		// update instance
@@ -2220,36 +2238,71 @@ void Node::Update( const ts_mat4& T )
 //  +-----------------------------------------------------------------------------+
 void Node::PrepareLights()
 {
-	if (meshID > -1)
-	{
+	// note: this requires the node to have its ID, which the scene assigns
+	// when the node is added: each light records the node it was created for.
+	if (hasLights) RemoveLights(); // replace the lights of a previous call
+	if (meshID < 0 || meshID >= (int)Scene::meshPool.size()) return;
 		Mesh* mesh = Scene::meshPool[meshID];
+	if (!mesh) return;
 		for (int s = (int)mesh->triangles.size(), i = 0; i < s; i++)
 		{
 			FatTri* tri = &mesh->triangles[i];
 			uint32_t matIdx = tri->material;
 			if (matIdx >= Scene::materials.size()) continue;
 			Material* mat = Scene::materials[matIdx];
-			if (mat->IsEmissive())
-			{
+		if (!mat->IsEmissive()) continue;
 				tri->UpdateArea();
 				FatTri transformedTri = TransformedFatTri( tri, localTransform );
 				TriLight* light = new TriLight( &transformedTri, i, ID );
-				tri->ltriIdx = (int)Scene::triLights.size(); // TODO: can't duplicate a light due to this.
-				Scene::triLights.push_back( light );
+		// store the light in a vacated slot if we have one. Note: slots are
+		// stable, FatTri::ltriIdx refers to them; see Node::RemoveLights.
+		if (Scene::freeLightSlots.empty())
+			tri->ltriIdx = (int)Scene::triLights.size(), Scene::triLights.push_back( light );
+		else
+		{
+			const int slot = Scene::freeLightSlots.back();
+			Scene::freeLightSlots.pop_back();
+			Scene::triLights[slot] = light, tri->ltriIdx = slot;
+		}
 				hasLights = true;
 				// Note: TODO:
-				// 1. if a mesh is deleted it should scan the list of area lights
-				//    to delete those that no longer exist.
+		// 1. ltriIdx is stored in the mesh, which instances share: a second
+		//    instance of an emissive mesh overwrites the indices of the first.
+		//    Those lights still exist and are still retired with their node,
+		//    but only the last instance can update them.
 				// 2. if a material is changed from emissive to non-emissive,
 				//    meshes using the material should remove their light emitting
 				//    triangles from the list of area lights.
 				// 3. if a material is changed from non-emissive to emissive,
 				//    meshes using the material should update the area lights list.
-				// Item 1 can be done efficiently. Items 2 and 3 require a list
-				// of materials per mesh to be efficient.
-			}
+		// Items 2 and 3 require a list of materials per mesh to be efficient.
 		}
+}
+
+//  +-----------------------------------------------------------------------------+
+//  |  Node::RemoveLights                                                         |
+//  |  Retire the area lights that were created for this node.              LH2'26|
+//  +-----------------------------------------------------------------------------+
+void Node::RemoveLights()
+{
+	// note: a light slot is emptied rather than erased, and recycled by a
+	// later PrepareLights: erasing would shift every slot behind it, while
+	// FatTri::ltriIdx stores slot indices.
+	::std::vector<TriLight*>& lightList = Scene::triLights;
+	for (int s = (int)lightList.size(), i = 0; i < s; i++)
+	{
+		if (!lightList[i] || lightList[i]->instIdx != ID) continue;
+		delete lightList[i];
+		lightList[i] = 0;
+		Scene::freeLightSlots.push_back( i );
 	}
+	// clear the light indices stored in the triangles of the mesh. Note: an
+	// index that still points to a light belongs to another instance of the
+	// same mesh and is left alone.
+	Mesh* mesh = meshID > -1 && meshID < (int)Scene::meshPool.size() ? Scene::meshPool[meshID] : 0;
+	if (mesh) for (auto& tri : mesh->triangles)
+		if (tri.ltriIdx > -1 && lightList[tri.ltriIdx] == 0) tri.ltriIdx = -1;
+	hasLights = false;
 }
 
 //  +-----------------------------------------------------------------------------+
@@ -2260,17 +2313,20 @@ void Node::PrepareLights()
 void Node::UpdateLights()
 {
 	if (!hasLights) return;
-	Mesh* mesh = Scene::meshPool[meshID];
+	Mesh* mesh = meshID > -1 && meshID < (int)Scene::meshPool.size() ? Scene::meshPool[meshID] : 0;
+	if (!mesh) return;
 	for (int s = (int)mesh->triangles.size(), i = 0; i < s; i++)
 	{
 		FatTri* tri = &mesh->triangles[i];
-		if (tri->ltriIdx > -1)
-		{
+		if (tri->ltriIdx < 0) continue;
+		// note: the light may have been retired, or may belong to another
+		// instance of this mesh; in both cases it is not ours to update.
+		TriLight* light = Scene::triLights[tri->ltriIdx];
+		if (!light || light->instIdx != ID) continue;
 			// triangle is light emitting; update it
 			tri->UpdateArea();
 			FatTri transformedTri = TransformedFatTri( tri, combinedTransform );
-			*Scene::triLights[tri->ltriIdx] = TriLight( &transformedTri, i, ID );
-		}
+		*light = TriLight( &transformedTri, i, ID );
 	}
 }
 
@@ -2644,6 +2700,8 @@ void Animation::Channel::ConvertFromGLTFChannel( const tinygltf::AnimationChanne
 //  +-----------------------------------------------------------------------------+
 void Animation::Channel::Update( const float dt, const Sampler* sampler )
 {
+	// the node this channel targets may have been removed from the scene.
+	if (nodeIdx < 0 || nodeIdx >= (int)Scene::nodePool.size() || !Scene::nodePool[nodeIdx]) return;
 	// advance animation timer
 	t += dt;
 	const int keyCount = (int)sampler->t.size();
@@ -2892,8 +2950,7 @@ void Texture::Load( const char* fileName, const uint32_t modFlags, bool normalMa
 		int n, w, h;
 		uint8_t* data = stbi_load( fileName, &w, &h, &n, 0 );
 		SCENE_FATAL_ERROR_IF( data == 0, "File does not exist." );
-		int pixels = w * h;
-		for (int i = 1; i < MIPLEVELCOUNT; i++) pixels += (w * h) >> i;
+		const int pixels = PixelsNeeded( w, h, MIPLEVELCOUNT );
 		idata = (ts_uchar4*)malloc64( pixels * sizeof( uint32_t ) );
 		const int s = w * h;
 		// note: alpha must be stored; ConstructMIPmaps and the opacity micro maps read it.
@@ -3188,19 +3245,15 @@ int Scene::AddScene( const char* sceneFile, const char* dir, const ts_mat4& tran
 	for (size_t s = gltfModel.meshes.size(), i = 0; i < s; i++)
 	{
 		tinygltf::Mesh& gltfMesh = gltfModel.meshes[i];
-		Mesh* newMesh = new Mesh( gltfMesh, gltfModel, matIdx, gltfModel.materials.size() == 0 ? 0 : -1 );
+		Mesh* newMesh = new Mesh( gltfMesh, gltfModel, matIdx, -1 );
 		newMesh->ID = (int)i + meshBase;
-		// prepare file name ID for mesh
-		char fileID[256];
-		strcpy( fileID, sceneFile );
-		if (strlen( fileID ) > 4)
-		{
-			if (fileID[strlen( fileID ) - 4] == '.') fileID[strlen( fileID ) - 4] = 0;
-			if (fileID[strlen( fileID ) - 5] == '.') fileID[strlen( fileID ) - 5] = 0;
-		}
-		strcat( fileID, "_9999" );
-		for (int d = 1000, i = 0; i < 4; i++, d /= 10) fileID[strlen( fileID ) - 4 + i] = (newMesh->ID / d) % 10 + '0';
-		newMesh->fileName = ::std::string( fileID );
+		// prepare file name ID for mesh: the scene file name without extension, plus the mesh index.
+		::std::string fileID( sceneFile );
+		const size_t dot = fileID.find_last_of( "." );
+		if (dot != ::std::string::npos) fileID = fileID.substr( 0, dot );
+		char meshIdx[8];
+		snprintf( meshIdx, sizeof( meshIdx ), "_%04i", newMesh->ID % 10000 );
+		newMesh->fileName = fileID + meshIdx;
 		meshPool.push_back( newMesh );
 	}
 	// push an extra node that holds a transform for the gltf scene
@@ -3215,6 +3268,7 @@ int Scene::AddScene( const char* sceneFile, const char* dir, const ts_mat4& tran
 		Node* node = new Node( gltfNode, nodeBase, meshBase, skinBase );
 		node->ID = (int)nodePool.size();
 		nodePool.push_back( node );
+		node->PrepareLights(); // the node has an ID now, so its lights can be tagged.
 	}
 	// convert animations and skins
 	for (tinygltf::Animation& gltfAnim : gltfModel.animations)
@@ -3314,6 +3368,7 @@ int Scene::AddNode( Node* newNode )
 {
 	newNode->ID = (int)nodePool.size();
 	nodePool.push_back( newNode );
+	newNode->PrepareLights(); // the node has an ID now, so its lights can be tagged.
 	return newNode->ID;
 }
 
@@ -3323,6 +3378,7 @@ int Scene::AddNode( Node* newNode )
 //  +-----------------------------------------------------------------------------+
 int Scene::AddChildNode( const int parentNodeId, const int childNodeId )
 {
+	if (parentNodeId < 0 || parentNodeId >= (int)nodePool.size() || !nodePool[parentNodeId]) return -1;
 	const int childIdx = (int)nodePool[parentNodeId]->childIdx.size();
 	nodePool[parentNodeId]->childIdx.push_back( childNodeId );
 	return childIdx;
@@ -3334,6 +3390,7 @@ int Scene::AddChildNode( const int parentNodeId, const int childNodeId )
 //  +-----------------------------------------------------------------------------+
 int Scene::GetChildId( const int parentId, const int childIdx )
 {
+	if (parentId < 0 || parentId >= (int)nodePool.size() || !nodePool[parentId]) return -1;
 	return nodePool[parentId]->childIdx[childIdx];
 }
 
@@ -3347,6 +3404,7 @@ int Scene::GetChildId( const int parentId, const int childIdx )
 //  +-----------------------------------------------------------------------------+
 void Scene::RemoveNode( const int nodeId )
 {
+	if (nodeId < 0 || nodeId >= (int)nodePool.size() || !nodePool[nodeId]) return;
 	// remove the instance from the scene graph
 	for (int s = (int)rootNodes.size(), i = 0; i < s; i++) if (rootNodes[i] == nodeId)
 	{
@@ -3354,9 +3412,12 @@ void Scene::RemoveNode( const int nodeId )
 		rootNodes.pop_back();
 		break;
 	}
-	// delete the instance
+	// delete the instance. Note: the slot in nodePool is emptied rather than
+	// erased, since nodes refer to each other by index; everything that walks
+	// the node pool skips empty slots. The destructor retires the area lights
+	// of the node and disables its tlas instance.
 	Node* node = nodePool[nodeId];
-	nodePool[nodeId] = 0; // safe; we only access the nodes ::std::vector indirectly.
+	nodePool[nodeId] = 0;
 	delete node;
 }
 
@@ -3477,7 +3538,7 @@ int Scene::FindNextMaterialID( const char* name, const int matID )
 //  +-----------------------------------------------------------------------------+
 int Scene::FindNode( const char* name )
 {
-	for (auto node : nodePool) if (node->name.compare( name ) == 0) return node->ID;
+	for (auto node : nodePool) if (node && node->name.compare( name ) == 0) return node->ID;
 	return -1;
 }
 
@@ -3488,9 +3549,10 @@ int Scene::FindNode( const char* name )
 //  +-----------------------------------------------------------------------------+
 void Scene::CreateOpacityMicroMaps( const int nodeId, const int N )
 {
-	Node* node = nodePool[nodeId];
-	int m = node->meshID;
-	if (m > -1) meshPool[m]->CreateOpacityMicroMaps( N );
+	Node* node = nodeId > -1 && nodeId < (int)nodePool.size() ? nodePool[nodeId] : 0;
+	if (!node) return;
+	const int m = node->meshID;
+	if (m > -1 && meshPool[m]) meshPool[m]->CreateOpacityMicroMaps( N );
 	for (int id : node->childIdx) CreateOpacityMicroMaps( id, N );
 }
 
@@ -3500,9 +3562,13 @@ void Scene::CreateOpacityMicroMaps( const int nodeId, const int N )
 //  +-----------------------------------------------------------------------------+
 void Scene::SetBVHType( const int nodeId, const int t )
 {
-	Node* node = nodePool[nodeId];
-	int m = node->meshID;
-	if (m > -1) meshPool[m]->blas.bvhType = t;
+	Node* node = nodeId > -1 && nodeId < (int)nodePool.size() ? nodePool[nodeId] : 0;
+	if (!node) return;
+	const int m = node->meshID;
+	// note: the existing blas is of the wrong type now; Node::Update discards
+	// it and builds a new one, which is why we flag the geometry as changed.
+	if (m > -1 && meshPool[m] && meshPool[m]->blas.bvhType != (uint32_t)t)
+		meshPool[m]->blas.bvhType = t, meshPool[m]->geomChanged = true;
 	for (int id : node->childIdx) SetBVHType( id, t );
 }
 
@@ -3512,7 +3578,8 @@ void Scene::SetBVHType( const int nodeId, const int t )
 //  +-----------------------------------------------------------------------------+
 int Scene::FindMeshNode( const int nodeId, const int meshId )
 {
-	Node* node = nodePool[nodeId];
+	Node* node = nodeId > -1 && nodeId < (int)nodePool.size() ? nodePool[nodeId] : 0;
+	if (!node) return -1;
 	if (node->meshID == meshId) return nodeId;
 	for (int id : node->childIdx)
 	{
@@ -3538,7 +3605,7 @@ int Scene::CollapseMeshes( const int subtreeRoot )
 	while (1)
 	{
 		Node* node = nodePool[nodeId];
-		int m = node->meshID;
+		const int m = node ? node->meshID : -1;
 		if (m > -1 && meshPool[m])
 		{
 			if (meshPool[m]->joints.size() > 0 || meshPool[m]->omaps != 0)
@@ -3550,7 +3617,7 @@ int Scene::CollapseMeshes( const int subtreeRoot )
 			triCount += (int)meshPool[m]->triangles.size();
 			if (firstMesh == -1) firstMesh = m, firstNode = nodeId;
 		}
-		for (int id : node->childIdx) stack.push_back( id );
+		if (node) for (int id : node->childIdx) stack.push_back( id );
 		if (stack.empty()) break;
 		nodeId = stack.back(), stack.pop_back();
 	}
@@ -3567,7 +3634,7 @@ int Scene::CollapseMeshes( const int subtreeRoot )
 	while (1)
 	{
 		Node* node = nodePool[nodeId];
-		int m = node->meshID;
+		const int m = node ? node->meshID : -1;
 		if (m > -1 && m != firstMesh)
 		{
 			// note: may already be 0 if a second node referenced the same mesh.
@@ -3581,7 +3648,7 @@ int Scene::CollapseMeshes( const int subtreeRoot )
 			}
 			node->meshID = -1;
 		}
-		for (int id : node->childIdx) stack.push_back( id );
+		if (node) for (int id : node->childIdx) stack.push_back( id );
 		if (stack.empty()) break;
 		nodeId = stack.back(), stack.pop_back();
 	}
@@ -3603,7 +3670,7 @@ int Scene::CollapseMeshes( const int subtreeRoot )
 //  +-----------------------------------------------------------------------------+
 void Scene::SetNodeTransform( const int nodeId, const ts_mat4& transform )
 {
-	if (nodeId < 0 || nodeId >= (int)nodePool.size()) return;
+	if (nodeId < 0 || nodeId >= (int)nodePool.size() || !nodePool[nodeId]) return;
 	nodePool[nodeId]->localTransform = transform;
 }
 
@@ -3614,7 +3681,7 @@ void Scene::SetNodeTransform( const int nodeId, const ts_mat4& transform )
 const ts_mat4& Scene::GetNodeTransform( const int nodeId )
 {
 	static ts_mat4 dummyIdentity;
-	if (nodeId < 0 || nodeId >= (int)nodePool.size()) return dummyIdentity;
+	if (nodeId < 0 || nodeId >= (int)nodePool.size() || !nodePool[nodeId]) return dummyIdentity;
 	return nodePool[nodeId]->localTransform;
 }
 
@@ -3744,18 +3811,15 @@ void Scene::UpdateSceneGraph( const float deltaTime )
 	for (int nodeIdx : rootNodes)
 	{
 		Node* node = nodePool[nodeIdx];
+		if (!node) continue; // note: removed by Scene::RemoveNode.
 		ts_mat4 T;
 		node->Update( T /* start with an identity matrix */ );
 	}
 	// update tlas
 	static ::std::vector<tinybvh::BVHBase*> bvhList;
-	if (bvhList.size() != meshPool.size())
-	{
-		// note: assign, so entries for empty mesh slots are null rather than garbage.
 		bvhList.assign( meshPool.size(), nullptr );
 		for (size_t i = 0; i < meshPool.size(); i++) if (meshPool[i])
 			bvhList[i] = meshPool[i]->blas.dynamicBVH;
-	}
 	const uint32_t bvhListSize = (uint32_t)bvhList.size();
 	if (defaultBVHType == GPU_DYNAMIC || defaultBVHType == GPU_RIGID || defaultBVHType == GPU_STATIC)
 	{

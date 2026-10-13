@@ -45,6 +45,9 @@
     <ClInclude Include="..\..\tiny_bvh_arm_double.h">
       <Filter>tinybvh</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\tiny_ocl.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="shaders\trace.rgen">
