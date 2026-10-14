@@ -30,10 +30,10 @@ The library consists of `tiny_bvh.h` and the `tiny_bvh_*.h` headers next to it:
 | --- | --- |
 | `tiny_bvh.h` | configuration, platform detection; **the only header application code includes** |
 | `tiny_bvh_base.h` | platform-neutral code: types, builders, traversal, TLAS, voxels |
-| `tiny_bvh_x86_float.h` | SSE / AVX / AVX2 kernels for the single precision layouts |
-| `tiny_bvh_x86_double.h` | x86 kernels for the double precision layouts |
-| `tiny_bvh_arm_float.h` | NEON kernels for the single precision layouts |
-| `tiny_bvh_arm_double.h` | ARM kernels for the double precision layouts |
+| `tiny_bvh_x86_float.h` | x86 SIMD (SSE / AVX / AVX2) kernels for the single precision layouts |
+| `tiny_bvh_x86_double.h` | x86 SIMD kernels for the double precision layouts |
+| `tiny_bvh_arm_float.h` | ARM SIMD (NEON) kernels for the single precision layouts |
+| `tiny_bvh_arm_double.h` | ARM SIMD kernels for the double precision layouts |
 
 Keep them together and include only `tiny_bvh.h`. Define `TINYBVH_IMPLEMENTATION` in exactly one translation unit:
 
