@@ -148,6 +148,12 @@ private:
 	void OptExRefitUp( uint32_t nodeIdx );
 	void OptExComputeCosts( State& st );
 	void RefreshOwnArea( State& st );
+	struct SortItem { uint32_t idx; float cost; };
+	struct RefitRecord { bvhvec3 bmin; uint32_t node; bvhvec3 bmax; uint32_t dummy; }; // 32 bytes
+	double RefitUp( uint32_t nodeIdx, RefitRecord* journal, uint32_t& journalPtr, const uint32_t journalCap );
+	float SAHCostUp( uint32_t nodeIdx ) const;
+	uint32_t FindBestNewPosition( const uint32_t Lid, float& bestCost ) const;
+	void OptimizeSerial( const uint32_t iterations, const bool extreme, bool stochastic );
 	uint32_t OptExSweepSplit( uint32_t* leaf, const uint32_t count, const float jitter, uint32_t& seed, State& st );
 	uint32_t OptExBuildTopology( uint32_t* leaf, const uint32_t count, uint32_t* slots, uint32_t& slotPtr,
 		const uint32_t parent, const float jitter, uint32_t& seed, float& interiorCost, State& st );
@@ -454,6 +460,259 @@ bool Optimizer::OptExTreelet( const uint32_t nodeIdx, const uint32_t maxL, State
 	}
 	return true;
 }
+
+
+// ----------------------------------------------------------------------------------------
+// reinsertion
+//
+// Bittner's insertion-based optimization, moved here verbatim from BVH_Verbose::Optimize. The
+// library runs the parallel method of Meister & Bittner instead, which does less serial work
+// but converges to a slightly higher SAH cost; this one stays for the offline case, where the
+// quality matters and the wall clock does not.
+// ----------------------------------------------------------------------------------------
+void Optimizer::OptimizeSerial( const uint32_t iterations, const bool extreme, bool stochastic )
+{
+	BVH_FATAL_ERROR_IF( b.bvhNode == 0, "Optimizer::OptimizeSerial, no nodes." );
+	BVH_FATAL_ERROR_IF( holes, "Optimizer::OptimizeSerial, tree has holes; compact it first." );
+	if (iterations == 0 || b.usedNodes < 6 || b.bvhNode[0].isLeaf()) return;
+	// working memory, allocated once.
+	SortItem* sortList = (SortItem*)tinybvh::malloc64( b.usedNodes * sizeof( SortItem ) );
+	const uint32_t journalCap = 4096; // >> 3x max tree depth
+	RefitRecord* journal = (RefitRecord*)tinybvh::malloc64( journalCap * sizeof( RefitRecord ) );
+	const double minGain = -1e-7 * (double)b.bvhNode[0].SA();
+	uint32_t seed = 0x12345678u;
+	// optimize by reinserting subtrees with a high cost - Section 3.4 of the paper.
+	for (uint32_t i = 0; i < iterations; i++)
+	{
+		// calculate combined cost for all nodes
+		uint32_t interiorNodes = 0;
+		for (uint32_t j = 2; j < b.usedNodes; j++)
+		{
+			const Node& node = b.bvhNode[j];
+			if (node.isLeaf()) continue;
+			// skip the two children of the root: they have no grandparent to reattach to.
+			if (node.parent == 0) continue;
+			const float A = node.SA(), AL = b.bvhNode[node.left].SA(), AR = b.bvhNode[node.right].SA();
+			const float Mmin = A / tinybvh::tinybvh_max( float( 1e-10 ), tinybvh::tinybvh_min( AL, AR ) );
+			const float Msum = A / tinybvh::tinybvh_max( float( 1e-10 ), float( 0.5 ) * (AL + AR) );
+			sortList[interiorNodes].idx = j, sortList[interiorNodes++].cost = A * Msum * Mmin;
+		}
+		if (interiorNodes == 0) break;
+		// last couple of iterations we will process more nodes.
+		const float portion = stochastic ? 0.5f : (extreme ? (0.01f + (0.6f * (float)i) / (float)iterations) : 0.01f);
+		const uint32_t limit = tinybvh::tinybvh_max( (uint32_t)1, tinybvh::tinybvh_min( interiorNodes, (uint32_t)(portion * (float)interiorNodes) ) );
+		const uint32_t step = tinybvh::tinybvh_max( (uint32_t)1, (uint32_t)(portion / 0.02f) );
+		// partial descending sort: only the first 'limit' entries need to end up in order.
+		struct Task { uint32_t first, last; } stack[STACK_SIZE];
+		uint32_t first = 0, last = interiorNodes - 1;
+		uint32_t stackPtr = 0;
+		while (1)
+		{
+			if (first >= last)
+			{
+				if (stackPtr == 0) break; else first = stack[--stackPtr].first, last = stack[stackPtr].last;
+				continue;
+			}
+			// median-of-three pivot
+			SortItem t;
+			const uint32_t mid = first + ((last - first) >> 1);
+			if (sortList[mid].cost > sortList[first].cost) t = sortList[mid], sortList[mid] = sortList[first], sortList[first] = t;
+			if (sortList[last].cost > sortList[first].cost) t = sortList[last], sortList[last] = sortList[first], sortList[first] = t;
+			if (sortList[last].cost > sortList[mid].cost) t = sortList[last], sortList[last] = sortList[mid], sortList[mid] = t;
+			t = sortList[mid], sortList[mid] = sortList[first], sortList[first] = t;
+			uint32_t pivot = first;
+			const SortItem e = sortList[first];
+			for (uint32_t j = first + 1; j <= last; j++) if (sortList[j].cost > e.cost)
+				t = sortList[j], sortList[j] = sortList[++pivot], sortList[pivot] = t;
+			t = sortList[pivot], sortList[pivot] = sortList[first], sortList[first] = t;
+			if (pivot + 1 < limit && stackPtr < STACK_SIZE) stack[stackPtr].first = pivot + 1, stack[stackPtr++].last = last;
+			if (pivot == 0)
+			{
+				if (stackPtr == 0) break; else first = stack[--stackPtr].first, last = stack[stackPtr].last;
+				continue;
+			}
+			last = pivot - 1;
+		}
+		// reinsert selected nodes
+		Node bckp[5];
+		uint32_t start = 0;
+		if (stochastic)
+		{
+			float r = tinybvh::tinybvh_rndfloat( seed );
+			r = tinybvh::tinybvh_max( 0.0f, (r * 1.2f) - 0.3f ); // 0 .. 0.9f
+			start = (uint32_t)((float)limit * r);
+		}
+		uint32_t accepted = 0;
+		for (uint32_t j = start; j < limit; j += stochastic ? (uint32_t)((tinybvh::tinybvh_rnduint( seed ) & 63) + 1) : step)
+		{
+			// prepare change
+			const uint32_t Nid = sortList[j].idx;
+			Node& N = b.bvhNode[Nid]; // N must have a grandparent to reattach its sibling to.
+			if (N.isLeaf() || N.parent == 0 || N.parent == (uint32_t)-1) continue;
+			const uint32_t Pid = N.parent;
+			Node& P = b.bvhNode[Pid];
+			const uint32_t X1 = P.parent, X2 = (P.left == Nid ? P.right : P.left);
+			uint32_t jPtr = 0;
+			// execute the change, accumulating the exact SAH delta as we go.
+			bckp[0] = b.bvhNode[X1];
+			if (b.bvhNode[X1].left == Pid) b.bvhNode[X1].left = X2;
+			else /* b.bvhNode[X1].right == Pid */ b.bvhNode[X1].right = X2;
+			const uint32_t p2 = b.bvhNode[X2].parent;
+			b.bvhNode[X2].parent = X1;
+			const uint32_t Lid = N.left, Rid = N.right;
+			double deltaArea = RefitUp( X2, journal, jPtr, journalCap );
+			float cost1, cost2;
+			const uint32_t Xbest1 = FindBestNewPosition( Lid, cost1 );
+			if (Xbest1 == 0)
+			{
+				while (jPtr) --jPtr, b.bvhNode[journal[jPtr].node].aabbMin = journal[jPtr].bmin,
+					b.bvhNode[journal[jPtr].node].aabbMax = journal[jPtr].bmax;
+				b.bvhNode[X2].parent = p2, b.bvhNode[X1] = bckp[0];
+				continue;
+			}
+			const uint32_t XA = b.bvhNode[Xbest1].parent;
+			bckp[1] = b.bvhNode[Nid];
+			N.left = Xbest1, N.right = Lid, N.parent = XA;
+			bckp[2] = b.bvhNode[XA];
+			if (b.bvhNode[XA].left == Xbest1) b.bvhNode[XA].left = Nid; else b.bvhNode[XA].right = Nid;
+			const uint32_t p3 = b.bvhNode[Xbest1].parent, p4 = b.bvhNode[Lid].parent;
+			b.bvhNode[Xbest1].parent = Nid, b.bvhNode[Lid].parent = Nid;
+			deltaArea += RefitUp( Nid, journal, jPtr, journalCap );
+			const uint32_t Xbest2 = FindBestNewPosition( Rid, cost2 );
+			if (Xbest2 == 0) // [10] defensive, as above.
+			{
+				b.bvhNode[Lid].parent = p4, b.bvhNode[Xbest1].parent = p3;
+				b.bvhNode[XA] = bckp[2], b.bvhNode[Nid] = bckp[1];
+				b.bvhNode[X2].parent = p2, b.bvhNode[X1] = bckp[0];
+				while (jPtr) --jPtr, b.bvhNode[journal[jPtr].node].aabbMin = journal[jPtr].bmin,
+					b.bvhNode[journal[jPtr].node].aabbMax = journal[jPtr].bmax;
+				continue;
+			}
+			const uint32_t XB = b.bvhNode[Xbest2].parent;
+			bckp[3] = b.bvhNode[Pid];
+			P.left = Xbest2, P.right = Rid, P.parent = XB;
+			bckp[4] = b.bvhNode[XB];
+			if (b.bvhNode[XB].left == Xbest2) b.bvhNode[XB].left = Pid; else b.bvhNode[XB].right = Pid;
+			const uint32_t p1 = b.bvhNode[Xbest2].parent, p0 = b.bvhNode[Rid].parent;
+			b.bvhNode[Xbest2].parent = Pid, b.bvhNode[Rid].parent = Pid;
+			deltaArea += RefitUp( Pid, journal, jPtr, journalCap );
+			// keep the change if it meaningfully reduced the SAH cost of the tree.
+			if (deltaArea < minGain) { accepted++; continue; }
+			// undo change, mind the order.
+			b.bvhNode[Rid].parent = p0, b.bvhNode[Xbest2].parent = p1, b.bvhNode[XB] = bckp[4];
+			b.bvhNode[Pid] = bckp[3], b.bvhNode[Lid].parent = p4, b.bvhNode[Xbest1].parent = p3;
+			b.bvhNode[XA] = bckp[2], b.bvhNode[Nid] = bckp[1], b.bvhNode[X2].parent = p2, b.bvhNode[X1] = bckp[0];
+			// restore the boxes from the journal, newest first.
+			while (jPtr) --jPtr, b.bvhNode[journal[jPtr].node].aabbMin = journal[jPtr].bmin,
+				b.bvhNode[journal[jPtr].node].aabbMax = journal[jPtr].bmax;
+		}
+		if (accepted == 0 && !stochastic && !extreme) break;
+	}
+	b.Refit( 0, true );
+	tinybvh::free64( journal );
+	tinybvh::free64( sortList );
+}
+
+double Optimizer::RefitUp( uint32_t nodeIdx, RefitRecord* journal, uint32_t& journalPtr, const uint32_t journalCap )
+{
+	double deltaArea = 0;
+	bool first = true;
+	while (1)
+	{
+		Node& node = b.bvhNode[nodeIdx];
+		if (!node.isLeaf())
+		{
+			const Node& left = b.bvhNode[node.left];
+			const Node& right = b.bvhNode[node.right];
+			const bvhvec3 bmin = tinybvh::tinybvh_min( left.aabbMin, right.aabbMin );
+			const bvhvec3 bmax = tinybvh::tinybvh_max( left.aabbMax, right.aabbMax );
+			// early out: if this node's box is unchanged, no ancestor changes either.
+			if (!first &&
+				bmin.x == node.aabbMin.x && bmin.y == node.aabbMin.y && bmin.z == node.aabbMin.z &&
+				bmax.x == node.aabbMax.x && bmax.y == node.aabbMax.y && bmax.z == node.aabbMax.z) break;
+			if (journalPtr == journalCap) return BVH_FAR; // overflow: force a reject.
+			journal[journalPtr].node = nodeIdx;
+			journal[journalPtr].bmin = node.aabbMin;
+			journal[journalPtr++].bmax = node.aabbMax;
+			const float areaBefore = node.SA();
+			node.aabbMin = bmin, node.aabbMax = bmax;
+			deltaArea += (double)node.SA() - (double)areaBefore;
+		}
+		first = false;
+		if (nodeIdx == 0) break; else nodeIdx = node.parent;
+	}
+	return deltaArea;
+}
+
+// SAHCostUp: Calculate the SAH cost of a node and its ancestry
+float Optimizer::SAHCostUp( uint32_t nodeIdx ) const
+{
+	float sum = 0;
+	while (nodeIdx != (uint32_t)-1)
+	{
+		Node& node = b.bvhNode[nodeIdx];
+		sum += SurfaceArea( node.aabbMin, node.aabbMax );
+		nodeIdx = node.parent;
+	}
+	return sum;
+}
+
+// FindBestNewPosition
+// Part of "Fast Insertion-Based Optimization of Bounding Volume Hierarchies"
+uint32_t Optimizer::FindBestNewPosition( const uint32_t Lid, float& bestCost ) const
+{
+	struct Task { float ci; uint32_t node; };
+	static const int maxTasks = STACK_SIZE;
+	ALIGNED( 64 ) Task task[maxTasks];
+	const Node& L = b.bvhNode[Lid];
+	const bvhvec3 Lmin = L.aabbMin, Lmax = L.aabbMax;
+	const float LSA = L.SA();
+	float Cbest = BVH_FAR;
+	uint32_t Xbest = 0;
+	int tasks = 1;
+	task[0].ci = 0, task[0].node = 0;
+	while (tasks > 0)
+	{
+		// pop the task with the smallest induced cost
+		const uint32_t Xid = task[0].node;
+		const float CiLX = task[0].ci;
+		if (--tasks > 0)
+		{
+			task[0] = task[tasks];
+			for (int i = 0; ; )
+			{
+				const int l = 2 * i + 1, r = l + 1;
+				int s = i;
+				if (l < tasks && task[l].ci < task[s].ci) s = l;
+				if (r < tasks && task[r].ci < task[s].ci) s = r;
+				if (s == i) break;
+				const Task t = task[i]; task[i] = task[s]; task[s] = t; i = s;
+			}
+		}
+		// if the popped task has the lowest induced cost in the queue: done.
+		if (CiLX + LSA >= Cbest) break;
+		const Node& X = b.bvhNode[Xid];
+		const float CdLX = SurfaceArea( tinybvh::tinybvh_min( Lmin, X.aabbMin ), tinybvh::tinybvh_max( Lmax, X.aabbMax ) );
+		const float CLX = CiLX + CdLX;
+		if (CLX < Cbest && Xid != 0) Cbest = CLX, Xbest = Xid;
+		const float Ci = CLX - X.SA();
+		if (Ci + LSA >= Cbest || X.isLeaf() || tasks + 2 > maxTasks) continue;
+		for (int c = 0; c < 2; c++)
+		{
+			int i = tasks++;
+			task[i].ci = Ci, task[i].node = c ? X.right : X.left;
+			while (i > 0)
+			{
+				const int p = (i - 1) >> 1;
+				if (task[p].ci <= task[i].ci) break;
+				const Task t = task[p]; task[p] = task[i]; task[i] = t; i = p;
+			}
+		}
+	}
+	bestCost = Cbest;
+	return Xbest;
+}
+
 
 void Optimizer::OptExTreeletSweep( const Settings& s, State& st )
 {
@@ -1027,7 +1286,7 @@ void Optimizer::Run( const Ref* refBox, const uint32_t* vertIdx )
 			memcpy( snapPrim, b.primIdx, b.idxCount * sizeof( uint32_t ) );
 		}
 		RefreshOwnArea( st );
-		if (s.reinsertIters) b.Optimize( s.reinsertIters, true, false ), Progress( round, roundStart, "reinsertion" ); // stage 1
+		if (s.reinsertIters) OptimizeSerial( s.reinsertIters, true, false ), Progress( round, roundStart, "reinsertion" ); // stage 1
 		for (uint32_t k = 0; k < s.treeletSweeps; k++) OptExTreeletSweep( s, st ), Progress( round, roundStart, "treelets" ); // stage 2
 		if (s.rebuildSubtrees) OptExRebuildSubtrees( s, st ), Progress( round, roundStart, "subtree rebuild" ); // stage 3
 		if (s.unsplitRefs) { OptExUnsplit( st ); OptExCompactRefs(); Progress( round, roundStart, "unsplitting" ); } // stage 4
