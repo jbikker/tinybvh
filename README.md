@@ -72,8 +72,8 @@ A Bounding Volume Hierarchy is a data structure used to quickly find intersectio
 
 | setting | builder |
 | --- | --- |
-| _(default)_ | **Bonsai** ([Ganestam et al., 2015](https://www.highperformancegraphics.org/wp-content/uploads/2015/Papers-Session1/HPG2015_BonsaiGrowingTreelets.pdf)): grid cells become mini trees, built in parallel on top of the SIMD binned SAH code, then pruned and combined under a top tree. |
-| `useSpatialSplits` | **Bonsai HQ** (Ganestam & Doggett, 2016): SAH-guided triangle splitting during Bonsai partitioning. |
+| _(default)_ | **Bonsai** ([Ganestam et al., 2015](https://fileadmin.cs.lth.se/graphics/research/papers/2015/bonsai/)): grid cells become mini trees, built in parallel on top of the SIMD binned SAH code, then pruned and combined under a top tree. |
+| `useSpatialSplits` | **Bonsai HQ** ([Ganestam & Doggett, 2016](https://fileadmin.cs.lth.se/graphics/research/papers/2016/splitting/)): SAH-guided triangle splitting during Bonsai partitioning. |
 | `binnedBVH` | **Binned SAH**, using the AVX (x86) or NEON (ARM) SIMD builder. |
 | `binnedBVH` + `useSpatialSplits` | **SBVH** ([Stich et al., 2009](https://www.nvidia.in/docs/IO/77714/sbvh.pdf)), including "unsplitting". |
 | `useSIMDifavailable = false` | Scalar reference binned SAH builder; SBVH if `useSpatialSplits` is set. |
