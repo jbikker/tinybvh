@@ -235,6 +235,10 @@ THE SOFTWARE.
 #ifndef MT_CONVERT_MAX_TASKS
 #define MT_CONVERT_MAX_TASKS 32
 #endif
+// FitLeafs: nodes a slice may leave for the serial pass; depth-bounded, with a fallback if exceeded.
+#ifndef MT_FIT_PENDING
+#define MT_FIT_PENDING 128
+#endif
 
 // Experimental / WIP features
 

@@ -959,6 +959,7 @@ public:
 	bool IntersectSphere( const Vec3& pos, const Float r ) const;
 	void ConvertFrom( const BVH_Verbose& original, bool compact = true );
 	void SplitLeafs( const Index maxPrims );
+	void FitLeafs( const Index primCount );
 	Float SAHCost( const Index nodeIdx = 0, uint32_t depth = 0 ) const;
 	Float EPOCost( const Index nodeIdx = 0, uint32_t depth = 0 ) const;
 	Index CollectNodes( const Index root, Index* list, const Index cap ) const;
@@ -4001,40 +4002,120 @@ TEMPLATED void BVH<Float, Index>::CombineLeafs( const Index primCount )
 {
 	// merging two leaves requires the primitives of each subtree to be contiguous in primIdx.
 	if (!orderedNodes) Compact();
-	struct Frame { Index node, firstLeft, leftCount; uint32_t state; };
-	Frame stack[TINYBVH_STACK_SIZE];
-	uint32_t stackPtr = 0;
-	stack[stackPtr].node = 0, stack[stackPtr].state = 0;
-	stack[stackPtr].firstLeft = 0, stack[stackPtr++].leftCount = 0;
-	Index retFirst = 0, retCount = 0; // result of the frame that just finished
-	while (stackPtr)
+	const Index nodes = tinybvh_max( newNodePtr, usedNodes );
+	if (nodes == 0) return;
+	Index* subtreePrims = (Index*)AlignedAlloc( (size_t)nodes * sizeof( Index ) );
+	if (nodes > 1) subtreePrims[1] = 0; // node 1 is never part of the tree: the root has no sibling.
+	for (Index i = nodes; i-- > 0; )
 	{
-		Frame& f = stack[stackPtr - 1];
-		BVHNode& node = bvhNode[f.node];
-		if (f.state == 0)
-		{
-			if (node.isLeaf()) { retFirst = node.leftFirst, retCount = node.triCount, stackPtr--; continue; }
-			BVH_FATAL_ERROR_IF( stackPtr == BVH_NUM_ELEMS( stack ), "BVH::CombineLeafs( .. ), tree too deep." );
-			f.state = 1;
-			stack[stackPtr].node = node.leftFirst, stack[stackPtr].state = 0;
-			stack[stackPtr].firstLeft = 0, stack[stackPtr++].leftCount = 0;
-			continue;
-		}
-		if (f.state == 1)
-		{
-			// left child done; descend into the right one. 'node.leftFirst' is still
-			// the child pointer here: it is only overwritten in state 2.
-			BVH_FATAL_ERROR_IF( stackPtr == BVH_NUM_ELEMS( stack ), "BVH::CombineLeafs( .. ), tree too deep." );
-			f.firstLeft = retFirst, f.leftCount = retCount, f.state = 2;
-			stack[stackPtr].node = node.leftFirst + 1, stack[stackPtr].state = 0;
-			stack[stackPtr].firstLeft = 0, stack[stackPtr++].leftCount = 0;
-			continue;
-		}
-		// both children done; retFirst/retCount describe the right one.
-		const Index first = tinybvh_min( f.firstLeft, retFirst ), total = f.leftCount + retCount;
-		if (total <= primCount) node.triCount = total, node.leftFirst = first;
-		retFirst = first, retCount = total, stackPtr--;
+		if (i == 1) continue;
+		BVHNode& node = bvhNode[i];
+		if (node.isLeaf()) { subtreePrims[i] = node.triCount; continue; }
+		const Index first = node.leftFirst;
+		// Nodes that were never allocated, or that an earlier collapse orphaned, are not
+		// necessarily well-formed; their child pointer is only trusted if it can be one.
+		if (first <= i || first + 1 >= nodes) { subtreePrims[i] = 0; continue; }
+		const Index total = subtreePrims[first] + subtreePrims[first + 1];
+		subtreePrims[i] = total;
+		if (total == 0 || total > primCount) continue;
+		// A subtree small enough to merge has both children merged already, so their 'leftFirst'
+		// is the first primitive of each, not a child pointer.
+		node.leftFirst = tinybvh_min( bvhNode[first].leftFirst, bvhNode[first + 1].leftFirst ), node.triCount = total;
 	}
+	AlignedFree( subtreePrims );
+}
+
+// FitLeafs: CombineLeafs( primCount ) followed by SplitLeafs( primCount ), fused, parallel.
+TEMPLATED void BVH<Float, Index>::FitLeafs( const Index primCount )
+{
+	if (!orderedNodes || hasHoles) Compact();
+	const Index nodes = tinybvh_max( newNodePtr, usedNodes );
+	if (nodes == 0) { usedNodes = 0; return; }
+	const uint32_t slices = TaskCount( PoolAvailable() && nodes >= (Index)MT_CONVERT_MIN_NODES,
+		nodes, MT_CONVERT_TASK_NODES, MT_CONVERT_MAX_TASKS );
+	Index pendFirst[MT_CONVERT_MAX_TASKS], pendLast[MT_CONVERT_MAX_TASKS], slicePairs[MT_CONVERT_MAX_TASKS];
+	uint32_t pendCount[MT_CONVERT_MAX_TASKS];
+	const Index pending = (Index)-1; // no subtree holds this many primitives.
+	// 1. Collapse.
+	Index* subtreePrims = (Index*)AlignedAlloc( (size_t)nodes * sizeof( Index ) );
+	Index* pendList = (Index*)AlignedAlloc( (size_t)slices * MT_FIT_PENDING * sizeof( Index ) );
+	// Counts for (i, limit) must be final; returns false if the node has to wait for a later slice.
+	auto Collapse = [&]( const Index i, const Index limit )
+	{
+		BVHNode& node = bvhNode[i];
+		if (node.isLeaf()) { subtreePrims[i] = node.triCount; return true; }
+		const Index first = node.leftFirst;
+		// Nodes that were never allocated, or that an earlier collapse orphaned, are not
+		// necessarily well-formed; their child pointer is only trusted if it can be one.
+		if (first <= i || first + 1 >= nodes) { subtreePrims[i] = 0; return true; }
+		if (first + 1 >= limit) { subtreePrims[i] = pending; return false; }
+		const Index l = subtreePrims[first], r = subtreePrims[first + 1];
+		if (l == pending || r == pending) { subtreePrims[i] = pending; return false; }
+		const Index total = l + r;
+		subtreePrims[i] = total;
+		if (total == 0 || total > primCount) return true;
+		// A subtree small enough to merge has both children merged already, so their 'leftFirst'
+		// is the first primitive of each, not a child pointer.
+		node.leftFirst = tinybvh_min( bvhNode[first].leftFirst, bvhNode[first + 1].leftFirst ), node.triCount = total;
+		return true;
+	};
+	ParallelFor( true, slices, [&]( uint32_t s )
+	{
+		const Index start = SliceStart( nodes, s, slices ), end = SliceStart( nodes, s + 1, slices );
+		Index* list = pendList + (size_t)s * MT_FIT_PENDING, lo = end, hi = start, pairs = 0;
+		uint32_t count = 0;
+		for (Index i = end; i-- > start; )
+		{
+			if (i == 1) { subtreePrims[1] = 0; continue; } // node 1 is never part of the tree.
+			const Index leafPrims = bvhNode[i].isLeaf() ? bvhNode[i].triCount : 0;
+			if (leafPrims > primCount) pairs += (leafPrims + primCount - 1) / primCount - 1;
+			if (Collapse( i, end )) continue;
+			if (count < MT_FIT_PENDING) list[count] = i;
+			if (lo == end) hi = i;
+			lo = i, count++;
+		}
+		pendFirst[s] = lo, pendLast[s] = hi, pendCount[s] = count, slicePairs[s] = pairs;
+	} );
+	for (uint32_t s = slices; s-- > 0; ) // resolve what the slices left, from the back
+	{
+		if (pendCount[s] == 0) continue;
+		if (pendCount[s] <= MT_FIT_PENDING)
+		{
+			// the list is in descending order, which is the order these have to be resolved in.
+			const Index* list = pendList + (size_t)s * MT_FIT_PENDING;
+			for (uint32_t p = 0; p < pendCount[s]; p++) Collapse( list[p], nodes );
+	}
+		else for (Index i = pendLast[s] + 1; i-- > pendFirst[s]; ) if (subtreePrims[i] == pending) Collapse( i, nodes );
+	}
+	AlignedFree( pendList );
+	AlignedFree( subtreePrims );
+	// 2. Split.
+	Index pairs = 0;
+	for (uint32_t s = 0; s < slices; s++) { const Index n = slicePairs[s]; slicePairs[s] = pairs, pairs += n; }
+	if (pairs == 0) { newNodePtr = usedNodes = nodes; return; }
+	BVH_FATAL_ERROR_IF( nodes + 2 * pairs > allocatedNodes, "BVH::FitLeafs( .. ), node pool too small." );
+	ParallelFor( true, slices, [&]( uint32_t s )
+	{
+		const Index end = SliceStart( nodes, s + 1, slices );
+		Index at = nodes + 2 * slicePairs[s];
+		for (Index i = SliceStart( nodes, s, slices ); i < end; i++) if (i != 1)
+	{
+		BVHNode* node = &bvhNode[i];
+		if (!node->isLeaf() || node->triCount <= primCount) continue;
+			// Split off 'primCount' primitives at a time into a left child, the rest into a right
+			// one, which is split further until it fits. Children inherit the bounds of the leaf.
+		for (Index first = node->leftFirst, count = node->triCount; count > primCount; count -= primCount)
+		{
+			BVHNode& left = bvhNode[at], & right = bvhNode[at + 1];
+			left = right = *node;
+			left.leftFirst = first, left.triCount = primCount;
+			right.leftFirst = first += primCount, right.triCount = count - primCount;
+			node->leftFirst = at, node->triCount = 0;
+			node = &right, at += 2;
+		}
+	}
+	} );
+	newNodePtr = usedNodes = nodes + 2 * pairs;
 }
 
 TEMPLATED bool BVH<Float, Index>::IntersectSphere( const Vec3& pos, const Float r ) const
@@ -6546,8 +6627,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::EmitNode( MBVH<4, Float, Index>& src, con
 
 TEMPLATED_M void MBVH<M, Float, Index>::ConvertForCPULayout( const bool leavesMerged )
 {
-	if (!leavesMerged) bvh.CombineLeafs( 4 );
-	bvh.SplitLeafs( 4 );
+	if (leavesMerged) bvh.SplitLeafs( 4 ); else bvh.FitLeafs( 4 );
 	leafPrimLimit = 4; // leaves in these layouts hold 4 prims
 	ConvertFrom( bvh, true );
 }
@@ -6833,8 +6913,7 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::Build( const Slice& vertices, const Ind
 	this->PassSettingsTo( bvh8 ), this->PassSettingsTo( bvh8.bvh );
 	// build underlying layout
 	bvh8.bvh.Build( vertices, indices, prims );
-	bvh8.bvh.CombineLeafs( 3 ); // merge subtrees that fit in one leaf slot
-	bvh8.bvh.SplitLeafs( 3 );
+	bvh8.bvh.FitLeafs( 3 ); // merge subtrees that fit in one leaf slot, cap the rest at that size
 	// convert to BVH8_CWBVH layout
 	bvh8.leafPrimLimit = 3; // a cwbvh leaf slot holds at most 3 prims
 	bvh8.ConvertFrom( bvh8.bvh, true );
@@ -8495,8 +8574,7 @@ TEMPLATED BVH8_CWBVH<Float, Index> BVH8_CWBVH<Float, Index>::Load( const char* f
 	if (src.usedNodes == 0) return result;
 	result.PassSettingsTo( result.bvh8 ), result.PassSettingsTo( result.bvh8.bvh );
 	result.bvh8.bvh = tinybvh_move( src );
-	result.bvh8.bvh.CombineLeafs( 3 ); // a cwbvh leaf slot holds at most 3 prims
-	result.bvh8.bvh.SplitLeafs( 3 );
+	result.bvh8.bvh.FitLeafs( 3 ); // a cwbvh leaf slot holds at most 3 prims
 	result.bvh8.leafPrimLimit = 3;
 	result.bvh8.ConvertFrom( result.bvh8.bvh, true );
 	result.ConvertFrom( result.bvh8, true );
