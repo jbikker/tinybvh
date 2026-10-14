@@ -67,9 +67,9 @@ static void QuitProcess() { exit( 1 ); }
 // settings
 constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 #define ENABLE_HWRT			true	// display info on hardware RT pipeline performance
-#define ENABLE_BVH2			true	// display info on BVH_GPU performance
+#define ENABLE_BVH2			false	// display info on BVH_GPU performance
 #define ENABLE_BVH4			false	// display info on BVH4_GPU performance
-#define ENABLE_CWBVH		false	// display info on BVH8_CWBVH performance
+#define ENABLE_CWBVH		true	// display info on BVH8_CWBVH performance
 #define ENABLE_RAY_QUERIES	false	// display info on inline ray query performance
 #define ENABLE_VALIDATION	false	// VK_LAYER_KHRONOS_validation; costs performance
 #define BARRIER_BETWEEN_DISPATCHES false
@@ -78,11 +78,11 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 // OpenCL interleaving. The OpenCL backends trace the same rays through the same
 // scene as the compute shaders: BVH_GPU with shaders/traverse.cl, the AMD layouts
 // with shaders/traverse_amd.cl, so the two APIs can be compared one frame apart.
-#define ENABLE_OPENCL		true	// init OpenCL and put its backends in the rotation
+#define ENABLE_OPENCL		false	// init OpenCL and put its backends in the rotation
 #define ENABLE_OCL_BVH2		true	// display info on OpenCL BVH_GPU performance
 #define ENABLE_OCL_AMD_BVH4	true	// display info on AMD BVH4 hardware traversal (RDNA3/RDNA4)
 #define ENABLE_OCL_AMD_BVH8	true	// display info on AMD BVH8 hardware traversal (RDNA4)
-#define OCL_PRESENT_RESULT	false	// show what OpenCL traced; costs a 4MB readback + upload per frame
+#define OCL_PRESENT_RESULT	true	// show what OpenCL traced; costs a 4MB readback + upload per frame
 #define OCL_DEVICE_INDEX	-1		// -1: use the GPU Vulkan runs on; else an index from the list printed at startup
 
 constexpr uint32_t NUM_INSTANCES = 1, FRAME_COUNT = 2;
@@ -867,7 +867,7 @@ static void UpdateRayBuffer()
 	// 64-byte layout, and both APIs must trace exactly the same set.
 	hostRays.assign( (size_t)rayCount * 8, 0.0f );
 	float* data = hostRays.data();
-	const char* raySetPath = "../../view3rays.bin";
+	const char* raySetPath = "../../diffrays.bin";
 	FILE* f = fopen( raySetPath, "rb" );
 	if (f)
 	{
