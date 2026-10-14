@@ -1122,7 +1122,7 @@ private:
 	Index AllocNodePair()
 	{
 	#ifdef ENABLE_THREADED_BUILDS
-		if (threadedBuild) return atomicNewNodePtr->fetch_add( 2 );
+		if (threadedBuild) return atomicNewNodePtr->fetch_add( 2, std::memory_order_relaxed );
 	#endif
 		const Index n = newNodePtr;
 		newNodePtr += 2;
@@ -3438,7 +3438,7 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 							if (valid == 3)
 							{
 							#ifdef ENABLE_THREADED_BUILDS
-								Index newFragIdx = threadedBuild ? atomicNextFrag->fetch_add( 1 ) : nextFrag++;
+								Index newFragIdx = threadedBuild ? atomicNextFrag->fetch_add( 1, std::memory_order_relaxed ) : nextFrag++;
 							#else
 								Index newFragIdx = nextFrag++;
 							#endif
@@ -7647,7 +7647,7 @@ TEMPLATED void BVH<Float, Index>::BonsaiHQPartition( BonsaiHQState& st, const Bo
 		if (doSplit && sum.both)
 		{
 		#ifdef ENABLE_THREADED_BUILDS
-			if (threadedBuild) frag = atomicNextFrag->fetch_add( sum.both ); else
+			if (threadedBuild) frag = atomicNextFrag->fetch_add( sum.both, std::memory_order_relaxed ); else
 		#endif
 				frag = nextFrag, nextFrag += sum.both;
 		}
