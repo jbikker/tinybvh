@@ -23,9 +23,18 @@ uint depth_to_pixel( const float t )
 	return 0xff000000 | (v << 16) | (v << 8) | v; // R in the low byte: R8G8B8A8_UNORM
 }
 
+#define BVH_DIR_MIN 0x1p-100f
+
 float safe_rcp( float x )
 {
-	return 1.0f / (sign( x ) * max( fabs( x ), 1e-5f ));
+	const uint s = as_uint( x ) & 0x80000000u;
+	return 1.0f / as_float( as_uint( fmax( fabs( x ), BVH_DIR_MIN ) ) | s );
+}
+
+float3 safe_rcp3( float3 d )
+{
+	const uint3 s = as_uint3( d ) & 0x80000000u;
+	return 1.0f / as_float3( as_uint3( fmax( fabs( d ), (float3)BVH_DIR_MIN ) ) | s );
 }
 
 // The hardware intrinsics only exist on RDNA3/RDNA4; elsewhere this file compiles

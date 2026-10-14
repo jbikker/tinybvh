@@ -6,11 +6,6 @@ struct BVHNode
 	float4 rmax; // unsigned firstTri in w
 };
 
-// 32 bytes per ray, bit for bit the RayData the compute shaders get: origin and
-// direction, with the pad lanes folded into the float4s. rD is derived per ray in
-// the kernel, as the GLSL does it, and there is no hit record because the only
-// thing written back is a pixel. Keeping the two sides on the same 32 bytes halves
-// the ray traffic and takes the last asymmetry out of the measurement.
 struct RayData
 {
 	// 16-byte values, to encourage the compilers to fetch 16 bytes at a time:
@@ -19,10 +14,6 @@ struct RayData
 	float4 D; // .xyz = direction, .w unused
 };
 
-// Workgroup shape. An 8x8 tile of the image per group, matching tiny.comp: a wave
-// then covers a square of pixels instead of a 64-wide strip of one scanline, which
-// keeps the rays in a wave inside a much tighter frustum - same node visits, far
-// fewer of them divergent.
 #define GROUP_X    8
 #define GROUP_Y    8
 #define GROUP_SIZE (GROUP_X * GROUP_Y)
@@ -30,12 +21,6 @@ struct RayData
 // BVH traversal stack size 
 #define STACK_SIZE 32
 
-// The stack lives in local memory rather than in a private array: a private array
-// with a dynamic index gets demoted to scratch by every compiler here, which is
-// slower than LDS and costs 128 bytes per lane. Depth-major indexing, so all lanes
-// at the same stack depth land on consecutive LDS banks. Note the cost:
-// GROUP_SIZE * STACK_SIZE * 4 = 8KB per group, which caps occupancy - exactly the
-// tradeoff tiny.comp makes.
 #define STACK_AT(i) stack[(i) * GROUP_SIZE + lane]
 
 float4 traverse( const global struct BVHNode* bvhNode, 
@@ -106,9 +91,18 @@ uint depth_to_pixel( const float t )
 	return 0xff000000 | (v << 16) | (v << 8) | v; // R in the low byte: R8G8B8A8_UNORM
 }
 
+#define BVH_DIR_MIN 0x1p-100f
+
 float safe_rcp( float x )
 {
-	return 1.0f / (sign( x ) * max( fabs( x ), 1e-5f ));
+	const uint s = as_uint( x ) & 0x80000000u;
+	return 1.0f / as_float( as_uint( fmax( fabs( x ), BVH_DIR_MIN ) ) | s );
+}
+
+float3 safe_rcp3( float3 d )
+{
+	const uint3 s = as_uint3( d ) & 0x80000000u;
+	return 1.0f / as_float3( as_uint3( fmax( fabs( d ), (float3)BVH_DIR_MIN ) ) | s );
 }
 
 // Launched 2D over the image: global size rtWidth x rtHeight, local size
@@ -123,7 +117,7 @@ void kernel bench_bvh2( const global struct BVHNode* bvhNode, const global float
 	const uint threadId = get_global_id( 1 ) * get_global_size( 0 ) + get_global_id( 0 );
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
-	const float3 rD = (float3)( safe_rcp( D.x ), safe_rcp( D.y ), safe_rcp( D.z ) );
+	const float3 rD = safe_rcp3( D );
 	const float4 hit = traverse( bvhNode, orderedVerts, 0, O, D, rD, 1e30f, stack, lane, 0 );
 	pixels[threadId] = depth_to_pixel( hit.x );
 }

@@ -29,14 +29,19 @@ struct RayData
 layout( set = 0, binding = 2, std430 ) readonly buffer RayBuffer { RayData rayBuffer[]; };
 
 // robust reciprocal calculation
-float safe_rcp( float x )
+
+#define BVH_DIR_MIN 7.88860905e-31f // 0x1p-100; 1 / BVH_DIR_MIN == BVH_RCP_FAR
+
+float safe_rcp( in float x )
 {
-	return 1.0f / (sign( x ) * max( abs( x ), 1e-5f ));
+	const uint s = floatBitsToUint( x ) & 0x80000000u;
+	return 1.0f / uintBitsToFloat( floatBitsToUint( max( abs( x ), BVH_DIR_MIN ) ) | s );
 }
 
-vec3 safe_rcp3( vec3 d )
+vec3 safe_rcp3( in vec3 d )
 {
-	return vec3( safe_rcp( d.x ), safe_rcp( d.y ), safe_rcp( d.z ) );
+	const uvec3 s = floatBitsToUint( d ) & 0x80000000u;
+	return 1.0f / uintBitsToFloat( floatBitsToUint( max( abs( d ), vec3( BVH_DIR_MIN ) ) ) | s );
 }
 
 #endif // COMMON_GLSL
