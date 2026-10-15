@@ -239,6 +239,6 @@ void kernel batch_gpu4wayHW_any( const global float4* alt4Node, global struct Ra
 
 	__local uint hwStack[HW_BVH_WORKGROUP_SIZE * HW_BVH_STACK_ENTRIES];
 	float4 hit = 0;
-	if (isoccluded_gpu4wayHW( alt4Node, O, D, rD, tmax, hwStack )) hit.w = as_float( 1 );
+	if (isoccluded_gpu4wayHW( alt4Node, O, D, rD, tmax, hwStack )) hit.w = 1;
 	rayData[threadId].hit = hit;
 }
