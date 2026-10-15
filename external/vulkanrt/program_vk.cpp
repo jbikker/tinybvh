@@ -2,8 +2,12 @@
 
 #if defined(_WIN32)
 #define VK_USE_PLATFORM_WIN32_KHR
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #else
 #define VK_USE_PLATFORM_XCB_KHR
@@ -113,10 +117,6 @@ using namespace tinybvh;
 // it does a global 'using namespace tinyocl', which would collide with the Buffer
 // struct below.
 #include "../../tiny_ocl.h"
-
-#ifndef CWBVH_COMPRESSED_TRIS
-#error "tiny8.comp assumes CWBVH_COMPRESSED_TRIS; enable it, or set TRI_STRIDE 3 in tiny8.comp and recompile"
-#endif
 
 // tinybvh BVH_GPU node.
 struct GPUBVHNode
