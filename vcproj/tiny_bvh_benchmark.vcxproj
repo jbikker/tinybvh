@@ -51,9 +51,12 @@
     <None Include="..\kernels\traverse.cl" />
     <None Include="..\kernels\traverse_amd_hw.cl" />
     <None Include="..\kernels\traverse_amd_hw_bvh4.cl" />
+    <None Include="..\kernels\traverse_amd_hw_bvh8.cl" />
     <None Include="..\kernels\traverse_bvh2.cl" />
     <None Include="..\kernels\traverse_bvh4.cl" />
     <None Include="..\kernels\traverse_cwbvh.cl" />
+    <None Include="..\kernels\wavefront_amd_hw.cl" />
+    <None Include="..\kernels\wavefront_amd_hw_bvh8.cl" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
