@@ -1242,6 +1242,7 @@ protected:
 	using Base::ParallelFor;
 	using Base::PoolAvailable;
 	using Base::SliceStart;
+	using Base::TaskCount;
 public:
 	struct BVHNode
 	{
@@ -3541,7 +3542,8 @@ TEMPLATED Float BVH<Float, Index>::NoSplitCostSAH( const Index Nparent ) const
 // BVH TOOLS
 
 #define BVH_METRIC_TASKS 256 // reduction tasks for tree quality metrics.
-#define OPTIMIZE_TASKS 512 // slices of the node list per phase of BVH_Verbose::Optimize.
+#define OPTIMIZE_TASKS 256 // upper bound on slices of the node list per phase of BVH_Verbose::Optimize.
+#define OPTIMIZE_NODES_PER_TASK 8192 // ..and the work each slice should hold.
 
 TEMPLATED Index BVH<Float, Index>::PrimCount( const Index nodeIdx ) const
 {
@@ -4792,70 +4794,81 @@ TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, u
 	for (Index i = 0; i < nodeCount; i++) if (bvhNode[i].isLeaf()) leafList[leafCount++] = i;
 	for (Index i = 0; i < nodeCount; i++) new (lock + i) std::atomic<uint64_t>( 0 ), new (arrived + i) std::atomic<Index>( 0 );
 	const bool threads = PoolAvailable();
-	const uint32_t tasks = (uint32_t)tinybvh_min( (Index)OPTIMIZE_TASKS, nodeCount );
-	const uint32_t leafTasks = (uint32_t)tinybvh_min( (Index)OPTIMIZE_TASKS, tinybvh_max( (Index)1, leafCount ) );
-	Float prevCost = SAHCost();
+	// Tasks are sized by the work in them, not by the node count: a round is only milliseconds,
+	// and at 512 slices each task was microseconds of work with a queue push and a wake behind
+	// it. TaskCount also collapses to 1 when the pool is unavailable.
+	const uint32_t tasks = TaskCount( threads, nodeCount, OPTIMIZE_NODES_PER_TASK, OPTIMIZE_TASKS );
+	const uint32_t leafTasks = TaskCount( threads, leafCount, OPTIMIZE_NODES_PER_TASK, OPTIMIZE_TASKS );
+	double* partial = (double*)AlignedAlloc( tasks * sizeof( double ) );
+	const Float rootArea = bvhNode[0].SA();
 	if (mu == 0) mu = 1;
+	// The cost of the tree as the previous round left it, summed by the search pass rather than
+	// by a separate serial walk: it rides along for free, and the schedule only needs to compare
+	// one round against the last.
+	Float prevCost = SAHCost(), cost = prevCost;
 	for (uint32_t iter = 0; iter < iterations; iter++)
 	{
-		// 1. search: every selected node looks for the position that would gain the most.
+		// 1. search, and claim: every selected node looks for the position that would gain the
+		// most, then stakes the six nodes whose topology the move would change. Six nodes per
+		// move - the input, its sibling, parent and grandparent, the output and its parent - each
+		// taken by atomic maximum on (decrease, index), so the most valuable move wins and the
+		// losers stand down. A claim only needs this node's own search, so the two fuse.
 		ParallelFor( threads, tasks, [&]( const uint32_t t )
 		{
+			double sum = 0;
 			for (Index i = SliceStart( nodeCount, t, tasks ), e = SliceStart( nodeCount, t + 1, tasks ); i < e; i++)
 			{
+				const BVHNode& n = bvhNode[i];
+				sum += (double)(n.isLeaf() ? (c_int * (Float)n.triCount) : c_trav) * (double)n.SA();
 				decrease[i] = 0, outNode[i] = 0;
 					if (i % mu != iter % mu) continue; // sparse search: round-robin over the nodes
 					OptimizeSearch( i, decrease[i], outNode[i] );
-			}
-		} );
-		// 2. claim: six nodes change topology per move, each taken by atomic maximum.
-		ParallelFor( threads, tasks, [&]( const uint32_t t )
-		{
-			for (Index i = SliceStart( nodeCount, t, tasks ), e = SliceStart( nodeCount, t + 1, tasks ); i < e; i++)
-			{
 				if (!(decrease[i] > 0)) continue;
 				Index node[6];
-				const uint32_t n = OptimizeNodes( i, outNode[i], node );
-				if (n == 0) { decrease[i] = 0; continue; }
+				const uint32_t n6 = OptimizeNodes( i, outNode[i], node );
+				if (n6 == 0) { decrease[i] = 0; continue; }
+				// positive floats compare the same as their bit patterns, so a single atomic max
+				// on (decrease, index) picks the better move and breaks ties on the index.
 				uint32_t bits;
 				memcpy( &bits, &decrease[i], 4 );
 				const uint64_t claim = ((uint64_t)bits << 32) | (uint64_t)i;
-				for (uint32_t k = 0; k < n; k++)
+				for (uint32_t k = 0; k < 6; k++)
 				{
 					uint64_t held = lock[node[k]].load( std::memory_order_relaxed );
 					while (held < claim && !lock[node[k]].compare_exchange_weak( held, claim,
 						std::memory_order_relaxed, std::memory_order_relaxed )) { /* retry */ }
 				}
 			}
+			partial[t] = sum;
 		} );
-		// 3. verify: a move proceeds only if it holds every node it needs.
+		// 2. verify: a move proceeds only if it holds every node it needs. Separate from the move
+		// below, which rewrites the pointers this reads.
 		ParallelFor( threads, tasks, [&]( const uint32_t t )
 		{
 			for (Index i = SliceStart( nodeCount, t, tasks ), e = SliceStart( nodeCount, t + 1, tasks ); i < e; i++)
 			{
 				if (!(decrease[i] > 0)) continue;
 				Index node[6];
-				const uint32_t n = OptimizeNodes( i, outNode[i], node );
-				for (uint32_t k = 0; k < n; k++) if ((lock[node[k]].load( std::memory_order_relaxed ) & 0xffffffffu) != i)
+				const uint32_t n6 = OptimizeNodes( i, outNode[i], node );
+				for (uint32_t k = 0; k < n6; k++) if ((lock[node[k]].load( std::memory_order_relaxed ) & 0xffffffffu) != i)
 				{
 					decrease[i] = 0;
 					break;
 				}
 			}
 		} );
-		// 4. move: the winners are disjoint in the six nodes they touch, so they can run at once.
+		// 3. move, and clear the claims for the next round: the winners are disjoint in the six
+		// nodes they touch, so they can run at once, and nothing reads the locks any more.
 		ParallelFor( threads, tasks, [&]( const uint32_t t )
 		{
 			for (Index i = SliceStart( nodeCount, t, tasks ), e = SliceStart( nodeCount, t + 1, tasks ); i < e; i++)
+			{
 				if (decrease[i] > 0) OptimizeReinsert( i, outNode[i] );
-		} );
-		// 5. refit, bottom-up: a thread climbing from a leaf stops at the first node it reaches
-		// alone and the second arrival carries on, so every box is built from finished children.
-		ParallelFor( threads, tasks, [&]( const uint32_t t )
-		{
-			for (Index i = SliceStart( nodeCount, t, tasks ), e = SliceStart( nodeCount, t + 1, tasks ); i < e; i++)
 				lock[i].store( 0, std::memory_order_relaxed ), arrived[i].store( 0, std::memory_order_relaxed );
+			}
 		} );
+		// 4. refit, bottom-up: a thread climbing from a leaf stops at the first node it reaches
+		// alone and the second arrival carries on, so every box is built from finished children.
 		ParallelFor( threads, leafTasks, [&]( const uint32_t t )
 		{
 			for (Index j = SliceStart( leafCount, t, leafTasks ), e = SliceStart( leafCount, t + 1, leafTasks ); j < e; j++)
@@ -4872,18 +4885,24 @@ TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, u
 				}
 			}
 		} );
-		// 6. schedule: once a round stops paying, search denser; at the densest, stop.
-		const Float cost = SAHCost();
-		if (prevCost - cost < epsilon) { if (mu == 1) { prevCost = cost; break; } mu--; }
-		prevCost = cost;
+		// 5. schedule: once a round stops paying, search denser; at the densest, stop. The cost
+		// here is the one the search pass summed, so it lags the tree by one round - which is all
+		// a comparison against the previous round needs.
+		double sum = 0;
+		for (uint32_t t = 0; t < tasks; t++) sum += partial[t];
+		const Float newCost = rootArea > 0 ? (Float)(sum / (double)rootArea) : Float( 0 );
+		if (prevCost - newCost < epsilon && iter > 0)
+		{
+			if (mu == 1) break;
+			mu--;
+		}
+		prevCost = cost, cost = newCost;
 	}
+	AlignedFree( partial );
 	AlignedFree( leafList ), AlignedFree( arrived ), AlignedFree( lock );
 	AlignedFree( outNode ), AlignedFree( decrease );
 }
 
-// OptimizeNodes: the nodes whose topology a move would change - the removal touches the input,
-// its sibling, parent and grandparent, the insertion the output and its parent. Returns 0 when
-// the move is not expressible, which also rejects an output inside the input's own subtree.
 TEMPLATED uint32_t BVH_Verbose<Float, Index>::OptimizeNodes( const Index in, const Index out, Index* node ) const
 {
 	if (in == 0 || out == 0 || in == out) return 0;
