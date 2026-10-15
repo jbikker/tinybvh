@@ -14,9 +14,10 @@ enum BuildFlags : int {
 	PRESPLIT = 64,
 	SPATIALSPLITS = 128,
 	OPTIMIZE = 256,
-	LOW = 512, // low, medium, high: For Embree and Madmann91.
-	MEDIUM = 1024,
-	HIGH = 2048 
+	BAKED = 512,
+	LOW = 1024, // low, medium, high: For Embree and Madmann91.
+	MEDIUM = 2048,
+	HIGH = 4096 
 };
 
 enum BVHLayout
@@ -66,6 +67,8 @@ private:
 	bvh::v2::Bvh<bvh::v2::Node<float,3>> madmannbvh;
 	std::vector<PrecomputedTri> precomputed_tris;
 	bool mmTrisPrecomputed = false;
+public:
+	static inline char bakedBVH[128];
 };
 
 inline BuildFlags operator|( BuildFlags a, BuildFlags b )

@@ -135,6 +135,7 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		else if (f & BuildFlags::INDEXED) { strncat( desc, "indexed", 100 ); strncat( flagShrt, "I", 32 ); f -= BuildFlags::INDEXED; }
 		else if (f & BuildFlags::FULLSWEEP) { strncat( desc, "full-sweep", 100 ); strncat( flagShrt, "F", 32 ); f -= BuildFlags::FULLSWEEP; }
 		else if (f & BuildFlags::LBVH) { strncat( desc, "LBVH", 100 ); strncat( flagShrt, "L", 32 ); f -= BuildFlags::LBVH; }
+		else if (f & BuildFlags::BAKED) { strncat( desc, "baked", 100 ); strncat( flagShrt, "~", 32 ); f -= BuildFlags::BAKED; }
 		else if (f & BuildFlags::BONSAI) { strncat( desc, "Bonsai", 100 ); strncat( flagShrt, "B", 32 ); f -= BuildFlags::BONSAI; }
 		else if (f & BuildFlags::HPLOC) { strncat( desc, "H-PLOC", 100 ); strncat( flagShrt, "H", 32 ); f -= BuildFlags::HPLOC; }
 		else if (f & BuildFlags::SPATIALSPLITS) { strncat( desc, "SBVH", 100 ); strncat( flagShrt, "S", 32 ); f -= BuildFlags::SPATIALSPLITS; }
@@ -165,6 +166,11 @@ void AccStruc::PrepareBuild()
 	}
 }
 
+static BVH loadedBVH;
+static BVH4_CPU loadedBVH4;
+static BVH8_CPU loadedBVH8;
+static BVH_GPU loadedBVHGPU;
+
 BVHBase* AccStruc::Build( PrimitiveSet* prims )
 {
 	primSet = prims;
@@ -173,7 +179,12 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	case BVH2:
 	{
 		BVH* accstruc = (BVH*)bvh;
-		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		if (flags & BAKED) 
+		{
+			loadedBVH = BVH::Load( bakedBVH );
+			bvh = &loadedBVH;
+		}
+		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		if (flags & HPLOC) accstruc->MergeLeafs();
 		break;
@@ -190,49 +201,80 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	case BVH4_WIVE:
 	{
 		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
-		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		if (flags & BAKED) 
+		{
+			loadedBVH4 = BVH4_CPU::Load( bakedBVH );
+			bvh = &loadedBVH4;
+		}
+		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
 	case BVH8_WIVE:
 	{
 		BVH8_CPU* accstruc = (BVH8_CPU*)bvh;
-		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		if (flags & BAKED) 
+		{
+			loadedBVH4 = BVH4_CPU::Load( bakedBVH );
+			bvh = &loadedBVH8;
+		}
+		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
 	case GPU_BVH:
 	{
 		BVH_GPU* accstruc = (BVH_GPU*)bvh;
-		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		if (flags & BAKED) 
+		{
+			loadedBVHGPU = BVH_GPU::Load( bakedBVH );
+			bvh = &loadedBVHGPU;
+		}
+		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
 	case GPU_BVH4:
 	{
 		BVH4_GPU* accstruc = (BVH4_GPU*)bvh;
-		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		if (flags & BAKED) 
+		{
+			exit( 0 ); // TODO
+		}
+		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
 	case CWBVH:
 	{
 		BVH8_CWBVH* accstruc = (BVH8_CWBVH*)bvh;
-		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		if (flags & BAKED) 
+		{
+			exit( 0 ); // TODO
+		}
+		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
 	case AMD_HWRT:
 	{
 		BVH4_AMD_HW* accstruc = (BVH4_AMD_HW*)bvh;
-		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		if (flags & BAKED) 
+		{
+			exit( 0 ); // TODO
+		}
+		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
 	case AMD_HWRT8:
 	{
 		CWBVH8_AMD_HW* accstruc = (CWBVH8_AMD_HW*)bvh;
-		if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
+		if (flags & BAKED) 
+		{
+			exit( 0 ); // TODO
+		}
+		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
 	}
