@@ -3,17 +3,14 @@
 // Reads a BVH saved with BVH::Save, spends an unbounded amount of time lowering its SAH and
 // EPO cost, and writes the result next to the input with "_opt" appended to the stem.
 //
-// The optimizer is deliberately outside the library: it is slow, it is only useful offline,
-// and none of it belongs in a header that people include to build a BVH in 90 ms. It touches
-// TinyBVH only through public members of BVH_Verbose, plus BVH_Verbose::Optimize for the
-// insertion-based stage, which is the one piece of the pipeline the library already has.
-//
 // Usage: bvhopt <file.bvh> [options]
 //
-// The file must carry its own geometry, which is what BVH::Save does by default. EPO is defined
-// over the triangles, so a BVH saved without them cannot be judged here, only rearranged.
-//
 // Build: g++ -O2 -mavx2 -mfma -std=c++17 -o bvhopt bvhopt.cpp
+//
+// Results:
+// CRYTEKSPONZA   SAH: 61.6687 -> 56.7408 ( -7.99%), EPO: 20.9516 -> 19.2926 ( -7.92%)
+// CONFERENCE     SAH: 36.3071 -> 30.9185 (-14.84%), EPO: 12.7778 -> 10.9949 (-13.95%)
+// BISTRO         SAH: 64.6207 -> 58.1694 ( -9.98%), EPO: 32.8089 -> 27.2498 (-16.94%)
 
 #define TINYBVH_IMPLEMENTATION
 #include "tiny_bvh.h"
@@ -96,6 +93,11 @@ public:
 		float epsilon = 1e-4f;			// relative gain a round must deliver to justify another.
 		uint32_t seed = 0x12345678u;	// all randomization derives from this; runs are reproducible.
 		uint32_t reinsertIters = 100;	// BVH_Verbose::Optimize iterations per round, 'extreme' mode; 0 disables.
+		// The reinsertion stage is most of the run, and the serial version kept here converges
+		// lower than the library's parallel one. For a mesh large enough that the wall clock is
+		// the thing that hurts, 'fast' hands the stage back to the library.
+		bool fast = false;				// use BVH_Verbose::Optimize, which runs on the pool.
+		uint32_t fastMu = 8;			// its search density: higher searches fewer nodes per round.
 		uint32_t treeletSize = 7;		// treelet leaves for the bulk of the tree; DP is O(3^n) per treelet.
 		uint32_t treeletSizeTop = 10;	// ..and for the nodes that carry most of the cost. At most MAX_TREELET.
 		uint32_t treeletSweeps = 2;		// bottom-up treelet sweeps per round; 0 disables.
@@ -1235,6 +1237,9 @@ void Optimizer::Run( const Ref* refBox, const uint32_t* vertIdx )
 	st.tMin = (bvhvec3*)tinybvh::malloc64( (1u << MAX_TREELET) * sizeof( bvhvec3 ) );
 	st.tMax = (bvhvec3*)tinybvh::malloc64( (1u << MAX_TREELET) * sizeof( bvhvec3 ) );
 	st.orderCount = 0, st.seed = s.seed ? s.seed : 1u;
+	// BVH::Save writes settings into the file and Load restores them, so a BVH saved with
+	// threading disabled would run the library's parallel optimizer on the calling thread.
+	if (s.fast) b.settings.enableThreading = true;
 	st.vertIdx = vertIdx;
 	st.ownArea = (float*)tinybvh::malloc64( b.allocatedNodes * sizeof( float ) );
 	memset( st.ownArea, 0, b.allocatedNodes * sizeof( float ) );
@@ -1286,7 +1291,11 @@ void Optimizer::Run( const Ref* refBox, const uint32_t* vertIdx )
 			memcpy( snapPrim, b.primIdx, b.idxCount * sizeof( uint32_t ) );
 		}
 		RefreshOwnArea( st );
-		if (s.reinsertIters) OptimizeSerial( s.reinsertIters, true, false ), Progress( round, roundStart, "reinsertion" ); // stage 1
+		if (s.reinsertIters)
+		{
+			if (s.fast) b.Optimize( s.reinsertIters, s.fastMu ); else OptimizeSerial( s.reinsertIters, true, false );
+			Progress( round, roundStart, "reinsertion" ); // stage 1
+		}
 		for (uint32_t k = 0; k < s.treeletSweeps; k++) OptExTreeletSweep( s, st ), Progress( round, roundStart, "treelets" ); // stage 2
 		if (s.rebuildSubtrees) OptExRebuildSubtrees( s, st ), Progress( round, roundStart, "subtree rebuild" ); // stage 3
 		if (s.unsplitRefs) { OptExUnsplit( st ); OptExCompactRefs(); Progress( round, roundStart, "unsplitting" ); } // stage 4
@@ -1584,6 +1593,8 @@ static void Usage()
 		"  -rebuild N         worst subtrees rebuilt per round, 0 disables (default 0)\n"
 		"  -nounsplit         do not merge spatial split references\n"
 		"  -noexplode         keep the input's leaves instead of one reference per leaf\n"
+		"  -fast              reinsert with the library's parallel optimizer: quicker, converges higher\n"
+		"  -fastmu N          its search density, higher is sparser and quicker (default 8)\n"
 		"  -exact N           exact optimal subtrees up to N references, 0 disables (default 10, max 14)\n"
 		"  -leaf N            final leaf budget: 1 for a pure BVH2, 4 for BVH4_CPU (default 4)\n"
 		"  -epoguide W        steer decisions by estimated EPO, weight W (default 0.5, 0 = off)\n"
@@ -1616,6 +1627,8 @@ int main( int argc, char** argv )
 		else if (a == "-camera") g_cameraMode = true;
 		else if (a == "-nounsplit") set.unsplitRefs = false;
 		else if (a == "-noexplode") set.explodeLeaves = false;
+		else if (a == "-fast") set.fast = true;
+		else if (a == "-fastmu") set.fastMu = num( 8 );
 		else if (a == "-quiet") set.verbose = false;
 		else if (a == "-treelet")
 		{
