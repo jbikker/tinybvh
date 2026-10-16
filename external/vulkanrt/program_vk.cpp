@@ -73,7 +73,7 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 #define ENABLE_HWRT			true	// display info on hardware RT pipeline performance
 #define ENABLE_BVH2			false	// display info on BVH_GPU performance
 #define ENABLE_BVH4			false	// display info on BVH4_GPU performance
-#define ENABLE_CWBVH		true	// display info on BVH8_CWBVH performance
+#define ENABLE_CWBVH		false	// display info on BVH8_CWBVH performance
 #define ENABLE_RAY_QUERIES	false	// display info on inline ray query performance
 #define ENABLE_VALIDATION	false	// VK_LAYER_KHRONOS_validation; costs performance
 #define BARRIER_BETWEEN_DISPATCHES false
@@ -82,8 +82,8 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 // OpenCL interleaving. The OpenCL backends trace the same rays through the same
 // scene as the compute shaders: BVH_GPU with shaders/traverse.cl, the AMD layouts
 // with shaders/traverse_amd.cl, so the two APIs can be compared one frame apart.
-#define ENABLE_OPENCL		false	// init OpenCL and put its backends in the rotation
-#define ENABLE_OCL_BVH2		true	// display info on OpenCL BVH_GPU performance
+#define ENABLE_OPENCL		true	// init OpenCL and put its backends in the rotation
+#define ENABLE_OCL_BVH2		false	// display info on OpenCL BVH_GPU performance
 #define ENABLE_OCL_AMD_BVH4	true	// display info on AMD BVH4 hardware traversal (RDNA3/RDNA4)
 #define ENABLE_OCL_AMD_BVH8	true	// display info on AMD BVH8 hardware traversal (RDNA4)
 #define OCL_PRESENT_RESULT	true	// show what OpenCL traced; costs a 4MB readback + upload per frame
@@ -826,13 +826,15 @@ static void InitMeshes()
 		VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
 		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, "meshVB" );
 	// One spatial-split build, converted to both GPU layouts.
-	bvh2.BuildHQ( verts, triCount );
-	bvh2.Optimize();
+	bvh2.settings.useSpatialSplits = true; // triggers a high-quality BonsaiS build
+	bvh2.settings.postOptimize = true; // triggers post-optimization
+	bvh2.Build( verts, triCount );
 	bvh.ConvertFrom( bvh2, true );    // Aila & Laine 64-byte nodes + primIdx + separate tris
 	mbvh4.ConvertFrom( bvh2, true );  // collapse the BVH2 into a 4-wide BVH
 	bvh4.ConvertFrom( mbvh4, true );  // quantize into the single-blob BVH4_GPU layout
-	cwbvh.BuildHQ( verts, triCount ); // separate SBVH build: see the note at 'cwbvh'.
-	cwbvh.Optimize();
+	cwbvh.settings.useSpatialSplits = true; // triggers a high-quality BonsaiS build
+	cwbvh.settings.postOptimize = true; // triggers post-optimization
+	cwbvh.Build( verts, triCount ); // separate SBVH build: see the note at 'cwbvh'.
 }
 
 static void InitBVHBuffers()
