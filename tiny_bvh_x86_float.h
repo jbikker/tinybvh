@@ -1594,6 +1594,11 @@ template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( c
 // WiVeC bundle traversal, AVX2. Fuetterling et al., HPG 2017, section 4, and
 // rend.c's intersect_pckts_blas / intersect_pckts_tlas. Closest hit only.
 
+#ifdef _MSC_VER
+#pragma warning ( push )
+#pragma warning ( disable: 4324 /* structure padding */ )
+#endif
+
 // RayBundle: the rays of one IntersectBundle call, in SoA form.
 struct ALIGNED( 64 ) RayBundle
 {
@@ -1667,6 +1672,10 @@ struct ALIGNED( 64 ) RayBundle
 		return improved;
 	}
 };
+
+#ifdef _MSC_VER
+#pragma warning ( pop )
+#endif
 
 static int32_t tinybvh_trace_packets( const BVHBase* bvh, RayBundle& b, const uint32_t* pk, const uint32_t n );
 
@@ -1758,7 +1767,7 @@ static TINYBVH_FORCEINLINE uint32_t tinybvh_leaftris( const uint32_t* primIdx )
 #define TINYBVH_BUNDLE_SETUP \
 	__m256 rdxMin, rdxMax, rdyMin, rdyMax, rdzMin, rdzMax; \
 	__m256 rxMin, rxMax, ryMin, ryMax, rzMin, rzMax, tmax8; \
-	for (uint32_t i = 0; i < n; i++) { \
+	for (uint32_t i = 0; i < pn; i++) { \
 		const uint32_t l = pk[i] * 8; \
 		const __m256 rdx = _mm256_load_ps( b.rdx + l ), rdy = _mm256_load_ps( b.rdy + l ), rdz = _mm256_load_ps( b.rdz + l ); \
 		const __m256 qx = _mm256_mul_ps( _mm256_load_ps( b.ox + l ), rdx ); \
@@ -1806,17 +1815,17 @@ static TINYBVH_FORCEINLINE uint32_t tinybvh_leaftris( const uint32_t* primIdx )
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
 
-PER_OCTANT static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
+PER_OCTANT static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uint32_t* pk, const uint32_t pn )
 {
 	using BVHNode = BVH4_CPU::BVHNode;
 	// an opacity map needs a per-lane gather in the leaf; not worth vectorizing.
-	if (bvh.opmap) ISUNLIKELY return tinybvh_packets_per_ray( &bvh, b, pk, n );
+	if (bvh.opmap) ISUNLIKELY return tinybvh_packets_per_ray( &bvh, b, pk, pn );
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 3 + 4];
 	ALIGNED( 64 ) uint32_t infoStack[TINYBVH_STACK_SIZE * 3 + 4];	// parent << 2 | lane
 	ALIGNED( 64 ) uint32_t fpiStack[TINYBVH_STACK_SIZE * 3 + 4];	// packet to test first
 	ALIGNED( 64 ) float rx[TINYBVH_BUNDLE_RAYS], ry[TINYBVH_BUNDLE_RAYS], rz[TINYBVH_BUNDLE_RAYS];
 	int32_t stackPtr = 0, steps = 0;
-	uint32_t nodeIdx = 0, fpi = 0, active = (1u << n) - 1;
+	uint32_t nodeIdx = 0, fpi = 0, active = (1u << pn) - 1;
 	const __m256 zero8 = _mm256_setzero_ps(), one8 = _mm256_set1_ps( 1.0f );
 	const __m256i instIdx8 = _mm256_set1_epi32( (int32_t)b.instIdx );
 	TINYBVH_BUNDLE_SETUP;
@@ -1893,7 +1902,7 @@ PER_OCTANT static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b
 			if (anyHit)
 			{
 				__m256 m8 = _mm256_load_ps( b.t + pk[0] * 8 );
-				for (uint32_t i = 1; i < n; i++) m8 = _mm256_max_ps( m8, _mm256_load_ps( b.t + pk[i] * 8 ) );
+				for (uint32_t i = 1; i < pn; i++) m8 = _mm256_max_ps( m8, _mm256_load_ps( b.t + pk[i] * 8 ) );
 				far4 = tinybvh_lo4( tinybvh_hmax8( m8 ) );
 			}
 		}
@@ -1921,7 +1930,7 @@ PER_OCTANT static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b
 					entering |= 1u << i;
 					if (!isLeaf) break;
 				}
-				if (++i == n) i = 0;
+				if (++i == pn) i = 0;
 			} while (i != first);
 			if (!entering) continue;
 			nodeIdx = child, fpi = firstHit, active = entering;
@@ -1931,7 +1940,7 @@ PER_OCTANT static int32_t tinybvh_bundle_bvh4( const BVH4_CPU& bvh, RayBundle& b
 }
 
 // Ray bundle traversal - TLAS level.
-PER_OCTANT static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
+PER_OCTANT static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, const uint32_t* pk, const uint32_t pn )
 {
 	using BVHNode = BVH::BVHNode;
 	uint32_t nodeStack[TINYBVH_STACK_SIZE], fpiStack[TINYBVH_STACK_SIZE];
@@ -1939,7 +1948,7 @@ PER_OCTANT static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, con
 	RayBundle obj;
 	uint32_t visiting[TINYBVH_BUNDLE_PACKETS], objPk[TINYBVH_BUNDLE_PACKETS];
 	int32_t stackPtr = 0, steps = 0;
-	uint32_t nodeIdx = 0, fpi = 0, active = (1u << n) - 1;
+	uint32_t nodeIdx = 0, fpi = 0, active = (1u << pn) - 1;
 	const __m256 zero8 = _mm256_setzero_ps();
 	TINYBVH_BUNDLE_SETUP;
 	// the TLAS node test is scalar, so reduce the interval ray all the way down.
@@ -1984,7 +1993,7 @@ PER_OCTANT static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, con
 			if (anyHit)
 			{
 				__m256 m8 = _mm256_load_ps( b.t + pk[0] * 8 );
-				for (uint32_t i = 1; i < n; i++) m8 = _mm256_max_ps( m8, _mm256_load_ps( b.t + pk[i] * 8 ) );
+				for (uint32_t i = 1; i < pn; i++) m8 = _mm256_max_ps( m8, _mm256_load_ps( b.t + pk[i] * 8 ) );
 				_mm_store_ss( &tfar, tinybvh_lo4( tinybvh_hmax8( m8 ) ) );
 			}
 		}
@@ -2011,7 +2020,7 @@ PER_OCTANT static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, con
 					// through a blas, which is far more expensive than the scan.
 					if (!isLeaf) break;
 				}
-				if (++i == n) i = 0;
+				if (++i == pn) i = 0;
 			} while (i != first);
 			if (!entering) continue;
 			nodeIdx = entry, fpi = firstHit, active = entering;
@@ -2151,7 +2160,7 @@ static TINYBVH_FORCEINLINE __m256 tinybvh_lanemask8( const uint32_t m )
 #define TINYBVH_BUNDLE_SETUP_ANY \
 	__m256 rdxMin, rdxMax, rdyMin, rdyMax, rdzMin, rdzMax; \
 	__m256 rxMin, rxMax, ryMin, ryMax, rzMin, rzMax, tmax8 = minusOne8; \
-	for (uint32_t i = 0; i < n; i++) { \
+	for (uint32_t i = 0; i < pn; i++) { \
 		const uint32_t l = pk[i] * 8; \
 		const __m256 rdx = _mm256_load_ps( b.rdx + l ), rdy = _mm256_load_ps( b.rdy + l ), rdz = _mm256_load_ps( b.rdz + l ); \
 		const __m256 qx = _mm256_mul_ps( _mm256_load_ps( b.ox + l ), rdx ); \
@@ -2170,10 +2179,10 @@ static TINYBVH_FORCEINLINE __m256 tinybvh_lanemask8( const uint32_t m )
 			rzMin = _mm256_min_ps( rzMin, qz ), rzMax = _mm256_max_ps( rzMax, qz ); \
 		tmax8 = _mm256_max_ps( tmax8, tcur[i] ); }
 
-PER_OCTANT static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
+PER_OCTANT static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle& b, const uint32_t* pk, const uint32_t pn )
 {
 	using BVHNode = BVH4_CPU::BVHNode;
-	if (bvh.opmap) ISUNLIKELY return tinybvh_packets_occluded_per_ray( &bvh, b, pk, n );
+	if (bvh.opmap) ISUNLIKELY return tinybvh_packets_occluded_per_ray( &bvh, b, pk, pn );
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 3 + 4];
 	ALIGNED( 64 ) uint32_t infoStack[TINYBVH_STACK_SIZE * 3 + 4];
 	ALIGNED( 64 ) uint32_t fpiStack[TINYBVH_STACK_SIZE * 3 + 4];
@@ -2271,7 +2280,7 @@ PER_OCTANT static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle&
 					entering |= 1u << i;
 					if (!isLeaf) break;
 				}
-				if (++i == n) i = 0;
+				if (++i == pn) i = 0;
 			} while (i != first);
 			if (!entering) continue;
 			nodeIdx = child, fpi = firstHit, active = entering;
@@ -2280,7 +2289,7 @@ PER_OCTANT static int32_t tinybvh_occluded_bvh4( const BVH4_CPU& bvh, RayBundle&
 	}
 }
 
-PER_OCTANT static int32_t tinybvh_occluded_tlas( const BVH& bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
+PER_OCTANT static int32_t tinybvh_occluded_tlas( const BVH& bvh, RayBundle& b, const uint32_t* pk, const uint32_t pn )
 {
 	using BVHNode = BVH::BVHNode;
 	uint32_t nodeStack[TINYBVH_STACK_SIZE], fpiStack[TINYBVH_STACK_SIZE];
@@ -2337,7 +2346,7 @@ PER_OCTANT static int32_t tinybvh_occluded_tlas( const BVH& bvh, RayBundle& b, c
 					b.occluded[wp] |= obj.occluded[j];
 					if (b.occluded[wp] == before) continue;
 					retired = true;
-					for (uint32_t s = 0; s < n; s++) if (pk[s] == wp)
+					for (uint32_t s = 0; s < pn; s++) if (pk[s] == wp)
 					{
 						tcur[s] = _mm256_blendv_ps( _mm256_load_ps( b.t + wp * 8 ), minusOne8,
 							tinybvh_lanemask8( b.occluded[wp] ) );
@@ -2375,7 +2384,7 @@ PER_OCTANT static int32_t tinybvh_occluded_tlas( const BVH& bvh, RayBundle& b, c
 					entering |= 1u << i;
 					if (!isLeaf) break;
 				}
-				if (++i == n) i = 0;
+				if (++i == pn) i = 0;
 			} while (i != first);
 			if (!entering) continue;
 			nodeIdx = entry, fpi = firstHit, active = entering;
