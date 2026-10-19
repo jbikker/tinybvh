@@ -397,7 +397,7 @@ class SkyDome
 public:
 	// constructor / destructor
 	SkyDome() = default;
-	SkyDome( const char* file ) { Load( file ); }
+	SkyDome( const char* file, const float scale = 1 ) { Load( file, scale ); }
 	void Load( const char* filename, const ts_vec3 scale = { 1.f, 1.f, 1.f } );
 	// public data members
 	ts_vec3* pixels = nullptr;			// HDR texture data for sky dome
