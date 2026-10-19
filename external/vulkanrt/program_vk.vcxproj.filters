@@ -13,10 +13,6 @@
       <UniqueIdentifier>{1c7d4e93-2a85-4f16-b0c7-9d3e6a2b58f4}</UniqueIdentifier>
       <Extensions>comp;rgen;rmiss;rchit;glsl</Extensions>
     </Filter>
-    <Filter Include="Build">
-      <UniqueIdentifier>{2e8b5f07-3c91-4d2a-8e46-5a7c1b9d40e3}</UniqueIdentifier>
-      <Extensions>bat;md</Extensions>
-    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="program_vk.cpp">
@@ -75,15 +71,6 @@
   <ItemGroup>
     <None Include="shaders\common.glsl">
       <Filter>Shaders</Filter>
-    </None>
-    <None Include="compile_shaders.bat">
-      <Filter>Build</Filter>
-    </None>
-    <None Include="build.bat">
-      <Filter>Build</Filter>
-    </None>
-    <None Include="README_vulkan.md">
-      <Filter>Build</Filter>
     </None>
     <None Include="shaders\traverse.cl">
       <Filter>Shaders</Filter>

@@ -123,9 +123,6 @@
   <ItemGroup>
     <!-- included by the shaders below, not compiled on its own -->
     <None Include="shaders\common.glsl" />
-    <None Include="compile_shaders.bat" />
-    <None Include="build.bat" />
-    <None Include="README_vulkan.md" />
     <None Include="shaders\traverse.cl" />
   </ItemGroup>
   <ItemGroup>
