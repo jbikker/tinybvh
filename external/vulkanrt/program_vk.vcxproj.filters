@@ -1,10 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <Filter Include="Source Files">
-      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
-      <Extensions>cpp;c;cc;cxx</Extensions>
-    </Filter>
     <Filter Include="tinybvh">
       <UniqueIdentifier>{0f9a2b1c-6d3e-4a58-9c21-7b4e5d8a3f60}</UniqueIdentifier>
       <Extensions>h;hpp</Extensions>
@@ -15,12 +11,8 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="program_vk.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="tiny_ocl_impl.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
+    <ClCompile Include="program_vk.cpp" />
+    <ClCompile Include="tiny_ocl_impl.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\tiny_bvh.h">
