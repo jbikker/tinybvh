@@ -24,16 +24,10 @@
 #include <fstream>
 #include <vector>
 
-// GPU selection. Vulkan and OpenCL both run on the GPU picked here; it has to be
-// this early because the exports below are part of the choice. An integrated GPU is
-// only a candidate if it exposes VK_KHR_acceleration_structure and
-// VK_KHR_ray_tracing_pipeline - plenty of them do not - and InitDevice() reports it
-// and falls back to the discrete GPU when that is the case.
+// GPU selection.
 #define USE_INTEGRATED_GPU	false	// run the experiment on the iGPU instead of the dGPU
 
 #if defined(_WIN32)
-// On hybrid laptops these exports ask the driver to put the process on the discrete
-// GPU; targeting the iGPU means not asking for that.
 extern "C" { __declspec( dllexport ) DWORD NvOptimusEnablement = USE_INTEGRATED_GPU ? 0 : 1; }
 extern "C" { __declspec( dllexport ) int AmdPowerXpressRequestHighPerformance = USE_INTEGRATED_GPU ? 0 : 1; }
 #endif
@@ -73,7 +67,7 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 #define ENABLE_HWRT			true	// display info on hardware RT pipeline performance
 #define ENABLE_BVH2			false	// display info on BVH_GPU performance
 #define ENABLE_BVH4			false	// display info on BVH4_GPU performance
-#define ENABLE_CWBVH		true	// display info on BVH8_CWBVH performance
+#define ENABLE_CWBVH		false	// display info on BVH8_CWBVH performance
 #define ENABLE_RAY_QUERIES	false	// display info on inline ray query performance
 #define ENABLE_VALIDATION	false	// VK_LAYER_KHRONOS_validation; costs performance
 #define BARRIER_BETWEEN_DISPATCHES false
@@ -82,15 +76,18 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 // OpenCL interleaving. The OpenCL backends trace the same rays through the same
 // scene as the compute shaders: BVH_GPU with shaders/traverse.cl, the AMD layouts
 // with shaders/traverse_amd.cl, so the two APIs can be compared one frame apart.
-#define ENABLE_OPENCL		false	// init OpenCL and put its backends in the rotation
-#define ENABLE_OCL_BVH2		true	// display info on OpenCL BVH_GPU performance
-#define ENABLE_OCL_AMD_BVH4	true	// display info on AMD BVH4 hardware traversal (RDNA3/RDNA4)
+#define ENABLE_OPENCL		true	// init OpenCL and put its backends in the rotation
+#define ENABLE_OCL_BVH2		false	// display info on OpenCL BVH_GPU performance
+#define ENABLE_OCL_AMD_BVH4	false	// display info on AMD BVH4 hardware traversal (RDNA3/RDNA4)
 #define ENABLE_OCL_AMD_BVH8	true	// display info on AMD BVH8 hardware traversal (RDNA4)
-#define OCL_PRESENT_RESULT	true	// show what OpenCL traced; costs a 4MB readback + upload per frame
+#define OCL_PRESENT_RESULT	false	// show what OpenCL traced; costs a 4MB readback + upload per frame
 #define OCL_DEVICE_INDEX	-1		// -1: use the GPU Vulkan runs on; else an index from the list printed at startup
 
+const char* triMesh = "../../testdata/cryteksponza.bin";
+const char* raySetPath = "../../view1rays.bin";
+
 constexpr uint32_t NUM_INSTANCES = 1, FRAME_COUNT = 2;
-constexpr uint32_t NUM_DISPATCHES = 1;
+constexpr uint32_t NUM_DISPATCHES = 100;
 constexpr uint32_t NUM_SHADER_GROUPS = 3; // raygen, miss, hit group
 
 // The ray tracing backends that are cycled through, one per frame. Everything from
@@ -820,7 +817,7 @@ static void InitSurfaces()
 
 static void InitMeshes()
 {
-	AddMesh( "../../testdata/cryteksponza.bin" );
+	AddMesh( triMesh );
 	meshVB = MakeDeviceBuffer( verts, (VkDeviceSize)triCount * 3 * sizeof( bvhvec4 ),
 		(VkDeviceSize)triCount * 3 * sizeof( bvhvec4 ),
 		VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
@@ -867,7 +864,6 @@ static void UpdateRayBuffer()
 	// 64-byte layout, and both APIs must trace exactly the same set.
 	hostRays.assign( (size_t)rayCount * 8, 0.0f );
 	float* data = hostRays.data();
-	const char* raySetPath = "../../diffrays.bin";
 	FILE* f = fopen( raySetPath, "rb" );
 	if (f)
 	{
@@ -1246,22 +1242,16 @@ static void InitOpenCL()
 #else
 	const unsigned cwTriBytes = (unsigned)(cwbvh.idxCount * 3 * sizeof( bvhvec4 ));
 #endif
-	oclBVH2Nodes = new tinyocl::Buffer( nodeBytes, bvh.bvhNode, tinyocl::Buffer::READONLY );
-	oclBVH2Verts = new tinyocl::Buffer( vertBytes, (bvhvec4*)bvh.orderedVerts.data, tinyocl::Buffer::READONLY );
-	oclBVH4Data = new tinyocl::Buffer( bvh4Bytes, bvh4.bvh4Data, tinyocl::Buffer::READONLY );
-	oclCWBVHNodes = new tinyocl::Buffer( cwNodeBytes, cwbvh.bvh8Data, tinyocl::Buffer::READONLY );
-	oclCWBVHTris = new tinyocl::Buffer( cwTriBytes, cwbvh.bvh8Tris, tinyocl::Buffer::READONLY );
+	oclBVH2Nodes = new tinyocl::Buffer( nodeBytes, bvh.bvhNode, tinyocl::Buffer::DEVICEONLY);
+	oclBVH2Verts = new tinyocl::Buffer( vertBytes, (bvhvec4*)bvh.orderedVerts.data, tinyocl::Buffer::DEVICEONLY);
+	oclBVH4Data = new tinyocl::Buffer( bvh4Bytes, bvh4.bvh4Data, tinyocl::Buffer::DEVICEONLY);
+	oclCWBVHNodes = new tinyocl::Buffer( cwNodeBytes, cwbvh.bvh8Data, tinyocl::Buffer::DEVICEONLY);
+	oclCWBVHTris = new tinyocl::Buffer( cwTriBytes, cwbvh.bvh8Tris, tinyocl::Buffer::DEVICEONLY);
 	// 32 bytes per ray, host side and all: hostRays is the array the Vulkan ray
 	// buffer was filled from, so there is nothing to convert and nothing that can
 	// drift between the two. Buffer does not take ownership of it.
-	oclRays = new tinyocl::Buffer( rayCount * 32, hostRays.data(), tinyocl::Buffer::READONLY );
-	oclPixels = new tinyocl::Buffer( rayCount * 4, 0, tinyocl::Buffer::WRITEONLY );
-	oclBVH2Nodes->CopyToDevice();
-	oclBVH2Verts->CopyToDevice();
-	oclBVH4Data->CopyToDevice();
-	oclCWBVHNodes->CopyToDevice();
-	oclCWBVHTris->CopyToDevice();
-	oclRays->CopyToDevice();
+	oclRays = new tinyocl::Buffer( rayCount * 32, hostRays.data(), tinyocl::Buffer::DEVICEONLY);
+	oclPixels = new tinyocl::Buffer( rayCount * 4, 0, tinyocl::Buffer::WRITEONLY);
 	oclKernel[BACKEND_OCL_BVH_GPU]->SetArguments( oclBVH2Nodes, oclBVH2Verts, oclRays, oclPixels );
 	// AMD hardware traversal: the intrinsics exist on RDNA3 (BVH4) and RDNA4 (BVH4 + BVH8).
 	// Kernels are only requested where they can run; elsewhere traverse_amd.cl compiles
@@ -1270,8 +1260,7 @@ static void InitOpenCL()
 	{
 		InitAMDBVH4();
 		oclAMD4Data = new tinyocl::Buffer( (unsigned)(bvh4AMD.usedBlocks * sizeof( bvhvec4 )),
-			bvh4AMD.bvh4Data, tinyocl::Buffer::READONLY );
-		oclAMD4Data->CopyToDevice();
+			bvh4AMD.bvh4Data, tinyocl::Buffer::DEVICEONLY);
 		oclKernel[BACKEND_OCL_AMD_BVH4] = new tinyocl::Kernel( "shaders/traverse_amd.cl", "bench_amd_bvh4" );
 		oclKernel[BACKEND_OCL_AMD_BVH4]->SetArguments( oclAMD4Data, oclRays, oclPixels );
 	}
@@ -1280,8 +1269,7 @@ static void InitOpenCL()
 	{
 		InitAMDBVH8();
 		oclAMD8Data = new tinyocl::Buffer( (unsigned)(bvh8AMD.usedBlocks * sizeof( bvhvec4 )),
-			bvh8AMD.bvh8Data, tinyocl::Buffer::READONLY );
-		oclAMD8Data->CopyToDevice();
+			bvh8AMD.bvh8Data, tinyocl::Buffer::DEVICEONLY);
 		oclKernel[BACKEND_OCL_AMD_BVH8] = new tinyocl::Kernel( "shaders/traverse_amd.cl", "bench_amd_bvh8" );
 		oclKernel[BACKEND_OCL_AMD_BVH8]->SetArguments( oclAMD8Data, oclRays, oclPixels );
 	}
