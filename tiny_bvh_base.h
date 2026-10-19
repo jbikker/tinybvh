@@ -56,6 +56,8 @@ namespace tinybvh {
 // The warning is re-enabled right after the definition of the vector data types.
 #pragma warning ( push )
 #pragma warning ( disable: 4201 /* nameless struct / union */ )
+#pragma warning ( disable: 4324 /* structure padding */ )
+#pragma warning ( disable: 4324 /* possible division by zero */ )
 #endif
 
 #ifndef TINYBVH_USE_CUSTOM_VECTOR_TYPES
@@ -217,10 +219,6 @@ TINYBVH_FORCEINLINE bool tinybvh_isnan( float f )
 	memcpy( &i, &f, sizeof( i ) );
 	return (i & 0x7F800000) == 0x7F800000 && (i & 0x007FFFFF) != 0; // ieee-754
 }
-#ifdef _MSC_VER
-#pragma warning ( push )
-#pragma warning ( disable: 4723 /* possible divide by zero */ )
-#endif
 TINYBVH_FORCEINLINE float tinybvh_safercp( const float x )
 {
 	const float r = 1 / x;
@@ -233,9 +231,6 @@ TINYBVH_FORCEINLINE double tinybvh_safercp( const double x )
 	if (!(fabs( r ) <= BVH_DBL_RCP_FAR)) return copysign( BVH_DBL_RCP_FAR, x );
 	return r;
 }
-#ifdef _MSC_VER
-#pragma warning ( pop )
-#endif
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_safercp( const bvhvec3 a ) { return bvhvec3( tinybvh_safercp( a.x ), tinybvh_safercp( a.y ), tinybvh_safercp( a.z ) ); }
 TINYBVH_FORCEINLINE bvhvec3 tinybvh_rcp( const bvhvec3 a ) { return tinybvh_safercp( a ); /* bvhvec3( 1.0f / a.x, 1.0f / a.y, 1.0f / a.z ); */ }
 TINYBVH_FORCEINLINE float tinybvh_sqrf( const float x ) { return x * x; }
@@ -371,10 +366,6 @@ struct bvhdbl3
 };
 
 #endif // TINYBVH_USE_CUSTOM_VECTOR_TYPES
-
-#ifdef _MSC_VER
-#pragma warning ( pop ) // re-enable 4201, "nameless struct in union".
-#endif
 
 TINYBVH_FORCEINLINE bvhdbl3 tinybvh_min( const bvhdbl3& a, const bvhdbl3& b ) { return bvhdbl3( tinybvh_min( a.x, b.x ), tinybvh_min( a.y, b.y ), tinybvh_min( a.z, b.z ) ); }
 TINYBVH_FORCEINLINE bvhdbl3 tinybvh_max( const bvhdbl3& a, const bvhdbl3& b ) { return bvhdbl3( tinybvh_max( a.x, b.x ), tinybvh_max( a.y, b.y ), tinybvh_max( a.z, b.z ) ); }
@@ -1546,12 +1537,10 @@ public:
 	using typename Base::Ray;
 	using typename Base::Slice;
 	using typename Base::Vec3;
-
 protected:
 	using Base::AlignedAlloc;
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
-
 public:
 	// Layout reference: Mesa, src/amd/vulkan/bvh/bvh_defines.h (GFX12 nodes).
 	// These structs document the packed buffer; ConvertFrom writes bvhvec4 blocks.
@@ -1561,7 +1550,6 @@ public:
 		uint32_t dword1; // 12-bit zmin, 12-bit xmax, 8-bit ray mask.
 		uint32_t dword2; // 12-bit ymax, 12-bit zmax, 4-bit type, 4-bit size in 128-byte records.
 	}; // 12 bytes.
-
 	struct AMDBoxNode
 	{
 		uint32_t internal_base_id; // byte 0: first internal child, in 8-byte units.
@@ -1572,12 +1560,10 @@ public:
 		uint32_t obb_matrix_index; // byte 28: 0x7f disables oriented bounding boxes.
 		AMDBoxChild children[8]; // bytes 32..127: internal children first, primitive children next.
 	}; // 128 bytes.
-
 	struct AMDTriangleNode
 	{
 		uint32_t words[32]; // 52-bit header, uncompressed vertices and primitive IDs, 29-bit pair descriptor.
 	}; // 128 bytes; stores one or two triangles.
-
 	CWBVH8_AMD_HW( BVHContext ctx = {} ) { layout = LAYOUT_CWBVH8_AMD_HW; context = ctx; }
 	CWBVH8_AMD_HW( const MBVH<8, Float, Index>& bvh8 ) { /* DEPRECATED */ layout = LAYOUT_CWBVH8_AMD_HW; ConvertFrom( bvh8 ); }
 	CWBVH8_AMD_HW( const CWBVH8_AMD_HW& ) = delete; // owns its allocations, so it cannot be copied
@@ -1760,11 +1746,6 @@ TINYBVH_FORCEINLINE bool tinybvh_opmap_opaque( const uint32_t* opmap, const uint
 	return (om[idx >> 5] >> (idx & 31)) & 1;
 }
 
-#ifdef _MSC_VER
-// For float/uint32_t BVHs, BVHTri4Leaf is padded. This is as intended.
-#pragma warning ( push )
-#pragma warning ( disable: 4324 /* structure was padded due to alignment specifier */ )
-#endif
 TEMPLATED struct ALIGNED( 64 ) BVHTri4Leaf
 {
 	using Vec3 = typename bvh_traits<Float>::vec3;
@@ -1799,9 +1780,6 @@ TEMPLATED struct ALIGNED( 64 ) BVHTri4Leaf
 		return true;
 	}
 };
-#ifdef _MSC_VER
-#pragma warning ( pop )
-#endif
 
 // Storage for a single triangle, for BVH8_CPU.
 TEMPLATED struct BVHTri1Leaf
@@ -2011,6 +1989,10 @@ private:
 
 } // namespace tinybvh
 
+#ifdef _MSC_VER
+#pragma warning ( pop ) // re-enable 4201, 4324 and 4324.
+#endif
+
 #endif // TINY_BVH_BASE_H_
 
 // ============================================================================
@@ -2046,6 +2028,12 @@ private:
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include "windows.h"
+#endif
+
+#ifdef _MSC_VER
+#pragma warning ( push )
+#pragma warning ( disable: 4324 /* structure padding */ )
+#pragma warning ( disable: 4701 /* using possibly uninitialized variable */ )
 #endif
 
 namespace tinybvh {
@@ -7736,7 +7724,6 @@ TEMPLATED void BVH<Float, Index>::BonsaiHQPartition( BonsaiHQState& st, const Bo
 	using Task = BonsaiHQTask;
 	using Part = BonsaiHQPart;
 	Task t = start, stack[BONSAI_HQ_MAX_DEPTH]; // one push per level at most
-
 	auto cost = [&]( const BinBox& a, const BinBox& b, const Index n ) { BinBox u = a; BinBoxMerge( u, b ); return n ? BinBoxArea( u ) * (Float)n : 0; };
 	uint32_t stackPtr = 0;
 	while (1)
@@ -9340,6 +9327,10 @@ void tinybvh_builtin_parallel_for( uint32_t n, void (*fn)(uint32_t, void*), void
 #endif
 
 } // namespace tinybvh
+
+#ifdef _MSC_VER
+#pragma warning ( pop )
+#endif
 
 #endif // TINY_BVH_BASE_H_IMPL
 #endif // TINYBVH_IMPLEMENTATION
