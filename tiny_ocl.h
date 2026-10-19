@@ -158,7 +158,7 @@ public:
 class Buffer
 {
 public:
-	enum { DEFAULT = 0, TEXTURE = 8, TARGET = 16, READONLY = 1, WRITEONLY = 2 };
+	enum { DEFAULT = 0, TEXTURE = 8, TARGET = 16, READONLY = 1, WRITEONLY = 2, DEVICEONLY = 4 };
 	// constructor / destructor
 	Buffer() = default;
 	Buffer( unsigned int N, void* ptr = 0, unsigned int t = DEFAULT );
@@ -612,15 +612,28 @@ Buffer::Buffer( unsigned int N, void* ptr, unsigned int t )
 	if (!Kernel::clStarted) Kernel::InitCL();
 	type = t;
 	ownData = false;
-	int rwFlags = CL_MEM_READ_WRITE;
-	if (t & READONLY) rwFlags = CL_MEM_READ_ONLY;
-	if (t & WRITEONLY) rwFlags = CL_MEM_WRITE_ONLY;
+	int rwFlags = 0;
+	if (t & DEVICEONLY) rwFlags |= CL_MEM_HOST_NO_ACCESS;
+	if (t & READONLY) rwFlags |= CL_MEM_READ_ONLY;
+	else if (t & WRITEONLY) rwFlags |= CL_MEM_WRITE_ONLY;
+	else rwFlags |= CL_MEM_READ_WRITE;
 	if ((t & (TEXTURE | TARGET)) == 0)
 	{
 		size = N;
 		textureID = 0; // not representing a texture
-		if (N > 0) deviceBuffer = clCreateBuffer( Kernel::GetContext(), rwFlags, size, 0, 0 );
-		hostBuffer = (unsigned*)ptr;
+		if (N > 0)
+		{
+			if (t & DEVICEONLY)
+			{
+				deviceBuffer = clCreateBuffer(Kernel::GetContext(), rwFlags | CL_MEM_COPY_HOST_PTR, size, ptr, 0);
+				hostBuffer = 0; // this buffer only resides on the device.
+			}
+			else
+			{
+				deviceBuffer = clCreateBuffer(Kernel::GetContext(), rwFlags, size, 0, 0);
+				hostBuffer = (unsigned*)ptr;
+			}
+		}
 	}
 	else
 	{
@@ -670,7 +683,7 @@ unsigned int* Buffer::GetHostPtr()
 // ----------------------------------------------------------------------------
 void Buffer::CopyToDevice( const bool blocking )
 {
-	if (size == 0) return;
+	if (size == 0 || (type & DEVICEONLY)) return;
 	cl_int error;
 	if (!hostBuffer)
 	{
@@ -681,7 +694,7 @@ void Buffer::CopyToDevice( const bool blocking )
 }
 void Buffer::CopyToDevice( const int offset, const int byteCount, const bool blocking )
 {
-	if (size == 0) return;
+	if (size == 0 || (type & DEVICEONLY)) return;
 	cl_int error;
 	if (!hostBuffer)
 	{
@@ -695,7 +708,7 @@ void Buffer::CopyToDevice( const int offset, const int byteCount, const bool blo
 // ----------------------------------------------------------------------------
 void Buffer::CopyToDevice2( const bool blocking, cl_event* eventToSet, const size_t s )
 {
-	if (size == 0) return;
+	if (size == 0 || (type & DEVICEONLY)) return;
 	cl_int error;
 	if (!hostBuffer)
 	{
@@ -709,7 +722,7 @@ void Buffer::CopyToDevice2( const bool blocking, cl_event* eventToSet, const siz
 // ----------------------------------------------------------------------------
 void Buffer::CopyFromDevice( const bool blocking )
 {
-	if (size == 0) return;
+	if (size == 0 || (type & DEVICEONLY)) return;
 	cl_int error;
 	if (!hostBuffer)
 	{
@@ -720,7 +733,7 @@ void Buffer::CopyFromDevice( const bool blocking )
 }
 void Buffer::CopyFromDevice( const int offset, const int byteCount, const bool blocking )
 {
-	if (size == 0) return;
+	if (size == 0 || (type & DEVICEONLY)) return;
 	cl_int error;
 	if (!hostBuffer)
 	{
