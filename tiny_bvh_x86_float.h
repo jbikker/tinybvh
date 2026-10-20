@@ -34,10 +34,6 @@ template <> uint32_t impl::BVH<float, uint32_t>::SplitFrag( const Fragment& orig
 template <> void impl::BVH<float, uint32_t>::ClipFragToBins( const Fragment& orig, const int32_t bin1, const int32_t bin2, const uint32_t axis, const float nodeMin, const float planeDist, BVHBinBox<float>* sbinBox ) const;
 template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
 template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
-template <> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectBundle( Ray* rays ) const;
-template <> int32_t impl::BVH<float, uint32_t>::IntersectBundle( Ray* rays ) const;
-template <> int32_t impl::BVH4_CPU<float, uint32_t>::IsOccludedBundle( Ray* rays, bool* occluded ) const;
-template <> int32_t impl::BVH<float, uint32_t>::IsOccludedBundle( Ray* rays, bool* occluded ) const;
 #endif
 #ifdef BVH_USEAVX
 template <> void impl::BVH<float, uint32_t>::BinBoxClear( BVHBinBox<float>& b );
@@ -59,6 +55,10 @@ template <> void impl::BVH<float, uint32_t>::BonsaiHQDistribute( BonsaiHQState& 
 template <> void impl::BVH4_CPU<float, uint32_t>::EmitNode( impl::MBVH<4, float, uint32_t>& src, const uint32_t* base, uint32_t n );
 template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
 template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
+template <> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectBundle( Ray* rays ) const;
+template <> int32_t impl::BVH<float, uint32_t>::IntersectBundle( Ray* rays ) const;
+template <> int32_t impl::BVH4_CPU<float, uint32_t>::IsOccludedBundle( Ray* rays, bool* occluded ) const;
+template <> int32_t impl::BVH<float, uint32_t>::IsOccludedBundle( Ray* rays, bool* occluded ) const;
 #endif
 
 } // namespace tinybvh
