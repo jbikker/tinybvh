@@ -19,7 +19,7 @@ using namespace tinybvh;
 
 // Application variables
 
-BVH_GPU bvh;							// BVH layout to use. Can be: BVH, BVH4_CPU, BVH8_CPU, BVH8_CWBVH.
+BVH bvh;								// BVH layout to use. Can be: BVH, BVH4_CPU, BVH8_CPU, BVH8_CWBVH.
 bvhvec4* verts = 0;						// Triangle data. Three bvhvec4 vertices per triangle.
 int triCount = 0;						// Triangle count.
 std::atomic<int> tileIdx( 0 );			// Atomic counter for tile-based threaded rendering.
@@ -41,7 +41,7 @@ void AddMesh( const char* file, float scale = 1, bvhvec3 pos = {}, int c = 0, in
 }
 
 // Geometry access
-bvhvec3 rgb32_to_vec3( const unsigned c ) { return bvhvec3( (float)(c >> 16), (float)((c >> 8) & 255), (float)(c & 255) ) * (1 / 255.f); }
+bvhvec3 rgb32_to_vec3( const unsigned c ) { return bvhvec3( (float)((c >> 16) & 255), (float)((c >> 8) & 255), (float)(c & 255) ) * (1 / 255.f); }
 bvhvec3 TriangleColor( const unsigned idx ) { return rgb32_to_vec3( *(unsigned*)&verts[idx * 3].w ); }
 bvhvec3 TriangleNormal( const unsigned idx )
 {
@@ -52,14 +52,27 @@ bvhvec3 TriangleNormal( const unsigned idx )
 // Application initialization
 void Init()
 {
+	// have a console window
+	CONSOLE_SCREEN_BUFFER_INFO coninfo;
+	AllocConsole();
+	GetConsoleScreenBufferInfo( GetStdHandle( STD_OUTPUT_HANDLE ), &coninfo );
+	coninfo.dwSize.X = 1280;
+	coninfo.dwSize.Y = 800;
+	SetConsoleScreenBufferSize( GetStdHandle( STD_OUTPUT_HANDLE ), coninfo.dwSize );
+	FILE* file = nullptr;
+	freopen_s( &file, "CON", "w", stdout );
+	freopen_s( &file, "CON", "w", stderr );
+	SetWindowPos( GetConsoleWindow(), HWND_BOTTOM, 0, 0, 800, 600, 0 );
 	// prepare scene
 #if 1
-	AddMesh( "./testdata/cryteksponza.bin" );			// Load one .bin file with triangle data,
+	AddMesh( "./testdata/cryteksponza.bin" );		// Load one .bin file with triangle data,
+	// AddMesh( "./testdata/sanmiguel.bin" );
 #else
 	AddMesh( "./testdata/bistro_ext_part1.bin" );		// ..or several.
 	AddMesh( "./testdata/bistro_ext_part2.bin" );		// See ./testdata for a collection of meshes.
 #endif
-	bvh.BuildHQ( verts, triCount );						// Construct a high-quality BVH.
+	bvh.settings.postOptimize = true;
+	bvh.BuildHQ( verts, triCount );
 	// load serialized camera position / direction from file
 	std::fstream s = std::fstream{ "camera.bin", s.binary | s.in };
 	if (!s.is_open()) return;
@@ -108,6 +121,9 @@ void TraceWorkerThread( uint32_t* buf, int threadIdx )
 			{
 				bvhvec3 N = TriangleNormal( ray.hit.prim & PRIM_IDX_MASK );
 				if (tinybvh_dot( N, ray.D ) > 0) N *= -1.0f;
+				static bvhvec3 L = tinybvh_normalize( bvhvec3( 1, 1, 0 ) );
+				float light = tinybvh_clamp( tinybvh_dot( N, L ), 0.2f, 0.999f );
+				// E = TriangleColor( ray.hit.prim & PRIM_IDX_MASK ) * light;
 				E = (N + 1) * 0.5f; // encode normal as rgb color
 			}
 			float r = 255.0f * E.x, g = 255.0f * E.y, b = 255.0f * E.z;
