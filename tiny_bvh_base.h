@@ -1,4 +1,4 @@
-// tiny_bvh_base.h: platform-neutral part of TinyBVH. Do not include this file
+﻿// tiny_bvh_base.h: platform-neutral part of TinyBVH. Do not include this file
 // directly; include tiny_bvh.h, which selects the platform headers.
 
 #ifndef TINY_BVH_H_
@@ -8309,6 +8309,7 @@ TEMPLATED bool BVHBase<Float, Index>::TriOccludes( const Ray& ray, const Slice& 
 
 // PrecomputeTriangle (helper), transforms a triangle to the format used in:
 // Fast Ray-Triangle Intersections by Coordinate Transformation. Baldwin & Weber, 2016.
+// Improved precision suggestion by Niels Brunekreef.
 TEMPLATED void BVHBase<Float, Index>::PrecomputeTriangle( const Slice& vert, const Index i0, const Index i1, const Index i2, void* dst )
 {
 	Float T[12];
@@ -8317,21 +8318,21 @@ TEMPLATED void BVHBase<Float, Index>::PrecomputeTriangle( const Slice& vert, con
 	Float x1, x2, n = tinybvh_dot( v0, N ), rN;
 	if (fabs( N[0] ) > fabs( N[1] ) && fabs( N[0] ) > fabs( N[2] ))
 	{
-		x1 = v1.y * v0.z - v1.z * v0.y, x2 = v2.y * v0.z - v2.z * v0.y, rN = 1.0f / N.x;
+		x1 = e1.y * v0.z - e1.z * v0.y, x2 = e2.y * v0.z - e2.z * v0.y, rN = 1.0f / N.x;
 		T[0] = 0, T[1] = e2.z * rN, T[2] = -e2.y * rN, T[3] = x2 * rN;
 		T[4] = 0, T[5] = -e1.z * rN, T[6] = e1.y * rN, T[7] = -x1 * rN;
 		T[8] = 1, T[9] = N.y * rN, T[10] = N.z * rN, T[11] = -n * rN;
 	}
 	else if (fabs( N.y ) > fabs( N.z ))
 	{
-		x1 = v1.z * v0.x - v1.x * v0.z, x2 = v2.z * v0.x - v2.x * v0.z, rN = 1.0f / N.y;
+		x1 = e1.z * v0.x - e1.x * v0.z, x2 = e2.z * v0.x - e2.x * v0.z, rN = 1.0f / N.y;
 		T[0] = -e2.z * rN, T[1] = 0, T[2] = e2.x * rN, T[3] = x2 * rN;
 		T[4] = e1.z * rN, T[5] = 0, T[6] = -e1.x * rN, T[7] = -x1 * rN;
 		T[8] = N.x * rN, T[9] = 1, T[10] = N.z * rN, T[11] = -n * rN;
 	}
 	else if (fabs( N.z ) > 0)
 	{
-		x1 = v1.x * v0.y - v1.y * v0.x, x2 = v2.x * v0.y - v2.y * v0.x, rN = 1.0f / N.z;
+		x1 = e1.x * v0.y - e1.y * v0.x, x2 = e2.x * v0.y - e2.y * v0.x, rN = 1.0f / N.z;
 		T[0] = e2.y * rN, T[1] = -e2.x * rN, T[2] = 0, T[3] = x2 * rN;
 		T[4] = -e1.y * rN, T[5] = e1.x * rN, T[6] = 0, T[7] = -x1 * rN;
 		T[8] = N.x * rN, T[9] = N.y * rN, T[10] = 1, T[11] = -n * rN;
