@@ -14,8 +14,8 @@ layout( set = 0, binding = 8, std430 ) readonly buffer CwTriBuf { vec4 cwbvhTris
 
 // #define CWBVH_COMPRESSED_TRIS
 
-#ifdef CWBVH_COMPRESSED_TRIS
-#define TRI_STRIDE 4u // must match the tiny_bvh.h build define
+#ifdef CWBVH_COMPRESSED_TRIS // must match the tiny_bvh.h build define
+#define TRI_STRIDE 4u
 #else
 #define TRI_STRIDE 3u
 #endif
