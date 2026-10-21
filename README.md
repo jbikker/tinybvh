@@ -378,6 +378,7 @@ A list of projects using TinyBVH:
 * Remedy's [Northlight](https://www.remedygames.com/northlight) engine uses TinyBVH in their editor and for baking per-micro-vertex displacements.
 * [EA SEED's Gigi](https://github.com/electronicarts/gigi/releases/tag/v1.0.0): uses TinyBVH for WebGPU ray tracing, "..as fast as when using the DXR api in DX12". Try the [demo](https://electronicarts.github.io/gigi/Demos/tinybvh/index.html).
 * SideFX [Houdini](https://www.sidefx.com/docs/houdini/licenses) uses TinyBVH.
+* [MuTracer](https://github.com/pissang/mutracer) by Yi Shen uses TinyBVH for real-time WebGPU path tracing in the browser.
 * [wave_tracer](https://github.com/ssteinberg/wave_tracer) by Shlomi Steinberg uses TinyBVH to trace path segments.
 * [TrenchBroomBFG](https://github.com/RobertBeckebans/TrenchBroomBFG), by Robert Beckebans. "TinyBVH allows to load bigger glTF 2 maps almost instantly instead of minutes".
 * Jon Baker's [Icarus](https://jbaker.graphics/writings/icarusPLY.html) Point Cloud visualizer uses TinyBVH to represent geometry.
