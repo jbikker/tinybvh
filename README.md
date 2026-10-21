@@ -309,8 +309,6 @@ TinyBVH GPU ray traversal examples are available for OpenCL, OpenGL with compute
 
 ![Bistro](images/combined.jpg)
 
-For shaders that aren't OpenCL, `kernels/traverse_cwbvh.slang` is a [Slang](https://shader-slang.org) port of the CWBVH traversal (`traverse_cwbvh` and `isoccluded_cwbvh`), which compiles to SPIR-V for Vulkan, Metal, HLSL and the other Slang targets: upload `BVH8_CWBVH::bvh8Data` and `bvh8Tris` as two `StructuredBuffer<float4>`, and define `CWBVH_COMPRESSED_TRIS` if `tiny_bvh.h` does.
-
 To use TinyOCL, just include `tiny_ocl.h`; this will automatically cause linking with `OpenCL.lib` in the 'external' folder, which in turn passes on work to vendor-specific driver code.
 
 Note that the `tiny_bvh.h` library will work without `tiny_ocl.h` and remains dependency-free. `tiny_ocl.h` is only needed in projects that wish to trace rays on the GPU using BVHs created by `tiny_bvh.h`.
@@ -324,6 +322,7 @@ TinyBVH is a cross-platform library and should build on any platform that suppor
 * `ANDROID`: benefits from ARM NEON support as well as aligned memory allocation.
 * `APPLE`: benefits from ARM NEON support, dedicated paths in GPU example code and specialized support in TinyBVH itself.
 * `OPENCL`: although TinyBVH does not directly use OpenCL, GPU-specific BVHs can be constructed and example code for BLAS/TLAS traversal in OpenCL is provided.
+* `Slang`: `kernels/traverse_cwbvh.slang` is a [Slang](https://shader-slang.org) port of the CWBVH traversal (`traverse_cwbvh` and `isoccluded_cwbvh`), which compiles to SPIR-V for Vulkan, Metal, HLSL and the other Slang targets.
 * `OpenGL/compute`: example compute shader code for BLAS traversal is provided.
 * `DirectX12` and `Vulkan`: benchmark code is provided to directly compare DXR and Vulkan Ray Tracing against TinyBVH.
 * `WASM / Emscripten`: supported, as are g++, clang and Visual Studio.
