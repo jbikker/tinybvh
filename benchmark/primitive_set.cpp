@@ -61,6 +61,14 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 		camPos[1] = bvhvec3( -4.8f, 2.1f, -7.2f ), camDir[1] = tinybvh_normalize( bvhvec3( -0.53f, 0.80f, -1.88f ) - camPos[1] );
 		camPos[2] = bvhvec3( -0.7f, 4.9f, 0.4f ), camDir[2] = tinybvh_normalize( bvhvec3( 0.13f, 3.28f, -1.36f ) - camPos[2] );
 	}
+	else if (scene == LEGO_PORSCHE)
+	{
+		// load the Lego Porsche model
+		AddMesh( "./testdata/legoporsche.bin" );
+		camPos[0] = bvhvec3( 0.33f, -2.31f, 0.30f ), camDir[0] = tinybvh_normalize( bvhvec3( -0.11f, 0.72f, 0.69f ) );
+		camPos[1] = bvhvec3( 0.29f, 0.55f, -2.02f ), camDir[1] = tinybvh_normalize( bvhvec3( -0.24f, -0.28f, 0.93f ) );
+		camPos[2] = bvhvec3( 3.98f, 1.67f, 4.28f ), camDir[2] = tinybvh_normalize( bvhvec3( -0.70f, -0.48f, -0.53f ) );
+	}
 	else
 	{
 		exit( 0 ); // invalid scene.
@@ -105,6 +113,12 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	{
 		strncpy( desc, "Stanford Dragon", 128 ); 
 		strncpy( shrt, "dragon", 64 ); 
+		break;
+	}
+	case Scene::LEGO_PORSCHE: 
+	{
+		strncpy( desc, "Lego Porsche", 128 ); 
+		strncpy( shrt, "porsche", 64 ); 
 		break;
 	}
 	default: 

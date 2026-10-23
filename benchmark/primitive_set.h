@@ -9,7 +9,8 @@ enum Scene : uint32_t {
 	SAN_MIGUEL, // not included in GitHub repo due to size, request if needed.
 	CONFERENCE_ROOM,
 	BUNNY_10K,
-	STANFORD_DRAGON
+	STANFORD_DRAGON,
+	LEGO_PORSCHE
 };
 
 class PrimitiveSet
