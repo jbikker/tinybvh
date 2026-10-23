@@ -86,7 +86,7 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 #if 1
 
 const char* triMesh = "../../testdata/cryteksponza.bin";
-const char* raySetPath = "../../view3rays_sm.bin";
+const char* raySetPath = "../../view3rays.bin";
 
 #else
 
