@@ -67,7 +67,7 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 #define ENABLE_HWRT			true	// display info on hardware RT pipeline performance
 #define ENABLE_BVH2			false	// display info on BVH_GPU performance
 #define ENABLE_BVH4			false	// display info on BVH4_GPU performance
-#define ENABLE_CWBVH		false	// display info on BVH8_CWBVH performance
+#define ENABLE_CWBVH		true	// display info on BVH8_CWBVH performance
 #define ENABLE_RAY_QUERIES	false	// display info on inline ray query performance
 #define ENABLE_VALIDATION	false	// VK_LAYER_KHRONOS_validation; costs performance
 #define BARRIER_BETWEEN_DISPATCHES false
@@ -77,9 +77,9 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 // scene as the compute shaders: BVH_GPU with shaders/traverse.cl, the AMD layouts
 // with shaders/traverse_amd.cl, so the two APIs can be compared one frame apart.
 #define ENABLE_OPENCL		true	// init OpenCL and put its backends in the rotation
-#define ENABLE_OCL_BVH2		false	// display info on OpenCL BVH_GPU performance
+#define ENABLE_OCL_BVH2		true	// display info on OpenCL BVH_GPU performance
 #define ENABLE_OCL_AMD_BVH4	false	// display info on AMD BVH4 hardware traversal (RDNA3/RDNA4)
-#define ENABLE_OCL_AMD_BVH8	true	// display info on AMD BVH8 hardware traversal (RDNA4)
+#define ENABLE_OCL_AMD_BVH8	false	// display info on AMD BVH8 hardware traversal (RDNA4)
 #define OCL_PRESENT_RESULT	false	// show what OpenCL traced; costs a 4MB readback + upload per frame
 #define OCL_DEVICE_INDEX	-1		// -1: use the GPU Vulkan runs on; else an index from the list printed at startup
 
@@ -865,7 +865,7 @@ static void InitBVHBuffers()
 #endif
 	const VkBufferUsageFlags use = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 	bvhNodeBuffer = MakeDeviceBuffer( bvh.bvhNode, nodeBytes, nodeBytes, use, "bvhNodeBuffer" );
-	bvhIdxBuffer = MakeDeviceBuffer( bvh.bvh.primIdx, idxBytes, idxBytes, use, "bvhIdxBuffer" );
+	bvhIdxBuffer = MakeDeviceBuffer( bvh2.primIdx, idxBytes, idxBytes, use, "bvhIdxBuffer" );
 	bvhVertBuffer = MakeDeviceBuffer( (bvhvec4*)bvh.orderedVerts.data, vertBytes, vertBytes, use, "bvhVertBuffer" );
 	bvh4DataBuffer = MakeDeviceBuffer( bvh4.bvh4Data, bvh4Bytes, bvh4Bytes, use, "bvh4DataBuffer" );
 	cwbvhNodeBuffer = MakeDeviceBuffer( cwbvh.bvh8Data, cwbvhNodeBytes, cwbvhNodeBytes, use, "cwbvhNodeBuffer" );
