@@ -77,14 +77,23 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 // scene as the compute shaders: BVH_GPU with shaders/traverse.cl, the AMD layouts
 // with shaders/traverse_amd.cl, so the two APIs can be compared one frame apart.
 #define ENABLE_OPENCL		true	// init OpenCL and put its backends in the rotation
-#define ENABLE_OCL_BVH2		true	// display info on OpenCL BVH_GPU performance
+#define ENABLE_OCL_BVH2		false	// display info on OpenCL BVH_GPU performance
 #define ENABLE_OCL_AMD_BVH4	false	// display info on AMD BVH4 hardware traversal (RDNA3/RDNA4)
-#define ENABLE_OCL_AMD_BVH8	false	// display info on AMD BVH8 hardware traversal (RDNA4)
+#define ENABLE_OCL_AMD_BVH8	true	// display info on AMD BVH8 hardware traversal (RDNA4)
 #define OCL_PRESENT_RESULT	false	// show what OpenCL traced; costs a 4MB readback + upload per frame
 #define OCL_DEVICE_INDEX	-1		// -1: use the GPU Vulkan runs on; else an index from the list printed at startup
 
+#if 1
+
 const char* triMesh = "../../testdata/cryteksponza.bin";
-const char* raySetPath = "../../view1rays.bin";
+const char* raySetPath = "../../view3rays_sm.bin";
+
+#else
+
+const char* triMesh = "../../testdata/sanmiguel.bin";
+const char* raySetPath = "../../view3rays_sm.bin";
+
+#endif
 
 constexpr uint32_t NUM_INSTANCES = 1, FRAME_COUNT = 2;
 constexpr uint32_t NUM_DISPATCHES = 100;
@@ -824,14 +833,19 @@ static void InitMeshes()
 		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, "meshVB" );
 	// One spatial-split build, converted to both GPU layouts.
 	bvh2.settings.useSpatialSplits = true; // triggers a high-quality BonsaiS build
-	bvh2.settings.postOptimize = true; // triggers post-optimization
+	// bvh2.settings.postOptimize = true; // triggers post-optimization
+	printf("building base BVH... ");
 	bvh2.Build( verts, triCount );
-	bvh.ConvertFrom( bvh2, true );    // Aila & Laine 64-byte nodes + primIdx + separate tris
+	printf("done.\nconverting to MBVH<4>...");
+	bvh.ConvertFrom(bvh2, true);    // Aila & Laine 64-byte nodes + primIdx + separate tris
 	mbvh4.ConvertFrom( bvh2, true );  // collapse the BVH2 into a 4-wide BVH
-	bvh4.ConvertFrom( mbvh4, true );  // quantize into the single-blob BVH4_GPU layout
+	printf("done.\nconverting to bvh4...");
+	bvh4.ConvertFrom(mbvh4, true);  // quantize into the single-blob BVH4_GPU layout
+	printf("done.\nconverting to cwbvh...");
 	cwbvh.settings.useSpatialSplits = true; // triggers a high-quality BonsaiS build
 	cwbvh.settings.postOptimize = true; // triggers post-optimization
 	cwbvh.Build( verts, triCount ); // separate SBVH build: see the note at 'cwbvh'.
+	printf("done.\n");
 }
 
 static void InitBVHBuffers()
@@ -957,20 +971,24 @@ static void CopyBVH2( BVH& copy )
 
 static void InitAMDBVH4()
 {
+	printf("converting to AMD4... ");
 	CopyBVH2( bvh2AMD4 );
 	bvh2AMD4.SplitLeafs( 1 );
 	mbvh4AMD.leafPrimLimit = 0;
 	mbvh4AMD.ConvertFrom( bvh2AMD4, true );
 	bvh4AMD.ConvertFrom( mbvh4AMD );
+	printf("done.\n");
 }
 
 static void InitAMDBVH8()
 {
+	printf("converting to AMD8... ");
 	CopyBVH2( bvh2AMD8 );
 	bvh2AMD8.SplitLeafs( 2 );
 	mbvh8AMD.leafPrimLimit = 2;
 	mbvh8AMD.ConvertFrom( bvh2AMD8, true );
 	bvh8AMD.ConvertFrom( mbvh8AMD );
+	printf("done.\n");
 }
 
 static void RunOpenCL( const int backend, cl_event* event = 0 )
