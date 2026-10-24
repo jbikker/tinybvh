@@ -1054,6 +1054,8 @@ static void renameLocals( Flat& f, Names& N, RenameStats& st )
 			if (!stmtStart && !forInit) continue;
 			vector<size_t> nm;
 			if (parseDecl( F, i, hi, N, 0, nm, after )) { for (size_t x : nm) decl.push_back( x ); i = after; }
+			else if (stmtStart && F[i].id() && !N.keyword.count( F[i].s ) && i + 1 < hi &&
+				F[i + 1].is( ":" )) decl.push_back( i );		// a goto label
 			else if (debugMisses && F[i].id() && !N.keyword.count( F[i].s ))
 			{
 				// Set MICROBVH_DEBUG to list statements that were not recognized as
@@ -1731,24 +1733,128 @@ static size_t mergeDecls( Flat& f, const Names& N )
 	return merged;
 }
 
-// '0.5f' is '.5f'; '1.0f' is '1.f'. Purely lexical, the type is unchanged.
-static void shortenLiterals( Flat& f, size_t& n )
+// Shorter spellings for literals. Every rewrite keeps the value and the type.
+//  - '0.5f' is '.5f', '1.0f' is '1.f'
+//  - a hex constant is respelled in whichever base is shorter
+//  - an all-ones mask is '~0u', a power of two is '1u<<k'
+//  - 'true' and 'false' are 1 and 0
+// The multi-token forms are only used where the neighbouring operators bind
+// more loosely than a shift, so no parentheses are needed and no expression
+// changes meaning.
+struct LitStats { size_t floats = 0, ints = 0, bools = 0, bytes = 0; };
+
+static bool shiftSafeLeft( const Tok& t )
 {
-	for (Tok& t : f.F)
+	static const unordered_set<string> S = { "(", ",", "=", "return", ";", "{", "[", "&&", "||",
+		"|", "&", "^", "?", ":", "+=", "-=", "|=", "&=", "^=" };
+	return S.count( t.s ) != 0;
+}
+static bool shiftSafeRight( const Tok& t )
+{
+	static const unordered_set<string> S = { ")", ",", ";", "]", "}", "&&", "||", "|", "&", "^", ":" };
+	return S.count( t.s ) != 0;
+}
+
+// Parse an integer literal into a value plus a type class. Returns false for
+// anything whose type is not obvious: octal, digit separators, odd suffixes.
+static bool intLiteral( const string& s, unsigned long long& v, bool& isU, bool& is64 )
+{
+	size_t i = 0, n = s.size();
+	if (n == 0 || !isdigit( (unsigned char)s[0] )) return false;
+	int base = 10;
+	if (n > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; i = 2; }
+	else if (s[0] == '0' && n > 1) return false;					// octal: leave alone
+	size_t digits = i;
+	v = 0;
+	for (; i < n; i++)
 	{
-		if (t.k != T_NUM || t.s.find( '.' ) == string::npos) continue;
-		size_t suf = t.s.size();
-		while (suf && (t.s[suf - 1] == 'f' || t.s[suf - 1] == 'F')) suf--;
-		string body = t.s.substr( 0, suf ), tail = t.s.substr( suf );
-		if (body.find_first_not_of( "0123456789." ) != string::npos) continue;	// no hex, no exponent
-		size_t dot = body.find( '.' );
-		if (dot == string::npos || body.find( '.', dot + 1 ) != string::npos) continue;
-		string lead = body.substr( 0, dot ), frac = body.substr( dot + 1 );
-		while (!frac.empty() && frac.back() == '0') frac.pop_back();
-		if (lead == "0" && !frac.empty()) lead.clear();							// 0.5 -> .5
-		if (lead.empty() && frac.empty()) lead = "0";							// 0.0 -> 0.
-		string out = lead + "." + frac + tail;
-		if (out.size() < t.s.size()) { n += t.s.size() - out.size(); t.s = out; }
+		int d;
+		char c = s[i];
+		if (isdigit( (unsigned char)c )) d = c - '0';
+		else if (base == 16 && isxdigit( (unsigned char)c )) d = (tolower( c ) - 'a') + 10;
+		else break;
+		unsigned long long nv = v * (unsigned)base + (unsigned)d;
+		if (nv < v) return false;									// overflow
+		v = nv;
+	}
+	if (i == digits) return false;
+	string suf = s.substr( i );
+	for (char& c : suf) c = (char)tolower( (unsigned char)c );
+	if (suf != "" && suf != "u" && suf != "ull" && suf != "ul" && suf != "ll" && suf != "llu" &&
+		suf != "l" && suf != "lu") return false;
+	isU = suf.find( 'u' ) != string::npos;
+	is64 = suf.find( "ll" ) != string::npos || v > 0xFFFFFFFFull;
+	if (!isU && base == 16 && !is64 && v > 0x7FFFFFFFull) isU = true;	// hex picks unsigned int
+	else if (!isU && v > 0x7FFFFFFFull && base != 16) return false;		// decimal would widen
+	if (suf.find( 'l' ) != string::npos && suf.find( "ll" ) == string::npos) return false;
+	return true;
+}
+
+static void shortenConstants( Flat& f, LitStats& st, bool doBool )
+{
+	vector<Tok>& F = f.F;
+	for (size_t k = 0; k < F.size(); k++)
+	{
+		Tok& t = F[k];
+		if (doBool && t.k == T_ID && (t.s == "true" || t.s == "false"))
+		{
+			st.bytes += t.s.size() - 1, st.bools++;
+			t.s = t.s == "true" ? "1" : "0";
+			t.k = T_NUM;
+			continue;
+		}
+		if (t.k != T_NUM) continue;
+		if (t.s.find( '.' ) != string::npos)
+		{
+			size_t suf = t.s.size();
+			while (suf && (t.s[suf - 1] == 'f' || t.s[suf - 1] == 'F')) suf--;
+			string body = t.s.substr( 0, suf ), tail = t.s.substr( suf );
+			if (body.find_first_not_of( "0123456789." ) != string::npos) continue;
+			size_t dot = body.find( '.' );
+			if (dot == string::npos || body.find( '.', dot + 1 ) != string::npos) continue;
+			string lead = body.substr( 0, dot ), frac = body.substr( dot + 1 );
+			while (!frac.empty() && frac.back() == '0') frac.pop_back();
+			if (lead == "0" && !frac.empty()) lead.clear();
+			if (lead.empty() && frac.empty()) lead = "0";
+			string out = lead + "." + frac + tail;
+			if (out.size() < t.s.size()) { st.bytes += t.s.size() - out.size(), st.floats++; t.s = out; }
+			continue;
+		}
+		unsigned long long v;
+		bool isU, is64;
+		if (!intLiteral( t.s, v, isU, is64 )) continue;
+		string suf = string( isU ? "u" : "" ) + (is64 ? "ll" : "");
+		if (is64 && isU) suf = "ull";
+		vector<string> forms;
+		{
+			char dec[32], hex[32];
+			snprintf( dec, sizeof( dec ), "%llu", v );
+			snprintf( hex, sizeof( hex ), "0x%llX", v );
+			forms.push_back( string( dec ) + suf );
+			forms.push_back( string( hex ) + suf );
+		}
+		bool multi = false;
+		unsigned long long allOnes = is64 ? ~0ull : 0xFFFFFFFFull;
+		if (isU && v == allOnes) forms.push_back( "~0" + suf );			// unary: always safe
+		size_t best = 0;
+		for (size_t i = 1; i < forms.size(); i++) if (forms[i].size() < forms[best].size()) best = i;
+		// a power of two needs a shift, which only fits without parentheses in a
+		// context that binds more loosely than '<<'
+		if (isU && v >= 16 && (v & (v - 1)) == 0 && k && k + 1 < F.size() &&
+			shiftSafeLeft( F[k - 1] ) && shiftSafeRight( F[k + 1] ))
+		{
+			int sh = 0;
+			for (unsigned long long w = v; w > 1; w >>= 1) sh++;
+			char buf[32];
+			snprintf( buf, sizeof( buf ), "1%s<<%d", suf.c_str(), sh );
+			if (strlen( buf ) < forms[best].size()) { forms.push_back( buf ); best = forms.size() - 1; multi = true; }
+		}
+		(void)multi;
+		if (forms[best].size() < t.s.size())
+		{
+			st.bytes += t.s.size() - forms[best].size(), st.ints++;
+			t.s = forms[best];
+		}
 	}
 }
 
@@ -1769,24 +1875,65 @@ static uint64_t hashSeq( const vector<Tok>& F, size_t i, size_t n )
 	return h;
 }
 
-static bool seqUsable( const vector<Tok>& F, size_t i, size_t n, const Names& N )
+static bool seqUsable( const vector<Tok>& F, size_t i, size_t n, const Names& N, bool* argUnsafe = nullptr )
 {
 	if (F[i].is( "(" )) return false;							// would hide a function-like macro call
-	if (N.funcLikeMacro.count( F[i + n - 1].s )) return false;	// its '(' would end up outside
+	if (n > 1 && N.funcLikeMacro.count( F[i + n - 1].s )) return false;
 	int d1 = 0, d2 = 0, d3 = 0;
+	bool unsafe = false;
 	for (size_t k = 0; k < n; k++)
 	{
 		const string& s = F[i + k].s;
 		if (s == "#" || s == "##") return false;
-		if (s == "(") d1++; else if (s == ")") { if (--d1 < 0) return false; }
-		else if (s == "[") d2++; else if (s == "]") { if (--d2 < 0) return false; }
-		else if (s == "{") d3++; else if (s == "}") { if (--d3 < 0) return false; }
-		else if (s == "," && d1 == 0 && d2 == 0 && d3 == 0) return false;	// would change macro arity
+		if (s == "(") d1++; else if (s == ")") d1--;
+		else if (s == "[") d2++; else if (s == "]") d2--;
+		else if (s == "{") d3++; else if (s == "}") d3--;
+		else if (s == "," && d1 == 0 && d2 == 0 && d3 == 0) unsafe = true;
+		// a run that closes a bracket it never opened is not self-contained,
+		// even when the totals happen to balance again: ');if(' is not a unit
+		if (d1 < 0 || d2 < 0 || d3 < 0) return false;
 	}
-	return d1 == 0 && d2 == 0 && d3 == 0;
+	// A run must close what it opens. Leaving a bracket open is legal and was
+	// measured: it is worth under a hundred bytes across the targets, which does
+	// not justify moving brackets into macro bodies.
+	if (d1 || d2 || d3) return false;
+	if (argUnsafe) *argUnsafe = unsafe;
+	return true;
 }
 
-struct MacroDef { string name, param; vector<Tok> seq; };
+static bool seqBalanced( const vector<Tok>& F, size_t i, size_t n )
+{
+	int d1 = 0, d2 = 0, d3 = 0;
+	for (size_t k = 0; k < n; k++)
+	{
+		const string& s = F[i + k].s;
+		if (s == "(") d1++; else if (s == ")") d1--;
+		else if (s == "[") d2++; else if (s == "]") d2--;
+		else if (s == "{") d3++; else if (s == "}") d3--;
+		if (d1 < 0 || d2 < 0 || d3 < 0) return false;
+	}
+	return !d1 && !d2 && !d3;
+}
+
+// Positions inside any argument list, where a run carrying a top-level comma
+// may not be replaced: if the callee turns out to be a function-like macro the
+// comma count is its arity. The callee need not be one of ours - _MM_SHUFFLE
+// comes from <xmmintrin.h> - so every 'name( ... )' is treated as suspect.
+static void markMacroArgs( const Flat& f, const Names& N, vector<char>& in )
+{
+	const vector<Tok>& F = f.F;
+	(void)N;
+	in.assign( F.size(), 0 );
+	for (size_t i = 0; i + 1 < F.size(); i++)
+	{
+		if (!F[i].id() || !F[i + 1].is( "(" )) continue;
+		size_t e = matchFwd( F, i + 1, F.size() );
+		if (e == string::npos) continue;
+		for (size_t k = i + 1; k <= e; k++) in[k] = 1;
+	}
+}
+
+struct MacroDef { string name, param; vector<string> params; vector<Tok> seq; };
 
 static void compact( Flat& f )
 {
@@ -1799,27 +1946,63 @@ static void compact( Flat& f )
 }
 
 // Hands out short macro names that do not collide with anything in the header.
+// The prefixed names come first, so the hottest macros stay recognizable; after
+// those 62 run out it falls back to any free two character spelling rather than
+// going to three characters, which is worth several kilobytes. A collision with
+// application code is a redefinition or a syntax error, never silent breakage.
 struct NameGen
 {
 	Names& N;
 	string prefix;
-	size_t ctr = 0;
-	NameGen( Names& n, const string& p ) : N( n ), prefix( p ) {}
-	string operator()()
+	vector<string> pool;
+	size_t ctr = 0, ctrLong = 0, longStart = 0;
+	NameGen( Names& n, const string& p ) : N( n ), prefix( p ) { build(); ctrLong = longStart; }
+	void build()
 	{
-		static const char* A = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-		for (; ; ctr++)
+		// Uppercase first: 'eq', 'lt' and friends are real members of standard
+		// library types, and this header is often included before <string>.
+		static const char* A = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+		static const char* B = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+		if (!prefix.empty()) for (const char* q = B; *q; q++) pool.push_back( prefix + *q );
+		for (const char* q = A; *q; q++) for (const char* r = B; *r; r++)
 		{
-			size_t v = ctr;
-			string s = prefix;
-			s += A[v % 62];
-			if (v >= 62) s += A[(v / 62) % 62];
-			if (v >= 62 * 62) s += A[(v / 3844) % 62];
-			if (!N.allIdent.count( s )) { N.allIdent.insert( s ); ctr++; return s; }
+			string s2 = string( 1, *q ) + *r;
+			if (!prefix.empty() && s2[0] == prefix[0]) continue;		// already emitted above
+			pool.push_back( s2 );
+		}
+		longStart = pool.size();
+		string pfx = prefix.empty() ? string( "Z" ) : prefix;
+		for (const char* q = B; *q; q++) for (const char* r = B; *r; r++)
+			pool.push_back( pfx + *q + *r );
+	}
+	string at( size_t& c, size_t limit )
+	{
+		for (; c < limit; c++) if (!N.allIdent.count( pool[c] ))
+		{
+			N.allIdent.insert( pool[c] );
+			return pool[c++];
+		}
+		// exhausted: fall back to a longer spelling
+		static size_t extra = 0;
+		for (; ; extra++)
+		{
+			char buf[32];
+			snprintf( buf, sizeof( buf ), "%s%zu", prefix.empty() ? "Z" : prefix.c_str(), extra );
+			string s2 = buf;
+			if (!N.allIdent.count( s2 )) { N.allIdent.insert( s2 ); extra++; return s2; }
 		}
 	}
-	void undo() { ctr--; }
+	string operator()() { return at( ctr, longStart ); }
+	// Names for things used a handful of times; the two character names belong to
+	// the factored runs, which are referenced hundreds of times each.
+	string longName() { return at( ctrLong, pool.size() ); }
+	void undo() { if (ctr) ctr--; }
+	void undoLong() { if (ctrLong > longStart) ctrLong--; }
 };
+
+static size_t g_macroTail = 0;		// bytes of cleanup each generated macro costs
+static size_t g_minRun = 4;			// shortest run worth a macro; shorter ones crowd out better ones
+static size_t g_perRound = 0;		// 0 = apply every candidate a round turns up
 
 static void factorMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGen& gen,
 	int rounds, size_t maxN, size_t maxCand, long long minGain )
@@ -1830,7 +2013,7 @@ static void factorMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGen& ge
 		vector<Tok>& F = f.F;
 		size_t n = F.size();
 		if (n < 8) break;
-		struct C { uint64_t h; uint32_t cnt; uint32_t pos; uint32_t len; long long est; };
+		struct C { uint64_t h; uint32_t cnt; uint32_t pos; uint32_t len; long long est; bool unsafe; };
 		vector<C> cands;
 		// L == 1 captures a single long identifier or keyword. The macro expands
 		// back to the original spelling, so public names stay intact after
@@ -1842,7 +2025,7 @@ static void factorMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGen& ge
 			for (size_t i = 0; i + L <= n; i++)
 			{
 				if (f.owner[i] != f.owner[i + L - 1]) continue;
-				if (L == 1 && (F[i].k != T_ID || F[i].s.size() < 5)) continue;
+				if (L == 1 && ((F[i].k != T_ID && F[i].k != T_NUM) || F[i].s.size() < 3)) continue;
 				uint64_t h = hashSeq( F, i, L );
 				auto& e = cnt[h];
 				if (e.first++ == 0) e.second = (uint32_t)i;
@@ -1852,12 +2035,13 @@ static void factorMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGen& ge
 				if (kv.second.first < 3) continue;
 				size_t pos = kv.second.second;
 				size_t rl = renderLen( F, pos, L );
-				if (rl < (L == 1 ? 5u : 9u)) continue;
-				long long raw = (long long)kv.second.first * ((long long)rl - 3);
-				if (raw <= minGain || raw - (long long)(13 + rl) <= 0) continue;
-				long long est = raw - (long long)(13 + rl);
-				if (!seqUsable( F, pos, L, N )) continue;
-				cands.push_back( { kv.first, kv.second.first, (uint32_t)pos, (uint32_t)L, est } );
+				if (rl < g_minRun) continue;
+				long long raw = (long long)kv.second.first * ((long long)rl - 2);
+				if (raw <= minGain || raw - (long long)(12 + rl + g_macroTail) <= 0) continue;
+				long long est = raw - (long long)(12 + rl + g_macroTail);
+				bool unsafe = false;
+				if (!seqUsable( F, pos, L, N, &unsafe )) continue;
+				cands.push_back( { kv.first, kv.second.first, (uint32_t)pos, (uint32_t)L, est, unsafe } );
 			}
 		}
 		if (cands.empty()) break;
@@ -1869,7 +2053,8 @@ static void factorMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGen& ge
 		unordered_set<string> firsts;
 		for (const C& c : cands) firsts.insert( F[c.pos].s );
 		for (size_t i = 0; i < n; i++) if (firsts.count( F[i].s )) firstPos[F[i].s].push_back( (uint32_t)i );
-		vector<char> taken( n, 0 );
+		vector<char> taken( n, 0 ), inArgs;
+		markMacroArgs( f, N, inArgs );
 		int applied = 0;
 		for (const C& c : cands)
 		{
@@ -1899,6 +2084,14 @@ static void factorMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGen& ge
 				for (uint32_t k = 0; k < c.len; k++)
 					if (taken[p + k] || F[p + k].s != seq[k].s || F[p + k].k != seq[k].k) { ok = false; break; }
 				if (!ok) continue;
+				if (c.unsafe)
+				{
+					// the whole run must stay clear of any argument list, not just
+					// its first token: a run may start outside and reach inside
+					bool touches = false;
+					for (uint32_t k = 0; k < c.len && !touches; k++) touches = inArgs[p + k] != 0;
+					if (touches) continue;
+				}
 				if (multiStmt && p > 0)
 				{
 					const Tok& pv = F[p - 1];
@@ -1919,7 +2112,8 @@ static void factorMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGen& ge
 			size_t rl = renderLen( F, c.pos, c.len );
 			string name = freshName();
 			long long raw = (long long)hits.size() * ((long long)rl - (long long)name.size());
-			long long gain = raw - (long long)(10 + name.size() + rl);
+			long long gain = raw - (long long)(10 + name.size() + rl) -
+				(long long)(g_macroTail ? 8 + name.size() : 0);
 			if (raw <= minGain || gain <= 0) { gen.undo(); continue; }
 			for (uint32_t p : hits)
 			{
@@ -1927,8 +2121,9 @@ static void factorMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGen& ge
 				for (uint32_t k = 1; k < c.len; k++) { f.dead[p + k] = 1; taken[p + k] = 1; }
 				taken[p] = 1;
 			}
-			defs.push_back( { name, string(), seq } );
+			defs.push_back( { name, string(), {}, seq } );
 			applied++;
+			if (g_perRound && (size_t)applied >= g_perRound) break;
 		}
 		compact( f );
 		if (!applied) break;
@@ -1946,7 +2141,7 @@ static void factorMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGen& ge
 // no inlining decision changes.
 // ----------------------------------------------------------------------------
 
-struct ParamCand { uint32_t pos, len, hole, cnt; long long est; };
+struct ParamCand { uint32_t pos, len, hole, cnt; long long est; bool unsafe; };
 
 static uint64_t hashHoled( const vector<Tok>& F, size_t i, size_t n, size_t hole )
 {
@@ -2018,12 +2213,13 @@ static void factorParamMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGe
 					size_t rl = renderLen( F, pos, L ), al = F[pos + hole].s.size();
 					if (rl < 12) continue;
 					// name(arg) replaces the run; assume a 3 character macro name
-					long long per = (long long)rl - (long long)(3 + 2 + al);
+					long long per = (long long)rl - (long long)(2 + 2 + al);
 					long long raw = (long long)kv.second.first * per;
-					if (raw <= minGain || raw - (long long)(16 + rl) <= 0) continue;
-					long long est = raw - (long long)(16 + rl);
-					if (!seqUsable( F, pos, L, N )) continue;
-					cands.push_back( { (uint32_t)pos, (uint32_t)L, (uint32_t)hole, kv.second.first, est } );
+					if (raw <= minGain || raw - (long long)(15 + rl + g_macroTail) <= 0) continue;
+					long long est = raw - (long long)(15 + rl + g_macroTail);
+					bool unsafe = false;
+					if (!seqUsable( F, pos, L, N, &unsafe ) || !seqBalanced( F, pos, L )) continue;
+					cands.push_back( { (uint32_t)pos, (uint32_t)L, (uint32_t)hole, kv.second.first, est, unsafe } );
 				}
 			}
 		}
@@ -2035,7 +2231,8 @@ static void factorParamMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGe
 		unordered_set<string> firsts;
 		for (const ParamCand& c : cands) firsts.insert( F[c.pos].s );
 		for (size_t i = 0; i < n; i++) if (firsts.count( F[i].s )) firstPos[F[i].s].push_back( (uint32_t)i );
-		vector<char> taken( n, 0 );
+		vector<char> taken( n, 0 ), inArgs;
+		markMacroArgs( f, N, inArgs );
 		int applied = 0;
 		for (const ParamCand& c : cands)
 		{
@@ -2058,6 +2255,14 @@ static void factorParamMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGe
 					else if (F[p + k].s != seq[k].s || F[p + k].k != seq[k].k) ok = false;
 				}
 				if (!ok || !hitSafe( F, p, c.len )) continue;
+				if (c.unsafe)
+				{
+					// collapsing a run that carries a top-level comma would drop an
+					// argument from an enclosing function-like macro call
+					bool touches = false;
+					for (uint32_t k = 0; k < c.len && !touches; k++) touches = inArgs[p + k] != 0;
+					if (touches) continue;
+				}
 				hits.push_back( p );
 				origBytes += (long long)renderLen( F, p, c.len );
 				argBytes += (long long)F[p + c.hole].s.size();
@@ -2078,7 +2283,8 @@ static void factorParamMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGe
 			string name = gen();
 			size_t bodyLen = renderLen( F, c.pos, c.len );
 			long long raw = origBytes - (long long)hits.size() * (long long)(name.size() + 2) - argBytes;
-			long long gain = raw - (long long)(11 + name.size() + bodyLen);
+			long long gain = raw - (long long)(11 + name.size() + bodyLen) -
+				(long long)(g_macroTail ? 8 + name.size() : 0);
 			if (raw <= minGain || gain <= 0) { gen.undo(); continue; }
 			MacroDef d;
 			d.name = name;
@@ -2094,6 +2300,238 @@ static void factorParamMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGe
 				F[p + 2] = arg;
 				F[p + 3] = Tok( ")", T_PUNCT );
 				for (uint32_t k = 4; k < c.len; k++) f.dead[p + k] = 1;
+			}
+			defs.push_back( d );
+			applied++, made++;
+		}
+		compact( f );
+		if (!applied) break;
+	}
+}
+
+// ----------------------------------------------------------------------------
+// The library's own function-like macros.
+//
+// Object-like internal macros are already handled: the single token pass aliases
+// TEMPLATED to a two character name and the preprocessor expands it straight
+// back. A function-like macro cannot be aliased that way, because the alias
+// would leave its '(' outside, so those are renamed outright - at the #define,
+// at every #undef, and at every call site.
+//
+// A macro is treated as internal when its name never appears in a conditional
+// directive: a configuration switch is always tested somewhere with #ifdef,
+// #ifndef or defined(), so one that is never tested is not configuration.
+// ----------------------------------------------------------------------------
+
+static size_t shortenInternalMacros( vector<Chunk>& C, Names& N, NameGen& gen,
+	const set<string>& keep, const set<string>& force, bool list )
+{
+	unordered_set<string> conditional, defined_;
+	for (const Chunk& c : C)
+	{
+		if (!c.dir) continue;
+		if (c.t[0].is( "if" ) || c.t[0].is( "ifdef" ) || c.t[0].is( "ifndef" ) || c.t[0].is( "elif" ))
+			for (size_t i = 1; i < c.t.size(); i++) if (c.t[i].id()) conditional.insert( c.t[i].s );
+		if (c.t[0].is( "define" ) && c.t.size() > 2 && c.t[1].id() && c.t[2].is( "(" ) && !c.t[2].ws)
+			defined_.insert( c.t[1].s );
+	}
+	// names a caller is known to reach for, and the warning plumbing we may drop
+	static const char* PUBLIC[] = { "ALIGNED", "TINYBVH_ALIGNED", "BVH_FATAL_ERROR",
+		"BVH_FATAL_ERROR_IF", "WARNING" };
+	map<string, size_t> use;
+	for (const Chunk& c : C) for (const Tok& t : c.t) if (t.id()) use[t.s]++;
+	vector<pair<size_t, string>> cand;
+	for (const string& m : defined_)
+	{
+		if (force.count( m )) { cand.push_back( { (m.size() - 2) * use[m], m } ); continue; }
+		if (keep.count( m ) || conditional.count( m )) continue;
+		bool pub = false;
+		for (const char* q : PUBLIC) if (m == q) pub = true;
+		if (pub || m.size() < 4) continue;
+		cand.push_back( { (m.size() - 2) * use[m], m } );
+	}
+	sort( cand.begin(), cand.end(), []( const pair<size_t, string>& a, const pair<size_t, string>& b )
+		{ return a.first != b.first ? a.first > b.first : a.second < b.second; } );
+	unordered_map<string, string> ren;
+	for (auto& c : cand)
+	{
+		string n = gen.longName();
+		if (n.size() >= c.second.size()) { gen.undoLong(); continue; }
+		ren[c.second] = n;
+		N.macroIdent.insert( n );
+		N.funcLikeMacro.insert( n );
+		if (list) fprintf( stderr, "macro %s -> %s (x%zu)\n", c.second.c_str(), n.c_str(), use[c.second] );
+	}
+	if (ren.empty()) return 0;
+	for (Chunk& c : C) for (Tok& t : c.t)
+	{
+		if (!t.id()) continue;
+		auto it = ren.find( t.s );
+		if (it != ren.end()) t.s = it->second;
+	}
+	return ren.size();
+}
+
+// ----------------------------------------------------------------------------
+// Multi-argument macros: runs that repeat with only their numeric literals
+// changing. A 4x4 matrix inverse writes 'T[a]*T[b]*T[c]' ninety-six times with
+// nothing but the three indices varying; one macro with three parameters
+// collapses all of them. Holes are numeric literals only, which keeps the
+// arguments single tokens, so no argument can change how the body parses.
+// ----------------------------------------------------------------------------
+
+struct NumCand { uint32_t pos, len, cnt; uint64_t mask; long long est; bool unsafe; };
+
+// Is this token an operand that a macro could take as an argument?
+static bool holeable( const Tok& t, const Names& N, bool idHoles )
+{
+	if (t.k == T_NUM) return true;
+	if (!idHoles || t.k != T_ID) return false;
+	return !N.keyword.count( t.s ) && !N.funcLikeMacro.count( t.s );
+}
+
+static uint64_t hashNumHoled( const vector<Tok>& F, size_t i, size_t n, const Names& N, bool idHoles )
+{
+	uint64_t h = 1469598103934665603ull;
+	for (size_t k = 0; k < n; k++)
+	{
+		if (holeable( F[i + k], N, idHoles )) { h ^= 0xbeefu; h *= 1099511628211ull; continue; }
+		for (char c : F[i + k].s) { h ^= (unsigned char)c; h *= 1099511628211ull; }
+		h ^= 1u; h *= 1099511628211ull;
+	}
+	return h;
+}
+
+static void factorNumericMacros( Flat& f, Names& N, vector<MacroDef>& defs, NameGen& gen,
+	int rounds, size_t maxN, long long minGain, size_t& made, bool idHoles = false )
+{
+	for (int round = 0; round < rounds; round++)
+	{
+		vector<Tok>& F = f.F;
+		size_t n = F.size();
+		if (n < 16) break;
+		vector<NumCand> cands;
+		for (size_t L = 4; L <= maxN && L <= 60; L++)
+		{
+			struct Ent { uint32_t cnt, pos; uint64_t mask; };
+			unordered_map<uint64_t, Ent> grp;
+			for (size_t i = 0; i + L <= n; i++)
+			{
+				if (f.owner[i] != f.owner[i + L - 1]) continue;
+				uint64_t num = 0;
+				int cnt = 0;
+				for (size_t k = 0; k < L; k++) if (holeable( F[i + k], N, idHoles )) num |= 1ull << k, cnt++;
+				if (cnt == 0 || cnt > 16) continue;
+				uint64_t h = hashNumHoled( F, i, L, N, idHoles );
+				auto it = grp.find( h );
+				if (it == grp.end()) { grp[h] = { 1, (uint32_t)i, 0 }; continue; }
+				it->second.cnt++;
+				// remember which literal positions differ from the first occurrence
+				for (size_t k = 0; k < L; k++) if ((num >> k) & 1)
+					if (F[i + k].s != F[it->second.pos + k].s) it->second.mask |= 1ull << k;
+			}
+			for (auto& kv : grp)
+			{
+				Ent& e = kv.second;
+				if (e.cnt < 3 || !e.mask) continue;
+				size_t holes = 0;
+				for (size_t k = 0; k < L; k++) if ((e.mask >> k) & 1) holes++;
+				if (holes > (idHoles ? 4u : 8u) || L < 2 + 2 * holes) continue;
+				size_t rl = renderLen( F, e.pos, L ), args = 0;
+				for (size_t k = 0; k < L; k++) if ((e.mask >> k) & 1) args += F[e.pos + k].s.size();
+				long long per = (long long)rl - (long long)(2 + 2 + args + holes - 1);
+				long long raw = (long long)e.cnt * per;
+				if (per <= 0 || raw <= minGain || raw - (long long)(19 + rl + g_macroTail) <= 0) continue;
+				bool unsafe = false;
+				if (!seqUsable( F, e.pos, L, N, &unsafe ) || !seqBalanced( F, e.pos, L )) continue;
+				cands.push_back( { e.pos, (uint32_t)L, e.cnt, e.mask,
+					raw - (long long)(19 + rl + g_macroTail), unsafe } );
+			}
+		}
+		if (cands.empty()) break;
+		sort( cands.begin(), cands.end(), []( const NumCand& a, const NumCand& b )
+			{ return a.est != b.est ? a.est > b.est : a.len > b.len; } );
+		if (cands.size() > 1500) cands.resize( 1500 );
+		unordered_map<string, vector<uint32_t>> firstPos;
+		unordered_set<string> firsts;
+		for (const NumCand& c : cands) firsts.insert( F[c.pos].s );
+		for (size_t i = 0; i < n; i++) if (firsts.count( F[i].s )) firstPos[F[i].s].push_back( (uint32_t)i );
+		vector<char> taken( n, 0 ), inArgs;
+		markMacroArgs( f, N, inArgs );
+		int applied = 0;
+		for (const NumCand& c : cands)
+		{
+			vector<Tok> seq( F.begin() + c.pos, F.begin() + c.pos + c.len );
+			vector<uint32_t> hits;
+			long long origBytes = 0, callBytes = 0;
+			uint32_t last = 0;
+			bool first = true;
+			size_t holes = 0;
+			for (uint32_t k = 0; k < c.len; k++) if ((c.mask >> k) & 1) holes++;
+			for (uint32_t p : firstPos[seq[0].s])
+			{
+				if (!first && p < last) continue;
+				if (p + c.len > n || f.owner[p] != f.owner[p + c.len - 1]) continue;
+				bool ok = true;
+				for (uint32_t k = 0; k < c.len && ok; k++)
+				{
+					if (taken[p + k]) ok = false;
+					else if ((c.mask >> k) & 1) { if (!holeable( F[p + k], N, idHoles )) ok = false; }
+					else if (F[p + k].s != seq[k].s || F[p + k].k != seq[k].k) ok = false;
+				}
+				if (!ok || !hitSafe( F, p, c.len )) continue;
+				if (c.unsafe)
+				{
+					bool touches = false;
+					for (uint32_t k = 0; k < c.len && !touches; k++) touches = inArgs[p + k] != 0;
+					if (touches) continue;
+				}
+				hits.push_back( p );
+				origBytes += (long long)renderLen( F, p, c.len );
+				for (uint32_t k = 0; k < c.len; k++) if ((c.mask >> k) & 1) callBytes += F[p + k].s.size();
+				last = p + c.len;
+				first = false;
+			}
+			if (hits.size() < 3) continue;
+			// parameter names the body does not already use
+			vector<string> param;
+			for (const char* q = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"; *q && param.size() < holes; q++)
+			{
+				string t( 1, *q );
+				bool clash = false;
+				for (uint32_t k = 0; k < c.len; k++) if (!((c.mask >> k) & 1) && F[c.pos + k].s == t) clash = true;
+				if (!clash) param.push_back( t );
+			}
+			if (param.size() < holes) continue;
+			string name = gen();
+			size_t bodyLen = renderLen( F, c.pos, c.len );
+			long long raw = origBytes - (long long)hits.size() * (long long)(name.size() + 2 + holes - 1) - callBytes;
+			long long gain = raw - (long long)(10 + name.size() + 2 * holes + 1 + bodyLen) -
+				(long long)(g_macroTail ? 8 + name.size() : 0);
+			if (raw <= minGain || gain <= 0) { gen.undo(); continue; }
+			MacroDef d;
+			d.name = name;
+			d.seq.assign( seq.begin(), seq.end() );
+			{
+				size_t h = 0;
+				for (uint32_t k = 0; k < c.len; k++) if ((c.mask >> k) & 1)
+					d.seq[k] = Tok( param[h], T_ID, true ), d.params.push_back( param[h] ), h++;
+			}
+			for (uint32_t p : hits)
+			{
+				vector<Tok> args;
+				for (uint32_t k = 0; k < c.len; k++) if ((c.mask >> k) & 1) args.push_back( F[p + k] );
+				for (uint32_t k = 0; k < c.len; k++) taken[p + k] = 1;
+				size_t w = p;
+				F[w++] = Tok( name, T_ID, true );
+				F[w++] = Tok( "(", T_PUNCT );
+				for (size_t a = 0; a < args.size(); a++)
+				{
+					if (a) F[w++] = Tok( ",", T_PUNCT );
+					F[w++] = args[a];
+				}
+				F[w++] = Tok( ")", T_PUNCT );
+				for (size_t k = w; k < (size_t)p + c.len; k++) f.dead[k] = 1;
 			}
 			defs.push_back( d );
 			applied++, made++;
@@ -2264,9 +2702,12 @@ int main( int argc, char** argv )
 	Isa isa = ISA_NONE;
 	size_t width = 100, maxSeq = 32, maxCand = 4000;
 	int rounds = 10, paramRounds = 10;
-	size_t paramSeq = 32;
+	bool opHoles = true;
+	size_t paramSeq = 32, minRun = 4, perRound = 0;
 	long long minGain = -1;
 	bool doRename = true, doMacros = true, doMembers = true, doBraces = true;
+	set<string> keepMacro, forceMacro;
+	bool doMacroNames = true, doBool = true, doLicense = false, doUndef = true;
 	vector<pair<string, long long>> cliDefine;
 	vector<string> cliUndef;
 	int constMode = -1;				// -1 = auto: only worthwhile without macro factoring
@@ -2282,6 +2723,9 @@ int main( int argc, char** argv )
 		else if (a == "--maxcand") maxCand = (size_t)atoi( val().c_str() );
 		else if (a == "--param-rounds") paramRounds = atoi( val().c_str() );
 		else if (a == "--param-seq") paramSeq = (size_t)atoi( val().c_str() );
+		else if (a == "--minrun") minRun = (size_t)atoi( val().c_str() );
+		else if (a == "--per-round") perRound = (size_t)atoi( val().c_str() );
+		else if (a == "--no-operand-holes") opHoles = false;
 		else if (a == "--gain") minGain = atoll( val().c_str() );
 		else if (a == "--macro-prefix") prefix = val();
 		else if (a == "--no-rename") doRename = false;
@@ -2298,6 +2742,12 @@ int main( int argc, char** argv )
 			cliDefine.push_back( { name, num } );
 		}
 		else if (a == "-U" || a == "--undefine") cliUndef.push_back( val() );
+		else if (a == "--keep-macro") keepMacro.insert( val() );
+		else if (a == "--shorten-macro") forceMacro.insert( val() );
+		else if (a == "--no-macro-names") doMacroNames = false;
+		else if (a == "--no-bool") doBool = false;
+		else if (a == "--license") doLicense = true;
+		else if (a == "--no-undef") doUndef = false;
 		else if (a == "--no-macros") doMacros = false;
 		else if (a == "--isa")
 		{
@@ -2323,16 +2773,24 @@ int main( int argc, char** argv )
 				"  --maxcand <n>        macro candidates considered per round (default 4000)\n"
 				"  --param-rounds <n>   rounds of one-argument macro factoring (default 10, 0 = off)\n"
 				"  --param-seq <n>      longest run a one-argument macro may capture (default 32)\n"
+				"  --minrun <n>         shortest run a macro may capture (default 4)\n"
 				"  --gain <n>           text a macro must remove to be worth a line (default: --width)\n"
 				"  --no-rename          keep original local variable names\n"
 				"  --no-macros          do not factor repeated token runs into macros\n"
 				"  --no-members         keep original internal (private/protected) member names\n"
+				"  --no-macro-names     keep original names for the library's own macros\n"
+				"  --keep-macro <name>  never rename this macro\n"
+				"  --shorten-macro <n>  rename this macro even if the heuristic would keep it\n"
+				"  --no-bool            keep 'true' and 'false' instead of 1 and 0\n"
+				"  --license            emit the full MIT license block (default: one line)\n"
+				"  --no-undef           leave the generated macros defined after the header\n"
 				"  -D NAME[=n] / -U NAME  pin a configuration macro and fold its conditionals\n"
 				"  --no-braces          keep every block brace; no comma folding\n"
 				"  --const / --no-const drop top-level const on scalar parameters and locals;\n"
 				"                       default: only when --no-macros, where it pays off\n\n"
-				"Set MICROBVH_DEBUG in the environment to list statements that the local\n"
-				"declaration parser did not recognize; useful after adding new types.\n" );
+				"Set MICROBVH_DEBUG to list statements the declaration parser did not\n"
+				"recognize, and MICROBVH_ALIAS to report what per-function aliasing of\n"
+				"long names could still buy; both are diagnostics, not transformations.\n" );
 			return 0;
 		}
 		else fatal( "unknown option " + a );
@@ -2359,6 +2817,11 @@ int main( int argc, char** argv )
 
 	Names N;
 	collectNames( C, N );
+	NameGen gen( N, prefix );
+	size_t macroRenamed = 0;
+	if (doMacroNames)
+		macroRenamed = shortenInternalMacros( C, N, gen, keepMacro, forceMacro,
+			getenv( "MICROBVH_DEBUG" ) != nullptr );
 	Flat f;
 	flatten( C, f );
 	RenameStats rs;
@@ -2369,8 +2832,8 @@ int main( int argc, char** argv )
 	if (constMode == 1 || (constMode < 0 && !doMacros)) constDropped = stripConst( f, N );
 	size_t protoNames = doRename ? stripPrototypeNames( f, N ) : 0;
 	compact( f );
-	size_t litBytes = 0;
-	shortenLiterals( f, litBytes );
+	LitStats lit;
+	shortenConstants( f, lit, doBool );
 	size_t declMerged = 0;
 	if (doBraces) declMerged = mergeDecls( f, N );
 	compact( f );
@@ -2378,31 +2841,75 @@ int main( int argc, char** argv )
 	if (doBraces) simp.run();
 	compact( f );
 	vector<MacroDef> defs;
+	{	// every pass up to here must leave the bracket structure untouched;
+		// macro factoring may move brackets into bodies, and is covered by the
+		// compile-and-compare verification instead
+		unflatten( C, f );
+		long long p1, b1, k1; size_t t1;
+		countShape( C, p1, b1, k1, t1 );
+		if (p0 != p1 || b0 != b1 || k0 != k1) fatal( "internal error: bracket balance changed" );
+	}
+	g_macroTail = doUndef ? 10 : 0;		// "#undef Xy\n"
+	g_minRun = minRun;
+	g_perRound = perRound;
 	long long gainLimit = minGain < 0 ? (long long)width : minGain;
-	NameGen gen( N, prefix );
 	size_t paramMade = 0;
 	if (doMacros) for (int pass = 0; pass < (paramRounds > 0 ? 3 : 1); pass++)
 	{
 		size_t before = defs.size();
 		factorMacros( f, N, defs, gen, rounds, maxSeq, maxCand, gainLimit );
 		if (paramRounds > 0)
+		{
 			factorParamMacros( f, N, defs, gen, paramRounds, paramSeq, gainLimit, paramMade );
+			factorNumericMacros( f, N, defs, gen, paramRounds, paramSeq, gainLimit, paramMade );
+			if (opHoles) factorNumericMacros( f, N, defs, gen, paramRounds, paramSeq, gainLimit, paramMade, true );
+		}
 		if (defs.size() == before) break;
+	}
+	if (getenv( "MICROBVH_ALIAS" ))
+	{
+		// What a per-function 'auto a = X;' alias could still buy, on top of
+		// everything the macro pass already took.
+		vector<Body> bb;
+		findBodies( f.F, bb );
+		map<string, long long> top;
+		long long gainLong = 0, gainMacro = 0;
+		size_t siteLong = 0, siteMacro = 0;
+		for (const Body& b : bb)
+		{
+			map<string, size_t> c;
+			for (size_t i = b.brace + 1; i < b.close; i++) if (f.F[i].id() &&
+				!(f.F[i - 1].is( "." ) || f.F[i - 1].is( "->" ) || f.F[i - 1].is( "::" ))) c[f.F[i].s]++;
+			for (auto& kv : c)
+			{
+				size_t L = kv.first.size(), k = kv.second;
+				if (L < 2) continue;
+				long long g = (long long)((L - 1) * k) - (long long)(8 + L);	// "auto a=X;"
+				if (g <= 0) continue;
+				if (L <= 3) gainMacro += g, siteMacro++; else { gainLong += g, siteLong++; top[kv.first] += g; }
+			}
+		}
+		fprintf( stderr, "alias ceiling: long names %lld bytes over %zu sites; "
+			"already-macro names %lld bytes over %zu sites\n", gainLong, siteLong, gainMacro, siteMacro );
+		vector<pair<long long, string>> v;
+		for (auto& kv : top) v.push_back( { kv.second, kv.first } );
+		sort( v.rbegin(), v.rend() );
+		for (size_t i = 0; i < v.size() && i < 10; i++)
+			fprintf( stderr, "   %-22s %lld\n", v[i].second.c_str(), v[i].first );
 	}
 	unflatten( C, f );
 
-	long long p1, b1, k1; size_t t1;
-	countShape( C, p1, b1, k1, t1 );
-	if (p0 != p1 || b0 != b1 || k0 != k1) fatal( "internal error: bracket balance changed" );
-
 	string body = emit( C, width );
-	string head = license + "\n";
+	// The full MIT block belongs with the readable sources; a condensed header
+	// carries a one line notice instead, with --license to restore the original.
+	string head = doLicense ? license + "\n" :
+		"// TinyBVH by Jacco Bikker, MIT licensed - see tiny_bvh.h for the full notice.\n";
 	head += "// microbvh.h - generated from the TinyBVH headers by microbvh.cpp.\n";
 	head += string( "// Target ISA: " ) + isaName( isa ) + ". Drop-in replacement for tiny_bvh.h.\n";
 	head += "// Do not edit; edit the TinyBVH sources and regenerate.\n";
+	string tail;
 	if (!defs.empty())
 	{
-		head += "#ifndef TINYBVH_" + prefix + "_DEFS\n#define TINYBVH_" + prefix + "_DEFS\n";
 		Writer w( width );
 		for (const MacroDef& d : defs)
 		{
@@ -2410,22 +2917,33 @@ int main( int argc, char** argv )
 			c.dir = true;
 			c.t.push_back( Tok( "define", T_ID ) );
 			c.t.push_back( Tok( d.name, T_ID ) );
-			if (!d.param.empty())
+			if (!d.param.empty() || !d.params.empty())
 			{
 				c.t.push_back( Tok( "(", T_PUNCT ) );		// function-like: no space here
-				c.t.push_back( Tok( d.param, T_ID ) );
+				if (!d.param.empty()) c.t.push_back( Tok( d.param, T_ID ) );
+				for (size_t q = 0; q < d.params.size(); q++)
+				{
+					if (q) c.t.push_back( Tok( ",", T_PUNCT ) );
+					c.t.push_back( Tok( d.params[q], T_ID ) );
+				}
 				c.t.push_back( Tok( ")", T_PUNCT ) );
 			}
 			for (const Tok& t : d.seq) c.t.push_back( t );
-			if (d.param.empty() && c.t[2].is( "(" )) c.t[2].ws = true;	// keep it object-like
+			if (d.param.empty() && d.params.empty() && c.t[2].is( "(" )) c.t[2].ws = true;
 			emitDirective( w, c );
 		}
 		head += w.out;
-		head += "#endif\n";
+		if (doUndef)
+		{
+			// Nothing generated here escapes the header: each inclusion defines
+			// these and takes them away again, so a second include for the
+			// implementation still sees them and user code never does.
+			for (const MacroDef& d : defs) tail += "#undef " + d.name + "\n";
+		}
 	}
 	head += "#if defined __GNUC__ || defined __clang__\n#pragma GCC diagnostic push\n"
 		"#pragma GCC diagnostic ignored \"-Wmisleading-indentation\"\n#endif\n";
-	string result = head + body +
+	string result = head + body + tail +
 		"#if defined __GNUC__ || defined __clang__\n#pragma GCC diagnostic pop\n#endif\n";
 
 	ofstream o( outPath, ios::binary );
@@ -2446,6 +2964,7 @@ int main( int argc, char** argv )
 	printf( "  renamed      %zu locals, %zu references, %zu bytes\n", rs.vars, rs.occ, rs.chars );
 	printf( "  internals    %zu names, %zu bytes; %zu prototype parameter names dropped\n",
 		memberCount, memberSaved, protoNames );
+	printf( "  own macros   %zu renamed\n", macroRenamed );
 	printf( "  blocks       %zu braces removed, %zu statements comma-joined, %zu loops\n",
 		simp.blocks, simp.folds, simp.loops );
 	if (getenv( "MICROBVH_DEBUG" ))
@@ -2453,8 +2972,9 @@ int main( int argc, char** argv )
 		fprintf( stderr, "blocks considered: %zu\n", simp.tried );
 		for (auto& w : simp.why) fprintf( stderr, "  %-8s %zu\n", w.first.c_str(), w.second );
 	}
-	printf( "  const        %zu dropped, %zu declarations merged, %zu literal bytes\n",
-		constDropped, declMerged, litBytes );
+	printf( "  constants    %zu float, %zu integer, %zu bool rewritten, %zu bytes\n",
+		lit.floats, lit.ints, lit.bools, lit.bytes );
+	printf( "  const        %zu dropped, %zu declarations merged\n", constDropped, declMerged );
 	printf( "  macros       %zu generated (%zu with a parameter)\n", defs.size(), paramMade );
 	return 0;
 }
