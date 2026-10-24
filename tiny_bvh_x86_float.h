@@ -1,4 +1,4 @@
-// tiny_bvh_x86_float.h: SSE / AVX / AVX2 specializations for the single
+﻿// tiny_bvh_x86_float.h: SSE / AVX / AVX2 specializations for the single
 // precision layouts. Included by tiny_bvh.h; do not include directly.
 
 #ifndef TINY_BVH_H_
@@ -53,6 +53,7 @@ template <> void impl::BVH<float, uint32_t>::BonsaiHQClassify( uint8_t* mask, co
 template <> void impl::BVH<float, uint32_t>::BonsaiHQDistribute( BonsaiHQState& st, const uint8_t* mask, uint8_t* maskOut, const uint32_t lo, const uint32_t hi, const uint32_t axis,
 	const float pos2, const bool doSplit, BonsaiHQPart& p, const BonsaiHQNext* plan, BonsaiHQPart* next );
 template <> void impl::BVH4_CPU<float, uint32_t>::EmitNode( impl::MBVH<4, float, uint32_t>& src, const uint32_t* base, uint32_t n );
+template <> uint32_t impl::BVH8_CWBVH<float, uint32_t>::SlotPermutation( const impl::MBVH<8, float, uint32_t>& bvh8, const uint32_t nodeIdx ) const;
 template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
 template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
 template <> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectBundle( Ray* rays ) const;
@@ -384,6 +385,69 @@ template <> void impl::BVH4_CPU<float, uint32_t>::EmitNode( impl::MBVH<4, float,
 		newNode->ymin[cidx] = bvh_far<float>, newNode->ymax[cidx] = -bvh_far<float>,
 		newNode->zmin[cidx] = bvh_far<float>, newNode->zmax[cidx] = -bvh_far<float>,
 		newNode->child[cidx] |= EMPTY_BIT;
+}
+
+
+// SlotPermutation, AVX2.
+template <> uint32_t impl::BVH8_CWBVH<float, uint32_t>::SlotPermutation( const impl::MBVH<8, float, uint32_t>& bvh8, const uint32_t nodeIdx ) const
+{
+	const MBVH<8, float, uint32_t>::MBVHNode* const orig = &bvh8.mbvhNode[nodeIdx];
+	// Child centroids, unhalved: a common factor of two does not change the order.
+	// An absent child reads node 0 and is masked out below.
+	const __m256i childIdx = tinybvh_load8i( orig->child );
+	__m128 sum[8];
+	for (uint32_t i = 0; i < 8; i++)
+	{
+		const __m256 v = tinybvh_load8( &bvh8.mbvhNode[orig->child[i]] );	// min.xyz, firstTri, max.xyz, triCount
+		sum[i] = _mm_add_ps( _mm256_castps256_ps128( v ), _mm256_extractf128_ps( v, 1 ) );
+	}
+	__m128 a0 = sum[0], a1 = sum[1], a2 = sum[2], a3 = sum[3];
+	__m128 b0 = sum[4], b1 = sum[5], b2 = sum[6], b3 = sum[7];
+	_MM_TRANSPOSE4_PS( a0, a1, a2, a3 );
+	_MM_TRANSPOSE4_PS( b0, b1, b2, b3 );
+	const __m256 nodeSum = _mm256_add_ps( _mm256_broadcast_ps( (const __m128*)&orig->aabbMin ),
+		_mm256_broadcast_ps( (const __m128*)&orig->aabbMax ) );
+	const __m256 dx = _mm256_sub_ps( _mm256_set_m128( b0, a0 ), _mm256_permute_ps( nodeSum, 0x00 ) );
+	const __m256 dy = _mm256_sub_ps( _mm256_set_m128( b1, a1 ), _mm256_permute_ps( nodeSum, 0x55 ) );
+	const __m256 dz = _mm256_sub_ps( _mm256_set_m128( b2, a2 ), _mm256_permute_ps( nodeSum, 0xAA ) );
+	// slot s negates x for bit 2, y for bit 1, z for bit 0; row[s ^ 7] is -row[s].
+	const __m256 t0 = _mm256_add_ps( dx, dy ), t1 = _mm256_sub_ps( dx, dy ), SIGN = _mm256_set1_ps( -0.0f );
+	__m256 row[8];
+	row[0] = _mm256_add_ps( t0, dz ), row[1] = _mm256_sub_ps( t0, dz );
+	row[2] = _mm256_add_ps( t1, dz ), row[3] = _mm256_sub_ps( t1, dz );
+	row[4] = _mm256_xor_ps( row[3], SIGN ), row[5] = _mm256_xor_ps( row[2], SIGN );
+	row[6] = _mm256_xor_ps( row[1], SIGN ), row[7] = _mm256_xor_ps( row[0], SIGN );
+	const __m256i LOW3 = _mm256_set1_epi32( 7 ), FULL = _mm256_set1_epi32( -1 );
+	__m256i key[8];
+	for (uint32_t s = 0; s < 8; s++)
+	{
+		// float order -> uint32 order: flip the sign bit, or all bits if negative.
+		const __m256i c = _mm256_castps_si256( row[s] );
+		const __m256i m = _mm256_or_si256( _mm256_srai_epi32( c, 31 ), _mm256_set1_epi32( (int)0x80000000 ) );
+		key[s] = _mm256_or_si256( _mm256_andnot_si256( LOW3, _mm256_xor_si256( c, m ) ), _mm256_set1_epi32( (int)s ) );
+	}
+	const __m256i lane = _mm256_setr_epi32( 0, 1, 2, 3, 4, 5, 6, 7 );
+	__m256i busy = _mm256_cmpeq_epi32( childIdx, _mm256_setzero_si256() );	// -1 where there is no child
+	const uint32_t children = tinybvh_popc( 255u & ~(uint32_t)_mm256_movemask_ps( _mm256_castsi256_ps( busy ) ) );
+	uint32_t perm = 0xFFFFFFFF;
+	for (uint32_t r = 0; r < children; r++)
+	{
+		const __m256i k0 = _mm256_min_epu32( _mm256_max_epu32( key[0], busy ), _mm256_max_epu32( key[1], busy ) );
+		const __m256i k1 = _mm256_min_epu32( _mm256_max_epu32( key[2], busy ), _mm256_max_epu32( key[3], busy ) );
+		const __m256i k2 = _mm256_min_epu32( _mm256_max_epu32( key[4], busy ), _mm256_max_epu32( key[5], busy ) );
+		const __m256i k3 = _mm256_min_epu32( _mm256_max_epu32( key[6], busy ), _mm256_max_epu32( key[7], busy ) );
+		const __m256i k = _mm256_min_epu32( _mm256_min_epu32( k0, k1 ), _mm256_min_epu32( k2, k3 ) );
+		__m256i h = _mm256_min_epu32( k, _mm256_permute2x128_si256( k, k, 1 ) );
+		h = _mm256_min_epu32( h, _mm256_shuffle_epi32( h, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+		h = _mm256_min_epu32( h, _mm256_shuffle_epi32( h, _MM_SHUFFLE( 2, 3, 0, 1 ) ) );
+		const uint32_t hits = (uint32_t)_mm256_movemask_ps( _mm256_castsi256_ps( _mm256_cmpeq_epi32( k, h ) ) );
+		const uint32_t child = tinybvh_ctz( hits );								// ties go to the lowest child,
+		const uint32_t slot = TINYBVH_LANE0( _mm256_castsi256_si128( h ) ) & 7;	// and before that the lowest slot
+		perm ^= (0xF ^ child) << (slot * 4);
+		key[slot] = FULL;
+		busy = _mm256_or_si256( busy, _mm256_cmpeq_epi32( lane, _mm256_set1_epi32( (int)child ) ) );
+	}
+	return perm;
 }
 
 #endif // BVH_USEAVX2

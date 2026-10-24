@@ -1717,6 +1717,9 @@ public:
 	static BVH8_CWBVH Load( const char* fileName );
 	void Optimize( const uint32_t iterations = 25, uint32_t mu = 8 );
 	void ConvertFrom( const MBVH<8, Float, Index>& original, bool compact = true );
+	// Greedy octant assignment for the children of one node, used by ConvertFrom.
+	// An AVX2 version of this function is in tiny_bvh_x86_float.h.
+	uint32_t SlotPermutation( const MBVH<8, Float, Index>& bvh8, const Index nodeIdx ) const;
 	Float SAHCost( const Index nodeIdx = 0 ) const;
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const { FALLBACK_SHADOW_QUERY( ray ); }
@@ -7070,6 +7073,41 @@ static int32_t CWBVHQuantExp( const float extent )
 	return (int32_t)tinybvh_clamp( e, -126.0f, 126.0f );
 }
 
+// SlotPermutation: greedy child node ordering from "Efficient Incoherent Ray
+// Traversal on GPUs Through Compressed Wide BVHs", Ylitie et al. 2017.
+TEMPLATED uint32_t BVH8_CWBVH<Float, Index>::SlotPermutation( const MBVH<8, Float, Index>& bvh8, const Index nodeIdx ) const
+{
+	const typename MBVH<8, Float, Index>::MBVHNode* const orig = &bvh8.mbvhNode[nodeIdx];
+	const Vec3 nodeCentroid = (orig->aabbMin + orig->aabbMax) * 0.5f;
+	float cost[8][8];
+	int32_t assignment[8];
+	bool isSlotEmpty[8];
+	for (int32_t s = 0; s < 8; s++) isSlotEmpty[s] = true, assignment[s] = -1;
+	for (int32_t i = 0; i < 8; i++)
+	{
+		if (orig->child[i] == 0) { for (int32_t s = 0; s < 8; s++) cost[s][i] = bvh_far<float>; continue; }
+		const typename MBVH<8, Float, Index>::MBVHNode* const child = &bvh8.mbvhNode[orig->child[i]];
+		const Vec3 d = (child->aabbMin + child->aabbMax) * 0.5f - nodeCentroid;
+		for (int32_t s = 0; s < 8; s++)
+			cost[s][i] = (float)(((s & 4) ? -d.x : d.x) + ((s & 2) ? -d.y : d.y) + ((s & 1) ? -d.z : d.z));
+	}
+	while (1)
+	{
+		float minCost = bvh_far<float>;
+		int32_t minEntryx = -1, minEntryy = -1;
+		for (int32_t s = 0; s < 8; s++) if (isSlotEmpty[s]) for (int32_t i = 0; i < 8; i++)
+			if (assignment[i] == -1 && cost[s][i] < minCost)
+				minCost = cost[s][i], minEntryx = s, minEntryy = i;
+		if (minEntryx == -1) break;
+		isSlotEmpty[minEntryx] = false, assignment[minEntryy] = minEntryx;
+	}
+	// An absent child is never assigned: the nibble of a slot it would have taken
+	// stays 0xF, which the caller reads as an empty slot.
+	uint32_t perm = 0xFFFFFFFF;
+	for (uint32_t i = 0; i < 8; i++) if (assignment[i] != -1) perm ^= (0xF ^ i) << (assignment[i] * 4);
+	return perm;
+}
+
 // Convert a BVH8 to the format specified in: "Efficient Incoherent Ray Traversal on GPUs Through
 // Compressed Wide BVHs", Ylitie et al. 2017. Adapted from code by "AlanWBFT".
 TEMPLATED void BVH8_CWBVH<Float, Index>::ConvertFrom( const MBVH<8, Float, Index>& original, bool compact )
@@ -7119,36 +7157,13 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::ConvertFrom( const MBVH<8, Float, Index
 		memset( &bvh8Data[currentNodeAddr], 0, 80 );
 		const Vec3 nodeLo = orig->aabbMin, nodeHi = orig->aabbMax;
 		// greedy child node ordering
-		const Vec3 nodeCentroid = (nodeLo + nodeHi) * 0.5f;
-		float cost[8][8];
-		int32_t assignment[8];
-		bool isSlotEmpty[8];
-		for (int32_t s = 0; s < 8; s++) isSlotEmpty[s] = true, assignment[s] = -1;
-		for (int32_t i = 0; i < 8; i++)
-		{
-			if (orig->child[i] == 0) { for (int32_t s = 0; s < 8; s++) cost[s][i] = bvh_far<Float>; continue; }
-			const typename MBVH<8, Float, Index>::MBVHNode* const child = &bvh8.mbvhNode[orig->child[i]];
-			const Vec3 d = (child->aabbMin + child->aabbMax) * 0.5f - nodeCentroid;
-			for (int32_t s = 0; s < 8; s++)
-				cost[s][i] = ((s & 4) ? -d.x : d.x) + ((s & 2) ? -d.y : d.y) + ((s & 1) ? -d.z : d.z);
-		}
-		while (1)
-		{
-			float minCost = bvh_far<Float>;
-			int32_t minEntryx = -1, minEntryy = -1;
-			for (int32_t s = 0; s < 8; s++) if (isSlotEmpty[s]) for (int32_t i = 0; i < 8; i++)
-				if (assignment[i] == -1 && cost[s][i] < minCost)
-					minCost = cost[s][i], minEntryx = s, minEntryy = i;
-			if (minEntryx == -1) break;
-			isSlotEmpty[minEntryx] = false, assignment[minEntryy] = minEntryx;
-		}
-		for (int32_t i = 0; i < 8; i++) if (assignment[i] == -1) for (int32_t s = 0; s < 8; s++) if (isSlotEmpty[s])
-		{
-			isSlotEmpty[s] = false, assignment[i] = s;
-			break;
-		}
+		const uint32_t perm = SlotPermutation( bvh8, origIdx );
 		uint32_t slotChild[8] = {};
-		for (int32_t i = 0; i < 8; i++) slotChild[assignment[i]] = orig->child[i];
+		for (uint32_t i = 0; i < 8; i++)
+		{
+			const uint32_t c = (perm >> (i * 4)) & 15;
+			if (c != 15) slotChild[i] = orig->child[c];
+		}
 		const int32_t ex = CWBVHQuantExp( nodeHi.x - nodeLo.x );
 		const int32_t ey = CWBVHQuantExp( nodeHi.y - nodeLo.y );
 		const int32_t ez = CWBVHQuantExp( nodeHi.z - nodeLo.z );
