@@ -960,6 +960,7 @@ public:
 	void MergeLeafs();
 	Index NodeCount() const;
 	Index LeafCount() const;
+	uint32_t Depth() const;
 	Index PrimCount( const Index nodeIdx = 0 ) const;
 	// BVH type identification
 	bool isTLAS() const { return instList != 0; }
@@ -4510,6 +4511,30 @@ TEMPLATED Index BVH<Float, Index>::LeafCount() const
 		const BVHNode& n = bvhNode[nodeIdx];
 		if (n.isLeaf()) { retVal++; if (stackPtr == 0) break; else nodeIdx = stack[--stackPtr]; }
 		else nodeIdx = n.leftFirst, stack[stackPtr++] = n.leftFirst + 1;
+	}
+	return retVal;
+}
+
+TEMPLATED uint32_t BVH<Float, Index>::Depth() const
+{
+	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::Depth(), bvhNode == 0." );
+	uint32_t retVal = 0, depth = 0, depthStack[TINYBVH_STACK_SIZE];
+	Index nodeIdx = 0, stack[TINYBVH_STACK_SIZE], stackPtr = 0;
+	while (1)
+	{
+		const BVHNode& n = bvhNode[nodeIdx];
+		if (n.isLeaf())
+		{
+			if (depth > retVal) retVal = depth;
+			if (stackPtr == 0) break;
+			stackPtr--, nodeIdx = stack[stackPtr], depth = depthStack[stackPtr];
+		}
+		else
+		{
+			BVH_FATAL_ERROR_IF( stackPtr == TINYBVH_STACK_SIZE, "BVH::Depth(), tree too deep." );
+			stack[stackPtr] = n.leftFirst + 1, depthStack[stackPtr++] = ++depth;
+			nodeIdx = n.leftFirst;
+		}
 	}
 	return retVal;
 }
