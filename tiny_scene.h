@@ -276,6 +276,9 @@ struct ts_mat4
 	static ts_mat4 scale( const float s ) { ts_mat4 r; r[0] = r[5] = r[10] = s; return r; }
 	static ts_mat4 scale( const ts_vec3 s ) { ts_mat4 r; r[0] = s.x, r[5] = s.y, r[10] = s.z; return r; }
 	static ts_mat4 translate( const ts_vec3 t ) { ts_mat4 r; r[3] = t.x, r[7] = t.y, r[11] = t.z; return r; }
+	static ts_mat4 rotatex( const float a ) { ts_mat4 r; r.cell[5] = cosf( a ); r.cell[6] = -sinf( a ); r.cell[9] = sinf( a ); r.cell[10] = cosf( a ); return r; };
+	static ts_mat4 rotatey( const float a ) { ts_mat4 r; r.cell[0] = cosf( a ); r.cell[2] = sinf( a ); r.cell[8] = -sinf( a ); r.cell[10] = cosf( a ); return r; };
+	static ts_mat4 rotatez( const float a ) { ts_mat4 r; r.cell[0] = cosf( a ); r.cell[1] = -sinf( a ); r.cell[4] = sinf( a ); r.cell[5] = cosf( a ); return r; };
 	float cell[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 	float& operator [] ( const int idx ) { return cell[idx]; }
 	const float& operator [] ( const int idx ) const { return cell[idx]; }
