@@ -69,6 +69,14 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 		camPos[1] = bvhvec3( 0.29f, 0.55f, -2.02f ), camDir[1] = tinybvh_normalize( bvhvec3( -0.24f, -0.28f, 0.93f ) );
 		camPos[2] = bvhvec3( 3.98f, 1.67f, 4.28f ), camDir[2] = tinybvh_normalize( bvhvec3( -0.70f, -0.48f, -0.53f ) );
 	}
+	else if (scene == VICTORIAN_HOUSE)
+	{
+		// load the Victorian House
+		AddMesh( "./testdata/victorianhouse.bin" );
+		camPos[0] = bvhvec3( 0.16f, -0.68f, 1.23f ), camDir[0] = tinybvh_normalize( bvhvec3( -0.20f, 0.12f, -0.97f ) );
+		camPos[1] = bvhvec3( -2.33f, 1.36f, -0.39f ), camDir[1] = tinybvh_normalize( bvhvec3( 0.72f, -0.66f, 0.21f ) );
+		camPos[2] = bvhvec3( -0.82f, -0.66f, 2.33f ), camDir[2] = tinybvh_normalize( bvhvec3( 0.35f, 0.16f, -0.92f ) );
+	}
 	else
 	{
 		exit( 0 ); // invalid scene.
@@ -113,6 +121,12 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	{
 		strncpy( desc, "Stanford Dragon", 128 ); 
 		strncpy( shrt, "dragon", 64 ); 
+		break;
+	}
+	case Scene::VICTORIAN_HOUSE: 
+	{
+		strncpy( desc, "Victorian House", 128 ); 
+		strncpy( shrt, "house", 64 ); 
 		break;
 	}
 	case Scene::LEGO_PORSCHE: 
