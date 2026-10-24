@@ -36,6 +36,19 @@ extern "C" { __declspec( dllexport ) int AmdPowerXpressRequestHighPerformance = 
 #pragma comment(lib, "vulkan-1")
 #endif
 
+#include <chrono>
+struct Timer
+{
+	Timer() { reset(); }
+	float elapsed() const
+	{
+		auto t2 = std::chrono::high_resolution_clock::now();
+		return (float)std::chrono::duration_cast<std::chrono::duration<double>>(t2 - start).count();
+	}
+	void reset() { start = std::chrono::high_resolution_clock::now(); }
+	std::chrono::high_resolution_clock::time_point start;
+};
+
 // ----------------------------------------------------------------------------
 // platform primitives
 // ----------------------------------------------------------------------------
@@ -76,21 +89,21 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 // OpenCL interleaving. The OpenCL backends trace the same rays through the same
 // scene as the compute shaders: BVH_GPU with shaders/traverse.cl, the AMD layouts
 // with shaders/traverse_amd.cl, so the two APIs can be compared one frame apart.
-#define ENABLE_OPENCL		true	// init OpenCL and put its backends in the rotation
+#define ENABLE_OPENCL		false	// init OpenCL and put its backends in the rotation
 #define ENABLE_OCL_BVH2		true	// display info on OpenCL BVH_GPU performance
 #define ENABLE_OCL_AMD_BVH4	false	// display info on AMD BVH4 hardware traversal (RDNA3/RDNA4)
 #define ENABLE_OCL_AMD_BVH8	false	// display info on AMD BVH8 hardware traversal (RDNA4)
 #define OCL_PRESENT_RESULT	false	// show what OpenCL traced; costs a 4MB readback + upload per frame
 #define OCL_DEVICE_INDEX	-1		// -1: use the GPU Vulkan runs on; else an index from the list printed at startup
 
-#if 1
+#if 0
 
 const char* triMesh = "../../testdata/cryteksponza.bin";
 const char* raySetPath = "../../view3rays.bin";
 
 #else
 
-const char* triMesh = "../../testdata/sanmiguel.bin";
+const char* triMesh = "../../testdata/legoporsche.bin";
 const char* raySetPath = "../../view3rays_sm.bin";
 
 #endif
@@ -834,18 +847,22 @@ static void InitMeshes()
 	// One spatial-split build, converted to both GPU layouts.
 	bvh2.settings.useSpatialSplits = true; // triggers a high-quality BonsaiS build
 	// bvh2.settings.postOptimize = true; // triggers post-optimization
+	Timer t;
 	printf("building base BVH... ");
 	bvh2.Build( verts, triCount );
-	printf("done.\nconverting to MBVH<4>...");
+	printf("done (%.2fs).\nconverting to MBVH<4>...", t.elapsed() );
+	t.reset();
 	bvh.ConvertFrom(bvh2, true);    // Aila & Laine 64-byte nodes + primIdx + separate tris
 	mbvh4.ConvertFrom( bvh2, true );  // collapse the BVH2 into a 4-wide BVH
-	printf("done.\nconverting to bvh4...");
+	printf("done (%.2fs).\nconverting to bvh4...", t.elapsed() );
+	t.reset();
 	bvh4.ConvertFrom(mbvh4, true);  // quantize into the single-blob BVH4_GPU layout
-	printf("done.\nconverting to cwbvh...");
+	printf("done (%.2fs).\nconverting to cwbvh...", t.elapsed() );
+	t.reset();
 	cwbvh.settings.useSpatialSplits = true; // triggers a high-quality BonsaiS build
 	cwbvh.settings.postOptimize = true; // triggers post-optimization
 	cwbvh.Build( verts, triCount ); // separate SBVH build: see the note at 'cwbvh'.
-	printf("done.\n");
+	printf("done (%.2fs).\n", t.elapsed() );
 }
 
 static void InitBVHBuffers()
