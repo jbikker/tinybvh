@@ -15,7 +15,7 @@
 
 #include "headers.h"
 
-Scene scene = CRYTEK_SPONZA; // SAN_MIGUEL;
+Scene scene = CRYTEK_SPONZA;
 static const char bakedBVH[] = "cryteksponza_opt.bvh"; // produced by bvhopt.cpp
 
 int main()
@@ -59,16 +59,11 @@ int main()
 
 	// 2. CPU BVH traversal
 	// PART 1 - TinyBVH, from default bvh via quick bvh builds to ultra-quality
-	/* experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW1 ) ); // basic BVH
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW2 ) );
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, PRIMARY_VIEW3 ) );
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, FIRST_BOUNCE ) );
-	experiment.push_back( new Experiment( BVH2, NO_FLAGS, scene, AO_RAYS ) );
 	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, PRIMARY_VIEW1 ) ); // fast build, good quality
 	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, PRIMARY_VIEW2 ) );
 	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, PRIMARY_VIEW3 ) );
 	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, FIRST_BOUNCE ) );
-	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, AO_RAYS ) ); */
+	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, AO_RAYS ) );
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW1 ) ); // BVH for fast traversal
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW2 ) );
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW3 ) );
