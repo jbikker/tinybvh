@@ -33,9 +33,9 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	{
 		// load 30 million triangles for San Miguel
 		AddMesh( "./testdata/sanmiguel.bin" );
-		camPos[0] = bvhvec3( 24.53f, 7.66f, -1.15f ), camDir[0] = tinybvh_normalize( bvhvec3( -0.93f, -0.09f, -0.35f ) );
-		camPos[1] = bvhvec3( 21.93f, 1.49f, 11.84f ), camDir[1] = tinybvh_normalize( bvhvec3( -0.56f, 0.10f, -0.82f ) );
-		camPos[2] = bvhvec3( 25.33f, 9.69f, -0.10f ), camDir[2] = tinybvh_normalize( bvhvec3( -0.33f, -0.46f, 0.83f ) );
+		camPos[0] = bvhvec3( 20.89f, 1.25f, 7.13f ), camDir[0] = tinybvh_normalize( bvhvec3( -1, 0, -0.07f ) );
+		camPos[1] = bvhvec3( 9.73f, 2.05f, -1.04f ), camDir[1] = tinybvh_normalize( bvhvec3( -0.69f, -0.67f, -0.28f ) );
+		camPos[2] = bvhvec3( 18.83f, 8.02f, -2.84f ), camDir[2] = tinybvh_normalize( bvhvec3( -0.26f, -0.18f, 0.95f ) );
 	}
 	else if (scene == CONFERENCE_ROOM)
 	{
