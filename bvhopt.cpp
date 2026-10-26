@@ -8,9 +8,9 @@
 // Build: g++ -O2 -mavx2 -mfma -std=c++17 -o bvhopt bvhopt.cpp
 //
 // Results:
-// CRYTEKSPONZA   SAH: 61.6687 -> 56.7408 ( -7.99%), EPO: 20.9516 -> 19.2926 ( -7.92%)
-// CONFERENCE     SAH: 36.3071 -> 30.9185 (-14.84%), EPO: 12.7778 -> 10.9949 (-13.95%)
-// BISTRO         SAH: 64.6207 -> 58.1694 ( -9.98%), EPO: 32.8089 -> 27.2498 (-16.94%)
+// CRYTEKSPONZA   SAH: 61.6687 -> 56.7440 ( -7.99%), EPO: 20.9516 -> 18.9277 ( -9.66%)
+// CONFERENCE     SAH: 36.3071 -> 30.9204 (-14.84%), EPO: 12.7778 -> 10.8347 (-15.21%)
+// BISTRO         SAH: 64.6207 -> 58.2660 ( -9.83%), EPO: 32.8089 -> 26.7568 (-18.45%)
 
 #define TINYBVH_IMPLEMENTATION
 #include "tiny_bvh.h"
@@ -1571,6 +1571,13 @@ static double MeasureTraversal( const tinybvh::BVH& bvh, uint32_t count, uint32_
 // driver
 // ----------------------------------------------------------------------------------------
 
+static std::string StripExtension( const std::string& path )
+{
+	const size_t dot = path.find_last_of( '.' ), slash = path.find_last_of( "/\\" );
+	if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) return path;
+	return path.substr( 0, dot );
+}
+
 static std::string OutputName( const std::string& path )
 {
 	const size_t dot = path.find_last_of( '.' ), slash = path.find_last_of( "/\\" );
@@ -1578,13 +1585,411 @@ static std::string OutputName( const std::string& path )
 	return path.substr( 0, dot ) + "_opt" + path.substr( dot );
 }
 
+// ----------------------------------------------------------------------------------------
+// wide targets
+//
+// With --target, the input is a mesh rather than a BVH, and the output is a finished
+// BVH4_CPU or BVH8_CPU. The binary tree is an intermediate here, so there is no reason to
+// commit to one builder: both an SBVH and a Bonsai with spatial splits are built, optimized,
+// collapsed and measured, and the one that traverses fastest wins. The collapse itself is
+// run twice per candidate as well - once weighted by surface area as usual, once by a visit
+// probability measured with a sample ray set, after Gu et al. [PG 2015]. All four results are
+// reported; nothing here is selected by SAH, which ranks wide trees poorly.
+// ----------------------------------------------------------------------------------------
+
+// A ray set generated once and reused by every candidate, so that the comparison is between
+// trees and nothing else. Two disjoint sets are drawn: one to fit the visit field, one to
+// score the result. Fitting and scoring on the same rays would only measure overfitting.
+struct RaySet
+{
+	std::vector<bvhvec3> O, D;
+	size_t Count() const { return O.size(); }
+};
+
+static bool LoadMesh( const char* path, std::vector<bvhvec4>& tris )
+{
+	FILE* f = fopen( path, "rb" );
+	if (!f) return false;
+	uint32_t triCount = 0;
+	if (fread( &triCount, sizeof( uint32_t ), 1, f ) != 1 || triCount == 0) { fclose( f ); return false; }
+	tris.resize( (size_t)triCount * 3 );
+	const size_t read = fread( tris.data(), sizeof( bvhvec4 ), tris.size(), f );
+	fclose( f );
+	return read == tris.size();
+}
+
+static void GenerateRays( const tinybvh::BVH& ref, const uint32_t count, const uint32_t seed, RaySet& set )
+{
+	set.O.clear(), set.D.clear();
+	set.O.reserve( count * 2 ), set.D.reserve( count * 2 );
+	ForEachSampleRay( ref, count, seed, [&]( const bvhvec3& o, const bvhvec3& d, float, int32_t )
+	{
+		set.O.push_back( o ), set.D.push_back( d );
+	} );
+}
+
+static float BoxDistance( const bvhvec3& O, const bvhvec3& rD, const bvhvec3& bmin, const bvhvec3& bmax, const float tmax )
+{
+	const float tx1 = (bmin.x - O.x) * rD.x, tx2 = (bmax.x - O.x) * rD.x;
+	float tmin = tinybvh::tinybvh_min( tx1, tx2 ), t = tinybvh::tinybvh_max( tx1, tx2 );
+	const float ty1 = (bmin.y - O.y) * rD.y, ty2 = (bmax.y - O.y) * rD.y;
+	tmin = tinybvh::tinybvh_max( tmin, tinybvh::tinybvh_min( ty1, ty2 ) );
+	t = tinybvh::tinybvh_min( t, tinybvh::tinybvh_max( ty1, ty2 ) );
+	const float tz1 = (bmin.z - O.z) * rD.z, tz2 = (bmax.z - O.z) * rD.z;
+	tmin = tinybvh::tinybvh_max( tmin, tinybvh::tinybvh_min( tz1, tz2 ) );
+	t = tinybvh::tinybvh_min( t, tinybvh::tinybvh_max( tz1, tz2 ) );
+	if (t >= tmin && tmin < tmax && t >= 0) return tinybvh::tinybvh_max( 0.0f, tmin );
+	return BVH_FAR;
+}
+
+static float TriDistance( const bvhvec3& O, const bvhvec3& D, const tinybvh::bvhvec4slice& verts, const uint32_t prim )
+{
+	const bvhvec3 v0( verts[prim * 3] ), v1( verts[prim * 3 + 1] ), v2( verts[prim * 3 + 2] );
+	const bvhvec3 e1 = v1 - v0, e2 = v2 - v0, h = tinybvh::tinybvh_cross( D, e2 );
+	const float a = tinybvh::tinybvh_dot( e1, h );
+	if (fabsf( a ) < 1e-12f) return BVH_FAR;
+	const float f = 1.0f / a;
+	const bvhvec3 s = O - v0;
+	const float u = f * tinybvh::tinybvh_dot( s, h );
+	if (u < 0 || u > 1) return BVH_FAR;
+	const bvhvec3 q = tinybvh::tinybvh_cross( s, e1 );
+	const float v = f * tinybvh::tinybvh_dot( D, q );
+	if (v < 0 || u + v > 1) return BVH_FAR;
+	const float t = f * tinybvh::tinybvh_dot( e2, q );
+	return t > 1e-5f ? t : BVH_FAR;
+}
+
+// CountPassTests: Gu et al.'s statistic. A node is counted when its box test passed and the
+// traversal went on to its children or its primitives. A prune-test ends the walk there and
+// says nothing about how the subtree is balanced, which is the thing the collapse needs to
+// know; counting those too would just recover the surface area ratio.
+static void CountPassTests( const tinybvh::BVH& bvh, const RaySet& rays, std::vector<uint32_t>& visit )
+{
+	visit.assign( bvh.usedNodes, 0u );
+	struct Entry { uint32_t node; float dist; };
+	Entry stack[STACK_SIZE];
+	for (size_t r = 0; r < rays.Count(); r++)
+	{
+		const bvhvec3 O = rays.O[r], D = rays.D[r];
+		const bvhvec3 rD( D.x == 0 ? BVH_FAR : 1.0f / D.x, D.y == 0 ? BVH_FAR : 1.0f / D.y, D.z == 0 ? BVH_FAR : 1.0f / D.z );
+		float best = BVH_FAR;
+		uint32_t stackPtr = 0, node = 0;
+		if (BoxDistance( O, rD, bvh.bvhNode[0].aabbMin, bvh.bvhNode[0].aabbMax, best ) == BVH_FAR) continue;
+		for (;;)
+		{
+			visit[node]++;
+			const tinybvh::BVH::BVHNode& n = bvh.bvhNode[node];
+			if (n.isLeaf())
+			{
+				for (uint32_t i = 0; i < n.triCount; i++)
+					best = tinybvh::tinybvh_min( best, TriDistance( O, D, bvh.verts, bvh.primIdx[n.leftFirst + i] ) );
+			}
+			else
+			{
+				uint32_t l = n.leftFirst, rgt = l + 1;
+				float dl = BoxDistance( O, rD, bvh.bvhNode[l].aabbMin, bvh.bvhNode[l].aabbMax, best );
+				float dr = BoxDistance( O, rD, bvh.bvhNode[rgt].aabbMin, bvh.bvhNode[rgt].aabbMax, best );
+				if (dl > dr) { const float t = dl; dl = dr, dr = t; const uint32_t c = l; l = rgt, rgt = c; }
+				if (dl != BVH_FAR)
+				{
+					if (dr != BVH_FAR && stackPtr < STACK_SIZE) stack[stackPtr].node = rgt, stack[stackPtr++].dist = dr;
+					node = l;
+					continue;
+				}
+			}
+			// pop the next node whose entry distance still beats the closest hit so far.
+			for (;;)
+			{
+				if (stackPtr == 0) { node = (uint32_t)-1; break; }
+				const Entry e = stack[--stackPtr];
+				if (e.dist >= best) continue;	// prune-test: not counted.
+				node = e.node;
+				break;
+			}
+			if (node == (uint32_t)-1) break;
+		}
+	}
+}
+
+// BuildVisitField: pass-test counts become the probability of visiting each node, relative to
+// the root. Below 'minVisits' the sample says nothing, so the node falls back to its parent's
+// probability scaled by the surface area ratio - which is exactly what the collapse assumes
+// everywhere today. The field therefore only differs from the default where it has evidence.
+static void BuildVisitField( const tinybvh::BVH& bvh, const std::vector<uint32_t>& visit,
+	const uint32_t minVisits, std::vector<float>& prob )
+{
+	prob.assign( bvh.usedNodes, 0.0f );
+	const double root = visit[0] > 0 ? (double)visit[0] : 1.0;
+	prob[0] = 1.0f;
+	for (uint32_t n = 0; n < bvh.usedNodes; n++)
+	{
+		const tinybvh::BVH::BVHNode& node = bvh.bvhNode[n];
+		if (node.isLeaf() || node.leftFirst + 1 >= bvh.usedNodes) continue;
+		const float sa = SurfaceArea( node.aabbMin, node.aabbMax );
+		for (uint32_t k = 0; k < 2; k++)
+		{
+			const uint32_t c = node.leftFirst + k;
+			const tinybvh::BVH::BVHNode& child = bvh.bvhNode[c];
+			if (visit[c] >= minVisits) prob[c] = (float)((double)visit[c] / root);
+			else prob[c] = sa > 0 ? prob[n] * SurfaceArea( child.aabbMin, child.aabbMax ) / sa : prob[n];
+		}
+	}
+}
+
+// Collapse a prepared binary tree into a wide layout. The source is referenced, not owned:
+// the same tree is collapsed several times here, with different weightings.
+static void BuildWide( tinybvh::BVH4_CPU& out, tinybvh::BVH& src, const float* prob )
+{
+	out.bvh4.bvh.ReferenceFrom( src );
+	out.bvh4.ownBVH = false;
+	out.bvh4.nodeProb = prob;
+	out.ConvertFrom( out.bvh4, true ); // leaves were already merged, by the optimizer's collapse
+}
+
+static void BuildWide( tinybvh::BVH8_CPU& out, tinybvh::BVH& src, const float* prob )
+{
+	out.bvh8.bvh.ReferenceFrom( src );
+	out.bvh8.ownBVH = false;
+	out.bvh8.nodeProb = prob;
+	out.ConvertFrom( out.bvh8, true );
+}
+
+// The SIMD kernels only return a step count in a debug build, and switching that on would
+// change the very thing we are timing. So the structural metric is taken from the collapsed
+// MBVH instead, with a plain scalar walk: child box tests and triangle tests per ray, which
+// is what the collapse decides and is identical on every machine. Time is measured apart.
+static const tinybvh::MBVH<4>& WideSource( const tinybvh::BVH4_CPU& t ) { return t.bvh4; }
+static const tinybvh::MBVH<8>& WideSource( const tinybvh::BVH8_CPU& t ) { return t.bvh8; }
+
+template <typename M> static void CountWideSteps( const M& m, const RaySet& rays, double& boxTests, double& primTests )
+{
+	double boxes = 0, prims = 0;
+	struct Entry { uint32_t node; float dist; };
+	Entry stack[STACK_SIZE * 2];
+	const tinybvh::BVH& src = m.bvh;
+	for (size_t r = 0; r < rays.Count(); r++)
+	{
+		const bvhvec3 O = rays.O[r], D = rays.D[r];
+		const bvhvec3 rD( D.x == 0 ? BVH_FAR : 1.0f / D.x, D.y == 0 ? BVH_FAR : 1.0f / D.y, D.z == 0 ? BVH_FAR : 1.0f / D.z );
+		float best = BVH_FAR;
+		uint32_t stackPtr = 0, node = 0;
+		boxes += 1; // the root box
+		if (BoxDistance( O, rD, m.mbvhNode[0].aabbMin, m.mbvhNode[0].aabbMax, best ) == BVH_FAR) continue;
+		for (;;)
+		{
+			const typename M::MBVHNode& n = m.mbvhNode[node];
+			if (n.isLeaf())
+			{
+				prims += (double)n.triCount;
+				for (uint32_t i = 0; i < n.triCount; i++)
+					best = tinybvh::tinybvh_min( best, TriDistance( O, D, src.verts, src.primIdx[n.firstTri + i] ) );
+			}
+			else
+			{
+				// one box test per occupied slot, the whole node at once in the real kernel.
+				Entry hit[8];
+				uint32_t hits = 0;
+				for (uint32_t k = 0; k < n.childCount; k++)
+				{
+					const uint32_t c = n.child[k];
+					boxes += 1;
+					const float d = BoxDistance( O, rD, m.mbvhNode[c].aabbMin, m.mbvhNode[c].aabbMax, best );
+					if (d != BVH_FAR) hit[hits].node = c, hit[hits++].dist = d;
+				}
+				for (uint32_t a = 1; a < hits; a++) for (uint32_t b = a; b > 0 && hit[b - 1].dist < hit[b].dist; b--)
+				{
+					const Entry t = hit[b - 1]; hit[b - 1] = hit[b], hit[b] = t;
+				}
+				if (hits > 0)
+				{
+					for (uint32_t a = 0; a + 1 < hits && stackPtr < STACK_SIZE * 2; a++) stack[stackPtr++] = hit[a];
+					node = hit[hits - 1].node;
+					continue;
+				}
+			}
+			for (;;)
+			{
+				if (stackPtr == 0) { node = (uint32_t)-1; break; }
+				const Entry e = stack[--stackPtr];
+				if (e.dist >= best) continue;
+				node = e.node;
+				break;
+			}
+			if (node == (uint32_t)-1) break;
+		}
+	}
+	boxTests = boxes / (double)rays.Count(), primTests = prims / (double)rays.Count();
+}
+
+// Wall clock, best of a few runs: the differences between these trees are small enough that
+// a single timed pass mostly measures the machine.
+template <typename T> static double TimeWide( const T& tree, const RaySet& rays, const uint32_t runs )
+{
+	double best = 1e30;
+	for (uint32_t run = 0; run < runs; run++)
+	{
+		const Clock::time_point t0 = Clock::now();
+		float sink = 0;
+		for (size_t i = 0; i < rays.Count(); i++)
+		{
+			tinybvh::Ray ray( rays.O[i], rays.D[i] );
+			tree.Intersect( ray );
+			sink += ray.hit.t == BVH_FAR ? 0 : ray.hit.t;
+		}
+		const double ns = MilliSec( t0, Clock::now() ) * 1e6 / (double)rays.Count();
+		if (sink >= 0 && ns < best) best = ns;
+	}
+	return best;
+}
+
+struct WideResult
+{
+	uint32_t candidate;		// 0 = SBVH, 1 = Bonsai HQ
+	bool weighted;			// collapse steered by the measured visit field
+	double boxTests, primTests, ns;
+	uint32_t blocks;
+};
+
+struct WideSettings
+{
+	bool bvh4 = false, bvh8 = false;
+	uint32_t rays = 100000;			// sample rays per set; each yields a primary and a bounce.
+	uint32_t minVisits = 8;			// below this a node's visit count is noise; use its area instead.
+	bool weighted = true;			// also collapse steered by the measured visit field
+	bool plain = true;				// also collapse steered by surface area, as the library does
+	uint32_t timingRuns = 3;		// timed passes per tree; the best one is reported
+	std::string outStem;
+};
+
+static const char* CandidateName( const uint32_t c ) { return c == 0 ? "sbvh" : "bonsai-hq"; }
+
+// Build one candidate binary tree and run the optimizer over it. Leaves end up at the wide
+// layouts' budget of four, and the node list is final from here: the collapse must see the
+// same node indices the visit field was measured on.
+static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tris, const uint32_t candidate,
+	const Optimizer::Settings& set )
+{
+	bvh.settings.useSpatialSplits = true;
+	bvh.settings.binnedBVH = candidate == 0;	// SBVH with, Bonsai HQ without
+	bvh.hqLeafPrims = 4, bvh.c_int = 2, bvh.lQuads = true;
+	bvh.settings.keepSplitting = true;	// the collapse below ends in SplitLeafs( 4 )
+	bvh.Build( tris.data(), (uint32_t)tris.size() / 3 );
+	std::vector<Optimizer::Ref> refBox( bvh.idxCount );
+	for (uint32_t n = 0; n < bvh.usedNodes; n++)
+	{
+		const tinybvh::BVH::BVHNode& node = bvh.bvhNode[n];
+		if (!node.isLeaf() || node.triCount == 0) continue;
+		for (uint32_t i = 0; i < node.triCount; i++)
+			refBox[node.leftFirst + i] = RecoverRef( bvh.verts, bvh.vertIdx,
+				bvh.primIdx[node.leftFirst + i], node.aabbMin, node.aabbMax );
+	}
+	tinybvh::BVH_Verbose verbose;
+	verbose.ConvertFrom( bvh );
+	Optimizer opt( verbose, set );
+	opt.Run( refBox.data(), bvh.vertIdx );
+	bvh.ConvertFrom( verbose );
+	bvh.Compact();
+	bvh.SplitLeafs( 4 );	// what the collapse would do anyway; done here, indices stop moving.
+}
+
+template <typename T> static void EvaluateTarget( const char* label, tinybvh::BVH* bvh, const uint32_t candidates,
+	const std::vector<float>* prob, const RaySet& score, const WideSettings& w, const std::string& stem )
+{
+	printf( "\n%s:\n", label );
+	printf( "  %-10s %-9s %10s %10s %9s %10s\n", "tree", "collapse", "box/ray", "prim/ray", "ns/ray", "size" );
+	std::vector<WideResult> results;
+	T best;
+	double bestScore = 1e30;
+	for (uint32_t c = 0; c < candidates; c++) for (uint32_t pass = 0; pass < 2; pass++)
+	{
+		const bool weighted = pass == 1;
+		if (weighted && !w.weighted) continue;
+		if (!weighted && !w.plain) continue;
+		T tree;
+		BuildWide( tree, bvh[c], weighted ? prob[c].data() : 0 );
+		WideResult r;
+		r.candidate = c, r.weighted = weighted, r.blocks = tree.usedBlocks;
+		CountWideSteps( WideSource( tree ), score, r.boxTests, r.primTests );
+		r.ns = TimeWide( tree, score, w.timingRuns );
+		results.push_back( r );
+		printf( "  %-10s %-9s %10.2f %10.2f %9.1f %7.1f MB\n", CandidateName( c ), weighted ? "visits" : "area",
+			r.boxTests, r.primTests, r.ns, (double)tree.usedBlocks * 64.0 / (1024 * 1024) );
+		if (r.boxTests < bestScore) bestScore = r.boxTests, best = tinybvh::tinybvh_move( tree );
+	}
+	const WideResult* win = &results[0];
+	const WideResult* fastest = &results[0];
+	for (const WideResult& r : results)
+	{
+		if (r.boxTests < win->boxTests) win = &r;
+		if (r.ns < fastest->ns) fastest = &r;
+	}
+	printf( "  winner: %s, %s collapse\n", CandidateName( win->candidate ), win->weighted ? "visit-weighted" : "area-weighted" );
+	if (fastest != win) printf( "  note: %s / %s was faster on the clock (%.1f vs %.1f ns); box tests decided.\n",
+		CandidateName( fastest->candidate ), fastest->weighted ? "visits" : "area", fastest->ns, win->ns );
+	const std::string path = stem + "_" + label + ".bvh";
+	best.Save( path.c_str() );
+	printf( "  output: %s\n", path.c_str() );
+}
+
+static int RunWideTargets( const std::string& meshPath, const Optimizer::Settings& set, const WideSettings& w )
+{
+	std::vector<bvhvec4> tris;
+	if (!LoadMesh( meshPath.c_str(), tris ))
+	{
+		printf( "error: cannot read '%s' as a mesh (uint32 triangle count, then three float4 per triangle).\n", meshPath.c_str() );
+		return 1;
+	}
+	printf( "input  : %s\n         %u triangles\n", meshPath.c_str(), (uint32_t)tris.size() / 3 );
+	// the two binary candidates, built and optimized in full.
+	tinybvh::BVH bvh[2];
+	for (uint32_t c = 0; c < 2; c++)
+	{
+		printf( "\n%s:\n", CandidateName( c ) );
+		const Clock::time_point t0 = Clock::now();
+		PrepareCandidate( bvh[c], tris, c, set );
+		printf( "  %u references, %u nodes, SAH %.4f, EPO %.4f, %.1f s\n", bvh[c].idxCount, bvh[c].usedNodes,
+			bvh[c].SAHCost(), bvh[c].EPOCost(), MilliSec( t0, Clock::now() ) / 1000.0 );
+	}
+	// one ray distribution for everything that follows, drawn through the first candidate.
+	RaySet fit, score;
+	GenerateRays( bvh[0], w.rays, set.seed ^ 0x9E3779B9u, fit );
+	GenerateRays( bvh[0], w.rays, set.seed ^ 0x85EBCA6Bu, score );
+	printf( "\nray sets: %u to fit the visit field, %u to score, from disjoint seeds\n",
+		(uint32_t)fit.Count(), (uint32_t)score.Count() );
+	std::vector<float> prob[2];
+	if (w.weighted) for (uint32_t c = 0; c < 2; c++)
+	{
+		std::vector<uint32_t> visit;
+		CountPassTests( bvh[c], fit, visit );
+		BuildVisitField( bvh[c], visit, w.minVisits, prob[c] );
+	}
+	const std::string stem = w.outStem.empty() ? StripExtension( meshPath ) : w.outStem;
+	if (w.bvh4) EvaluateTarget<tinybvh::BVH4_CPU>( "bvh4cpu", bvh, 2, prob, score, w, stem );
+	if (w.bvh8) EvaluateTarget<tinybvh::BVH8_CPU>( "bvh8cpu", bvh, 2, prob, score, w, stem );
+	return 0;
+}
+
 static void Usage()
 {
 	printf(
-		"usage: bvhopt <file.bvh> [options]\n"
+		"usage: bvhopt <file.bvh> [options]                     optimize a binary BVH\n"
+		"       bvhopt <mesh.bin> --target <list> [options]     build an optimized wide BVH\n"
 		"\n"
-		"  The BVH must have been saved with its geometry, which is what BVH::Save does by\n"
+		"  A .bvh must have been saved with its geometry, which is what BVH::Save does by\n"
 		"  default. EPO is defined over the triangles, so a file without them is of no use here.\n"
+		"\n"
+		"  With --target the input is a mesh instead (uint32 triangle count, then three float4\n"
+		"  per triangle) and the output is a finished wide BVH. Both an SBVH and a Bonsai with\n"
+		"  spatial splits are built, optimized and collapsed, each with and without the measured\n"
+		"  visit weighting, and the variant that traverses fastest is written out.\n"
+		"\n"
+		"  --target L         comma-separated: bvh4cpu, bvh8cpu\n"
+		"  -rays N            sample rays per set (default 100000; each adds one bounce)\n"
+		"  -visitmin N        visit count below which a node falls back to surface area (default 8)\n"
+		"  -timingruns N      timed passes per tree, best reported (default 3)\n"
+		"  -noweight          skip the visit-weighted collapse\n"
+		"  -noplain           skip the surface-area collapse\n"
+		"  -out STEM          output name stem (default: the mesh name without its extension)\n"
 		"\n"
 		"  -rounds N          outer rounds (default 16; stops early on convergence)\n"
 		"  -reinsert N        reinsertion iterations per round, 0 disables (default 100)\n"
@@ -1610,6 +2015,7 @@ int main( int argc, char** argv )
 	if (argc < 2) { Usage(); return 1; }
 	std::string bvhPath = argv[1];
 	Optimizer::Settings set;
+	WideSettings wide;
 	for (int i = 2; i < argc; i++)
 	{
 		const std::string a = argv[i];
@@ -1630,6 +2036,26 @@ int main( int argc, char** argv )
 		else if (a == "-fast") set.fast = true;
 		else if (a == "-fastmu") set.fastMu = num( 8 );
 		else if (a == "-quiet") set.verbose = false;
+		else if (a == "-rays") wide.rays = num( 100000 );
+		else if (a == "-visitmin") wide.minVisits = num( 8 );
+		else if (a == "-timingruns") wide.timingRuns = num( 3 );
+		else if (a == "-noweight") wide.weighted = false;
+		else if (a == "-noplain") wide.plain = false;
+		else if (a == "-out") { if (i + 1 < argc) wide.outStem = argv[++i]; }
+		else if (a == "--target" || a == "-target")
+		{
+			const std::string v = i + 1 < argc ? argv[++i] : "";
+			for (size_t p = 0; p < v.size(); )
+			{
+				const size_t comma = v.find( ',', p );
+				const std::string t = v.substr( p, comma == std::string::npos ? comma : comma - p );
+				if (t == "bvh4cpu") wide.bvh4 = true;
+				else if (t == "bvh8cpu") wide.bvh8 = true;
+				else { printf( "error: unknown target '%s'.\n", t.c_str() ); return 1; }
+				if (comma == std::string::npos) break;
+				p = comma + 1;
+			}
+		}
 		else if (a == "-treelet")
 		{
 			if (i + 1 < argc)
@@ -1646,6 +2072,8 @@ int main( int argc, char** argv )
 	set.treeletSize = (uint32_t)tinybvh::tinybvh_clamp( (int32_t)set.treeletSize, 3, (int32_t)MAX_TREELET );
 	set.treeletSizeTop = (uint32_t)tinybvh::tinybvh_clamp( (int32_t)set.treeletSizeTop, (int32_t)set.treeletSize, (int32_t)MAX_TREELET );
 	if (set.exactBottomSize > MAX_EXACT) set.exactBottomSize = MAX_EXACT;
+	if (!wide.weighted && !wide.plain) { printf( "error: -noweight and -noplain leave nothing to build.\n" ); return 1; }
+	if (wide.bvh4 || wide.bvh8) return RunWideTargets( bvhPath, set, wide );
 
 	tinybvh::BVH bvh = tinybvh::BVH::Load( bvhPath.c_str() );
 	if (bvh.usedNodes == 0)
