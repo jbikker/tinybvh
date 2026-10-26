@@ -1,4 +1,4 @@
-﻿// tiny_bvh_x86_float.h: SSE / AVX / AVX2 specializations for the single
+// tiny_bvh_x86_float.h: SSE / AVX / AVX2 specializations for the single
 // precision layouts. Included by tiny_bvh.h; do not include directly.
 
 #ifndef TINY_BVH_H_
@@ -53,7 +53,8 @@ template <> void impl::BVH<float, uint32_t>::BonsaiHQClassify( uint8_t* mask, co
 template <> void impl::BVH<float, uint32_t>::BonsaiHQDistribute( BonsaiHQState& st, const uint8_t* mask, uint8_t* maskOut, const uint32_t lo, const uint32_t hi, const uint32_t axis,
 	const float pos2, const bool doSplit, BonsaiHQPart& p, const BonsaiHQNext* plan, BonsaiHQPart* next );
 template <> void impl::BVH4_CPU<float, uint32_t>::EmitNode( impl::MBVH<4, float, uint32_t>& src, const uint32_t* base, uint32_t n );
-template <> uint32_t impl::BVH8_CWBVH<float, uint32_t>::SlotPermutation( const impl::MBVH<8, float, uint32_t>& bvh8, const uint32_t nodeIdx ) const;
+template <> uint32_t impl::BVH8_CWBVH<float, uint32_t>::SlotPermutation( const impl::MBVH<8, float, uint32_t>& bvh8, const uint32_t nodeIdx,
+	const bvhvec3& nodeLo, const float rsx, const float rsy, const float rsz, uint8_t* const qbase ) const;
 template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant( Ray& ray ) const;
 template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( const Ray& ray ) const;
 template <> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectBundle( Ray* rays ) const;
@@ -354,6 +355,7 @@ template <> void impl::BVH4_CPU<float, uint32_t>::EmitNode( impl::MBVH<4, float,
 		newNode->zmin[cidx] = child.aabbMin.z, newNode->zmax[cidx] = child.aabbMax.z;
 		if (child.isLeaf())
 		{
+			BVH_FATAL_ERROR_IF( child.triCount > 4, "MBVH::ConvertForCPULayout( .. ), leaf holds more than 4 prims; build with settings.keepSplitting, or convert with leavesMerged = false." );
 			newNode->child[cidx] = leafBlock + LEAF_BIT;
 			BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + leafBlock);
 			leafBlock += LEAF_BLOCKS;
@@ -389,27 +391,31 @@ template <> void impl::BVH4_CPU<float, uint32_t>::EmitNode( impl::MBVH<4, float,
 
 
 // SlotPermutation, AVX2.
-template <> uint32_t impl::BVH8_CWBVH<float, uint32_t>::SlotPermutation( const impl::MBVH<8, float, uint32_t>& bvh8, const uint32_t nodeIdx ) const
+template <> uint32_t impl::BVH8_CWBVH<float, uint32_t>::SlotPermutation( const impl::MBVH<8, float, uint32_t>& bvh8, const uint32_t nodeIdx,
+	const bvhvec3& nodeLo, const float rsx, const float rsy, const float rsz, uint8_t* const qbase ) const
 {
 	const MBVH<8, float, uint32_t>::MBVHNode* const orig = &bvh8.mbvhNode[nodeIdx];
-	// Child centroids, unhalved: a common factor of two does not change the order.
-	// An absent child reads node 0 and is masked out below.
+	// An absent child reads node 0; its lane is masked out of the assignment and
+	// its slot is filled with an inverted box at the end.
 	const __m256i childIdx = tinybvh_load8i( orig->child );
-	__m128 sum[8];
+	__m128 lo[8], hi[8];
 	for (uint32_t i = 0; i < 8; i++)
 	{
 		const __m256 v = tinybvh_load8( &bvh8.mbvhNode[orig->child[i]] );	// min.xyz, firstTri, max.xyz, triCount
-		sum[i] = _mm_add_ps( _mm256_castps256_ps128( v ), _mm256_extractf128_ps( v, 1 ) );
+		lo[i] = _mm256_castps256_ps128( v ), hi[i] = _mm256_extractf128_ps( v, 1 );
 	}
-	__m128 a0 = sum[0], a1 = sum[1], a2 = sum[2], a3 = sum[3];
-	__m128 b0 = sum[4], b1 = sum[5], b2 = sum[6], b3 = sum[7];
-	_MM_TRANSPOSE4_PS( a0, a1, a2, a3 );
-	_MM_TRANSPOSE4_PS( b0, b1, b2, b3 );
+	_MM_TRANSPOSE4_PS( lo[0], lo[1], lo[2], lo[3] );
+	_MM_TRANSPOSE4_PS( lo[4], lo[5], lo[6], lo[7] );
+	_MM_TRANSPOSE4_PS( hi[0], hi[1], hi[2], hi[3] );
+	_MM_TRANSPOSE4_PS( hi[4], hi[5], hi[6], hi[7] );
+	const __m256 minx = _mm256_set_m128( lo[4], lo[0] ), miny = _mm256_set_m128( lo[5], lo[1] ), minz = _mm256_set_m128( lo[6], lo[2] );
+	const __m256 maxx = _mm256_set_m128( hi[4], hi[0] ), maxy = _mm256_set_m128( hi[5], hi[1] ), maxz = _mm256_set_m128( hi[6], hi[2] );
+	// centroid offsets, unhalved: a common factor of two does not change the order.
 	const __m256 nodeSum = _mm256_add_ps( _mm256_broadcast_ps( (const __m128*)&orig->aabbMin ),
 		_mm256_broadcast_ps( (const __m128*)&orig->aabbMax ) );
-	const __m256 dx = _mm256_sub_ps( _mm256_set_m128( b0, a0 ), _mm256_permute_ps( nodeSum, 0x00 ) );
-	const __m256 dy = _mm256_sub_ps( _mm256_set_m128( b1, a1 ), _mm256_permute_ps( nodeSum, 0x55 ) );
-	const __m256 dz = _mm256_sub_ps( _mm256_set_m128( b2, a2 ), _mm256_permute_ps( nodeSum, 0xAA ) );
+	const __m256 dx = _mm256_sub_ps( _mm256_add_ps( minx, maxx ), _mm256_permute_ps( nodeSum, 0x00 ) );
+	const __m256 dy = _mm256_sub_ps( _mm256_add_ps( miny, maxy ), _mm256_permute_ps( nodeSum, 0x55 ) );
+	const __m256 dz = _mm256_sub_ps( _mm256_add_ps( minz, maxz ), _mm256_permute_ps( nodeSum, 0xAA ) );
 	// slot s negates x for bit 2, y for bit 1, z for bit 0; row[s ^ 7] is -row[s].
 	const __m256 t0 = _mm256_add_ps( dx, dy ), t1 = _mm256_sub_ps( dx, dy ), SIGN = _mm256_set1_ps( -0.0f );
 	__m256 row[8];
@@ -446,6 +452,37 @@ template <> uint32_t impl::BVH8_CWBVH<float, uint32_t>::SlotPermutation( const i
 		perm ^= (0xF ^ child) << (slot * 4);
 		key[slot] = FULL;
 		busy = _mm256_or_si256( busy, _mm256_cmpeq_epi32( lane, _mm256_set1_epi32( (int)child ) ) );
+	}
+	// quantization: gather the eight nibbles of 'perm' into lane indices, move the
+	// bounds into slot order with one permute each, then scale and pack.
+	const __m256i nib = _mm256_and_si256( _mm256_srlv_epi32( _mm256_set1_epi32( (int)perm ),
+		_mm256_setr_epi32( 0, 4, 8, 12, 16, 20, 24, 28 ) ), _mm256_set1_epi32( 15 ) );
+	const __m256i empty = _mm256_cmpeq_epi32( nib, _mm256_set1_epi32( 15 ) );
+	const __m256i pick = _mm256_and_si256( nib, LOW3 );
+	const __m256 vlo[3] = { _mm256_permutevar8x32_ps( minx, pick ), _mm256_permutevar8x32_ps( miny, pick ), _mm256_permutevar8x32_ps( minz, pick ) };
+	const __m256 vhi[3] = { _mm256_permutevar8x32_ps( maxx, pick ), _mm256_permutevar8x32_ps( maxy, pick ), _mm256_permutevar8x32_ps( maxz, pick ) };
+	const float base[3] = { nodeLo.x, nodeLo.y, nodeLo.z }, scale[3] = { rsx, rsy, rsz };
+	const __m256i Z = _mm256_setzero_si256(), M255 = _mm256_set1_epi32( 255 );
+	const __m256i PACK = _mm256_setr_epi8( 0, 4, 8, 12, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+		0, 4, 8, 12, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 );
+	for (uint32_t a = 0; a < 3; a++)
+	{
+		const __m256 b = _mm256_set1_ps( base[a] ), sc = _mm256_set1_ps( scale[a] );
+		__m256 qa = _mm256_mul_ps( _mm256_sub_ps( vlo[a], b ), sc );
+		__m256 qb = _mm256_mul_ps( _mm256_sub_ps( vhi[a], b ), sc );
+		qa = _mm256_round_ps( qa, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC );
+		qb = _mm256_round_ps( qb, _MM_FROUND_TO_POS_INF | _MM_FROUND_NO_EXC );
+		__m256i ia = _mm256_max_epi32( _mm256_min_epi32( _mm256_cvttps_epi32( qa ), M255 ), Z );
+		__m256i ib = _mm256_max_epi32( _mm256_min_epi32( _mm256_cvttps_epi32( qb ), M255 ), Z );
+		// an empty slot gets lo 255, hi 0: a box no ray can enter.
+		ia = _mm256_blendv_epi8( ia, M255, empty ), ib = _mm256_blendv_epi8( ib, Z, empty );
+		ia = _mm256_shuffle_epi8( ia, PACK ), ib = _mm256_shuffle_epi8( ib, PACK );
+		const uint32_t al = (uint32_t)TINYBVH_LANE0( _mm256_castsi256_si128( ia ) );
+		const uint32_t ah = (uint32_t)TINYBVH_LANE0( _mm256_extracti128_si256( ia, 1 ) );
+		const uint32_t bl = (uint32_t)TINYBVH_LANE0( _mm256_castsi256_si128( ib ) );
+		const uint32_t bh = (uint32_t)TINYBVH_LANE0( _mm256_extracti128_si256( ib, 1 ) );
+		*(uint64_t*)(qbase + a * 8) = (uint64_t)al | ((uint64_t)ah << 32);
+		*(uint64_t*)(qbase + 24 + a * 8) = (uint64_t)bl | ((uint64_t)bh << 32);
 	}
 	return perm;
 }
@@ -1075,6 +1112,15 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 	ALIGNED( 64 ) uint32_t task[TINYBVH_STACK_SIZE], taskDepth[TINYBVH_STACK_SIZE], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f;
+	// packed box (negated min in lanes 0..2, max in lanes 4..6) over a range of primIdx; for
+	// settings.keepSplitting, which takes its child boxes from a range rather than from the bins.
+	auto boxOf = [&]( const uint32_t from, const uint32_t to )
+	{
+		__m256 b = bvhc_max8();
+		for (uint32_t k = from; k < to; k++)
+			b = _mm256_max_ps( b, _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + primIdx[k] ), bvhc_signFlip8() ), bvhc_xyz8() ) );
+		return b;
+	};
 	while (1)
 	{
 		while (1)
@@ -1083,7 +1129,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			if (node.triCount < 2) break; // a single primitive is always a leaf.
 			const uint32_t slices = maxSlices > 2 * depth ? maxSlices - 2 * depth : 1;
 			const float SAV = node.SurfaceArea();
-			if (SAV == 0) break; // can't split an infinitely small node.
+			if (SAV == 0 && !settings.keepSplitting) break; // can't split an infinitely small node.
 			if (node.triCount == 2)
 			{
 				// two primitives: the only split puts one in each child, so score it directly, without
@@ -1092,7 +1138,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 				const __m256 b0 = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + primIdx[first] ), bvhc_signFlip8() ), bvhc_xyz8() );
 				const __m256 b1 = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + primIdx[first + 1] ), bvhc_signFlip8() ), bvhc_xyz8() );
 				const float rSAV = 1.0f / SAV, splitCost = c_trav + c_int * rSAV * (halfArea( b0 ) + halfArea( b1 ));
-				if (splitCost >= 2.0f * c_int) break; // not splitting is better.
+				if (splitCost >= 2.0f * c_int && !settings.keepSplitting) break; // not splitting is better.
 				const uint32_t n = AllocNodePair();
 				tinybvh_store8( &bvhNode[n], _mm256_xor_ps( b0, bvhc_signFlip8() ) );
 				bvhNode[n].leftFirst = first, bvhNode[n].triCount = 1;
@@ -1167,7 +1213,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			}
 			splitCost = c_trav + c_int * rSAV * splitCost;
 			const float noSplitCost = (float)node.triCount * c_int;
-			if (splitCost >= noSplitCost) break; // not splitting is better.
+			if (splitCost >= noSplitCost && !settings.keepSplitting) break; // not splitting is better.
 			const float rpd = tinybvh_getlane_f( &rpd4, bestAxis ), nmin = tinybvh_getlane_f( &nmin4, bestAxis );
 			uint32_t i = node.leftFirst;
 			if (sliced)
@@ -1231,7 +1277,14 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 				bestLBox = lbox8, bestRBox = rbox8;
 			}
 			// create child nodes and recurse
-			const uint32_t leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
+			uint32_t leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
+			if ((leftCount == 0 || rightCount == 0) && settings.keepSplitting && node.triCount > 1)
+			{
+				// nothing to split on: halve the primitive range, and take the boxes from the halves.
+				i = node.leftFirst + (node.triCount >> 1);
+				leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
+				bestLBox = boxOf( node.leftFirst, i ), bestRBox = boxOf( i, node.leftFirst + node.triCount );
+			}
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
 			const uint32_t n = AllocNodePair();
 			tinybvh_store8( &bvhNode[n], _mm256_xor_ps( bestLBox, bvhc_signFlip8() ) );

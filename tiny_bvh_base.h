@@ -1,4 +1,4 @@
-﻿// tiny_bvh_base.h: platform-neutral part of TinyBVH. Do not include this file
+// tiny_bvh_base.h: platform-neutral part of TinyBVH. Do not include this file
 // directly; include tiny_bvh.h, which selects the platform headers.
 
 #ifndef TINY_BVH_H_
@@ -491,6 +491,13 @@ template <typename Index> struct IntersectionInst<Index, true> {};
 
 // Commonly used template - macro to improve code readability.
 #define TEMPLATED template <typename Float, typename Index>
+#if defined(__GNUC__) || defined(__clang__)
+#define TINYBVH_PREFETCH(p) __builtin_prefetch(p)
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#define TINYBVH_PREFETCH(p) _mm_prefetch((const char*)(p),_MM_HINT_T0)
+#else
+#define TINYBVH_PREFETCH(p)
+#endif
 #define TEMPLATED_M template <int M, typename Float, typename Index>
 #define PER_OCTANT template <bool posX, bool posY, bool posZ>
 
@@ -649,6 +656,7 @@ struct BVHBuildSettings
 	uint32_t bonsaiGridPrims = 256;	// Bonsai: grid resolution target, in primitives per grid cell (empty cells included).
 	float bonsaiPruneFactor = 0.1f;	// Bonsai, Bonsai HQ: prune mini trees larger than this fraction of the average mini tree; 0 disables.
 	bool useHPLOC = false;			// H-PLOC builder; builds trees identical to NexusBVH CUDA code, for comparisons.
+	bool keepSplitting = false;		// subdivide regardless of what SAH prefers; see SplitLeafs.
 	bool postOptimize = false;		// optimize generated BVH using tree rotations.
 	int optimizeIterations = 25;	// default optimization iterations.
 	bool useSIMDifavailable = true;	// set to false to use the scalar reference builder, or SBVH with useSpatialSplits.
@@ -744,6 +752,7 @@ protected:
 	bool orderedNodes = true;		// depth-first: children follow their parents, subtree prims are contiguous. Not after Bonsai.
 	bool bvhOverAabbs = false;	// a BVH over AABBs is useful for e.g. TLAS traversal.
 	bool bvhOverIndices = false;	// a BVH over indices cannot translate primitive index to vertex index.
+	Index leafsSplit = 0;		// leaves are known to hold at most this many primitives; 0 means unknown.
 public:
 	// read-only queries on the flags.
 	bool isRefittable() const { return refittable; }
@@ -862,6 +871,7 @@ public:
 	using Base::hqbvhbins;
 	using Base::hqbvhoddeven;
 	using Base::hqLeafPrims;
+	using Base::leafsSplit;
 	using Base::aabbMin;
 	using Base::aabbMax;
 	using Base::opmapN;
@@ -975,6 +985,7 @@ private:
 	void BinObjects( const Index from, const Index to, const Vec3& nmin3, const Vec3& rpd3, const uint32_t binCount, BinBox* box, Index* cnt, const uint32_t stride ) const;
 	void BinSpatial( const Index from, const Index to, const int32_t a, const Float nodeMin, const Float planeDist, const uint32_t binCount, BinBox* box, Index* cntIn, Index* cntOut ) const;
 	template <typename F> void SweepBins( const BinBox* box, const Index* cntL, const Index* cntR, const uint32_t binCount, const Float rSAV, const F& accept ) const;
+	Index ForcedSplit( const BVHNode& node, Vec3& lMin, Vec3& lMax, Vec3& rMin, Vec3& rMax );
 	void FinalizeLeaf( const BVHNode& node ) { for (Index i = node.leftFirst; i < node.leftFirst + node.triCount; i++) primIdx[i] = fragment[primIdx[i]].primIdx; }
 	void BuildSIMDSubtree( Index nodeIdx = 0, uint32_t depth = 0, bool allowTasks = true, bool allowSlices = true );
 	void BuildBonsai();
@@ -1368,6 +1379,8 @@ public:
 	bool ownBVH = true;				// False when ConvertFrom receives an external bvh.
 	// collapse settings, consumed by ConvertFrom
 	Index leafPrimLimit = 0;		// max prims the collapse may merge into one leaf; 0 disables merging
+	// Visit probability per node, replacing SAH in the collapse cost model. SAH is used if 0.
+	const Float* nodeProb = 0;
 private:
 	// ConvertFrom and its decode passes: node flags, and the marker for output nodes without a source node.
 	static constexpr uint8_t USED = 1, CONTIG = 2, ASLEAF = 4;
@@ -1719,7 +1732,8 @@ public:
 	void ConvertFrom( const MBVH<8, Float, Index>& original, bool compact = true );
 	// Greedy octant assignment for the children of one node, used by ConvertFrom.
 	// An AVX2 version of this function is in tiny_bvh_x86_float.h.
-	uint32_t SlotPermutation( const MBVH<8, Float, Index>& bvh8, const Index nodeIdx ) const;
+	uint32_t SlotPermutation( const MBVH<8, Float, Index>& bvh8, const Index nodeIdx,
+		const Vec3& nodeLo, const float rsx, const float rsy, const float rsz, uint8_t* const qbase ) const;
 	Float SAHCost( const Index nodeIdx = 0 ) const;
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const { FALLBACK_SHADOW_QUERY( ray ); }
@@ -2215,6 +2229,7 @@ TEMPLATED void BVHBase<Float, Index>::CopyBasePropertiesFrom( const BVHBase& ori
 	this->orderedNodes = original.orderedNodes;
 	this->bvhOverAabbs = original.bvhOverAabbs;
 	this->bvhOverIndices = original.bvhOverIndices;
+	this->leafsSplit = 0;		// leaf sizes are a property of this layout, not of the source
 	this->context = original.context;
 	this->settings = original.settings;
 	this->triCount = original.triCount;
@@ -2372,6 +2387,7 @@ TEMPLATED bool BVH<Float, Index>::Load( const char* fileName, const Slice& verti
 		ownsGeometry = true;
 	}
 	// all ok.
+	leafsSplit = 0; // nothing is known about the leaf sizes of a tree that came off disk.
 	return true;
 }
 
@@ -2406,7 +2422,10 @@ TEMPLATED void BVH<Float, Index>::Build( const Slice& vertices, const Index* ind
 	else if (simd) BuildSIMD( vertices, indices, prims );
 	// fall-back / reference builder.
 	else PrepareBuild( vertices, indices, prims ), Build();
-	if (settings.postOptimize) Optimize( settings.optimizeIterations );
+	// keepSplitting leaves nothing for SplitLeafs to do; record the size the build guarantees. Only
+	// the SBVH builder honours hqLeafPrims, so it is an upper bound for the others - never a lie.
+	leafsSplit = settings.keepSplitting ? tinybvh_max( (Index)1, (Index)hqLeafPrims ) : 0;
+	if (settings.postOptimize) Optimize( settings.optimizeIterations ); // ..which merges leaves again
 }
 
 TEMPLATED void BVH<Float, Index>::BuildAABB( const Vertex* aabbs, const Index aabbCount )
@@ -2455,6 +2474,7 @@ TEMPLATED template <typename F> void BVH<Float, Index>::BuildFromBounds( const I
 	}
 	newNodePtr = 2;
 	Build();
+	leafsSplit = settings.keepSplitting ? 1 : 0;
 }
 
 // (Re)allocate the node pool, with room for nodes / 2 primitives in primIdx and fragment (see
@@ -2531,13 +2551,16 @@ TEMPLATED void BVH<Float, Index>::BuildQuick( const Slice& vertices )
 				tinybvh_swap( primIdx[src], primIdx[--j] );
 			}
 			// create child nodes
-			const Index leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
+			Index leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount, right = j;
+			if ((leftCount == 0 || rightCount == 0) && settings.keepSplitting && node.triCount > 1)
+				leftCount = ForcedSplit( node, lbmin, lbmax, rbmin, rbmax ),
+				rightCount = node.triCount - leftCount, right = node.leftFirst + leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // split did not work out.
 			const Index lci = newNodePtr++, rci = newNodePtr++;
 			bvhNode[lci].aabbMin = lbmin, bvhNode[lci].aabbMax = lbmax;
 			bvhNode[lci].leftFirst = node.leftFirst, bvhNode[lci].triCount = leftCount;
 			bvhNode[rci].aabbMin = rbmin, bvhNode[rci].aabbMax = rbmax;
-			bvhNode[rci].leftFirst = j, bvhNode[rci].triCount = rightCount;
+			bvhNode[rci].leftFirst = right, bvhNode[rci].triCount = rightCount;
 			node.leftFirst = lci, node.triCount = 0;
 			task[taskCount++] = rci, nodeIdx = lci;
 		}
@@ -2548,6 +2571,7 @@ TEMPLATED void BVH<Float, Index>::BuildQuick( const Slice& vertices )
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax, usedNodes = newNodePtr;
 	refittable = true; // not using spatial splits: can refit this BVH
 	hasHoles = false, orderedNodes = true; // the reference builder produces a continuous list of nodes
+	leafsSplit = settings.keepSplitting ? 1 : 0;
 }
 
 // Fragments and primIdx for primitives [first, last) from verts and vertIdx, and their bounds.
@@ -2599,6 +2623,34 @@ TEMPLATED void BVHBuildSubtree( void* payload )
 	BVHBuildSubtreeArgs<Float, Index>* a = (BVHBuildSubtreeArgs<Float, Index>*)payload;
 	a->bvh->Build( a->node, a->depth );
 }
+
+// ForcedSplit: Fallback for settings.keepSplitting.
+TEMPLATED Index BVH<Float, Index>::ForcedSplit( const BVHNode& node, Vec3& lMin, Vec3& lMax, Vec3& rMin, Vec3& rMax )
+{
+	const Index first = node.leftFirst, count = node.triCount;
+	const uint32_t axis = tinybvh_maxdim( node.aabbMax - node.aabbMin );
+	const Float pos2 = node.aabbMin[axis] + node.aabbMax[axis]; // doubled midpoint, for doubled centroids
+	Index left = 0;
+	for (Index i = 0; i < count; i++)
+	{
+		const Fragment& f = fragment[primIdx[first + i]];
+		if (f.bmin[axis] + f.bmax[axis] < pos2) tinybvh_swap( primIdx[first + i], primIdx[first + left] ), left++;
+	}
+	if (left == 0 || left == count) left = count >> 1; // degenerate node: halve the range instead
+	lMin = rMin = Vec3( bvh_far<Float> ), lMax = rMax = Vec3( -bvh_far<Float> );
+	for (Index i = 0; i < left; i++)
+	{
+		const Fragment& f = fragment[primIdx[first + i]];
+		lMin = tinybvh_min( lMin, f.bmin ), lMax = tinybvh_max( lMax, f.bmax );
+	}
+	for (Index i = left; i < count; i++)
+	{
+		const Fragment& f = fragment[primIdx[first + i]];
+		rMin = tinybvh_min( rMin, f.bmin ), rMax = tinybvh_max( rMax, f.bmax );
+	}
+	return left;
+}
+
 TEMPLATED void BVH<Float, Index>::Build( Index nodeIdx, uint32_t depth )
 {
 	// Reference builder: Binned, threaded SAH BVH builder. Not using SIMD.
@@ -2613,8 +2665,9 @@ TEMPLATED void BVH<Float, Index>::Build( Index nodeIdx, uint32_t depth )
 		while (1)
 		{
 			BVHNode& node = bvhNode[nodeIdx];
+			if (node.triCount < 2) break; // a single primitive is always a leaf.
 			const Float SA = node.SurfaceArea();
-			if (SA == 0) break; // can't split an infinitely small node.
+			if (SA == 0 && !settings.keepSplitting) break; // can't split an infinitely small node.
 			// find optimal object split
 			Vec3 binMin[3][BVHBINS], binMax[3][BVHBINS];
 			for (uint32_t a = 0; a < 3; a++) for (uint32_t i = 0; i < BVHBINS; i++)
@@ -2674,15 +2727,22 @@ TEMPLATED void BVH<Float, Index>::Build( Index nodeIdx, uint32_t depth )
 			}
 			splitCost = c_trav + c_int * splitCost / SA;
 			const Float noSplitCost = (Float)node.triCount * c_int;
+			bool forced = false;
 			if (splitCost >= noSplitCost)
 			{
+				if (!settings.keepSplitting)
+				{
 			#ifdef _DEBUG
 				if (node.triCount > 512) fprintf( stderr, "failed to split large node (%llu tris).\n", (unsigned long long)node.triCount );
 			#endif
 				break; // not splitting is better.
 			}
+				forced = true; // keepSplitting: subdivide anyway, and take the bounds from the partition.
+			}
 			// in-place partition
-			Index j = node.leftFirst + node.triCount, src = node.leftFirst;
+			Index j = node.leftFirst + node.triCount, src = node.leftFirst, leftCount = 0, rightCount = 0;
+			if (!forced)
+			{
 			const Float rpd = rpd3[bestAxis], nmin = nmin3[bestAxis];
 			for (Index i = 0; i < node.triCount; i++)
 			{
@@ -2691,8 +2751,13 @@ TEMPLATED void BVH<Float, Index>::Build( Index nodeIdx, uint32_t depth )
 				bi = tinybvh_clamp( bi, 0, BVHBINS - 1 );
 				if ((uint32_t)bi <= bestPos) src++; else tinybvh_swap( primIdx[src], primIdx[--j] );
 			}
+				leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
+				forced = (leftCount == 0 || rightCount == 0) && settings.keepSplitting;
+			}
+			if (forced) // no usable SAH split: split the node down the middle instead.
+				leftCount = ForcedSplit( node, bestLMin, bestLMax, bestRMin, bestRMax ),
+				rightCount = node.triCount - leftCount, j = node.leftFirst + leftCount;
 			// create child nodes
-			Index leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
 			const Index n = AllocNodePair();
 			bvhNode[n].aabbMin = bestLMin, bvhNode[n].aabbMax = bestLMax;
@@ -2872,7 +2937,8 @@ TEMPLATED void BVH<Float, Index>::BuildFullSweep( Index nodeIdx, uint32_t depth 
 			}
 			if (node.triCount == 1) break; // can't split one triangle.
 			const Vec3 extent = node.aabbMax - node.aabbMin;
-			Float splitCost = ((Float)node.triCount - cratio) * node.SurfaceArea();
+			// keepSplitting takes the best candidate regardless of cost, so it starts from infinity.
+			Float splitCost = settings.keepSplitting ? bvh_far<Float> : ((Float)node.triCount - cratio) * node.SurfaceArea();
 			uint32_t splitAxis = 0;
 			Index splitPos = 0;
 			for (uint32_t a = 0; a < 3; a++) if (extent[a] > minDim[a])
@@ -2913,7 +2979,12 @@ TEMPLATED void BVH<Float, Index>::BuildFullSweep( Index nodeIdx, uint32_t depth 
 					else if (SAL >= splitCost) break;
 				}
 			}
-			if (splitPos == 0) break; // no split beats not splitting; make this node a leaf.
+			if (splitPos == 0)
+			{
+				if (!settings.keepSplitting) break; // no split beats not splitting; make this node a leaf.
+				// keepSplitting: no usable candidate; halve the range, which is sorted on every axis.
+				splitAxis = tinybvh_maxdim( extent ), splitPos = node.triCount >> 1;
+			}
 			// partition
 			for (Index i = 0; i < splitPos; i++) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 0; // "left"
 			for (Index i = splitPos; i < node.triCount; i++) flag[sortedIdx[splitAxis][node.leftFirst + i]] = 1; // "right"
@@ -3260,6 +3331,30 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 	const Float rootArea = tinybvh_halfarea( root.aabbMax - root.aabbMin );
 	const Vec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f /* don't touch, carefully picked */;
 	const bool rootTask = (depth == 0);
+	// keepSplitting: subdivide a node that SAH would leave alone.
+	auto ForceSplitHQ = [&]( const BVHNode& n, Index& A, Index& B )
+	{
+		const Index first = n.leftFirst, count = n.triCount;
+		const uint32_t axis = tinybvh_maxdim( n.aabbMax - n.aabbMin );
+		const Float pos2 = n.aabbMin[axis] + n.aabbMax[axis]; // doubled midpoint, for doubled centroids
+		Index left = 0;
+		for (Index i = 0; i < count; i++)
+		{
+			const Fragment& f = fragment[primIdx[first + i]];
+			if (f.bmin[axis] + f.bmax[axis] < pos2) left++;
+		}
+		const bool byAxis = left > 0 && left < count;
+		if (!byAxis) left = count >> 1;
+		bestLMin = bestRMin = Vec3( bvh_far<Float> ), bestLMax = bestRMax = Vec3( -bvh_far<Float> );
+		for (Index i = 0; i < count; i++)
+		{
+			const Index fi = primIdx[first + i];
+			const Fragment& f = fragment[fi];
+			if (byAxis ? (f.bmin[axis] + f.bmax[axis] < pos2) : (i < left))
+				idxTmp[A++] = fi, bestLMin = tinybvh_min( bestLMin, f.bmin ), bestLMax = tinybvh_max( bestLMax, f.bmax );
+			else idxTmp[--B] = fi, bestRMin = tinybvh_min( bestRMin, f.bmin ), bestRMax = tinybvh_max( bestRMax, f.bmax );
+		}
+	};
 	// Scratch for horizontal binning, laid out as [slice][axis][bin].
 	const uint32_t maxSliceBins = MT_HQ_MAX_SLICES * 3 * (hqbvhbins + 1);
 	BinBox* sliceBox = 0; Index* sliceCnt = 0, * sliceOut = 0; // sliceCnt: object counts, then spatial 'in' counts
@@ -3278,8 +3373,12 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 				// small node: exact sweep over the sorted fragments instead of bins.
 				if (!SplitSmallExact( node, minDim, idxTmp, A, B, bestLMin, bestLMax, bestRMin, bestRMax ))
 				{
+					if (!settings.keepSplitting)
+					{
 					FinalizeLeaf( node );
 					break; // not splitting is better.
+				}
+					ForceSplitHQ( node, A, B ); // keepSplitting: subdivide anyway.
 				}
 			}
 			else
@@ -3377,14 +3476,16 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 					}
 				}
 				// evaluate best split cost
-				if (splitCost >= noSplitCost)
+				const bool forced = splitCost >= noSplitCost;
+				if (forced && !settings.keepSplitting)
 				{
 					FinalizeLeaf( node );
 					break; // not splitting is better.
 				}
 				// double-buffered partition
 				Index src = node.leftFirst;
-				if (spatial)
+				if (forced) ForceSplitHQ( node, A, B ); // keepSplitting: no split beats a leaf; split anyway.
+				else if (spatial)
 				{
 					// spatial partitioning
 					const Float planeDist = (node.aabbMax[bestAxis] - node.aabbMin[bestAxis]) / (binCount * 0.9999f);
@@ -3466,10 +3567,24 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 					}
 				}
 			}
-			// copy back slice data
-			memcpy( primIdx + sliceStart, idxTmp + sliceStart, (sliceEnd - sliceStart) * sizeof( Index ) );
 			// create child nodes
 			Index leftCount = A - sliceStart, rightCount = sliceEnd - B;
+			if ((leftCount == 0 || rightCount == 0) && settings.keepSplitting && leftCount + rightCount > 1)
+			{
+				// everything ended up on one side; move half of it across, so the node still splits.
+				if (rightCount == 0) for (Index i = leftCount >> 1; i > 0; i--) idxTmp[--B] = idxTmp[--A];
+				else for (Index i = rightCount >> 1; i > 0; i--) idxTmp[A++] = idxTmp[B++];
+				leftCount = A - sliceStart, rightCount = sliceEnd - B;
+				bestLMin = bestRMin = Vec3( bvh_far<Float> ), bestLMax = bestRMax = Vec3( -bvh_far<Float> );
+				for (Index i = sliceStart; i < A; i++)
+					bestLMin = tinybvh_min( bestLMin, fragment[idxTmp[i]].bmin ),
+					bestLMax = tinybvh_max( bestLMax, fragment[idxTmp[i]].bmax );
+				for (Index i = B; i < sliceEnd; i++)
+					bestRMin = tinybvh_min( bestRMin, fragment[idxTmp[i]].bmin ),
+					bestRMax = tinybvh_max( bestRMax, fragment[idxTmp[i]].bmax );
+			}
+			// copy back slice data
+			memcpy( primIdx + sliceStart, idxTmp + sliceStart, (sliceEnd - sliceStart) * sizeof( Index ) );
 			if (leftCount == 0 || rightCount == 0)
 			{
 				// spatial split failed. We shouldn't get here, but we do sometimes..
@@ -3791,6 +3906,7 @@ TEMPLATED Float BVH<Float, Index>::EPOCost( const Index nodeIdx, uint32_t ) cons
 TEMPLATED void BVH<Float, Index>::SplitLeafs( const Index maxPrims )
 {
 	if (!orderedNodes) Compact(); // the reachability sweep below requires children to follow their parents
+	if (leafsSplit && leafsSplit <= maxPrims) return; // the leaves are already this small
 	const Index origNodes = newNodePtr;
 	if (origNodes == 0) { usedNodes = 0; return; }
 	uint8_t* reachable = (uint8_t*)AlignedAlloc( (size_t)origNodes );
@@ -3816,7 +3932,7 @@ TEMPLATED void BVH<Float, Index>::SplitLeafs( const Index maxPrims )
 		left.triCount = maxPrims, node.leftFirst = newNodePtr, node.triCount = 0, newNodePtr += 2;
 	}
 	AlignedFree( reachable );
-	usedNodes = newNodePtr;
+	usedNodes = newNodePtr, leafsSplit = maxPrims;
 }
 
 TEMPLATED Float BVH<Float, Index>::SplitPriority( const Fragment& f ) const
@@ -4019,6 +4135,7 @@ TEMPLATED void BVH<Float, Index>::CombineLeafs( const Index primCount )
 		node.leftFirst = tinybvh_min( bvhNode[first].leftFirst, bvhNode[first + 1].leftFirst ), node.triCount = total;
 	}
 	AlignedFree( subtreePrims );
+	leafsSplit = 0; // leaves grew; their size is no longer known.
 }
 
 // FitLeafs: CombineLeafs( primCount ) followed by SplitLeafs( primCount ), fused, parallel.
@@ -4088,7 +4205,7 @@ TEMPLATED void BVH<Float, Index>::FitLeafs( const Index primCount )
 	// 2. Split.
 	Index pairs = 0;
 	for (uint32_t s = 0; s < slices; s++) { const Index n = slicePairs[s]; slicePairs[s] = pairs, pairs += n; }
-	if (pairs == 0) { newNodePtr = usedNodes = nodes; return; }
+	if (pairs == 0) { newNodePtr = usedNodes = nodes, leafsSplit = primCount; return; }
 	BVH_FATAL_ERROR_IF( nodes + 2 * pairs > allocatedNodes, "BVH::FitLeafs( .. ), node pool too small." );
 	ParallelFor( true, slices, [&]( uint32_t s )
 	{
@@ -4111,7 +4228,7 @@ TEMPLATED void BVH<Float, Index>::FitLeafs( const Index primCount )
 		}
 	}
 	} );
-	newNodePtr = usedNodes = nodes + 2 * pairs;
+	newNodePtr = usedNodes = nodes + 2 * pairs, leafsSplit = primCount;
 }
 
 TEMPLATED bool BVH<Float, Index>::IntersectSphere( const Vec3& pos, const Float r ) const
@@ -5651,7 +5768,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 		if (!(flag[n] & USED)) continue;
 		const typename BVH::BVHNode& node = original.bvhNode[n];
 		const size_t base = (size_t)n * M;
-		const Float sa = SA( node.aabbMin, node.aabbMax );
+		const Float sa = nodeProb ? nodeProb[n] : SA( node.aabbMin, node.aabbMax );
 		if (node.isLeaf())
 		{
 			// a leaf takes a single slot, no matter how many it is offered.
@@ -6073,9 +6190,11 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::Build( const Slice& vertices, const In
 	if (!ownBVH4) bvh4.DropReference( context ), ownBVH4 = true;
 	// propagate settings for this layout to the underlying layout
 	this->PassSettingsTo( bvh4 ), this->PassSettingsTo( bvh4.bvh );
+	bvh4.bvh.settings.keepSplitting = true; // this layout wants one triangle per leaf; the build delivers it
 	// build underlying layout
 	bvh4.bvh.Build( vertices, indices, prims );
-	// Force 1 triangle per leaf for HW
+	// Force 1 triangle per leaf for HW; a no-op after the build above, but a tree may arrive by
+	// other routes - SplitLeafs returns immediately when the leaves are already this small.
 	bvh4.bvh.SplitLeafs( 1 );
 	bvh4.leafPrimLimit = 0;
 	bvh4.ConvertFrom( bvh4.bvh ); // Convert to 4 Wide
@@ -6243,9 +6362,10 @@ TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Build( const Slice& vertices, const 
 	// propagate settings for this layout to the underlying layout
 	bvh8.context = bvh8.bvh.context = context, bvh8.settings = bvh8.bvh.settings = settings;
 	bvh8.c_int = bvh8.bvh.c_int = c_int, bvh8.c_trav = bvh8.bvh.c_trav = c_trav;
+	bvh8.bvh.settings.keepSplitting = true; // leaves hold at most 2 prims here; the build splits down to one
 	// build underlying layout
 	bvh8.bvh.Build( vertices, indices, prims );
-	bvh8.bvh.SplitLeafs( 2 );
+	bvh8.bvh.SplitLeafs( 2 ); // a no-op after the build above; see BVH4_AMD_HW::Build
 	bvh8.leafPrimLimit = 2;
 	bvh8.ConvertFrom( bvh8.bvh );
 	// convert to AMD format
@@ -6588,11 +6708,14 @@ TEMPLATED void BVH4_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	// propagate settings for this layout to the underlying layout
 	this->PassSettingsTo( bvh4 ), this->PassSettingsTo( bvh4.bvh );
 	bvh4.bvh.hqLeafPrims = 4;
+	bvh4.bvh.settings.keepSplitting = true; // ConvertForCPULayout ends in SplitLeafs / FitLeafs( 4 )
 	// build underlying layout
 	bvh4.bvh.Build( vertices, indices, prims );
 	if (settings.discardIntermediates && ownBVH4 && bvh4.ownBVH) AlignedFree( bvh4.bvh.fragment ), bvh4.bvh.fragment = 0;
 	// convert to BVH4_CPU layout
-	ConvertFrom( bvh4, settings.useSpatialSplits && settings.binnedBVH && !settings.postOptimize ); // only SBVH caps leaves at 4 prims
+	// only the SBVH path sizes its leaves for this layout (hqLeafPrims); the others split down to
+	// one prim per leaf and need the collapse in ConvertForCPULayout to group them again.
+	ConvertFrom( bvh4, settings.useSpatialSplits && settings.binnedBVH && !settings.postOptimize );
 }
 
 TEMPLATED void BVH4_CPU<Float, Index>::Save( const char* fileName )
@@ -6670,6 +6793,7 @@ template <class Node, int M, typename Float, typename Index> int32_t tinybvh_emi
 		newNode->zmin[cidx] = child.aabbMin.z, newNode->zmax[cidx] = child.aabbMax.z;
 		if (child.isLeaf())
 		{
+			BVH_FATAL_ERROR_IF( child.triCount > 4, "MBVH::ConvertForCPULayout( .. ), leaf holds more than 4 prims; build with settings.keepSplitting, or convert with leavesMerged = false." );
 			newNode->child[cidx] = leafBlock + leafBit;
 			BVHTri4Leaf<Float, Index>* leaf = (BVHTri4Leaf<Float, Index>*)(data + (size_t)leafBlock * 64);
 			leafBlock += LEAF_BLOCKS;
@@ -6724,6 +6848,9 @@ TEMPLATED void BVH4_CPU<Float, Index>::EmitNode( MBVH<4, Float, Index>& src, con
 
 #undef SORT
 
+// leavesMerged: the source tree's leaves are at most four prims each already, so they only need
+// splitting if that turns out not to hold - which SplitLeafs decides for itself, from leafsSplit.
+// Without it the leaves are collapsed to four here, which merges as well as splits.
 TEMPLATED_M void MBVH<M, Float, Index>::ConvertForCPULayout( const bool leavesMerged )
 {
 	if (leavesMerged) bvh.SplitLeafs( 4 ); else bvh.FitLeafs( 4 );
@@ -6765,6 +6892,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& origi
 	const bool discard = settings.discardIntermediates && ownBVH4;
 	bvh4.lQuads = lQuads, bvh4.c_int = c_int, bvh4.c_trav = c_trav;
 	bvh4.ConvertForCPULayout( leavesMerged );
+	if (&original != &bvh4) original = bvh4; // avoid caller holding freed pointer.
 	// from here on only bvh4.bvh.primIdx is read; the binary nodes can go.
 	if (discard && bvh4.ownBVH) AlignedFree( bvh4.bvh.bvhNode ), bvh4.bvh.bvhNode = 0;
 	// allocate if needed
@@ -6841,11 +6969,13 @@ TEMPLATED void BVH8_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	this->PassSettingsTo( bvh8 ), this->PassSettingsTo( bvh8.bvh );
 	// as for BVH4_CPU: leaves hold 4 prims, so the SBVH builder stops at that size.
 	bvh8.bvh.hqLeafPrims = 4;
+	bvh8.bvh.settings.keepSplitting = true; // ConvertForCPULayout ends in SplitLeafs / FitLeafs( 4 )
 	// build underlying layout
 	bvh8.bvh.Build( vertices, indices, prims );
 	if (settings.discardIntermediates && ownBVH8 && bvh8.ownBVH) AlignedFree( bvh8.bvh.fragment ), bvh8.bvh.fragment = 0;
 	// convert to BVH8_CPU layout
-	ConvertFrom( bvh8, settings.useSpatialSplits && settings.binnedBVH && !settings.postOptimize ); // only SBVH caps leaves at 4 prims
+	// as for BVH4_CPU: only the SBVH path sizes its leaves here; the others need the collapse.
+	ConvertFrom( bvh8, settings.useSpatialSplits && settings.binnedBVH && !settings.postOptimize );
 }
 
 TEMPLATED void BVH8_CPU<Float, Index>::Save( const char* fileName )
@@ -6931,6 +7061,7 @@ TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& origi
 	const bool discard = settings.discardIntermediates && ownBVH8;
 	bvh8.lQuads = lQuads, bvh8.c_int = c_int, bvh8.c_trav = c_trav;
 	bvh8.ConvertForCPULayout( leavesMerged );
+	if (&original != &bvh8) original = bvh8; // avoid caller from holding freed pointer.
 	if (discard && bvh8.ownBVH) AlignedFree( bvh8.bvh.bvhNode ), bvh8.bvh.bvhNode = 0;
 	// allocate if needed - leaves are stored only as leaf blocks: they get no node record.
 	const Index leavesNeeded = bvh8.LeafCount(), nodesNeeded = bvh8.usedNodes - leavesNeeded;
@@ -7069,13 +7200,19 @@ TEMPLATED bool BVH8_CWBVH<Float, Index>::Load( const char* fileName, const Index
 static int32_t CWBVHQuantExp( const float extent )
 {
 	if (!(extent > 0)) return -126; // zero, denormal or NaN extent
-	const float e = ceilf( log2f( extent * (1.0f / 255.0f) ) );
-	return (int32_t)tinybvh_clamp( e, -126.0f, 126.0f );
+	// ceil( log2( x ) ) for positive x is its unbiased exponent, plus one unless
+	// the mantissa is exactly 1; no need to call out to log2f for that.
+	const uint32_t b = tinybvh_as_uint( extent * (1.0f / 255.0f) );
+	const int32_t e = (int32_t)((b >> 23) & 255) - 127;
+	if (e < -126) return -126;	// subnormal product
+	if (e > 125) return 126;	// inf, or an exponent that would clamp anyway
+	return (b & 0x7FFFFF) ? e + 1 : e;
 }
 
 // SlotPermutation: greedy child node ordering from "Efficient Incoherent Ray
 // Traversal on GPUs Through Compressed Wide BVHs", Ylitie et al. 2017.
-TEMPLATED uint32_t BVH8_CWBVH<Float, Index>::SlotPermutation( const MBVH<8, Float, Index>& bvh8, const Index nodeIdx ) const
+TEMPLATED uint32_t BVH8_CWBVH<Float, Index>::SlotPermutation( const MBVH<8, Float, Index>& bvh8, const Index nodeIdx,
+	const Vec3& nodeLo, const float rsx, const float rsy, const float rsz, uint8_t* const qbase ) const
 {
 	const typename MBVH<8, Float, Index>::MBVHNode* const orig = &bvh8.mbvhNode[nodeIdx];
 	const Vec3 nodeCentroid = (orig->aabbMin + orig->aabbMax) * 0.5f;
@@ -7105,6 +7242,25 @@ TEMPLATED uint32_t BVH8_CWBVH<Float, Index>::SlotPermutation( const MBVH<8, Floa
 	// stays 0xF, which the caller reads as an empty slot.
 	uint32_t perm = 0xFFFFFFFF;
 	for (uint32_t i = 0; i < 8; i++) if (assignment[i] != -1) perm ^= (0xF ^ i) << (assignment[i] * 4);
+	// quantize the child bounds into the slots they were just assigned to. An
+	// empty slot gets an inverted box, which no ray can enter.
+	for (uint32_t i = 0; i < 8; i++)
+	{
+		const uint32_t c = (perm >> (i * 4)) & 15;
+		if (c == 15)
+		{
+			qbase[i + 0] = qbase[i + 8] = qbase[i + 16] = 255;
+			qbase[i + 24] = qbase[i + 32] = qbase[i + 40] = 0;
+			continue;
+		}
+		const typename MBVH<8, Float, Index>::MBVHNode* const child = &bvh8.mbvhNode[orig->child[c]];
+		qbase[i + 0] = (uint8_t)tinybvh_clamp( (int32_t)floorf( (float)(child->aabbMin.x - nodeLo.x) * rsx ), 0, 255 );
+		qbase[i + 8] = (uint8_t)tinybvh_clamp( (int32_t)floorf( (float)(child->aabbMin.y - nodeLo.y) * rsy ), 0, 255 );
+		qbase[i + 16] = (uint8_t)tinybvh_clamp( (int32_t)floorf( (float)(child->aabbMin.z - nodeLo.z) * rsz ), 0, 255 );
+		qbase[i + 24] = (uint8_t)tinybvh_clamp( (int32_t)ceilf( (float)(child->aabbMax.x - nodeLo.x) * rsx ), 0, 255 );
+		qbase[i + 32] = (uint8_t)tinybvh_clamp( (int32_t)ceilf( (float)(child->aabbMax.y - nodeLo.y) * rsy ), 0, 255 );
+		qbase[i + 40] = (uint8_t)tinybvh_clamp( (int32_t)ceilf( (float)(child->aabbMax.z - nodeLo.z) * rsz ), 0, 255 );
+	}
 	return perm;
 }
 
@@ -7141,6 +7297,9 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::ConvertFrom( const MBVH<8, Float, Index
 	stackNodeIdx[0] = 0, stackNodeAddr[0] = 0;
 	uint32_t nodeDataPtr = 5, triDataPtr = 0;
 	uint32_t slotsUsed = 0, nodeBlocks = 0, leafPrims = 0, leafBlocks = 0;
+	// prim indices in output order; the triangle data itself is written after the walk.
+	uint32_t* triPrim = (uint32_t*)AlignedAlloc( (size_t)tinybvh_max( 1u, (uint32_t)bvh8.idxCount ) * 4 );
+	uint32_t nTris = 0;
 	while (stackPtr > 0)
 	{
 		const uint32_t origIdx = stackNodeIdx[--stackPtr];
@@ -7154,37 +7313,32 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::ConvertFrom( const MBVH<8, Float, Index
 			AlignedFree( bvh8Data );
 			bvh8Data = newData, allocatedBlocks = newCap;
 		}
-		memset( &bvh8Data[currentNodeAddr], 0, 80 );
 		const Vec3 nodeLo = orig->aabbMin, nodeHi = orig->aabbMax;
-		// greedy child node ordering
-		const uint32_t perm = SlotPermutation( bvh8, origIdx );
+		const int32_t ex = CWBVHQuantExp( nodeHi.x - nodeLo.x );
+		const int32_t ey = CWBVHQuantExp( nodeHi.y - nodeLo.y );
+		const int32_t ez = CWBVHQuantExp( nodeHi.z - nodeLo.z );
+		const uint32_t bx = (uint32_t)(127 - ex) << 23, by = (uint32_t)(127 - ey) << 23, bz = (uint32_t)(127 - ez) << 23;
+		const float rsx = tinybvh_as_float( bx ), rsy = tinybvh_as_float( by ), rsz = tinybvh_as_float( bz ); // 2^-e, exact
+		uint8_t* const qbase = (uint8_t*)&bvh8Data[currentNodeAddr + 2];
+		uint8_t* const metaField = ((uint8_t*)&bvh8Data[currentNodeAddr + 1]) + 8;
+		// greedy child node ordering, with the child bounds quantized into their
+		// slots while they are still in registers.
+		const uint32_t perm = SlotPermutation( bvh8, origIdx, nodeLo, rsx, rsy, rsz, qbase );
 		uint32_t slotChild[8] = {};
 		for (uint32_t i = 0; i < 8; i++)
 		{
 			const uint32_t c = (perm >> (i * 4)) & 15;
 			if (c != 15) slotChild[i] = orig->child[c];
 		}
-		const int32_t ex = CWBVHQuantExp( nodeHi.x - nodeLo.x );
-		const int32_t ey = CWBVHQuantExp( nodeHi.y - nodeLo.y );
-		const int32_t ez = CWBVHQuantExp( nodeHi.z - nodeLo.z );
-		const uint32_t bx = (uint32_t)(127 - ex) << 23, by = (uint32_t)(127 - ey) << 23, bz = (uint32_t)(127 - ez) << 23;
-		const float rsx = tinybvh_as_float( bx ), rsy = tinybvh_as_float( by ), rsz = tinybvh_as_float( bz ); // 2^-e, exact
-		// encode output
+		// every byte of the record is written below, so no clearing is needed.
+		*(uint64_t*)metaField = 0;
 		int32_t internalChildCount = 0, leafChildTriCount = 0, childBaseIndex = 0, triangleBaseIndex = 0;
 		uint8_t imask = 0;
-		uint8_t* const qbase = (uint8_t*)&bvh8Data[currentNodeAddr + 2];
-		uint8_t* const metaField = ((uint8_t*)&bvh8Data[currentNodeAddr + 1]) + 8;
 		for (int32_t i = 0; i < 8; i++)
 		{
 			if (slotChild[i] == 0) continue;
 			const typename MBVH<8, Float, Index>::MBVHNode* const child = &bvh8.mbvhNode[slotChild[i]];
 			slotsUsed++;
-			qbase[i + 0] = (uint8_t)tinybvh_clamp( (int32_t)floorf( (child->aabbMin.x - nodeLo.x) * rsx ), 0, 255 );
-			qbase[i + 8] = (uint8_t)tinybvh_clamp( (int32_t)floorf( (child->aabbMin.y - nodeLo.y) * rsy ), 0, 255 );
-			qbase[i + 16] = (uint8_t)tinybvh_clamp( (int32_t)floorf( (child->aabbMin.z - nodeLo.z) * rsz ), 0, 255 );
-			qbase[i + 24] = (uint8_t)tinybvh_clamp( (int32_t)ceilf( (child->aabbMax.x - nodeLo.x) * rsx ), 0, 255 );
-			qbase[i + 32] = (uint8_t)tinybvh_clamp( (int32_t)ceilf( (child->aabbMax.y - nodeLo.y) * rsy ), 0, 255 );
-			qbase[i + 40] = (uint8_t)tinybvh_clamp( (int32_t)ceilf( (child->aabbMax.z - nodeLo.z) * rsz ), 0, 255 );
 			if (!child->isLeaf())
 			{
 				// interior node, set params and push onto stack
@@ -7214,23 +7368,13 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::ConvertFrom( const MBVH<8, Float, Index
 			leafChildTriCount += tcount;
 			leafPrims += tcount, leafBlocks++;
 			for (uint32_t j = 0; j < tcount; j++)
-			{
-				const uint32_t primIdx = (uint32_t)bvh8.bvh.primIdx[child->firstTri + j];
-				Index i0, i1, i2;
-				GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, primIdx );
+				triPrim[nTris + j] = (uint32_t)bvh8.bvh.primIdx[child->firstTri + j];
 			#ifdef CWBVH_COMPRESSED_TRIS
-				PrecomputeTriangle( bvh8.bvh.verts, i0, i1, i2, &bvh8Tris[triDataPtr] );
-				bvh8Tris[triDataPtr + 3] = bvhvec4( 0, 0, 0, tinybvh_as_float( primIdx ) );
-				triDataPtr += 4;
+			nTris += tcount, triDataPtr += tcount * 4;
 			#else
-				bvhvec4 t = bvh8.bvh.verts[i0];
-				bvh8Tris[triDataPtr + 0] = bvh8.bvh.verts[i2] - t;
-				bvh8Tris[triDataPtr + 1] = bvh8.bvh.verts[i1] - t;
-				t.w = tinybvh_as_float( primIdx );
-				bvh8Tris[triDataPtr + 2] = t, triDataPtr += 3;
+			nTris += tcount, triDataPtr += tcount * 3;
 			#endif
 			}
-		}
 		nodeBlocks++;
 		const uint8_t exyzAndimask[4] = { (uint8_t)(ex + 127), (uint8_t)(ey + 127), (uint8_t)(ez + 127), imask };
 		bvh8Data[currentNodeAddr + 0] = bvhvec4( nodeLo, tinybvh_bitcast<float>( exyzAndimask ) );
@@ -7238,6 +7382,35 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::ConvertFrom( const MBVH<8, Float, Index
 		bvh8Data[currentNodeAddr + 1].y = tinybvh_as_float( triangleBaseIndex );
 	}
 	AlignedFree( stackNodeIdx ), AlignedFree( stackNodeAddr );
+	// Triangle data, in output order. Pulled out of the walk: there the vertex
+	// fetch sits behind a second scattered load and has nothing to overlap with,
+	// here it is one flat loop that keeps many misses in flight.
+	{
+		const int8_t* const vbase = bvh8.bvh.verts.data;
+		const size_t vstride = bvh8.bvh.verts.stride;
+		bvhvec4* const out = bvh8Tris;
+		for (uint32_t k = 0; k < nTris; k++)
+		{
+			const uint32_t pf = k + 64 < nTris ? k + 64 : k;
+			TINYBVH_PREFETCH( vbase + (size_t)triPrim[pf] * 3 * vstride );
+			const uint32_t primIdx = triPrim[k];
+			Index i0, i1, i2;
+			GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, primIdx );
+		#ifdef CWBVH_COMPRESSED_TRIS
+			PrecomputeTriangle( bvh8.bvh.verts, i0, i1, i2, &out[k * 4] );
+			out[k * 4 + 3] = bvhvec4( 0, 0, 0, tinybvh_as_float( primIdx ) );
+		#else
+			bvhvec4 v0, v1, v2;
+			memcpy( &v0, vbase + (size_t)i0 * vstride, 16 );
+			memcpy( &v1, vbase + (size_t)i1 * vstride, 16 );
+			memcpy( &v2, vbase + (size_t)i2 * vstride, 16 );
+			out[k * 3 + 0] = v2 - v0, out[k * 3 + 1] = v1 - v0;
+			v0.w = tinybvh_as_float( primIdx );
+			out[k * 3 + 2] = v0;
+		#endif
+		}
+	}
+	AlignedFree( triPrim );
 	usedBlocks = nodeDataPtr;
 	usedTriBlocks = triDataPtr;
 	if (compact && allocatedBlocks > usedBlocks)

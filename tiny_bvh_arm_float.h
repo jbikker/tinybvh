@@ -295,6 +295,15 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 	ALIGNED( 64 ) uint32_t task[TINYBVH_STACK_SIZE], taskDepth[TINYBVH_STACK_SIZE], taskCount = 0;
 	BVHNode& root = bvhNode[0];
 	const bvhvec3 minDim = (root.aabbMax - root.aabbMin) * 1e-7f;
+	// packed box (negated min in lanes 0..2, max in lanes 4..6) over a range of primIdx; for
+	// settings.keepSplitting, which takes its child boxes from a range rather than from the bins.
+	auto boxOf = [&]( const uint32_t from, const uint32_t to )
+	{
+		float32x4x2_t b = neon_max8;
+		for (uint32_t k = from; k < to; k++)
+			b = vmaxq_f32x2( b, veorq_f32x2( tinybvh_load8( fragment + primIdx[k] ), neon_signFlip8 ) );
+		return b;
+	};
 	while (1)
 	{
 		while (1)
@@ -303,7 +312,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			if (node.triCount < 2) break; // a single primitive is always a leaf.
 			const uint32_t slices = maxSlices > 2 * depth ? maxSlices - 2 * depth : 1;
 			const float SAV = node.SurfaceArea();
-			if (SAV == 0) break; // can't split an infinitely small node.
+			if (SAV == 0 && !settings.keepSplitting) break; // can't split an infinitely small node.
 			if (node.triCount == 2)
 			{
 				// two primitives: the only split puts one in each child, so score it directly, without
@@ -312,7 +321,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 				const float32x4x2_t b0 = veorq_f32x2( tinybvh_load8( fragment + primIdx[first] ), neon_signFlip8 );
 				const float32x4x2_t b1 = veorq_f32x2( tinybvh_load8( fragment + primIdx[first + 1] ), neon_signFlip8 );
 				const float rSAV = 1.0f / SAV, splitCost = c_trav + c_int * rSAV * (halfArea( b0 ) + halfArea( b1 ));
-				if (splitCost >= 2.0f * c_int) break; // not splitting is better.
+				if (splitCost >= 2.0f * c_int && !settings.keepSplitting) break; // not splitting is better.
 				const uint32_t n = AllocNodePair();
 				tinybvh_store8( &bvhNode[n], veorq_f32x2( b0, neon_signFlip8 ) );
 				bvhNode[n].leftFirst = first, bvhNode[n].triCount = 1;
@@ -381,7 +390,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			}
 			splitCost = c_trav + c_int * rSAV * splitCost;
 			const float noSplitCost = (float)node.triCount * c_int;
-			if (splitCost >= noSplitCost) break; // not splitting is better.
+			if (splitCost >= noSplitCost && !settings.keepSplitting) break; // not splitting is better.
 			// in-place partition. Child boxes come from the fragments as partitioned, not from
 			// the bins: the two may disagree near the split plane when float math is reassociated.
 			const float rpd = tinybvh_getlane_f( &rpd4, bestAxis ), nmin = tinybvh_getlane_f( &nmin4, bestAxis );
@@ -402,7 +411,14 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 			}
 			bestLBox = lbox8, bestRBox = rbox8;
 			// create child nodes and recurse
-			const uint32_t leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
+			uint32_t leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
+			if ((leftCount == 0 || rightCount == 0) && settings.keepSplitting && node.triCount > 1)
+			{
+				// nothing to split on: halve the primitive range, and take the boxes from the halves.
+				i = node.leftFirst + (node.triCount >> 1);
+				leftCount = i - node.leftFirst, rightCount = node.triCount - leftCount;
+				bestLBox = boxOf( node.leftFirst, i ), bestRBox = boxOf( i, node.leftFirst + node.triCount );
+			}
 			if (leftCount == 0 || rightCount == 0 || taskCount == BVH_NUM_ELEMS( task )) break; // should not happen.
 			const uint32_t n = AllocNodePair();
 			tinybvh_store8( &bvhNode[n], veorq_f32x2( bestLBox, neon_signFlip8 ) );
