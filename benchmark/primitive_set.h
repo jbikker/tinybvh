@@ -11,8 +11,10 @@ enum Scene : uint32_t {
 	BUNNY_10K,
 	STANFORD_DRAGON,
 	LEGO_PORSCHE, // *
-	VICTORIAN_HOUSE, // *
+	VICTORIAN_HOUSE, // **
+	HAIRBALL, // **
 	// *: not included in GitHub repo due to size, request if needed.
+	// **: included in the repo but archived - unzip to use.
 };
 
 class PrimitiveSet

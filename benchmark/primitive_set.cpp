@@ -77,6 +77,14 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 		camPos[1] = bvhvec3( -2.33f, 1.36f, -0.39f ), camDir[1] = tinybvh_normalize( bvhvec3( 0.72f, -0.66f, 0.21f ) );
 		camPos[2] = bvhvec3( -0.82f, -0.66f, 2.33f ), camDir[2] = tinybvh_normalize( bvhvec3( 0.35f, 0.16f, -0.92f ) );
 	}
+	else if (scene == HAIRBALL)
+	{
+		// load the Victorian House
+		AddMesh( "./testdata/hairball.bin" );
+		camPos[0] = bvhvec3( -1.04f, -6.64f, -1.79f ), camDir[0] = tinybvh_normalize( bvhvec3( 0.12f, 0.95f, 0.28f ) );
+		camPos[1] = bvhvec3( -3.05f, -1.61f, 0.60f ), camDir[1] = tinybvh_normalize( bvhvec3( 0.96f, 0.24f, 0.13f ) );
+		camPos[2] = bvhvec3( -4.61f, -2.00f, 0.38f ), camDir[2] = tinybvh_normalize( bvhvec3( 0.41f, 0.89f, 0.21f ) );
+	}
 	else
 	{
 		exit( 0 ); // invalid scene.
@@ -127,6 +135,12 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	{
 		strncpy( desc, "Victorian House", 128 ); 
 		strncpy( shrt, "house", 64 ); 
+		break;
+	}
+	case Scene::HAIRBALL: 
+	{
+		strncpy( desc, "Hairball", 128 ); 
+		strncpy( shrt, "hairball", 64 ); 
 		break;
 	}
 	case Scene::LEGO_PORSCHE: 
