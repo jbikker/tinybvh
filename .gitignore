@@ -28,6 +28,7 @@ external/glm
 external/cv2pdb
 reference
 path.txt
+microbvh.h
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
