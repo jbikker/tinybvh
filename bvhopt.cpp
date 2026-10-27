@@ -8,9 +8,10 @@
 // Build: g++ -O2 -mavx2 -mfma -std=c++17 -o bvhopt bvhopt.cpp
 //
 // Results:
-// CRYTEKSPONZA   SAH: 61.6687 -> 56.7408 (  -7.99%), EPO: 20.9516 -> 19.2926 ( -7.92%)
+// CRYTEKSPONZA   SAH: 61.6687 -> 56.7440 (  -7.99%), EPO: 20.9516 -> 18.9277 ( -9.66%)
 // BISTRO         SAH: 64.6207 -> 58.1663 ( -10.00%), EPO: 32.8089 -> 26.7067 (-18.60%)
 // DRAGON         SAH: 50.4116 -> 47.1365 (  -6.50%), EPO: 17.9413 -> 16.4368 ( -8.39%)
+// SAN-MIGUEL     SAH: 56.8506 -> 50.0671 ( -11.93%), EPO: 22.7944 -> 19.0627 (-16.37%)
 
 #define TINYBVH_IMPLEMENTATION
 #include "tiny_bvh.h"
