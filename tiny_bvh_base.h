@@ -967,7 +967,7 @@ public:
 	void Refit( const Index nodeIdx = 0 );
 	void Compact();
 	void Optimize( const uint32_t iterations = 25, uint32_t mu = 8, Float epsilon = Float( 0.1 ) );
-	void MergeLeafs();
+	void MergeLeafs( const Index maxLeafPrims = 8 );
 	Index NodeCount() const;
 	Index LeafCount() const;
 	uint32_t Depth() const;
@@ -1273,6 +1273,7 @@ public:
 	void Compact();
 	void SortIndices();
 	void SplitLeafs( const Index maxPrims = 1 );
+	Index mergeLeafCap = 8; // largest leaf MergeLeafs may form.
 	void MergeLeafs();
 	void Optimize( const uint32_t iterations = 25, uint32_t mu = 8, Float epsilon = Float( 0.1 ) );
 private:
@@ -4065,12 +4066,14 @@ TEMPLATED void BVH<Float, Index>::Optimize( const uint32_t iterations, uint32_t 
 	ConvertFrom( verbose );
 }
 
-TEMPLATED void BVH<Float, Index>::MergeLeafs()
+TEMPLATED void BVH<Float, Index>::MergeLeafs( const Index maxLeafPrims )
 {
 	BVH_Verbose verbose; // ~BVH_Verbose only releases its own node pool
 	verbose.ConvertFrom( *this );
+	verbose.mergeLeafCap = maxLeafPrims;
 	verbose.MergeLeafs();
 	ConvertFrom( verbose );
+	leafsSplit = 0; // leaves grew; their size is no longer known.
 }
 
 // Refitting -For animated meshes, where the topology remains unchanged.
@@ -5221,13 +5224,13 @@ TEMPLATED void BVH_Verbose<Float, Index>::MergeLeafs()
 			const Index leftCount = subtreeTriCount[node.left];
 			const Index rightCount = subtreeTriCount[node.right];
 			const Index mergedCount = leftCount + rightCount;
-			// cost of unsplit
-			Float Cunsplit = SA( node.aabbMin, node.aabbMax ) * mergedCount * c_int;
-			// cost of leaving things as they are
 			BVHNode& left = bvhNode[node.left];
 			BVHNode& right = bvhNode[node.right];
-			Float Ckeepsplit = c_trav + c_int * (left.SA() * leftCount + right.SA() * rightCount);
-			if (Cunsplit <= Ckeepsplit)
+			// cost of unsplit
+			const Float area = SA( node.aabbMin, node.aabbMax );
+			Float Cunsplit   = area * mergedCount * c_int;
+			Float Ckeepsplit = c_trav * area + c_int * (left.SA()*leftCount + right.SA()*rightCount);
+			if (Cunsplit <= Ckeepsplit && mergedCount <= mergeLeafCap)
 			{
 				// collapse the subtree
 				Index start = newIdxPtr;
