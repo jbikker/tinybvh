@@ -389,7 +389,6 @@ template <> void impl::BVH4_CPU<float, uint32_t>::EmitNode( impl::MBVH<4, float,
 		newNode->child[cidx] |= EMPTY_BIT;
 }
 
-
 // SlotPermutation, AVX2.
 template <> uint32_t impl::BVH8_CWBVH<float, uint32_t>::SlotPermutation( const impl::MBVH<8, float, uint32_t>& bvh8, const uint32_t nodeIdx,
 	const bvhvec3& nodeLo, const float rsx, const float rsy, const float rsz, uint8_t* const qbase ) const
