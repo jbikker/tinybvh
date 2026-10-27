@@ -625,12 +625,12 @@ Buffer::Buffer( unsigned int N, void* ptr, unsigned int t )
 		{
 			if (t & DEVICEONLY)
 			{
-				deviceBuffer = clCreateBuffer(Kernel::GetContext(), rwFlags | CL_MEM_COPY_HOST_PTR, size, ptr, 0);
+				deviceBuffer = clCreateBuffer( Kernel::GetContext(), rwFlags | CL_MEM_COPY_HOST_PTR, size, ptr, 0 );
 				hostBuffer = 0; // this buffer only resides on the device.
 			}
 			else
 			{
-				deviceBuffer = clCreateBuffer(Kernel::GetContext(), rwFlags, size, 0, 0);
+				deviceBuffer = clCreateBuffer( Kernel::GetContext(), rwFlags, size, 0, 0 );
 				hostBuffer = (unsigned*)ptr;
 			}
 		}
