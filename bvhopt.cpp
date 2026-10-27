@@ -8,9 +8,9 @@
 // Build: g++ -O2 -mavx2 -mfma -std=c++17 -o bvhopt bvhopt.cpp
 //
 // Results:
-// CRYTEKSPONZA   SAH: 61.6687 -> 56.7440 ( -7.99%), EPO: 20.9516 -> 18.9277 ( -9.66%)
-// CONFERENCE     SAH: 36.3071 -> 30.9204 (-14.84%), EPO: 12.7778 -> 10.8347 (-15.21%)
-// BISTRO         SAH: 64.6207 -> 58.2660 ( -9.83%), EPO: 32.8089 -> 26.7568 (-18.45%)
+// CRYTEKSPONZA   SAH: 61.6687 -> 56.7408 ( -7.99%), EPO: 20.9516 -> 19.2926 ( -7.92%)
+// CONFERENCE     SAH: 36.3071 -> 30.9185 (-14.84%), EPO: 12.7778 -> 10.9949 (-13.95%)
+// BISTRO         SAH: 64.6207 -> 58.1694 ( -9.98%), EPO: 32.8089 -> 27.2498 (-16.94%)
 
 #define TINYBVH_IMPLEMENTATION
 #include "tiny_bvh.h"
@@ -1736,31 +1736,11 @@ static void BuildVisitField( const tinybvh::BVH& bvh, const std::vector<uint32_t
 	}
 }
 
-// Collapse a prepared binary tree into a wide layout. The source is referenced, not owned:
-// the same tree is collapsed several times here, with different weightings.
-static void BuildWide( tinybvh::BVH4_CPU& out, tinybvh::BVH& src, const float* prob )
-{
-	out.bvh4.bvh.ReferenceFrom( src );
-	out.bvh4.ownBVH = false;
-	out.bvh4.nodeProb = prob;
-	out.ConvertFrom( out.bvh4, true ); // leaves were already merged, by the optimizer's collapse
-}
-
-static void BuildWide( tinybvh::BVH8_CPU& out, tinybvh::BVH& src, const float* prob )
-{
-	out.bvh8.bvh.ReferenceFrom( src );
-	out.bvh8.ownBVH = false;
-	out.bvh8.nodeProb = prob;
-	out.ConvertFrom( out.bvh8, true );
-}
-
 // The SIMD kernels only return a step count in a debug build, and switching that on would
 // change the very thing we are timing. So the structural metric is taken from the collapsed
 // MBVH instead, with a plain scalar walk: child box tests and triangle tests per ray, which
-// is what the collapse decides and is identical on every machine. Time is measured apart.
-static const tinybvh::MBVH<4>& WideSource( const tinybvh::BVH4_CPU& t ) { return t.bvh4; }
-static const tinybvh::MBVH<8>& WideSource( const tinybvh::BVH8_CPU& t ) { return t.bvh8; }
-
+// is what the collapse decides and is identical on every machine. Time is measured apart,
+// and three of the six layouts have no CPU traversal at all, so for those it is all there is.
 template <typename M> static void CountWideSteps( const M& m, const RaySet& rays, double& boxTests, double& primTests )
 {
 	double boxes = 0, prims = 0;
@@ -1821,9 +1801,60 @@ template <typename M> static void CountWideSteps( const M& m, const RaySet& rays
 	boxTests = boxes / (double)rays.Count(), primTests = prims / (double)rays.Count();
 }
 
+// ----------------------------------------------------------------------------------------
+// per-layout plumbing
+//
+// Six layouts, all of them encodings of an MBVH<4> or an MBVH<8>, which is why one collapse
+// and one structural metric serve all six. They differ in three ways that matter here: how
+// many primitives a leaf slot holds, whether the collapse runs inside their ConvertFrom or
+// has to be run first, and whether they have a file format of their own. The CPU layouts
+// collapse from the binary tree themselves; the four GPU layouts take an MBVH that is
+// already collapsed. WideBuild returns the MBVH the result was encoded from, which is what
+// gets measured.
+// ----------------------------------------------------------------------------------------
+
+static const tinybvh::MBVH<4>* WideBuild( tinybvh::BVH4_CPU& o, tinybvh::MBVH<4>& m )
+{
+	o.bvh4.bvh.ReferenceFrom( m.bvh ), o.bvh4.ownBVH = false, o.bvh4.nodeProb = m.nodeProb;
+	o.ConvertFrom( o.bvh4, true );	// leaves were merged by the optimizer's collapse
+	return &o.bvh4;
+}
+
+static const tinybvh::MBVH<8>* WideBuild( tinybvh::BVH8_CPU& o, tinybvh::MBVH<8>& m )
+{
+	o.bvh8.bvh.ReferenceFrom( m.bvh ), o.bvh8.ownBVH = false, o.bvh8.nodeProb = m.nodeProb;
+	o.ConvertFrom( o.bvh8, true );
+	return &o.bvh8;
+}
+
+static const tinybvh::MBVH<4>* WideBuild( tinybvh::BVH4_GPU& o, tinybvh::MBVH<4>& m )
+{
+	m.ConvertFrom( m.bvh, true ), o.ConvertFrom( m, true );
+	return &m;
+}
+
+static const tinybvh::MBVH<8>* WideBuild( tinybvh::BVH8_CWBVH& o, tinybvh::MBVH<8>& m )
+{
+	m.ConvertFrom( m.bvh, true ), o.ConvertFrom( m, true );
+	return &m;
+}
+
+static const tinybvh::MBVH<4>* WideBuild( tinybvh::BVH4_AMD_HW& o, tinybvh::MBVH<4>& m )
+{
+	m.ConvertFrom( m.bvh, true ), o.ConvertFrom( m );
+	return &m;
+}
+
+static const tinybvh::MBVH<8>* WideBuild( tinybvh::CWBVH8_AMD_HW& o, tinybvh::MBVH<8>& m )
+{
+	m.ConvertFrom( m.bvh, true ), o.ConvertFrom( m, true );
+	return &m;
+}
+
 // Wall clock, best of a few runs: the differences between these trees are small enough that
-// a single timed pass mostly measures the machine.
-template <typename T> static double TimeWide( const T& tree, const RaySet& rays, const uint32_t runs )
+// a single timed pass mostly measures the machine. The hardware formats have no traversal
+// kernel on the CPU, so they report no time at all rather than a misleading one.
+template <typename T> static double WideTime( const T& tree, const RaySet& rays, const uint32_t runs )
 {
 	double best = 1e30;
 	for (uint32_t run = 0; run < runs; run++)
@@ -1842,37 +1873,84 @@ template <typename T> static double TimeWide( const T& tree, const RaySet& rays,
 	return best;
 }
 
-struct WideResult
+static double WideTime( const tinybvh::BVH4_AMD_HW&, const RaySet&, const uint32_t ) { return -1; }
+static double WideTime( const tinybvh::CWBVH8_AMD_HW&, const RaySet&, const uint32_t ) { return -1; }
+
+// Every layout now has a cache format of its own, so the collapse that won is what gets
+// written, weighting included. The template is the fallback for anything added later that
+// does not: for those the artifact would have to be the binary tree instead.
+static bool WideSave( tinybvh::BVH4_CPU& o, const std::string& path ) { o.Save( path.c_str() ); return true; }
+static bool WideSave( tinybvh::BVH8_CPU& o, const std::string& path ) { o.Save( path.c_str() ); return true; }
+static bool WideSave( tinybvh::BVH8_CWBVH& o, const std::string& path ) { o.Save( path.c_str() ); return true; }
+static bool WideSave( tinybvh::BVH4_GPU& o, const std::string& path ) { o.Save( path.c_str() ); return true; }
+static bool WideSave( tinybvh::BVH4_AMD_HW& o, const std::string& path ) { o.Save( path.c_str() ); return true; }
+static bool WideSave( tinybvh::CWBVH8_AMD_HW& o, const std::string& path ) { o.Save( path.c_str() ); return true; }
+template <typename T> static bool WideSave( T&, const std::string& ) { return false; }
+
+// Block sizes differ: the CPU layouts count 64-byte cache lines, the GPU ones 16-byte
+// quadwords, and CWBVH keeps its triangles in a second array.
+static double WideBytes( const tinybvh::BVH4_CPU& o ) { return (double)o.usedBlocks * 64; }
+static double WideBytes( const tinybvh::BVH8_CPU& o ) { return (double)o.usedBlocks * 64; }
+static double WideBytes( const tinybvh::BVH8_CWBVH& o ) { return (double)(o.usedBlocks + o.usedTriBlocks) * 16; }
+template <typename T> static double WideBytes( const T& o ) { return (double)o.usedBlocks * 16; }
+
+enum WideTargetId { TGT_BVH4CPU = 0, TGT_BVH8CPU, TGT_BVH4GPU, TGT_BVH8CWBVH, TGT_BVH4AMDHW, TGT_CWBVH8AMDHW, TGT_COUNT };
+
+struct TargetInfo
 {
-	uint32_t candidate;		// 0 = SBVH, 1 = Bonsai HQ
-	bool weighted;			// collapse steered by the measured visit field
-	double boxTests, primTests, ns;
-	uint32_t blocks;
+	const char* name;
+	uint32_t leafPrims;		// primitives per leaf this layout is built for
+	uint32_t collapseLimit;	// leafPrimLimit for the collapse; 0 means it may not merge leaves
+	bool fitLeaves;			// FitLeafs rather than SplitLeafs, as the layout's own Load does
+};
+
+static const TargetInfo g_target[TGT_COUNT] =
+{
+	{ "bvh4cpu",     4, 4, false },
+	{ "bvh8cpu",     4, 4, false },
+	{ "bvh4gpu",     4, 0, false },
+	{ "bvh8cwbvh",   3, 3, true  },
+	{ "bvh4amdhw",   1, 0, false },
+	{ "cwbvh8amdhw", 2, 2, false }
 };
 
 struct WideSettings
 {
-	bool bvh4 = false, bvh8 = false;
+	bool target[TGT_COUNT] = {};
 	uint32_t rays = 100000;			// sample rays per set; each yields a primary and a bounce.
 	uint32_t minVisits = 8;			// below this a node's visit count is noise; use its area instead.
 	bool weighted = true;			// also collapse steered by the measured visit field
 	bool plain = true;				// also collapse steered by surface area, as the library does
 	uint32_t timingRuns = 3;		// timed passes per tree; the best one is reported
 	std::string outStem;
+	bool Any() const { for (uint32_t t = 0; t < TGT_COUNT; t++) if (target[t]) return true; return false; }
 };
 
 static const char* CandidateName( const uint32_t c ) { return c == 0 ? "sbvh" : "bonsai-hq"; }
 
-// Build one candidate binary tree and run the optimizer over it. Leaves end up at the wide
-// layouts' budget of four, and the node list is final from here: the collapse must see the
-// same node indices the visit field was measured on.
-static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tris, const uint32_t candidate,
-	const Optimizer::Settings& set )
+struct WideResult
 {
+	uint32_t candidate;		// 0 = SBVH, 1 = Bonsai HQ
+	bool weighted;			// collapse steered by the measured visit field
+	double boxTests, primTests, ns;
+};
+
+// Build one candidate binary tree and run the optimizer over it, with the leaf budget of the
+// layouts it will feed. The layout's own leaf pass is run here as well, so that the node list
+// is final before the visit field is measured on it: the collapse must see the same node
+// indices the field was built on.
+static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tris, const uint32_t candidate,
+	Optimizer::Settings set, const TargetInfo& info )
+{
+	set.maxLeafPrims = info.leafPrims;
 	bvh.settings.useSpatialSplits = true;
 	bvh.settings.binnedBVH = candidate == 0;	// SBVH with, Bonsai HQ without
-	bvh.hqLeafPrims = 4, bvh.c_int = 2, bvh.lQuads = true;
-	bvh.settings.keepSplitting = true;	// the collapse below ends in SplitLeafs( 4 )
+	bvh.hqLeafPrims = info.leafPrims, bvh.c_int = 2, bvh.lQuads = info.leafPrims == 4;
+	// RecoverRef below rebuilds each reference box by clipping its triangle to the box of the leaf
+	// holding it, so smaller leaves recover the spatial splits more exactly - and for a leaf of one
+	// they recover them exactly. Which is only worth doing if the optimizer is going to take the
+	// leaves apart anyway; with -noexplode it works with the ones the builder produced.
+	bvh.settings.keepSplitting = set.explodeLeaves;
 	bvh.Build( tris.data(), (uint32_t)tris.size() / 3 );
 	std::vector<Optimizer::Ref> refBox( bvh.idxCount );
 	for (uint32_t n = 0; n < bvh.usedNodes; n++)
@@ -1889,46 +1967,71 @@ static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tri
 	opt.Run( refBox.data(), bvh.vertIdx );
 	bvh.ConvertFrom( verbose );
 	bvh.Compact();
-	bvh.SplitLeafs( 4 );	// what the collapse would do anyway; done here, indices stop moving.
+	if (info.fitLeaves) bvh.FitLeafs( info.leafPrims ); else bvh.SplitLeafs( info.leafPrims );
 }
 
-template <typename T> static void EvaluateTarget( const char* label, tinybvh::BVH* bvh, const uint32_t candidates,
-	const std::vector<float>* prob, const RaySet& score, const WideSettings& w, const std::string& stem )
+template <typename T, int M> static void EvaluateTarget( const TargetInfo& info, tinybvh::BVH* bvh,
+	const uint32_t candidates, const std::vector<float>* prob, const RaySet& score, const WideSettings& w,
+	const std::string& stem )
 {
-	printf( "\n%s:\n", label );
+	printf( "\n%s:\n", info.name );
 	printf( "  %-10s %-9s %10s %10s %9s %10s\n", "tree", "collapse", "box/ray", "prim/ray", "ns/ray", "size" );
 	std::vector<WideResult> results;
+	tinybvh::MBVH<M> keep[4];	// the GPU layouts reference their source MBVH; it has to outlive them.
 	T best;
+	uint32_t bestIdx = 0;
 	double bestScore = 1e30;
 	for (uint32_t c = 0; c < candidates; c++) for (uint32_t pass = 0; pass < 2; pass++)
 	{
 		const bool weighted = pass == 1;
 		if (weighted && !w.weighted) continue;
 		if (!weighted && !w.plain) continue;
+		tinybvh::MBVH<M>& m = keep[c * 2 + pass];
+		m.bvh.ReferenceFrom( bvh[c] ), m.ownBVH = false;
+		m.leafPrimLimit = info.collapseLimit;
+		m.nodeProb = weighted ? prob[c].data() : 0;
 		T tree;
-		BuildWide( tree, bvh[c], weighted ? prob[c].data() : 0 );
+		const tinybvh::MBVH<M>* source = WideBuild( tree, m );
 		WideResult r;
-		r.candidate = c, r.weighted = weighted, r.blocks = tree.usedBlocks;
-		CountWideSteps( WideSource( tree ), score, r.boxTests, r.primTests );
-		r.ns = TimeWide( tree, score, w.timingRuns );
+		r.candidate = c, r.weighted = weighted;
+		CountWideSteps( *source, score, r.boxTests, r.primTests );
+		r.ns = WideTime( tree, score, w.timingRuns );
 		results.push_back( r );
-		printf( "  %-10s %-9s %10.2f %10.2f %9.1f %7.1f MB\n", CandidateName( c ), weighted ? "visits" : "area",
-			r.boxTests, r.primTests, r.ns, (double)tree.usedBlocks * 64.0 / (1024 * 1024) );
-		if (r.boxTests < bestScore) bestScore = r.boxTests, best = tinybvh::tinybvh_move( tree );
+		printf( "  %-10s %-9s %10.2f %10.2f", CandidateName( c ), weighted ? "visits" : "area", r.boxTests, r.primTests );
+		if (r.ns < 0) printf( "%9s", "-" ); else printf( "%9.1f", r.ns );
+		printf( " %7.1f MB\n", WideBytes( tree ) / (1024 * 1024) );
+		if (r.boxTests < bestScore) bestScore = r.boxTests, bestIdx = (uint32_t)results.size() - 1, best = tinybvh::tinybvh_move( tree );
 	}
-	const WideResult* win = &results[0];
+	if (results.empty()) return;
+	const WideResult& win = results[bestIdx];
 	const WideResult* fastest = &results[0];
-	for (const WideResult& r : results)
+	for (const WideResult& r : results) if (r.ns >= 0 && (fastest->ns < 0 || r.ns < fastest->ns)) fastest = &r;
+	printf( "  winner: %s, %s collapse\n", CandidateName( win.candidate ), win.weighted ? "visit-weighted" : "area-weighted" );
+	if (fastest->ns >= 0 && fastest != &win) printf( "  note: %s / %s was faster on the clock (%.1f vs %.1f ns); box tests decided.\n",
+		CandidateName( fastest->candidate ), fastest->weighted ? "visits" : "area", fastest->ns, win.ns );
+	const std::string path = stem + "_" + info.name + ".bvh";
+	if (WideSave( best, path )) printf( "  output: %s\n", path.c_str() );
+	else
 	{
-		if (r.boxTests < win->boxTests) win = &r;
-		if (r.ns < fastest->ns) fastest = &r;
+		// No format of its own: the artifact is the binary tree, which this layout's Load
+		// converts. The collapse is redone there, so a weighted winner only survives if the
+		// field goes with it - hence the sidecar.
+		bvh[win.candidate].Save( path.c_str() );
+		printf( "  output: %s (binary tree; %s converts it on load)\n", path.c_str(), info.name );
+		if (win.weighted)
+		{
+			const std::string probPath = stem + "_" + info.name + ".prob";
+			FILE* f = fopen( probPath.c_str(), "wb" );
+			if (f)
+			{
+				const uint32_t n = (uint32_t)prob[win.candidate].size();
+				fwrite( &n, sizeof( uint32_t ), 1, f );
+				fwrite( prob[win.candidate].data(), sizeof( float ), n, f );
+				fclose( f );
+				printf( "  output: %s (visit field; feed it to MBVH::nodeProb or the weighting is lost)\n", probPath.c_str() );
+			}
+		}
 	}
-	printf( "  winner: %s, %s collapse\n", CandidateName( win->candidate ), win->weighted ? "visit-weighted" : "area-weighted" );
-	if (fastest != win) printf( "  note: %s / %s was faster on the clock (%.1f vs %.1f ns); box tests decided.\n",
-		CandidateName( fastest->candidate ), fastest->weighted ? "visits" : "area", fastest->ns, win->ns );
-	const std::string path = stem + "_" + label + ".bvh";
-	best.Save( path.c_str() );
-	printf( "  output: %s\n", path.c_str() );
 }
 
 static int RunWideTargets( const std::string& meshPath, const Optimizer::Settings& set, const WideSettings& w )
@@ -1940,32 +2043,54 @@ static int RunWideTargets( const std::string& meshPath, const Optimizer::Setting
 		return 1;
 	}
 	printf( "input  : %s\n         %u triangles\n", meshPath.c_str(), (uint32_t)tris.size() / 3 );
-	// the two binary candidates, built and optimized in full.
-	tinybvh::BVH bvh[2];
-	for (uint32_t c = 0; c < 2; c++)
-	{
-		printf( "\n%s:\n", CandidateName( c ) );
-		const Clock::time_point t0 = Clock::now();
-		PrepareCandidate( bvh[c], tris, c, set );
-		printf( "  %u references, %u nodes, SAH %.4f, EPO %.4f, %.1f s\n", bvh[c].idxCount, bvh[c].usedNodes,
-			bvh[c].SAHCost(), bvh[c].EPOCost(), MilliSec( t0, Clock::now() ) / 1000.0 );
-	}
-	// one ray distribution for everything that follows, drawn through the first candidate.
-	RaySet fit, score;
-	GenerateRays( bvh[0], w.rays, set.seed ^ 0x9E3779B9u, fit );
-	GenerateRays( bvh[0], w.rays, set.seed ^ 0x85EBCA6Bu, score );
-	printf( "\nray sets: %u to fit the visit field, %u to score, from disjoint seeds\n",
-		(uint32_t)fit.Count(), (uint32_t)score.Count() );
-	std::vector<float> prob[2];
-	if (w.weighted) for (uint32_t c = 0; c < 2; c++)
-	{
-		std::vector<uint32_t> visit;
-		CountPassTests( bvh[c], fit, visit );
-		BuildVisitField( bvh[c], visit, w.minVisits, prob[c] );
-	}
 	const std::string stem = w.outStem.empty() ? StripExtension( meshPath ) : w.outStem;
-	if (w.bvh4) EvaluateTarget<tinybvh::BVH4_CPU>( "bvh4cpu", bvh, 2, prob, score, w, stem );
-	if (w.bvh8) EvaluateTarget<tinybvh::BVH8_CPU>( "bvh8cpu", bvh, 2, prob, score, w, stem );
+	// Targets that want the same leaf budget share their binary trees; the rest get their own,
+	// since the optimizer's final collapse is what produces leaves of the right size.
+	RaySet fit, score;
+	bool done[TGT_COUNT] = {};
+	for (uint32_t t = 0; t < TGT_COUNT; t++)
+	{
+		if (!w.target[t] || done[t]) continue;
+		const TargetInfo& regime = g_target[t];
+		printf( "\n=== binary trees, %u primitive%s per leaf ===\n", regime.leafPrims, regime.leafPrims == 1 ? "" : "s" );
+		tinybvh::BVH bvh[2];
+		for (uint32_t c = 0; c < 2; c++)
+		{
+			const Clock::time_point t0 = Clock::now();
+			PrepareCandidate( bvh[c], tris, c, set, regime );
+			printf( "  %-10s %u references, %u nodes, SAH %.4f, EPO %.4f, %.1f s\n", CandidateName( c ),
+				bvh[c].idxCount, bvh[c].usedNodes, bvh[c].SAHCost(), bvh[c].EPOCost(), MilliSec( t0, Clock::now() ) / 1000.0 );
+		}
+		if (fit.Count() == 0)
+		{
+			// One ray distribution for every target and every candidate, drawn once.
+			GenerateRays( bvh[0], w.rays, set.seed ^ 0x9E3779B9u, fit );
+			GenerateRays( bvh[0], w.rays, set.seed ^ 0x85EBCA6Bu, score );
+			printf( "  ray sets: %u to fit the visit field, %u to score, from disjoint seeds\n",
+				(uint32_t)fit.Count(), (uint32_t)score.Count() );
+		}
+		std::vector<float> prob[2];
+		if (w.weighted) for (uint32_t c = 0; c < 2; c++)
+		{
+			std::vector<uint32_t> visit;
+			CountPassTests( bvh[c], fit, visit );
+			BuildVisitField( bvh[c], visit, w.minVisits, prob[c] );
+		}
+		for (uint32_t u = t; u < TGT_COUNT; u++)
+		{
+			if (!w.target[u] || g_target[u].leafPrims != regime.leafPrims) continue;
+			done[u] = true;
+			switch (u)
+			{
+			case TGT_BVH4CPU: EvaluateTarget<tinybvh::BVH4_CPU, 4>( g_target[u], bvh, 2, prob, score, w, stem ); break;
+			case TGT_BVH8CPU: EvaluateTarget<tinybvh::BVH8_CPU, 8>( g_target[u], bvh, 2, prob, score, w, stem ); break;
+			case TGT_BVH4GPU: EvaluateTarget<tinybvh::BVH4_GPU, 4>( g_target[u], bvh, 2, prob, score, w, stem ); break;
+			case TGT_BVH8CWBVH: EvaluateTarget<tinybvh::BVH8_CWBVH, 8>( g_target[u], bvh, 2, prob, score, w, stem ); break;
+			case TGT_BVH4AMDHW: EvaluateTarget<tinybvh::BVH4_AMD_HW, 4>( g_target[u], bvh, 2, prob, score, w, stem ); break;
+			case TGT_CWBVH8AMDHW: EvaluateTarget<tinybvh::CWBVH8_AMD_HW, 8>( g_target[u], bvh, 2, prob, score, w, stem ); break;
+			}
+		}
+	}
 	return 0;
 }
 
@@ -1981,9 +2106,13 @@ static void Usage()
 		"  With --target the input is a mesh instead (uint32 triangle count, then three float4\n"
 		"  per triangle) and the output is a finished wide BVH. Both an SBVH and a Bonsai with\n"
 		"  spatial splits are built, optimized and collapsed, each with and without the measured\n"
-		"  visit weighting, and the variant that traverses fastest is written out.\n"
+		"  visit weighting, and the variant with the fewest box tests is written out. Targets\n"
+		"  that want the same leaf size share their binary trees; the others get their own.\n"
+		"  Every layout has a cache format of its own, so the output is the collapsed tree and\n"
+		"  its Load reads it back directly.\n"
 		"\n"
-		"  --target L         comma-separated: bvh4cpu, bvh8cpu\n"
+		"  --target L         comma-separated, or 'all': bvh4cpu, bvh8cpu, bvh4gpu,\n"
+		"                     bvh8cwbvh, bvh4amdhw, cwbvh8amdhw\n"
 		"  -rays N            sample rays per set (default 100000; each adds one bounce)\n"
 		"  -visitmin N        visit count below which a node falls back to surface area (default 8)\n"
 		"  -timingruns N      timed passes per tree, best reported (default 3)\n"
@@ -2049,13 +2178,19 @@ int main( int argc, char** argv )
 			{
 				const size_t comma = v.find( ',', p );
 				const std::string t = v.substr( p, comma == std::string::npos ? comma : comma - p );
-				if (t == "bvh4cpu") wide.bvh4 = true;
-				else if (t == "bvh8cpu") wide.bvh8 = true;
-				else { printf( "error: unknown target '%s'.\n", t.c_str() ); return 1; }
+				if (t == "all") for (uint32_t k = 0; k < TGT_COUNT; k++) wide.target[k] = true;
+				else
+				{
+					uint32_t k = 0;
+					while (k < TGT_COUNT && t != g_target[k].name) k++;
+					if (k == TGT_COUNT) { printf( "error: unknown target '%s'.\n", t.c_str() ); return 1; }
+					wide.target[k] = true;
+				}
 				if (comma == std::string::npos) break;
 				p = comma + 1;
 			}
 		}
+		else if (a == "-out") { if (i + 1 < argc) wide.outStem = argv[++i]; }
 		else if (a == "-treelet")
 		{
 			if (i + 1 < argc)
@@ -2073,7 +2208,7 @@ int main( int argc, char** argv )
 	set.treeletSizeTop = (uint32_t)tinybvh::tinybvh_clamp( (int32_t)set.treeletSizeTop, (int32_t)set.treeletSize, (int32_t)MAX_TREELET );
 	if (set.exactBottomSize > MAX_EXACT) set.exactBottomSize = MAX_EXACT;
 	if (!wide.weighted && !wide.plain) { printf( "error: -noweight and -noplain leave nothing to build.\n" ); return 1; }
-	if (wide.bvh4 || wide.bvh8) return RunWideTargets( bvhPath, set, wide );
+	if (wide.Any()) return RunWideTargets( bvhPath, set, wide );
 
 	tinybvh::BVH bvh = tinybvh::BVH::Load( bvhPath.c_str() );
 	if (bvh.usedNodes == 0)
