@@ -1443,6 +1443,8 @@ public:
 	void BuildHQ( const Slice& vertices );
 	void BuildHQ( const bvhvec4* vertices, const Index* indices, const Index primCount );
 	void BuildHQ( const Slice& vertices, const Index* indices, const Index primCount );
+	void Save( const char* fileName );
+	bool Load( const char* fileName, const Index expectedTris );
 	static BVH4_GPU Load( const char* fileName );
 	void Optimize( const uint32_t iterations = 25, uint32_t mu = 8 );
 	void ConvertFrom( const MBVH<4, Float, Index>& original, bool compact = true );
@@ -1518,6 +1520,8 @@ public:
 	void BuildHQ( const Slice& vertices );
 	void BuildHQ( const bvhvec4* vertices, const Index* indices, const Index primCount );
 	void BuildHQ( const Slice& vertices, const Index* indices, const Index primCount );
+	void Save( const char* fileName );
+	bool Load( const char* fileName, const Index expectedTris );
 	static BVH4_AMD_HW Load( const char* fileName );
 	void Optimize( const uint32_t iterations = 25, uint32_t mu = 8 );
 	void ConvertFrom( const MBVH<4, Float, Index>& original );
@@ -1548,6 +1552,7 @@ public:
 	using Base::settings;
 	using Base::triCount;
 	using Base::usedNodes;
+	using typename Base::BVH;
 	using typename Base::Ray;
 	using typename Base::Slice;
 	using typename Base::Vec3;
@@ -1593,6 +1598,9 @@ public:
 	void BuildHQ( const bvhvec4* vertices, const uint32_t* indices, const Index primCount );
 	void BuildHQ( const Slice& vertices, const uint32_t* indices, const Index primCount );
 	void Optimize( const uint32_t iterations = 25, uint32_t mu = 8 );
+	void Save( const char* fileName );
+	bool Load( const char* fileName, const Index expectedTris );
+	static CWBVH8_AMD_HW Load( const char* fileName );
 	void ConvertFrom( const MBVH<8, Float, Index>& original, bool compact = true );
 	Float SAHCost( const Index nodeIdx = 0 ) const { return bvh8.SAHCost( nodeIdx ); }
 	// GPU traversal only; the underlying bvh8.bvh remains available for CPU queries.
@@ -5925,6 +5933,38 @@ TEMPLATED void BVH4_GPU<Float, Index>::Optimize( const uint32_t iterations, uint
 	ConvertFrom( bvh4, true );
 }
 
+TEMPLATED void BVH4_GPU<Float, Index>::Save( const char* fileName )
+{
+	std::fstream s{ fileName, s.binary | s.out };
+	const uint32_t header = this->CacheHeader();
+	s.write( (char*)&header, sizeof( uint32_t ) );
+	s.write( (char*)&triCount, sizeof( Index ) );
+	s.write( (char*)this, sizeof( BVH4_GPU ) );
+	s.write( (char*)bvh4Data, (size_t)usedBlocks * 16 );
+}
+
+TEMPLATED bool BVH4_GPU<Float, Index>::Load( const char* fileName, const Index expectedTris )
+{
+	// open file and check contents
+	std::fstream s{ fileName, s.binary | s.in };
+	if (!s) return false;
+	BVHContext tmp = context;
+	uint32_t header;
+	Index fileTriCount;
+	s.read( (char*)&header, sizeof( uint32_t ) );
+	if (header != this->CacheHeader()) return false;
+	s.read( (char*)&fileTriCount, sizeof( Index ) );
+	if (fileTriCount != expectedTris) return false;
+	// all checks passed; safe to overwrite *this
+	s.read( (char*)this, sizeof( BVH4_GPU ) );
+	context = tmp; // can't load context; function pointers will differ.
+	bvh4Data = (bvhvec4*)AlignedAlloc( (size_t)usedBlocks * 16 );
+	allocatedBlocks = usedBlocks;
+	s.read( (char*)bvh4Data, (size_t)usedBlocks * 16 );
+	bvh4.DropReference( context ); // holds raw file data: reset, don't free.
+	return true;
+}
+
 TEMPLATED void BVH4_GPU<Float, Index>::ConvertFrom( const MBVH<4, Float, Index>& original, bool compact )
 {
 	// get a copy of the original bvh4
@@ -6215,6 +6255,38 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::Optimize( const uint32_t iterations, u
 	ConvertFrom( bvh4 );
 }
 
+TEMPLATED void BVH4_AMD_HW<Float, Index>::Save( const char* fileName )
+{
+	std::fstream s{ fileName, s.binary | s.out };
+	const uint32_t header = this->CacheHeader();
+	s.write( (char*)&header, sizeof( uint32_t ) );
+	s.write( (char*)&triCount, sizeof( Index ) );
+	s.write( (char*)this, sizeof( BVH4_AMD_HW ) );
+	s.write( (char*)bvh4Data, (size_t)usedBlocks * 16 );
+}
+
+TEMPLATED bool BVH4_AMD_HW<Float, Index>::Load( const char* fileName, const Index expectedTris )
+{
+	// open file and check contents
+	std::fstream s{ fileName, s.binary | s.in };
+	if (!s) return false;
+	BVHContext tmp = context;
+	uint32_t header;
+	Index fileTriCount;
+	s.read( (char*)&header, sizeof( uint32_t ) );
+	if (header != this->CacheHeader()) return false;
+	s.read( (char*)&fileTriCount, sizeof( Index ) );
+	if (fileTriCount != expectedTris) return false;
+	// all checks passed; safe to overwrite *this
+	s.read( (char*)this, sizeof( BVH4_AMD_HW ) );
+	context = tmp; // can't load context; function pointers will differ.
+	bvh4Data = (bvhvec4*)AlignedAlloc( (size_t)usedBlocks * 16 );
+	allocatedBlocks = usedBlocks;
+	s.read( (char*)bvh4Data, (size_t)usedBlocks * 16 );
+	bvh4.DropReference( context ); // holds raw file data: reset, don't free.
+	return true;
+}
+
 TEMPLATED void BVH4_AMD_HW<Float, Index>::ConvertFrom( const MBVH<4, Float, Index>& original )
 {
 	// get a copy of the original bvh4
@@ -6436,6 +6508,38 @@ static int32_t AMDQuantExp( const double extent )
 	uint32_t roundedBits = (tinybvh_as_uint( float( extent ) ) + 0x7fffffu) & 0x7f800000u;
 	if (double( tinybvh_as_float( roundedBits ) ) < extent) roundedBits += 1u << 23;
 	return int32_t( roundedBits >> 23 ) - 127;
+}
+
+TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Save( const char* fileName )
+{
+	std::fstream s{ fileName, s.binary | s.out };
+	const uint32_t header = this->CacheHeader();
+	s.write( (char*)&header, sizeof( uint32_t ) );
+	s.write( (char*)&triCount, sizeof( Index ) );
+	s.write( (char*)this, sizeof( CWBVH8_AMD_HW ) );
+	s.write( (char*)bvh8Data, (size_t)usedBlocks * 16 );
+}
+
+TEMPLATED bool CWBVH8_AMD_HW<Float, Index>::Load( const char* fileName, const Index expectedTris )
+{
+	// open file and check contents
+	std::fstream s{ fileName, s.binary | s.in };
+	if (!s) return false;
+	BVHContext tmp = context;
+	uint32_t header;
+	Index fileTriCount;
+	s.read( (char*)&header, sizeof( uint32_t ) );
+	if (header != this->CacheHeader()) return false;
+	s.read( (char*)&fileTriCount, sizeof( Index ) );
+	if (fileTriCount != expectedTris) return false;
+	// all checks passed; safe to overwrite *this
+	s.read( (char*)this, sizeof( CWBVH8_AMD_HW ) );
+	context = tmp; // can't load context; function pointers will differ.
+	bvh8Data = (bvhvec4*)AlignedAlloc( (size_t)usedBlocks * 16 );
+	allocatedBlocks = usedBlocks;
+	s.read( (char*)bvh8Data, (size_t)usedBlocks * 16 );
+	bvh8.DropReference( context ); // holds raw file data: reset, don't free.
+	return true;
 }
 
 TEMPLATED void CWBVH8_AMD_HW<Float, Index>::ConvertFrom( const MBVH<8, Float, Index>& original, bool compact )
@@ -6660,8 +6764,8 @@ TEMPLATED void CWBVH8_AMD_HW<Float, Index>::ConvertFrom( const MBVH<8, Float, In
 	usedBlocks = nodeDataPtr;
 	if (compact && allocatedBlocks > usedBlocks)
 	{
-		bvhvec4* trimmed = (bvhvec4*)AlignedAlloc( usedBlocks * 16 );
-		memcpy( trimmed, bvh8Data, usedBlocks * 16 );
+		bvhvec4* trimmed = (bvhvec4*)AlignedAlloc( (size_t)usedBlocks * 16 );
+		memcpy( trimmed, bvh8Data, (size_t)usedBlocks * 16 );
 		AlignedFree( bvh8Data );
 		bvh8Data = trimmed, allocatedBlocks = usedBlocks;
 	}
@@ -6725,7 +6829,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::Save( const char* fileName )
 	s.write( (char*)&header, sizeof( uint32_t ) );
 	s.write( (char*)&triCount, sizeof( Index ) );
 	s.write( (char*)this, sizeof( BVH4_CPU ) );
-	s.write( (char*)bvh4Data, usedBlocks * 64 );
+	s.write( (char*)bvh4Data, (size_t)usedBlocks * 64 );
 }
 
 TEMPLATED bool BVH4_CPU<Float, Index>::Load( const char* fileName, const Index expectedTris )
@@ -6743,9 +6847,9 @@ TEMPLATED bool BVH4_CPU<Float, Index>::Load( const char* fileName, const Index e
 	// all checks passed; safe to overwrite *this
 	s.read( (char*)this, sizeof( BVH4_CPU ) );
 	context = tmp; // can't load context; function pointers will differ.
-	bvh4Data = (CacheLine*)AlignedAlloc( usedBlocks * 64 );
+	bvh4Data = (CacheLine*)AlignedAlloc( (size_t)usedBlocks * 64 );
 	allocatedBlocks = usedBlocks;
-	s.read( (char*)bvh4Data, usedBlocks * 64 );
+	s.read( (char*)bvh4Data, (size_t)usedBlocks * 64 );
 	bvh4.DropReference( context ); // holds raw file data: reset, don't free.
 	return true;
 }
@@ -6985,7 +7089,7 @@ TEMPLATED void BVH8_CPU<Float, Index>::Save( const char* fileName )
 	s.write( (char*)&header, sizeof( uint32_t ) );
 	s.write( (char*)&triCount, sizeof( Index ) );
 	s.write( (char*)this, sizeof( BVH8_CPU ) );
-	s.write( (char*)bvh8Data, usedBlocks * 64 );
+	s.write( (char*)bvh8Data, (size_t)usedBlocks * 64 );
 }
 
 TEMPLATED bool BVH8_CPU<Float, Index>::Load( const char* fileName, const Index expectedTris )
@@ -7003,9 +7107,9 @@ TEMPLATED bool BVH8_CPU<Float, Index>::Load( const char* fileName, const Index e
 	// all checks passed; safe to overwrite *this
 	s.read( (char*)this, sizeof( BVH8_CPU ) );
 	context = tmp; // can't load context; function pointers will differ.
-	bvh8Data = (CacheLine*)AlignedAlloc( usedBlocks * 64 );
+	bvh8Data = (CacheLine*)AlignedAlloc( (size_t)usedBlocks * 64 );
 	allocatedBlocks = usedBlocks;
-	s.read( (char*)bvh8Data, usedBlocks * 64 );
+	s.read( (char*)bvh8Data, (size_t)usedBlocks * 64 );
 	bvh8.DropReference( context ); // holds raw file data: reset, don't free.
 	return true;
 }
@@ -7168,8 +7272,8 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::Save( const char* fileName )
 	s.write( (char*)&header, sizeof( uint32_t ) );
 	s.write( (char*)&triCount, sizeof( Index ) );
 	s.write( (char*)this, sizeof( BVH8_CWBVH ) );
-	s.write( (char*)bvh8Data, usedBlocks * 16 );
-	s.write( (char*)bvh8Tris, usedTriBlocks * 16 );
+	s.write( (char*)bvh8Data, (size_t)usedBlocks * 16 );
+	s.write( (char*)bvh8Tris, (size_t)usedTriBlocks * 16 );
 }
 
 TEMPLATED bool BVH8_CWBVH<Float, Index>::Load( const char* fileName, const Index expectedTris )
@@ -7187,11 +7291,11 @@ TEMPLATED bool BVH8_CWBVH<Float, Index>::Load( const char* fileName, const Index
 	// all checks passed; safe to overwrite *this
 	s.read( (char*)this, sizeof( BVH8_CWBVH ) );
 	context = tmp; // can't load context; function pointers will differ.
-	bvh8Data = (bvhvec4*)AlignedAlloc( usedBlocks * 16 );
-	bvh8Tris = (bvhvec4*)AlignedAlloc( usedTriBlocks * 16 );
+	bvh8Data = (bvhvec4*)AlignedAlloc( (size_t)usedBlocks * 16 );
+	bvh8Tris = (bvhvec4*)AlignedAlloc( (size_t)usedTriBlocks * 16 );
 	allocatedBlocks = usedBlocks, allocatedTris = usedTriBlocks;
-	s.read( (char*)bvh8Data, usedBlocks * 16 );
-	s.read( (char*)bvh8Tris, usedTriBlocks * 16 );
+	s.read( (char*)bvh8Data, (size_t)usedBlocks * 16 );
+	s.read( (char*)bvh8Tris, (size_t)usedTriBlocks * 16 );
 	bvh8.DropReference( context ); // holds raw file data: reset, don't free.
 	return true;
 }
@@ -7374,7 +7478,7 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::ConvertFrom( const MBVH<8, Float, Index
 			#else
 			nTris += tcount, triDataPtr += tcount * 3;
 			#endif
-			}
+		}
 		nodeBlocks++;
 		const uint8_t exyzAndimask[4] = { (uint8_t)(ex + 127), (uint8_t)(ey + 127), (uint8_t)(ez + 127), imask };
 		bvh8Data[currentNodeAddr + 0] = bvhvec4( nodeLo, tinybvh_bitcast<float>( exyzAndimask ) );
@@ -7415,8 +7519,8 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::ConvertFrom( const MBVH<8, Float, Index
 	usedTriBlocks = triDataPtr;
 	if (compact && allocatedBlocks > usedBlocks)
 	{
-		bvhvec4* trimmed = (bvhvec4*)AlignedAlloc( usedBlocks * 16 );
-		memcpy( trimmed, bvh8Data, usedBlocks * 16 );
+		bvhvec4* trimmed = (bvhvec4*)AlignedAlloc( (size_t)usedBlocks * 16 );
+		memcpy( trimmed, bvh8Data, (size_t)usedBlocks * 16 );
 		AlignedFree( bvh8Data );
 		bvh8Data = trimmed, allocatedBlocks = usedBlocks;
 	}
@@ -8682,7 +8786,6 @@ TEMPLATED BVH_GPU<Float, Index> BVH_GPU<Float, Index>::Load( const char* fileNam
 	BVH_GPU result;
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
-	result.PassSettingsTo( result.bvh );
 	result.bvh = tinybvh_move( src );
 	result.ConvertFrom( result.bvh, false );
 	result.bvh = BVH( result.context ); // traversal runs on orderedVerts; the tree is spent
@@ -8705,9 +8808,13 @@ TEMPLATED_M MBVH<M, Float, Index> MBVH<M, Float, Index>::Load( const char* fileN
 TEMPLATED BVH4_GPU<Float, Index> BVH4_GPU<Float, Index>::Load( const char* fileName )
 {
 	BVH4_GPU result;
+	uint32_t header = 0;
+	Index tris = 0;
+	if (!tinybvh_peek_cache( fileName, header, tris )) return result;
+	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
-	result.PassSettingsTo( result.bvh4 ), result.PassSettingsTo( result.bvh4.bvh );
+	result.PassSettingsTo( result.bvh4 );
 	result.bvh4.bvh = tinybvh_move( src );
 	result.bvh4.ConvertFrom( result.bvh4.bvh );
 	result.ConvertFrom( result.bvh4, true );
@@ -8718,15 +8825,38 @@ TEMPLATED BVH4_GPU<Float, Index> BVH4_GPU<Float, Index>::Load( const char* fileN
 TEMPLATED BVH4_AMD_HW<Float, Index> BVH4_AMD_HW<Float, Index>::Load( const char* fileName )
 {
 	BVH4_AMD_HW result;
+	uint32_t header = 0;
+	Index tris = 0;
+	if (!tinybvh_peek_cache( fileName, header, tris )) return result;
+	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
-	result.PassSettingsTo( result.bvh4 ), result.PassSettingsTo( result.bvh4.bvh );
+	result.PassSettingsTo( result.bvh4 );
 	result.bvh4.bvh = tinybvh_move( src );
 	result.bvh4.bvh.SplitLeafs( 1 );
 	result.bvh4.leafPrimLimit = 0;
 	result.bvh4.ConvertFrom( result.bvh4.bvh );
 	result.ConvertFrom( result.bvh4 );
 	result.bvh4 = MBVH<4, Float, Index>( result.context );
+	return result;
+}
+
+TEMPLATED CWBVH8_AMD_HW<Float, Index> CWBVH8_AMD_HW<Float, Index>::Load( const char* fileName )
+{
+	CWBVH8_AMD_HW result;
+	uint32_t header = 0;
+	Index tris = 0;
+	if (!tinybvh_peek_cache( fileName, header, tris )) return result;
+	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
+	BVH src = BVH::Load( fileName );
+	if (src.usedNodes == 0) return result;
+	result.PassSettingsTo( result.bvh8 );
+	result.bvh8.bvh = tinybvh_move( src );
+	result.bvh8.bvh.SplitLeafs( 2 ); // an AMD cwbvh leaf slot holds at most 2 prims
+	result.bvh8.leafPrimLimit = 2;
+	result.bvh8.ConvertFrom( result.bvh8.bvh );
+	result.ConvertFrom( result.bvh8 );
+	result.bvh8 = MBVH<8, Float, Index>( result.context );
 	return result;
 }
 
@@ -8739,7 +8869,7 @@ TEMPLATED BVH4_CPU<Float, Index> BVH4_CPU<Float, Index>::Load( const char* fileN
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
-	result.PassSettingsTo( result.bvh4 ), result.PassSettingsTo( result.bvh4.bvh );
+	result.PassSettingsTo( result.bvh4 );
 	result.bvh4.bvh = tinybvh_move( src );
 	// ConvertFrom collapses from the binary tree itself, so the bvh4 nodes are built on the way.
 	result.ConvertFrom( result.bvh4 );
@@ -8756,7 +8886,7 @@ TEMPLATED BVH8_CWBVH<Float, Index> BVH8_CWBVH<Float, Index>::Load( const char* f
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
-	result.PassSettingsTo( result.bvh8 ), result.PassSettingsTo( result.bvh8.bvh );
+	result.PassSettingsTo( result.bvh8 );
 	result.bvh8.bvh = tinybvh_move( src );
 	result.bvh8.bvh.FitLeafs( 3 ); // a cwbvh leaf slot holds at most 3 prims
 	result.bvh8.leafPrimLimit = 3;
@@ -8775,7 +8905,7 @@ TEMPLATED BVH8_CPU<Float, Index> BVH8_CPU<Float, Index>::Load( const char* fileN
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
-	result.PassSettingsTo( result.bvh8 ), result.PassSettingsTo( result.bvh8.bvh );
+	result.PassSettingsTo( result.bvh8 );
 	result.bvh8.bvh = tinybvh_move( src );
 	result.ConvertFrom( result.bvh8 );
 	result.bvh8 = MBVH<8, Float, Index>( result.context );
