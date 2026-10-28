@@ -8,10 +8,9 @@
 // Build: g++ -O2 -mavx2 -mfma -std=c++17 -o bvhopt bvhopt.cpp
 //
 // Results:
-// CRYTEKSPONZA   SAH: 61.6687 -> 56.7440 (  -7.99%), EPO: 20.9516 -> 18.9277 ( -9.66%)
-// BISTRO         SAH: 64.6207 -> 58.1663 ( -10.00%), EPO: 32.8089 -> 26.7067 (-18.60%)
-// DRAGON         SAH: 50.4116 -> 47.1365 (  -6.50%), EPO: 17.9413 -> 16.4368 ( -8.39%)
-// SAN-MIGUEL     SAH: 56.8506 -> 50.0671 ( -11.93%), EPO: 22.7944 -> 19.0627 (-16.37%)
+// CRYTEKSPONZA   SAH: 61.6687 -> 56.7408 ( -7.99%), EPO: 20.9516 -> 19.2926 ( -7.92%)
+// CONFERENCE     SAH: 36.3071 -> 30.9185 (-14.84%), EPO: 12.7778 -> 10.9949 (-13.95%)
+// BISTRO         SAH: 64.6207 -> 58.1694 ( -9.98%), EPO: 32.8089 -> 27.2498 (-16.94%)
 
 #define TINYBVH_IMPLEMENTATION
 #include "tiny_bvh.h"
@@ -1817,9 +1816,13 @@ template <typename M> static void CountWideSteps( const M& m, const RaySet& rays
 	boxTests = boxes / n, primTests = prims / n, nodeTests = nodes / n, payPrims = pay / n;
 }
 
-// The same walk over a binary tree, for the plain BVH target: one node test covers both
+// The same walk over a binary tree, for the two 2-wide targets: one node test covers both
 // children, and a BVH2 tests its primitives one at a time, so nothing is rounded here.
-static void CountBinarySteps( const tinybvh::BVH& b, const RaySet& rays,
+// rootTest tells the walk whether the kernel tests the root box before descending. BVH::
+// Intersect does, and a ray that misses the scene pays one box test and stops. BVH_GPU
+// cannot: its nodes hold the bounds of their children, so the root's own box is nowhere in
+// the tree, and a ray that misses the scene pays for both of the root's children instead.
+static void CountBinarySteps( const tinybvh::BVH& b, const RaySet& rays, const bool rootTest,
 	double& boxTests, double& primTests, double& nodeTests )
 {
 	double boxes = 0, prims = 0, nodes = 0;
@@ -1831,8 +1834,11 @@ static void CountBinarySteps( const tinybvh::BVH& b, const RaySet& rays,
 		const bvhvec3 rD( D.x == 0 ? BVH_FAR : 1.0f / D.x, D.y == 0 ? BVH_FAR : 1.0f / D.y, D.z == 0 ? BVH_FAR : 1.0f / D.z );
 		float best = BVH_FAR;
 		uint32_t stackPtr = 0, node = 0;
-		boxes += 1, nodes += 1; // the root box
-		if (BoxDistance( O, rD, b.bvhNode[0].aabbMin, b.bvhNode[0].aabbMax, best ) == BVH_FAR) continue;
+		if (rootTest)
+		{
+			boxes += 1, nodes += 1; // the root box
+			if (BoxDistance( O, rD, b.bvhNode[0].aabbMin, b.bvhNode[0].aabbMax, best ) == BVH_FAR) continue;
+		}
 		for (;;)
 		{
 			const tinybvh::BVH::BVHNode& n = b.bvhNode[node];
@@ -1874,8 +1880,10 @@ static void CountBinarySteps( const tinybvh::BVH& b, const RaySet& rays,
 // ----------------------------------------------------------------------------------------
 // per-layout plumbing
 //
-// Six layouts, all of them encodings of an MBVH<4> or an MBVH<8>, which is why one collapse
-// and one structural metric serve all six. They differ in three ways that matter here: how
+// Six of the seven wide layouts are encodings of an MBVH<4> or an MBVH<8>, which is why one
+// collapse and one structural metric serve all six. (BVH_GPU is the odd one out: it is
+// 2-wide and encodes the binary tree directly, so it has no collapse to steer and is handled
+// by EvaluateGPUTarget rather than by any of this.) They differ in three ways that matter: how
 // many primitives a leaf slot holds, whether the collapse runs inside their ConvertFrom or
 // has to be run first, and whether they have a file format of their own. The CPU layouts
 // collapse from the binary tree themselves; the four GPU layouts take an MBVH that is
@@ -1964,7 +1972,7 @@ static double WideBytes( const tinybvh::BVH8_CPU& o ) { return (double)o.usedBlo
 static double WideBytes( const tinybvh::BVH8_CWBVH& o ) { return (double)(o.usedBlocks + o.usedTriBlocks) * 16; }
 template <typename T> static double WideBytes( const T& o ) { return (double)o.usedBlocks * 16; }
 
-enum WideTargetId { TGT_BVH = 0, TGT_BVH4CPU, TGT_BVH8CPU, TGT_BVH4GPU, TGT_BVH8CWBVH, TGT_BVH4AMDHW, TGT_CWBVH8AMDHW, TGT_COUNT };
+enum WideTargetId { TGT_BVH = 0, TGT_BVHGPU, TGT_BVH4CPU, TGT_BVH8CPU, TGT_BVH4GPU, TGT_BVH8CWBVH, TGT_BVH4AMDHW, TGT_CWBVH8AMDHW, TGT_COUNT };
 
 struct TargetInfo
 {
@@ -1973,20 +1981,18 @@ struct TargetInfo
 	uint32_t collapseLimit;	// leafPrimLimit for the collapse; 0 means it may not merge leaves
 	bool fitLeaves;			// FitLeafs rather than SplitLeafs, as the layout's own Load does
 	bool quadLeaves;		// leaf of four tested as one unit, so a partial leaf costs a full quad
-	float cInt;				// primitive test cost against a traversal step of 1, for this layout
 };
 
 static const TargetInfo g_target[TGT_COUNT] =
 {
-	// A wide layout tests a primitive for about two traversal steps; a plain BVH tests one
-	// triangle per step, which is what the library's own default of 1 describes.
-	{ "bvh",         0, 0, false, false, 1 },	// the plain binary tree: no collapse, no quads, SAH-sized leaves
-	{ "bvh4cpu",     4, 4, false, true,  2 },
-	{ "bvh8cpu",     4, 4, false, true,  2 },
-	{ "bvh4gpu",     4, 0, false, true,  2 },
-	{ "bvh8cwbvh",   3, 3, true,  false, 2 },
-	{ "bvh4amdhw",   1, 0, false, false, 2 },
-	{ "cwbvh8amdhw", 2, 2, false, false, 2 }
+	{ "bvh",         0, 0, false, false },	// the plain binary tree: no collapse, no quads, SAH-sized leaves
+	{ "bvhgpu",      0, 0, false, false },	// same tree, re-encoded; shares the binary trees with 'bvh'
+	{ "bvh4cpu",     4, 4, false, true  },
+	{ "bvh8cpu",     4, 4, false, true  },
+	{ "bvh4gpu",     4, 0, false, true  },
+	{ "bvh8cwbvh",   3, 3, true,  false },
+	{ "bvh4amdhw",   1, 0, false, false },
+	{ "cwbvh8amdhw", 2, 2, false, false }
 };
 
 // The candidates. Two builders with spatial splits, and the knobs of each that were measured
@@ -2066,7 +2072,7 @@ static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tri
 	bvh.settings.binnedBVH = cand.binned;		// SBVH with, Bonsai HQ without
 	bvh.hqbvhbins = cand.bins;
 	bvh.settings.bonsaiPruneFactor = cand.prune;
-	bvh.hqLeafPrims = capped ? info.leafPrims : 0, bvh.c_int = info.cInt, bvh.lQuads = info.quadLeaves;
+	bvh.hqLeafPrims = capped ? info.leafPrims : 0, bvh.c_int = 2, bvh.lQuads = info.quadLeaves;
 	// RecoverRef below rebuilds each reference box by clipping its triangle to the box of the leaf
 	// holding it, so smaller leaves recover the spatial splits more exactly - and for a leaf of one
 	// they recover them exactly. Which is only worth doing if the optimizer is going to take the
@@ -2104,6 +2110,80 @@ static void ReportWinner( const CandidateStats& st )
 	printf( "  EPO %10.4f -> %10.4f (%+6.2f%%)\n", st.epoPre, st.epoPost, 100.0f * (st.epoPost - st.epoPre) / st.epoPre );
 }
 
+// BVH_GPU packs a leaf into a single child slot: seven bits of triangle count, twenty-four
+// bits of offset into primIdx. Both are clamped on encode rather than checked, so a tree
+// that does not fit is encoded quietly and traverses into the wrong triangles. Neither limit
+// is reachable with SAH-sized leaves on a sane mesh; 'quietly' is why they are tested anyway.
+// The fat-leaf case is repaired in place, which is safe only because the plain BVH target is
+// evaluated before this one - it sits earlier in WideTargetId, and the dispatch loop runs in
+// enum order. The reference count is not repairable: at that size the layout is simply out.
+static bool FitsGPULayout( tinybvh::BVH& bvh )
+{
+	if (bvh.idxCount > 0x1000000)
+	{
+		printf( "  skipped: %u references exceeds the 24-bit leaf offset this layout encodes.\n", bvh.idxCount );
+		return false;
+	}
+	uint32_t fattest = 0;
+	for (uint32_t n = 0; n < bvh.usedNodes; n++)
+	{
+		const tinybvh::BVH::BVHNode& node = bvh.bvhNode[n];
+		if (node.isLeaf()) fattest = tinybvh::tinybvh_max( fattest, (uint32_t)node.triCount );
+	}
+	if (fattest > 127)
+	{
+		printf( "  note: leaf of %u, above the 127 this layout encodes; split to 127.\n", fattest );
+		bvh.SplitLeafs( 127 );
+	}
+	return true;
+}
+
+// The BVH_GPU target: the same binary tree in the Aila & Laine node layout, where a node
+// carries the bounds of its children and a leaf lives in a child slot rather than in a node
+// of its own. Nothing about the tree changes, so like the plain BVH target there is no
+// collapse to pick, no visit field, and one row per candidate. What does change is the cost:
+// the missing root test (see CountBinarySteps) and the triangles, which this layout copies
+// into an ordered array of its own and which dominate its size.
+//
+// The clock is the library's scalar reference kernel, not the GPU this layout is meant for.
+// It is a real traversal of the real encoding and comparable with the 'bvh' row above it -
+// 64-byte nodes against 32, no indirection through primIdx - but it says nothing about what
+// the tree would do on a GPU.
+static void EvaluateGPUTarget( const TargetInfo& info, tinybvh::BVH* bvh, const uint32_t candidates,
+	const CandidateStats* stat, const RaySet& score, const WideSettings& w, const std::string& stem )
+{
+	printf( "\n%s:\n", info.name );
+	printf( "  %-10s %-9s %10s %10s %9s %9s %10s\n", "tree", "collapse", "box/ray", "prim/ray", "cost/ray", "ns/ray", "size" );
+	uint32_t bestIdx = 0, fastestIdx = 0;
+	double bestCost = 1e30, bestNs = 1e30, winNs = 0;
+	for (uint32_t c = 0; c < candidates; c++)
+	{
+		if (!FitsGPULayout( bvh[c] )) return;
+		double box = 0, prim = 0, nodes = 0;
+		CountBinarySteps( bvh[c], score, false, box, prim, nodes );
+		const double cost = nodes * bvh[c].c_trav + prim * bvh[c].c_int;
+		tinybvh::BVH_GPU tree;
+		tree.ConvertFrom( bvh[c], true );
+		const double ns = WideTime( tree, score, w.timingRuns );
+		// nodes plus the ordered triangles, which this layout allocates and owns.
+		const double mb = (double)tree.usedNodes * sizeof( tinybvh::BVH_GPU::BVHNode )
+			+ (double)tree.idxCount * 3 * sizeof( bvhvec4 );
+		printf( "  %-10s %-9s %10.2f %10.2f %9.2f%9.1f %7.1f MB\n", CandidateName( c ), "-", box, prim, cost, ns, mb / (1024 * 1024) );
+		if (ns < bestNs) bestNs = ns, fastestIdx = c;
+		if (cost < bestCost) bestCost = cost, bestIdx = c, winNs = ns;
+	}
+	if (candidates == 0) return;
+	printf( "  winner: %s\n", CandidateName( bestIdx ) );
+	if (fastestIdx != bestIdx) printf( "  note: %s was faster on the clock (%.1f vs %.1f ns); cost decided.\n",
+		CandidateName( fastestIdx ), bestNs, winNs );
+	ReportWinner( stat[bestIdx] );
+	// No format of its own: BVH_GPU::Load reads a plain tree and converts it, and the
+	// conversion is lossless, so the binary tree is the whole artifact.
+	const std::string path = stem + "_" + info.name + ".bvh";
+	bvh[bestIdx].Save( path.c_str() );
+	printf( "  output: %s (binary tree; %s converts it on load)\n", path.c_str(), info.name );
+}
+
 // The plain BVH target. The optimized binary tree is the artifact, so there is no collapse to
 // pick and one row per candidate rather than two - and no visit field, which only steers a
 // collapse. Scoring and selection are otherwise identical to the wide targets.
@@ -2117,7 +2197,7 @@ static void EvaluateBinaryTarget( const TargetInfo& info, tinybvh::BVH* bvh, con
 	for (uint32_t c = 0; c < candidates; c++)
 	{
 		double box = 0, prim = 0, nodes = 0;
-		CountBinarySteps( bvh[c], score, box, prim, nodes );
+		CountBinarySteps( bvh[c], score, true, box, prim, nodes );
 		const double cost = nodes * bvh[c].c_trav + prim * bvh[c].c_int;
 		const double ns = WideTime( bvh[c], score, w.timingRuns );
 		const double mb = (double)(bvh[c].usedNodes * sizeof( tinybvh::BVH::BVHNode ) + bvh[c].idxCount * sizeof( uint32_t ));
@@ -2220,9 +2300,9 @@ static int RunWideTargets( const std::string& meshPath, const Optimizer::Setting
 	{
 		if (!w.target[t] || done[t]) continue;
 		const TargetInfo& regime = g_target[t];
-		if (regime.leafPrims == 0) printf( "\n=== binary trees, SAH-sized leaves, c_int %g ===\n", regime.cInt );
-		else printf( "\n=== binary trees, %u primitive%s per leaf%s, c_int %g ===\n", regime.leafPrims,
-			regime.leafPrims == 1 ? "" : "s", regime.quadLeaves ? ", quad-packed" : "", regime.cInt );
+		if (regime.leafPrims == 0) printf( "\n=== binary trees, SAH-sized leaves ===\n" );
+		else printf( "\n=== binary trees, %u primitive%s per leaf%s ===\n", regime.leafPrims,
+			regime.leafPrims == 1 ? "" : "s", regime.quadLeaves ? ", quad-packed" : "" );
 		tinybvh::BVH bvh[CAND_MAX];
 		CandidateStats stat[CAND_MAX] = {};
 		for (uint32_t c = 0; c < w.candidates; c++)
@@ -2254,6 +2334,7 @@ static int RunWideTargets( const std::string& meshPath, const Optimizer::Setting
 			switch (u)
 			{
 			case TGT_BVH: EvaluateBinaryTarget( g_target[u], bvh, w.candidates, stat, score, w, stem ); break;
+			case TGT_BVHGPU: EvaluateGPUTarget( g_target[u], bvh, w.candidates, stat, score, w, stem ); break;
 			case TGT_BVH4CPU: EvaluateTarget<tinybvh::BVH4_CPU, 4>( g_target[u], bvh, w.candidates, stat, prob, score, w, stem ); break;
 			case TGT_BVH8CPU: EvaluateTarget<tinybvh::BVH8_CPU, 8>( g_target[u], bvh, w.candidates, stat, prob, score, w, stem ); break;
 			case TGT_BVH4GPU: EvaluateTarget<tinybvh::BVH4_GPU, 4>( g_target[u], bvh, w.candidates, stat, prob, score, w, stem ); break;
@@ -2280,11 +2361,11 @@ static void Usage()
 		"  spatial splits are built, optimized and collapsed, each with and without the measured\n"
 		"  visit weighting, and the variant with the fewest box tests is written out. Targets\n"
 		"  that want the same leaf size share their binary trees; the others get their own.\n"
-		"  Every layout has a cache format of its own, so the output is the collapsed tree and\n"
-		"  its Load reads it back directly.\n"
+		"  Every layout with a cache format of its own gets the collapsed tree, which its Load\n"
+		"  reads back directly; the rest get the binary tree their Load converts.\n"
 		"\n"
-		"  --target L         comma-separated, or 'all': bvh, bvh4cpu, bvh8cpu, bvh4gpu,\n"
-		"                     bvh8cwbvh, bvh4amdhw, cwbvh8amdhw\n"
+		"  --target L         comma-separated, or 'all': bvh, bvhgpu, bvh4cpu, bvh8cpu,\n"
+		"                     bvh4gpu, bvh8cwbvh, bvh4amdhw, cwbvh8amdhw\n"
 		"  -rays N            sample rays per set (default 100000; each adds one bounce)\n"
 		"  -visitmin N        visit count below which a node falls back to surface area (default 8)\n"
 		"  -timingruns N      timed passes per tree, best reported (default 3)\n"
