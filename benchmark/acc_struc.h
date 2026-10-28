@@ -43,6 +43,7 @@ public:
 	char* GetDescription() { return desc; }
 	void PrepareBuild();
 	BVHBase* Build( PrimitiveSet* primSet );
+	BVHBase* LoadBVH( const char* bakedBVH );
 	void PostBuild();
 	BVHBase* GetBVH() { return bvh; }
 	float SAHCost();
@@ -67,8 +68,6 @@ private:
 	bvh::v2::Bvh<bvh::v2::Node<float,3>> madmannbvh;
 	std::vector<PrecomputedTri> precomputed_tris;
 	bool mmTrisPrecomputed = false;
-public:
-	static inline char bakedBVH[128];
 };
 
 inline BuildFlags operator|( BuildFlags a, BuildFlags b )

@@ -47,57 +47,57 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 	// fix flags for Embree / Madmann91
 	if (layout == EMBREE || layout == MADMANN91)
 	{
-		if ((flags & (MEDIUM|HIGH)) == 0) flags = LOW;
+		if ((flags & (MEDIUM | HIGH)) == 0) flags = LOW;
 	}
 	// construct description
 	switch (layout)
 	{
-	case BVH2: 
+	case BVH2:
 	{
-		strncpy( desc, "2-wide BVH", sizeof( desc ) ); 
-		strncpy( shrt, "BVH2", 60 ); 
+		strncpy( desc, "2-wide BVH", sizeof( desc ) );
+		strncpy( shrt, "BVH2", 60 );
 		break;
 	}
-	case BVH4: 
+	case BVH4:
 	{
-		strncpy( desc, "4-wide BVH", sizeof( desc ) ); 
-		strncpy( shrt, "BVH4", sizeof( shrt ) ); 
+		strncpy( desc, "4-wide BVH", sizeof( desc ) );
+		strncpy( shrt, "BVH4", sizeof( shrt ) );
 		break;
 	}
-	case BVH4_WIVE: 
+	case BVH4_WIVE:
 	{
-		strncpy( desc, "SSE 4-wide CPU BVH", sizeof( desc ) ); 
-		strncpy( shrt, "WiVe4", sizeof( shrt ) ); 
+		strncpy( desc, "SSE 4-wide CPU BVH", sizeof( desc ) );
+		strncpy( shrt, "WiVe4", sizeof( shrt ) );
 		break;
 	}
-	case BVH8_WIVE: 
+	case BVH8_WIVE:
 	{
-		strncpy( desc, "AVX2 8-wide CPU BVH", sizeof( desc ) ); 
-		strncpy( shrt, "Wive8", sizeof( shrt ) ); 
+		strncpy( desc, "AVX2 8-wide CPU BVH", sizeof( desc ) );
+		strncpy( shrt, "Wive8", sizeof( shrt ) );
 		break;
 	}
-	case GPU_BVH: 
+	case GPU_BVH:
 	{
-		strncpy( desc, "2-wide GPU BVH", sizeof( desc ) ); 
-		strncpy( shrt, "GPUBVH2", sizeof( shrt ) ); 
+		strncpy( desc, "2-wide GPU BVH", sizeof( desc ) );
+		strncpy( shrt, "GPUBVH2", sizeof( shrt ) );
 		break;
 	}
-	case GPU_BVH4: 
+	case GPU_BVH4:
 	{
-		strncpy( desc, "4-wide GPU BVH", sizeof( desc ) ); 
-		strncpy( shrt, "GPUBVH4", sizeof( shrt ) ); 
+		strncpy( desc, "4-wide GPU BVH", sizeof( desc ) );
+		strncpy( shrt, "GPUBVH4", sizeof( shrt ) );
 		break;
 	}
-	case CWBVH: 
+	case CWBVH:
 	{
-		strncpy( desc, "8-wide CWBVH", sizeof( desc ) ); 
-		strncpy( shrt, "CWBVH", sizeof( shrt ) ); 
+		strncpy( desc, "8-wide CWBVH", sizeof( desc ) );
+		strncpy( shrt, "CWBVH", sizeof( shrt ) );
 		break;
 	}
 	case AMD_HWRT:
 	{
-		strncpy( desc, "4-wide AMD BVH", sizeof( desc ) ); 
-		strncpy( shrt, "AMD4", sizeof( shrt ) ); 
+		strncpy( desc, "4-wide AMD BVH", sizeof( desc ) );
+		strncpy( shrt, "AMD4", sizeof( shrt ) );
 		break;
 	}
 	case AMD_HWRT8:
@@ -106,22 +106,22 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		strncpy( shrt, "AMD8", sizeof( shrt ) );
 		break;
 	}
-	case MADMANN91: 
+	case MADMANN91:
 	{
-		strncpy( desc, "madmann91 BVH", sizeof( desc ) ); 
-		strncpy( shrt, "MM'91", sizeof( shrt ) ); 
+		strncpy( desc, "madmann91 BVH", sizeof( desc ) );
+		strncpy( shrt, "MM'91", sizeof( shrt ) );
 		break;
 	}
 	case EMBREE:
 	{
-		strncpy( desc, "embree4 BVH", sizeof( desc ) ); 
-		strncpy( shrt, "Embree", sizeof( shrt ) ); 
+		strncpy( desc, "embree4 BVH", sizeof( desc ) );
+		strncpy( shrt, "Embree", sizeof( shrt ) );
 		break;
 	}
-	default: 
+	default:
 	{
 		strncpy( desc, "UNKNOWN LAYOUT", sizeof( desc ) );
-		strncpy( shrt, "Unkown", sizeof( shrt ) ); 
+		strncpy( shrt, "Unkown", sizeof( shrt ) );
 		break;
 	}
 	}
@@ -170,6 +170,74 @@ static BVH loadedBVH;
 static BVH4_CPU loadedBVH4;
 static BVH8_CPU loadedBVH8;
 static BVH_GPU loadedBVHGPU;
+static BVH4_GPU loadedBVH4GPU;
+static BVH8_CWBVH loadedBVH8GPU;
+static BVH4_AMD_HW loadedAMD4;
+static CWBVH8_AMD_HW loadedAMD8;
+
+BVHBase* AccStruc::LoadBVH( const char* bakedBVH )
+{
+	switch (layout)
+	{
+	case BVH2:
+	{
+		BVH* accstruc = (BVH*)bvh;
+		loadedBVH = BVH::Load( bakedBVH );
+		bvh = &loadedBVH;
+		break;
+	}
+	case BVH4_WIVE:
+	{
+		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
+		loadedBVH4 = BVH4_CPU::Load( bakedBVH );
+		bvh = &loadedBVH4;
+		break;
+	}
+	case BVH8_WIVE:
+	{
+		BVH8_CPU* accstruc = (BVH8_CPU*)bvh;
+		loadedBVH8 = BVH8_CPU::Load( bakedBVH );
+		bvh = &loadedBVH8;
+		break;
+	}
+	case GPU_BVH:
+	{
+		BVH_GPU* accstruc = (BVH_GPU*)bvh;
+		loadedBVHGPU = BVH_GPU::Load( bakedBVH );
+		bvh = &loadedBVHGPU;
+		break;
+	}
+	case GPU_BVH4:
+	{
+		BVH4_GPU* accstruc = (BVH4_GPU*)bvh;
+		loadedBVH4GPU = BVH4_GPU::Load( bakedBVH );
+		bvh = &loadedBVH4GPU;
+		break;
+	}
+	case CWBVH:
+	{
+		BVH8_CWBVH* accstruc = (BVH8_CWBVH*)bvh;
+		loadedBVH8GPU = BVH8_CWBVH::Load( bakedBVH );
+		bvh = &loadedBVH8GPU;
+		break;
+	}
+	case AMD_HWRT:
+	{
+		BVH4_AMD_HW* accstruc = (BVH4_AMD_HW*)bvh;
+		loadedAMD4 = BVH4_AMD_HW::Load( bakedBVH );
+		bvh = &loadedAMD4;
+		break;
+	}
+	case AMD_HWRT8:
+	{
+		CWBVH8_AMD_HW* accstruc = (CWBVH8_AMD_HW*)bvh;
+		loadedAMD8 = CWBVH8_AMD_HW::Load( bakedBVH );
+		bvh = &loadedAMD8;
+		break;
+	}
+	}
+	return bvh;
+}
 
 BVHBase* AccStruc::Build( PrimitiveSet* prims )
 {
@@ -179,11 +247,7 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	case BVH2:
 	{
 		BVH* accstruc = (BVH*)bvh;
-		if (flags & BAKED) 
-		{
-			loadedBVH = BVH::Load( bakedBVH );
-			bvh = &loadedBVH;
-		}
+		if (flags & BAKED) exit( 0 ); // deprecated
 		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		if (flags & HPLOC) accstruc->MergeLeafs();
@@ -201,11 +265,7 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	case BVH4_WIVE:
 	{
 		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
-		if (flags & BAKED) 
-		{
-			loadedBVH4 = BVH4_CPU::Load( bakedBVH );
-			bvh = &loadedBVH4;
-		}
+		if (flags & BAKED) exit( 0 ); // deprecated
 		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
@@ -213,11 +273,7 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	case BVH8_WIVE:
 	{
 		BVH8_CPU* accstruc = (BVH8_CPU*)bvh;
-		if (flags & BAKED) 
-		{
-			loadedBVH4 = BVH4_CPU::Load( bakedBVH );
-			bvh = &loadedBVH8;
-		}
+		if (flags & BAKED) exit( 0 ); // deprecated
 		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
@@ -225,11 +281,7 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	case GPU_BVH:
 	{
 		BVH_GPU* accstruc = (BVH_GPU*)bvh;
-		if (flags & BAKED) 
-		{
-			loadedBVHGPU = BVH_GPU::Load( bakedBVH );
-			bvh = &loadedBVHGPU;
-		}
+		if (flags & BAKED) exit( 0 ); // deprecated
 		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
@@ -237,10 +289,7 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	case GPU_BVH4:
 	{
 		BVH4_GPU* accstruc = (BVH4_GPU*)bvh;
-		if (flags & BAKED) 
-		{
-			exit( 0 ); // TODO
-		}
+		if (flags & BAKED) exit( 0 ); // deprecated
 		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
@@ -248,10 +297,7 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	case CWBVH:
 	{
 		BVH8_CWBVH* accstruc = (BVH8_CWBVH*)bvh;
-		if (flags & BAKED) 
-		{
-			exit( 0 ); // TODO
-		}
+		if (flags & BAKED) exit( 0 ); // deprecated
 		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
@@ -259,10 +305,7 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	case AMD_HWRT:
 	{
 		BVH4_AMD_HW* accstruc = (BVH4_AMD_HW*)bvh;
-		if (flags & BAKED) 
-		{
-			exit( 0 ); // TODO
-		}
+		if (flags & BAKED) exit( 0 ); // deprecated
 		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
@@ -270,10 +313,7 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	case AMD_HWRT8:
 	{
 		CWBVH8_AMD_HW* accstruc = (CWBVH8_AMD_HW*)bvh;
-		if (flags & BAKED) 
-		{
-			exit( 0 ); // TODO
-		}
+		if (flags & BAKED) exit( 0 ); // deprecated
 		else if (flags & INDEXED) accstruc->Build( primSet->verts, primSet->indices, primSet->primCount );
 		else accstruc->Build( primSet->verts, primSet->primCount );
 		break;
@@ -391,12 +431,12 @@ void AccStruc::IntersectBatchMT( char* rayData, int rayCount )
 	int slices = std::thread::hardware_concurrency() * 4;
 	int sliceSize = rayCount / slices;
 	tinybvh_parallel_for( context, slices, [&]( uint32_t i )
-	{
-		// the last slice takes the remainder.
-		int size = sliceSize;
-		if ((int)i == slices - 1) size = rayCount - (slices - 1) * sliceSize;
-		IntersectBatch( rayData + sliceSize * i * 64, size );
-	} );
+		{
+			// the last slice takes the remainder.
+			int size = sliceSize;
+			if ((int)i == slices - 1) size = rayCount - (slices - 1) * sliceSize;
+			IntersectBatch( rayData + sliceSize * i * 64, size );
+		} );
 }
 
 void AccStruc::IntersectBatchMTPackets( char* rayData, int rayCount )
@@ -543,7 +583,7 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 		static constexpr size_t invalid_id = 9999999;
 		bvh::v2::SmallStack<_Bvh::Index, 64> stack;
 		float u, v;
-		std::optional<std::tuple<float,float,float>> hit;
+		std::optional<std::tuple<float, float, float>> hit;
 		for (int i = 0; i < rayCount; i++)
 		{
 			const Ray& r = *(Ray*)(rayData + i * 64);
@@ -559,7 +599,7 @@ float AccStruc::IntersectBatch( char* rayData, int rayCount )
 					return prim_id != invalid_id;
 				} );
 		}
-		dist = hit.has_value() ? get<0>(hit.value()) : 1e30f;
+		dist = hit.has_value() ? get<0>( hit.value() ) : 1e30f;
 		break;
 	}
 	case EMBREE:
@@ -598,7 +638,7 @@ float AccStruc::IntersectBatchPackets( char* rayData, int rayCount )
 		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
 		{
 			char* rd = rayData + i * 64;
-			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( (char*)(batch + j), rd, 64 );
+			for (int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64) memcpy( (char*)(batch + j), rd, 64 );
 			accstruc->IntersectBundle( batch );
 		}
 		break;
@@ -728,7 +768,7 @@ void AccStruc::OcclusionBatchPackets( char* rayData, int rayCount )
 		for (int i = 0; i < rayCount; i += TINYBVH_BUNDLE_RAYS)
 		{
 			char* rd = rayData + i * 64;
-			for( int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64 ) memcpy( (char*)(batch + j), rd, 64 );
+			for (int j = 0; j < TINYBVH_BUNDLE_RAYS; j++, rd += 64) memcpy( (char*)(batch + j), rd, 64 );
 			accstruc->IsOccludedBundle( batch, occluded );
 		}
 		break;
@@ -739,7 +779,7 @@ void AccStruc::OcclusionBatchPackets( char* rayData, int rayCount )
 }
 
 bvhvec3 AccStruc::SceneExtent()
-{ 
+{
 	if (layout == EMBREE || layout == MADMANN91)
 	{
 		// hacky way to get scene extents, via a TinyBVH bvh.
