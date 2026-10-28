@@ -31,6 +31,8 @@ class Experiment
 {
 public:
 	Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays = RaySet::UNSPECIFIED, ExperimentFlags = DEFAULT, const char* view = 0, const char* rayFile = 0 );
+	Experiment( BVHLayout layout, const char* bakedBVH, Scene prims, RaySet rays = RaySet::UNSPECIFIED, ExperimentFlags = DEFAULT, const char* view = 0, const char* rayFile = 0 );
+	void Init( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays = RaySet::UNSPECIFIED, ExperimentFlags = DEFAULT, const char* view = 0, const char* rayFile = 0 );
 	void Run();
 private:
 	void RunBuildExperiment();
@@ -50,7 +52,7 @@ private:
 	Scene primSet = (Scene)0;
 	AccStruc* bvh = 0;
 	ExperimentFlags flags;
-	char* title = 0, *tgaFile = 0;
+	char* title = 0, *tgaFile = 0, *bakedBVH = 0;
 	float buildTime = 0; // in seconds.
 	inline static PrimitiveSet* cachedPrimSet[99] = { 0 };
 	inline static RayDistribution* cachedRaySet[99] = { 0 };

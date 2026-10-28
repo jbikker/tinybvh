@@ -32,7 +32,7 @@ namespace tinybvh
 
 extern RTCScene embreeScene;
 
-Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays, ExperimentFlags expFlags, const char* view, const char* rayFile )
+void Experiment::Init( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays, ExperimentFlags expFlags, const char* view, const char* rayFile )
 {
 	if (rays == RaySet::UNSPECIFIED)
 	{
@@ -62,9 +62,9 @@ Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, Ra
 		title = new char[1024];
 		char features[128] = "";
 		if (flags & MULTICORE) if (flags & PACKETS) strncpy( features, " (MT/packets)", 100 ); else strncpy( features, " (MT)", 100 );
-		else if (flags & USE_GPU) strncpy( features, " (GPU)", 100 ); 
-		else if (flags & PACKETS) strncpy( features, " (packets)", 100 ); 
-		snprintf( title, 1024, "BVH TRACE%s - %s - %s (%ik tris) - %s", 
+		else if (flags & USE_GPU) strncpy( features, " (GPU)", 100 );
+		else if (flags & PACKETS) strncpy( features, " (packets)", 100 );
+		snprintf( title, 1024, "BVH TRACE%s - %s - %s (%ik tris) - %s",
 			features, bvh->GetDescription(),
 			cachedPrimSet[primSet]->GetDescription(),
 			cachedPrimSet[primSet]->primCount / 1000,
@@ -82,6 +82,18 @@ Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, Ra
 			cachedRaySet[raySet]->WriteToFile( rayFile );
 		}
 	}
+}
+
+Experiment::Experiment( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays, ExperimentFlags expFlags, const char* view, const char* rayFile )
+{
+	Init( layout, buildFlags, prims, rays, expFlags, view, rayFile );
+}
+
+Experiment::Experiment( BVHLayout layout, const char* baked, Scene prims, RaySet rays, ExperimentFlags expFlags, const char* view, const char* rayFile )
+{
+	Init(  layout, BAKED, prims, rays, expFlags, view, rayFile );
+	bakedBVH = new char[strlen( baked ) + 1];
+	strncpy( bakedBVH, baked, strlen( baked ) + 1 );
 }
 
 static bool lastWasTrav = false, firstExperiment = true;
@@ -102,9 +114,16 @@ void Experiment::RunTraceExperiment()
 	// - Build once - time is irrelevant;
 	// - Trace on a single core;
 	// - Trace one million rays several times for average trace time.
-	bvh->PrepareBuild();
-	bvh->Build( cachedPrimSet[primSet] );
-	bvh->PostBuild();
+	if (bakedBVH)
+	{
+		bvh->LoadBVH( bakedBVH );
+	}
+	else
+	{
+		bvh->PrepareBuild();
+		bvh->Build( cachedPrimSet[primSet] );
+		bvh->PostBuild();
+	}
 	// emit header
 	if (firstExperiment || !lastWasTrav)
 	{
@@ -116,8 +135,8 @@ void Experiment::RunTraceExperiment()
 	// write experiment settings to csv
 	if (csv)
 	{
-		if (flags & USE_GPU) fprintf( csv, "gpu," ); 
-		else if (flags & MULTICORE) fprintf( csv, (flags & PACKETS) ? "cpu (MT/packets)" : "cpu (MT)" ); 
+		if (flags & USE_GPU) fprintf( csv, "gpu," );
+		else if (flags & MULTICORE) fprintf( csv, (flags & PACKETS) ? "cpu (MT/packets)" : "cpu (MT)" );
 		else fprintf( csv, (flags & PACKETS) ? "cpu (packets)" : "cpu," );
 		fprintf( csv, "%s,%i,", cachedPrimSet[primSet]->shrt, cachedPrimSet[primSet]->primCount );
 		fprintf( csv, "%s,%s,", bvh->shrt, bvh->flagShrt );
@@ -218,12 +237,12 @@ void Experiment::RunTraceExperiment()
 			t.reset();
 			while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
 			{
-				if (flags & MULTICORE) 
+				if (flags & MULTICORE)
 				{
-					if (flags & PACKETS) bvh->IntersectBatchMTPackets( extensionRays, N ); 
-					else bvh->IntersectBatchMT( extensionRays, N ); 
+					if (flags & PACKETS) bvh->IntersectBatchMTPackets( extensionRays, N );
+					else bvh->IntersectBatchMT( extensionRays, N );
 				}
-				else 
+				else
 				{
 					if (flags & PACKETS) bvh->IntersectBatchPackets( extensionRays, N );
 					else bvh->IntersectBatch( extensionRays, N );
@@ -322,12 +341,12 @@ void Experiment::RunTraceExperiment()
 				t.reset();
 				while (runs < 5 || t.elapsed() < 1.5f /* at least 5, or whatever fits in a 1.5 seconds. */)
 				{
-					if (flags & MULTICORE) 
+					if (flags & MULTICORE)
 					{
-						if (flags & PACKETS) bvh->OcclusionBatchMTPackets( shadowRays, N ); 
-						else bvh->OcclusionBatchMT( shadowRays, N ); 
+						if (flags & PACKETS) bvh->OcclusionBatchMTPackets( shadowRays, N );
+						else bvh->OcclusionBatchMT( shadowRays, N );
 					}
-					else 
+					else
 					{
 						if (flags & PACKETS) bvh->OcclusionBatchPackets( shadowRays, N );
 						else bvh->OcclusionBatch( shadowRays, N );
@@ -357,9 +376,16 @@ void Experiment::RunBuildExperiment()
 	// Accstruc build experiment.
 	// - Build several times for average build time;
 	// - Assess SAH and EPO.
-	bvh->PrepareBuild();
-	bvh->Build( cachedPrimSet[primSet] ); // warm caches
-	bvh->PostBuild();
+	if (bakedBVH)
+	{
+		bvh->LoadBVH( bakedBVH );
+	}
+	else
+	{
+		bvh->PrepareBuild();
+		bvh->Build( cachedPrimSet[primSet] ); // warm caches
+		bvh->PostBuild();
+	}
 	// emit header
 	if (firstExperiment || lastWasTrav)
 	{
@@ -467,7 +493,7 @@ float Experiment::RunGPU_BVH2_Any( char* raySet, const int N )
 	BVH_GPU* bvh_gpu = (BVH_GPU*)bvh->GetBVH();
 	// create OpenCL buffers for the BVH data calculated by tiny_bvh.h
 	tinyocl::Buffer gpuNodes( bvh_gpu->usedNodes * sizeof( BVH_GPU::BVHNode ), bvh_gpu->bvhNode, tinyocl::Buffer::READONLY );
-	tinyocl::Buffer triData( bvh_gpu->idxCount *  3 * sizeof( tinybvh::bvhvec4 ), (bvhvec4*)bvh_gpu->orderedVerts.data, tinyocl::Buffer::READONLY );
+	tinyocl::Buffer triData( bvh_gpu->idxCount * 3 * sizeof( tinybvh::bvhvec4 ), (bvhvec4*)bvh_gpu->orderedVerts.data, tinyocl::Buffer::READONLY );
 	gpuNodes.CopyToDevice();
 	triData.CopyToDevice();
 	// create rays and send them to the gpu side
