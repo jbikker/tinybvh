@@ -2339,8 +2339,8 @@ TEMPLATED bool BVH<Float, Index>::Load( const char* fileName, const Slice& verti
 	s.read( (char*)&fileTriCount, sizeof( Index ) );
 	if (!useFileGeometry)
 	{
-	if (expectIndexed && fileTriCount != primCount) return false;
-	if (!expectIndexed && fileTriCount != vertices.count / 3) return false;
+		if (expectIndexed && fileTriCount != primCount) return false;
+		if (!expectIndexed && fileTriCount != vertices.count / 3) return false;
 	}
 	FreeGeometry();
 	AlignedFree( bvhNode );
@@ -2741,25 +2741,25 @@ TEMPLATED void BVH<Float, Index>::Build( Index nodeIdx, uint32_t depth )
 			{
 				if (!settings.keepSplitting)
 				{
-			#ifdef _DEBUG
-				if (node.triCount > 512) fprintf( stderr, "failed to split large node (%llu tris).\n", (unsigned long long)node.triCount );
-			#endif
-				break; // not splitting is better.
-			}
+				#ifdef _DEBUG
+					if (node.triCount > 512) fprintf( stderr, "failed to split large node (%llu tris).\n", (unsigned long long)node.triCount );
+				#endif
+					break; // not splitting is better.
+				}
 				forced = true; // keepSplitting: subdivide anyway, and take the bounds from the partition.
 			}
 			// in-place partition
 			Index j = node.leftFirst + node.triCount, src = node.leftFirst, leftCount = 0, rightCount = 0;
 			if (!forced)
 			{
-			const Float rpd = rpd3[bestAxis], nmin = nmin3[bestAxis];
-			for (Index i = 0; i < node.triCount; i++)
-			{
-				const Index fi = primIdx[src];
-				int32_t bi = (uint32_t)(((fragment[fi].bmin[bestAxis] + fragment[fi].bmax[bestAxis]) * 0.5f - nmin) * rpd);
-				bi = tinybvh_clamp( bi, 0, BVHBINS - 1 );
-				if ((uint32_t)bi <= bestPos) src++; else tinybvh_swap( primIdx[src], primIdx[--j] );
-			}
+				const Float rpd = rpd3[bestAxis], nmin = nmin3[bestAxis];
+				for (Index i = 0; i < node.triCount; i++)
+				{
+					const Index fi = primIdx[src];
+					int32_t bi = (uint32_t)(((fragment[fi].bmin[bestAxis] + fragment[fi].bmax[bestAxis]) * 0.5f - nmin) * rpd);
+					bi = tinybvh_clamp( bi, 0, BVHBINS - 1 );
+					if ((uint32_t)bi <= bestPos) src++; else tinybvh_swap( primIdx[src], primIdx[--j] );
+				}
 				leftCount = src - node.leftFirst, rightCount = node.triCount - leftCount;
 				forced = (leftCount == 0 || rightCount == 0) && settings.keepSplitting;
 			}
@@ -3384,9 +3384,9 @@ TEMPLATED void BVH<Float, Index>::BuildHQTask( Index nodeIdx, uint32_t depth, In
 				{
 					if (!settings.keepSplitting)
 					{
-					FinalizeLeaf( node );
-					break; // not splitting is better.
-				}
+						FinalizeLeaf( node );
+						break; // not splitting is better.
+					}
 					ForceSplitHQ( node, A, B ); // keepSplitting: subdivide anyway.
 				}
 			}
@@ -4208,7 +4208,7 @@ TEMPLATED void BVH<Float, Index>::FitLeafs( const Index primCount )
 			// the list is in descending order, which is the order these have to be resolved in.
 			const Index* list = pendList + (size_t)s * MT_FIT_PENDING;
 			for (uint32_t p = 0; p < pendCount[s]; p++) Collapse( list[p], nodes );
-	}
+		}
 		else for (Index i = pendLast[s] + 1; i-- > pendFirst[s]; ) if (subtreePrims[i] == pending) Collapse( i, nodes );
 	}
 	AlignedFree( pendList );
@@ -4223,21 +4223,21 @@ TEMPLATED void BVH<Float, Index>::FitLeafs( const Index primCount )
 		const Index end = SliceStart( nodes, s + 1, slices );
 		Index at = nodes + 2 * slicePairs[s];
 		for (Index i = SliceStart( nodes, s, slices ); i < end; i++) if (i != 1)
-	{
-		BVHNode* node = &bvhNode[i];
-		if (!node->isLeaf() || node->triCount <= primCount) continue;
+		{
+			BVHNode* node = &bvhNode[i];
+			if (!node->isLeaf() || node->triCount <= primCount) continue;
 			// Split off 'primCount' primitives at a time into a left child, the rest into a right
 			// one, which is split further until it fits. Children inherit the bounds of the leaf.
-		for (Index first = node->leftFirst, count = node->triCount; count > primCount; count -= primCount)
-		{
-			BVHNode& left = bvhNode[at], & right = bvhNode[at + 1];
-			left = right = *node;
-			left.leftFirst = first, left.triCount = primCount;
-			right.leftFirst = first += primCount, right.triCount = count - primCount;
-			node->leftFirst = at, node->triCount = 0;
-			node = &right, at += 2;
+			for (Index first = node->leftFirst, count = node->triCount; count > primCount; count -= primCount)
+			{
+				BVHNode& left = bvhNode[at], & right = bvhNode[at + 1];
+				left = right = *node;
+				left.leftFirst = first, left.triCount = primCount;
+				right.leftFirst = first += primCount, right.triCount = count - primCount;
+				node->leftFirst = at, node->triCount = 0;
+				node = &right, at += 2;
+			}
 		}
-	}
 	} );
 	newNodePtr = usedNodes = nodes + 2 * pairs, leafsSplit = primCount;
 }
@@ -4965,8 +4965,8 @@ TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, u
 				const BVHNode& n = bvhNode[i];
 				sum += (double)(n.isLeaf() ? (c_int * (Float)n.triCount) : c_trav) * (double)n.SA();
 				decrease[i] = 0, outNode[i] = 0;
-					if (i % mu != iter % mu) continue; // sparse search: round-robin over the nodes
-					OptimizeSearch( i, decrease[i], outNode[i] );
+				if (i % mu != iter % mu) continue; // sparse search: round-robin over the nodes
+				OptimizeSearch( i, decrease[i], outNode[i] );
 				if (!(decrease[i] > 0)) continue;
 				Index node[6];
 				const uint32_t n6 = OptimizeNodes( i, outNode[i], node );
@@ -4980,7 +4980,8 @@ TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, u
 				{
 					uint64_t held = lock[node[k]].load( std::memory_order_relaxed );
 					while (held < claim && !lock[node[k]].compare_exchange_weak( held, claim,
-						std::memory_order_relaxed, std::memory_order_relaxed )) { /* retry */ }
+						std::memory_order_relaxed, std::memory_order_relaxed )) { /* retry */
+					}
 				}
 			}
 			partial[t] = sum;
@@ -5228,8 +5229,8 @@ TEMPLATED void BVH_Verbose<Float, Index>::MergeLeafs()
 			BVHNode& right = bvhNode[node.right];
 			// cost of unsplit
 			const Float area = SA( node.aabbMin, node.aabbMax );
-			Float Cunsplit   = area * mergedCount * c_int;
-			Float Ckeepsplit = c_trav * area + c_int * (left.SA()*leftCount + right.SA()*rightCount);
+			Float Cunsplit = area * mergedCount * c_int;
+			Float Ckeepsplit = c_trav * area + c_int * (left.SA() * leftCount + right.SA() * rightCount);
 			if (Cunsplit <= Ckeepsplit && mergedCount <= mergeLeafCap)
 			{
 				// collapse the subtree
@@ -6691,7 +6692,7 @@ TEMPLATED void CWBVH8_AMD_HW<Float, Index>::ConvertFrom( const MBVH<8, Float, In
 			const uint32_t primIdx = 31;
 
 			const uint32_t midpointOffset = 52 + (xBitWidth + yBitWidth + zBitWidth + 3) * tcount * 3
-									+ (geomBaseIdx << 1) + (geomIdx << 1) * (tcount - 1) + 3 * (31 - trailingZeroes) - (xBitWidth + yBitWidth + zBitWidth);
+				+ (geomBaseIdx << 1) + (geomIdx << 1) * (tcount - 1) + 3 * (31 - trailingZeroes) - (xBitWidth + yBitWidth + zBitWidth);
 
 			// x bits | y bits | z bits | trailing bits | geom base | geom | pair count | vertex type
 			writer.Write( xBitWidth, 5 );
@@ -7476,11 +7477,11 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::ConvertFrom( const MBVH<8, Float, Index
 			leafPrims += tcount, leafBlocks++;
 			for (uint32_t j = 0; j < tcount; j++)
 				triPrim[nTris + j] = (uint32_t)bvh8.bvh.primIdx[child->firstTri + j];
-			#ifdef CWBVH_COMPRESSED_TRIS
+		#ifdef CWBVH_COMPRESSED_TRIS
 			nTris += tcount, triDataPtr += tcount * 4;
-			#else
+		#else
 			nTris += tcount, triDataPtr += tcount * 3;
-			#endif
+		#endif
 		}
 		nodeBlocks++;
 		const uint8_t exyzAndimask[4] = { (uint8_t)(ex + 127), (uint8_t)(ey + 127), (uint8_t)(ez + 127), imask };
