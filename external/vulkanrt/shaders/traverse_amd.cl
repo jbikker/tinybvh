@@ -226,16 +226,13 @@ float4 traverse_gpu8wayHW( const global float4* alt4Node, const float4 O, const 
 	float4 hit = (float4)( tmax, 0.0f, 0.0f, as_float( INVALID_NODE ) );
 
 	uint currentNodeID = 5; // start at root BOX32 node at byte offset zero.
-	while (1)
+	uint steps = 0;
+	while (steps++ < 1024)
 	{
 		uint2 stackResults;
 		float3 outOrigin, outDirection;
-		// Resuming at a parent must reproduce the child list that node produced on
-		// the first visit, or the last_node skip cannot locate prevNode.
 		const float extent = ( prevNode != INVALID_NODE ) ? tmax : hit.x;
-		uint10 result = __builtin_amdgcn_image_bvh8_intersect_ray( encoded_base, extent,
-			(uchar)0xff, O.xyz, D.xyz, currentNodeID, BVH8_DESCRIPTOR, &outOrigin, &outDirection );
-
+		uint10 result = __builtin_amdgcn_image_bvh8_intersect_ray( encoded_base, extent, (uchar)0xff, O.xyz, D.xyz, currentNodeID, BVH8_DESCRIPTOR, &outOrigin, &outDirection );
 		uint type = bvh8_id_to_type( currentNodeID );
 		if (type < 4) // primitive node; type is the sub-primitive index
 		{
@@ -251,36 +248,26 @@ float4 traverse_gpu8wayHW( const global float4* alt4Node, const float4 O, const 
 					hit = (float4)( t, u, v, as_float( id ) );
 				}
 			}
-			// Push nothing, pop one. The skip encoding belongs in the last_node
-			// operand; putting it in a data slot risks it being pushed as a pointer.
-			stackResults = __builtin_amdgcn_ds_bvh_stack_push8_pop1_rtn(
-				stackAddr, BVH_STACK_SKIP_0_TO_7, (uint8)INVALID_NODE, BVH_STACK_CONTROLS );
+			stackResults = __builtin_amdgcn_ds_bvh_stack_push8_pop1_rtn( stackAddr, BVH_STACK_SKIP_0_TO_7, (uint8)INVALID_NODE, BVH_STACK_CONTROLS );
 		}
 		else
 		{
-			uint8 children;
-			for (uint i = 0; i < 8; ++i) children[i] = result[i];
-			stackResults = __builtin_amdgcn_ds_bvh_stack_push8_pop1_rtn(
-				stackAddr, prevNode, children, BVH_STACK_CONTROLS );
+			uint8 children = (uint8)INVALID_NODE;
+			children.s7 = BVH_STACK_SKIP_0_TO_7;
+			stackResults = __builtin_amdgcn_ds_bvh_stack_push8_pop1_rtn( stackAddr, INVALID_NODE, children, BVH_STACK_CONTROLS );
 		}
-
 		uint nextNodeID = stackResults.x;
 		stackAddr = stackResults.y;
 		prevNode = INVALID_NODE;
-
 		if (nextNodeID < BVH_STACK_SENTINEL_MIN)
 		{
 			currentNodeID = nextNodeID;
 			continue;
 		}
 		if (nextNodeID != INVALID_NODE) break; // TERMINAL or any other sentinel
-
-		// Stack empty: walk up through the parent and resume after the child we
-		// came from. Entries dropped on overflow are recovered this way.
 		prevNode = currentNodeID;
-		const global uint* words = (const global uint*)(
-			(const global uchar*)alt4Node + bvh8_id_to_offset( currentNodeID ) );
-		currentNodeID = ( type < 4 ) ? words[BVH8_PRIM_PARENT_WORD] : words[2];
+		const global uint* words = (const global uint*)((const global uchar*)alt4Node + bvh8_id_to_offset( currentNodeID ) );
+		currentNodeID = ( type < 4 ) ? parentBoxID : words[2];
 		if (currentNodeID == INVALID_NODE) break;
 	}
 	return hit;
