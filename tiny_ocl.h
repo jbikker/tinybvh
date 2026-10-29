@@ -625,7 +625,7 @@ Buffer::Buffer( unsigned int N, void* ptr, unsigned int t )
 		{
 			if (t & DEVICEONLY)
 			{
-				deviceBuffer = clCreateBuffer( Kernel::GetContext(), rwFlags | CL_MEM_COPY_HOST_PTR, size, ptr, 0 );
+				deviceBuffer = clCreateBuffer( Kernel::GetContext(), rwFlags | (ptr ? CL_MEM_COPY_HOST_PTR : 0), size, ptr, 0 );
 				hostBuffer = 0; // this buffer only resides on the device.
 			}
 			else
@@ -747,7 +747,11 @@ void Buffer::CopyFromDevice( const int offset, const int byteCount, const bool b
 // ----------------------------------------------------------------------------
 void Buffer::CopyTo( Buffer* buffer )
 {
-	if (size > 0) clEnqueueCopyBuffer( Kernel::GetQueue(), deviceBuffer, buffer->deviceBuffer, 0, 0, size, 0, 0, 0 );
+	if (size > 0) 
+	{
+		cl_int error;
+		CHECKCL( error = clEnqueueCopyBuffer( Kernel::GetQueue(), deviceBuffer, buffer->deviceBuffer, 0, 0, size, 0, 0, 0 ) );
+	}
 }
 
 // Clear
