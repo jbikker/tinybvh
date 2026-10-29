@@ -90,10 +90,9 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 // scene as the compute shaders: BVH_GPU with shaders/traverse.cl, the AMD layouts
 // with shaders/traverse_amd.cl, so the two APIs can be compared one frame apart.
 #define ENABLE_OPENCL		true	// init OpenCL and put its backends in the rotation
-#define ENABLE_OCL_BVH2		true	// display info on OpenCL BVH_GPU performance
-#define ENABLE_OCL_AMD_BVH4	false	// display info on AMD BVH4 hardware traversal (RDNA3/RDNA4)
+#define ENABLE_OCL_BVH2		false	// display info on OpenCL BVH_GPU performance
 #define ENABLE_OCL_AMD_BVH8	true	// display info on AMD BVH8 hardware traversal (RDNA4)
-#define OCL_PRESENT_RESULT	false	// show what OpenCL traced; costs a 4MB readback + upload per frame
+#define OCL_PRESENT_RESULT	true	// show what OpenCL traced; costs a 4MB readback + upload per frame
 #define OCL_DEVICE_INDEX	-1		// -1: use the GPU Vulkan runs on; else an index from the list printed at startup
 
 #if 0
@@ -104,24 +103,24 @@ const char* raySetPath = "../../testdata/view3rays.bin";
 #else
 
 const char* triMesh = "../../testdata/conference.bin";
-const char* raySetPath = "../../testdata/view1rays_cnf.bin";
+const char* raySetPath = "../../testdata/view3rays_cnf.bin";
 
 #endif
 
 constexpr uint32_t NUM_INSTANCES = 1, FRAME_COUNT = 2;
-constexpr uint32_t NUM_DISPATCHES = 1;
+constexpr uint32_t NUM_DISPATCHES = 100;
 constexpr uint32_t NUM_SHADER_GROUPS = 3; // raygen, miss, hit group
 
 // The ray tracing backends that are cycled through, one per frame. Everything from
 // BACKEND_OCL_* onwards runs outside Vulkan, on the OpenCL queue.
 enum Backend {
 	BACKEND_HWRT = 0, BACKEND_BVH_GPU, BACKEND_BVH4_GPU, BACKEND_BVH8_CWBVH, BACKEND_RAYQUERY,
-	BACKEND_OCL_BVH_GPU, BACKEND_OCL_AMD_BVH4, BACKEND_OCL_AMD_BVH8, BACKEND_COUNT
+	BACKEND_OCL_BVH_GPU, BACKEND_OCL_AMD_BVH8, BACKEND_COUNT
 };
 static const char* backendName[BACKEND_COUNT] = { "HWRT", "BVH_GPU", "BVH4_GPU", "CWBVH", "RayQuery",
-	"CL/BVH_GPU", "CL/AMD_BVH4", "CL/AMD_BVH8" };
+	"CL/BVH_GPU", "CL/AMD_BVH8" };
 static const bool backendPrint[BACKEND_COUNT] = { ENABLE_HWRT, ENABLE_BVH2, ENABLE_BVH4, ENABLE_CWBVH,
-	ENABLE_RAY_QUERIES, ENABLE_OCL_BVH2, ENABLE_OCL_AMD_BVH4, ENABLE_OCL_AMD_BVH8 };
+	ENABLE_RAY_QUERIES, ENABLE_OCL_BVH2,ENABLE_OCL_AMD_BVH8 };
 static bool BackendIsOpenCL( const int b ) { return b >= BACKEND_OCL_BVH_GPU; }
 static bool rayQuerySupported = false;
 // Backends that can actually run on this machine, in rotation order; built by
@@ -962,7 +961,7 @@ constexpr int OCL_GROUP_X = 8, OCL_GROUP_Y = 8;
 static tinyocl::Kernel* oclKernel[BACKEND_COUNT] = {}; // null: backend not available
 static tinyocl::Buffer* oclBVH2Nodes = 0, * oclBVH2Verts = 0, * oclBVH4Data = 0;
 static tinyocl::Buffer* oclCWBVHNodes = 0, * oclCWBVHTris = 0;
-static tinyocl::Buffer* oclAMD4Data = 0, * oclAMD8Data = 0;
+static tinyocl::Buffer* oclAMD8Data = 0;
 static tinyocl::Buffer* oclRays = 0, * oclPixels = 0;
 static bool openclReady = false;
 
@@ -974,7 +973,6 @@ static bool openclReady = false;
 static BVH bvh2AMD4, bvh2AMD8;
 static MBVH<4> mbvh4AMD;
 static MBVH<8> mbvh8AMD;
-static BVH4_AMD_HW bvh4AMD;
 static CWBVH8_AMD_HW bvh8AMD;
 
 static void CopyBVH2( BVH& copy )
@@ -984,21 +982,6 @@ static void CopyBVH2( BVH& copy )
 	BVH_Verbose verbose;
 	verbose.ConvertFrom( bvh2 );
 	copy.ConvertFrom( verbose, false );
-}
-
-static void InitAMDBVH4()
-{
-#if 0
-
-#else
-	printf("converting to AMD4... ");
-	CopyBVH2( bvh2AMD4 );
-	bvh2AMD4.SplitLeafs( 1 );
-	mbvh4AMD.leafPrimLimit = 0;
-	mbvh4AMD.ConvertFrom( bvh2AMD4, true );
-	bvh4AMD.ConvertFrom( mbvh4AMD );
-	printf("done.\n");
-#endif
 }
 
 static void InitAMDBVH8()
@@ -1295,17 +1278,6 @@ static void InitOpenCL()
 	oclPixels = new tinyocl::Buffer( rayCount * 4, 0, tinyocl::Buffer::WRITEONLY);
 	oclKernel[BACKEND_OCL_BVH_GPU]->SetArguments( oclBVH2Nodes, oclBVH2Verts, oclRays, oclPixels );
 	// AMD hardware traversal: the intrinsics exist on RDNA3 (BVH4) and RDNA4 (BVH4 + BVH8).
-	// Kernels are only requested where they can run; elsewhere traverse_amd.cl compiles
-	// to an empty program.
-	if (tinyocl::Kernel::isAMD && (tinyocl::Kernel::isRDNA3 || tinyocl::Kernel::isRDNA4))
-	{
-		InitAMDBVH4();
-		oclAMD4Data = new tinyocl::Buffer( (unsigned)(bvh4AMD.usedBlocks * sizeof( bvhvec4 )),
-			bvh4AMD.bvh4Data, tinyocl::Buffer::DEVICEONLY);
-		oclKernel[BACKEND_OCL_AMD_BVH4] = new tinyocl::Kernel( "shaders/traverse_amd.cl", "bench_amd_bvh4" );
-		oclKernel[BACKEND_OCL_AMD_BVH4]->SetArguments( oclAMD4Data, oclRays, oclPixels );
-	}
-	else printf( "%s disabled: requires AMD RDNA3 or RDNA4.\n", backendName[BACKEND_OCL_AMD_BVH4] );
 	if (tinyocl::Kernel::isAMD && tinyocl::Kernel::isRDNA4)
 	{
 		InitAMDBVH8();
@@ -1320,14 +1292,18 @@ static void InitOpenCL()
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true );
 	// One warm pass, which doubles as a sanity check: this traces the same scene the
 	// compute shaders do, so coverage and average depth should match what they show.
-	RunOpenCL( BACKEND_OCL_BVH_GPU );
-	oclPixels->CopyFromDevice(); // blocking, so this also drains the queue
-	const uint32_t* px = oclPixels->GetHostPtr();
-	uint32_t hits = 0;
-	double sum = 0;
-	for (uint32_t i = 0; i < rayCount; i++) if (px[i] & 255) hits++, sum += (double)(px[i] & 255);
-	printf( "%s: %.2f%% of rays hit, mean depth %.1f\n", backendName[BACKEND_OCL_BVH_GPU],
-		100.0 * hits / rayCount, hits ? sum / hits : 0.0 );
+	int be[] = { BACKEND_OCL_BVH_GPU , BACKEND_OCL_AMD_BVH8 };
+	for (int i = 0; i < 2; i++)
+	{
+		RunOpenCL(be[i]);
+		oclPixels->CopyFromDevice(); // blocking, so this also drains the queue
+		const uint32_t* px = oclPixels->GetHostPtr();
+		uint32_t hits = 0;
+		double sum = 0;
+		for (uint32_t i = 0; i < rayCount; i++) if (px[i] & 255) hits++, sum += (double)(px[i] & 255);
+		printf("%s: %.2f%% of rays hit, mean depth %.1f\n", backendName[be[i]],
+			100.0 * hits / rayCount, hits ? sum / hits : 0.0);
+	}
 	openclReady = true;
 }
 
@@ -1361,7 +1337,7 @@ static void ShutdownOpenCL()
 	}
 	delete oclBVH2Nodes, delete oclBVH2Verts, delete oclBVH4Data;
 	delete oclCWBVHNodes, delete oclCWBVHTris;
-	delete oclAMD4Data, delete oclAMD8Data;
+	delete oclAMD8Data;
 	delete oclRays, delete oclPixels;
 	for (int b = 0; b < BACKEND_COUNT; b++) delete oclKernel[b], oclKernel[b] = 0;
 	tinyocl::Kernel::KillCL();
