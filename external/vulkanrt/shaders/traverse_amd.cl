@@ -83,7 +83,7 @@ float3 safe_rcp3( float3 d )
 //
 // ============================================================================
 
-inline uint id_to_offset( uint id ) { return ( id & ( ~7u ) ) << 3; }
+inline uint id_to_offset( uint id ) { return (id & (~7u)) << 3; }
 inline uint id_to_type( uint id ) { return id & 7u; }
 
 // BVH descriptor: zero base, distance sorting, 42-bit size, pointer flags enabled.
@@ -97,20 +97,15 @@ float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 	uint prevNode = INVALID_NODE;
 	// LDS stack entries have a fixed stride of 32 words, even with wave64.
 	uint lane = get_local_id( 1 ) * get_local_size( 0 ) + get_local_id( 0 );
-	uint stackAddr = ( ( (uint)(size_t)hwStack >> 2 ) + ( lane & 31u ) +
-					  ( lane >> 5 ) * ( 32u * HW_BVH_STACK_ENTRIES ) ) << HW_BVH_STACK_BASE_SHIFT;
+	uint stackAddr = (((uint)(size_t)hwStack >> 2) + (lane & 31u) + (lane >> 5) * (32u * HW_BVH_STACK_ENTRIES)) << HW_BVH_STACK_BASE_SHIFT;
 	float4 hit = (float4)( tmax, 0.0f, 0.0f, as_float( INVALID_NODE ) );
 	uint currentNodeID = 5; // start at root BOX32 node at byte offset zero.
 	while (1)
 	{
 		uint2 stackResults;
 		ulong currentPointer = encoded_base + (ulong)currentNodeID;
-		// Resuming at a parent must reproduce the child list that node produced on the
-		// first visit, or the last_node skip in the LDS stack cannot locate prevNode.
 		const float extent = (prevNode != INVALID_NODE) ? tmax : hit.x;
-		uint4 dst4 = __builtin_amdgcn_image_bvh_intersect_ray_l(
-			currentPointer, extent, O, D, rD, BVH_DESCRIPTOR );
-
+		uint4 dst4 = __builtin_amdgcn_image_bvh_intersect_ray_l( currentPointer, extent, O, D, rD, BVH_DESCRIPTOR );
 		uint type = id_to_type( currentNodeID );
 		if (type < 4) // triangle node; type is the sub-triangle index
 		{
@@ -187,14 +182,14 @@ void kernel bench_amd_bvh4( const global float4* alt4Node,
 //
 // ============================================================================
 
-inline uint bvh8_id_to_offset( uint id ) { return ( id & ( ~7u ) ) << 3; }
+inline uint bvh8_id_to_offset( uint id ) { return (id & (~7u)) << 3; }
 inline uint bvh8_id_to_type( uint id ) { return id & 7u; }
 
 // BVH descriptor: zero base, distance sorting, 42-bit size, pointer flags enabled.
 // Type 8; GFX12 triangle results contain t, barycentrics and primitive IDs.
 #define BVH8_DESCRIPTOR                                      \
-    ((uint4)(                                               \
-        0u,                                                 \
+    ((uint4)(                                                \
+        0u,                                                  \
         (1u << 31) | /* box sorting */                       \
         (1u << 20),  /* triangles first */                   \
         0xffffffffu, /* address-range low bits */            \
@@ -217,18 +212,14 @@ float4 traverse_gpu8wayHW( const global float4* alt4Node, const float4 O, const 
 	uint parentBoxID = INVALID_NODE;
 	// LDS stack entries have a fixed stride of 32 words, even with wave64.
 	uint lane = get_local_id( 1 ) * get_local_size( 0 ) + get_local_id( 0 );
-	uint stackAddr = ( ( (uint)(size_t)hwStack >> 2 ) + ( lane & 31u ) +
-					  ( lane >> 5 ) * ( 32u * HW_BVH_STACK_ENTRIES ) ) << HW_BVH_STACK_BASE_SHIFT;
+	uint stackAddr = (((uint)(size_t)hwStack >> 2) + (lane & 31u) + (lane >> 5) * (32u * HW_BVH_STACK_ENTRIES)) << HW_BVH_STACK_BASE_SHIFT;
 	float4 hit = (float4)( tmax, 0.0f, 0.0f, as_float( INVALID_NODE ) );
-
 	uint currentNodeID = 5; // start at root BOX32 node at byte offset zero.
 	while (1)
 	{
 		uint2 stackResults;
 		float3 outOrigin, outDirection;
-		uint10 result = __builtin_amdgcn_image_bvh8_intersect_ray(
-			encoded_base, prevNode != INVALID_NODE ? tmax : hit.x, (uchar)0xff, O.xyz, D.xyz, currentNodeID, BVH8_DESCRIPTOR, &outOrigin, &outDirection);
-
+		uint10 result = __builtin_amdgcn_image_bvh8_intersect_ray( encoded_base, prevNode != INVALID_NODE ? tmax : hit.x, (uchar)0xff, O.xyz, D.xyz, currentNodeID, BVH8_DESCRIPTOR, &outOrigin, &outDirection);
 		uint type = bvh8_id_to_type( currentNodeID );
 		if (type == TRIANGLE)
 		{
@@ -246,52 +237,31 @@ float4 traverse_gpu8wayHW( const global float4* alt4Node, const float4 O, const 
 			}
 			uint8 children = (uint8)INVALID_NODE;
 			children.s7 = BVH_STACK_SKIP_0_TO_7;
-			stackResults = __builtin_amdgcn_ds_bvh_stack_push8_pop1_rtn(
-				stackAddr, INVALID_NODE, children, BVH_STACK_CONTROLS );
+			stackResults = __builtin_amdgcn_ds_bvh_stack_push8_pop1_rtn( stackAddr, INVALID_NODE, children, BVH_STACK_CONTROLS );
 		}
 		else
 		{
 			parentBoxID = currentNodeID;
 			uint8 children;
 			for (uint i = 0; i < 8; ++i) children[i] = result[i];
-			stackResults = __builtin_amdgcn_ds_bvh_stack_push8_pop1_rtn(
-				stackAddr, prevNode, children, BVH_STACK_CONTROLS );
+			stackResults = __builtin_amdgcn_ds_bvh_stack_push8_pop1_rtn( stackAddr, prevNode, children, BVH_STACK_CONTROLS );
 		}
-
 		uint nextNodeID = stackResults.x;
 		stackAddr = stackResults.y;
 		prevNode = INVALID_NODE;
-
 		if (nextNodeID != INVALID_NODE && nextNodeID != BVH_STACK_TERMINAL_NODE)
 		{
 			currentNodeID = nextNodeID;
 			continue;
 		}
-		else if (nextNodeID == BVH_STACK_TERMINAL_NODE)
-		{
-			break;
-		}
-
+		else if (nextNodeID == BVH_STACK_TERMINAL_NODE) break;
 		// continue with nearest node or first node on the stack
 		prevNode = currentNodeID;
 		uint parentID;
-		const global uint* words =
-			(const global uint*)( (const global uchar*)alt4Node +
-								  bvh8_id_to_offset( currentNodeID ) );
-		if (type == TRIANGLE)
-		{
-			parentID = parentBoxID;
-		}
-		else
-		{
-			parentID = words[2];
-		}
+		const global uint* words = (const global uint*)( (const global uchar*)alt4Node + bvh8_id_to_offset( currentNodeID ) );
+		if (type == TRIANGLE) parentID = parentBoxID; else parentID = words[2];
 		currentNodeID = parentID;
-
-		if (currentNodeID == INVALID_NODE)
-		{
-			break;
-		}
+		if (currentNodeID == INVALID_NODE) break;
 	}
 	return hit;
 }
