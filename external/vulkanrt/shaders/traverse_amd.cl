@@ -105,27 +105,30 @@ float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 	{
 		uint2 stackResults;
 		ulong currentPointer = encoded_base + (ulong)currentNodeID;
-		uint4 dst4 = __builtin_amdgcn_image_bvh_intersect_ray_l( currentPointer, hit.x, O, D, rD, BVH_DESCRIPTOR );
-		uint lastVisited = BVH_STACK_TERMINAL_NODE;
+		// Resuming at a parent must reproduce the child list that node produced on the
+		// first visit, or the last_node skip in the LDS stack cannot locate prevNode.
+		const float extent = (prevNode != INVALID_NODE) ? tmax : hit.x;
+		uint4 dst4 = __builtin_amdgcn_image_bvh_intersect_ray_l(
+			currentPointer, extent, O, D, rD, BVH_DESCRIPTOR );
+
 		uint type = id_to_type( currentNodeID );
-		if (type == TRIANGLE)
+		if (type < 4) // triangle node; type is the sub-triangle index
 		{
 			float4 triData = as_float4( dst4 );
 			float invDet = native_recip( triData[1] );
 			float t = triData[0] * invDet;
-			const global uint* triWords = (const global uint*)( (const global uchar*)alt4Node + id_to_offset( currentNodeID ) );
+			const global uint* triWords = (const global uint*)((const global uchar*)alt4Node + id_to_offset( currentNodeID ));
 			uint id = triWords[12];
-			if (t >= 0.0f && t <= hit.x)
+			if (t >= 0.0f && t < hit.x)
 			{
 				float u = triData[2] * invDet;
 				float v = triData[3] * invDet;
 			#ifdef ISRDNA4
-				// GFX12 uses the barycentric signs for metadata.
 				u = fabs( u ), v = fabs( v );
 			#endif
 				hit = (float4)( t, u, v, as_float( id ) );
 			}
-			stackResults = __builtin_amdgcn_ds_bvh_stack_push4_pop1_rtn( stackAddr, BVH_STACK_TERMINAL_NODE, (uint4)INVALID_NODE, BVH_STACK_CONTROLS );
+			stackResults = __builtin_amdgcn_ds_bvh_stack_push4_pop1_rtn( stackAddr, INVALID_NODE, (uint4)INVALID_NODE, BVH_STACK_CONTROLS );
 		}
 		else
 		{
