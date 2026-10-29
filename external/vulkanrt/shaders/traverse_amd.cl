@@ -257,10 +257,8 @@ float4 traverse_gpu8wayHW( const global float4* alt4Node, const float4 O, const 
 		else if (nextNodeID == BVH_STACK_TERMINAL_NODE) break;
 		// continue with nearest node or first node on the stack
 		prevNode = currentNodeID;
-		uint parentID;
-		const global uint* words = (const global uint*)( (const global uchar*)alt4Node + bvh8_id_to_offset( currentNodeID ) );
-		if (type == TRIANGLE) parentID = parentBoxID; else parentID = words[2];
-		currentNodeID = parentID;
+		const global uint* words = (const global uint*)((const global uchar*)alt4Node + bvh8_id_to_offset( currentNodeID ));
+		currentNodeID = (type == TRIANGLE) ? words[PRIM_PARENT_WORD] : words[2];
 		if (currentNodeID == INVALID_NODE) break;
 	}
 	return hit;
