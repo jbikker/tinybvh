@@ -21,6 +21,7 @@ extern tinyocl::Kernel* cwbvh_kernel_any;
 cl_event event;
 cl_ulong startTime, endTime;
 tinyocl::Buffer* gpuRayData = 0;
+tinyocl::Buffer* gpuOrigRays = 0;
 #endif
 
 void InitDXR();
@@ -465,16 +466,23 @@ float Experiment::RunGPU_BVH2( char* raySet, const int N, const char* tgaFile )
 	gpuNodes.CopyToDevice();
 	triData.CopyToDevice();
 	// create rays and send them to the gpu side
-	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+	if (!gpuRayData) 
+	{
+		gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+		gpuOrigRays = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */, 0, tinyocl::Buffer::DEVICEONLY );
+	}
 	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	kernel_nearest->SetArguments( &gpuNodes, &triData, gpuRayData );
 	int runs = 0;
+	gpuRayData->CopyToDevice();
+	gpuRayData->CopyTo( gpuOrigRays );
 	for (int pass = 0; pass < 50; pass++)
 	{
-		gpuRayData->CopyToDevice();
+		// gpuRayData->CopyToDevice();
+		gpuOrigRays->CopyTo( gpuRayData );
 		kernel_nearest->Run( N * 8, 64, 0, &event );
 		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
@@ -497,16 +505,22 @@ float Experiment::RunGPU_BVH2_Any( char* raySet, const int N )
 	gpuNodes.CopyToDevice();
 	triData.CopyToDevice();
 	// create rays and send them to the gpu side
-	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+	if (!gpuRayData) 
+	{
+		gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+		gpuOrigRays = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */, 0, tinyocl::Buffer::DEVICEONLY );
+	}
 	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	kernel_any->SetArguments( &gpuNodes, &triData, gpuRayData );
 	int runs = 0;
+	gpuRayData->CopyToDevice();
+	gpuRayData->CopyTo( gpuOrigRays );
 	for (int pass = 0; pass < 50; pass++)
 	{
-		gpuRayData->CopyToDevice();
+		gpuOrigRays->CopyTo( gpuRayData );
 		kernel_any->Run( N * 8, 64, 0, &event );
 		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
@@ -526,16 +540,22 @@ float Experiment::RunGPU_BVH4( char* raySet, const int N, const char* tgaFile )
 	tinyocl::Buffer gpuNodes( bvh4_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh4_gpu->bvh4Data, tinyocl::Buffer::READONLY );
 	gpuNodes.CopyToDevice();
 	// create rays and send them to the gpu side
-	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+	if (!gpuRayData) 
+	{
+		gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+		gpuOrigRays = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */, 0, tinyocl::Buffer::DEVICEONLY );
+	}
 	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	gpu4way_kernel->SetArguments( &gpuNodes, gpuRayData );
 	int runs = 0;
+	gpuRayData->CopyToDevice();
+	gpuRayData->CopyTo( gpuOrigRays );
 	for (int pass = 0; pass < 50; pass++)
 	{
-		gpuRayData->CopyToDevice();
+		gpuOrigRays->CopyTo( gpuRayData );
 		gpu4way_kernel->Run( N * 8, 64, 0, &event );
 		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
@@ -555,16 +575,22 @@ float Experiment::RunGPU_BVH4_Any( char* raySet, const int N )
 	tinyocl::Buffer gpuNodes( bvh4_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh4_gpu->bvh4Data, tinyocl::Buffer::READONLY );
 	gpuNodes.CopyToDevice();
 	// create rays and send them to the gpu side
-	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+	if (!gpuRayData) 
+	{
+		gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+		gpuOrigRays = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */, 0, tinyocl::Buffer::DEVICEONLY );
+	}
 	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	gpu4way_kernel_any->SetArguments( &gpuNodes, gpuRayData );
 	int runs = 0;
+	gpuRayData->CopyToDevice();
+	gpuRayData->CopyTo( gpuOrigRays );
 	for (int pass = 0; pass < 50; pass++)
 	{
-		gpuRayData->CopyToDevice();
+		gpuOrigRays->CopyTo( gpuRayData );
 		gpu4way_kernel_any->Run( N * 8, 64, 0, &event );
 		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
@@ -590,16 +616,22 @@ float Experiment::RunGPU_CWBVH( char* raySet, const int N, const char* tgaFile )
 	cwbvhNodes.CopyToDevice();
 	cwbvhTris.CopyToDevice();
 	// create rays (duplicated 8x) and send them to the gpu side
-	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+	if (!gpuRayData) 
+	{
+		gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+		gpuOrigRays = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */, 0, tinyocl::Buffer::DEVICEONLY );
+	}
 	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	cwbvh_kernel->SetArguments( &cwbvhNodes, &cwbvhTris, gpuRayData );
 	int runs = 0;
+	gpuRayData->CopyToDevice();
+	gpuRayData->CopyTo( gpuOrigRays );
 	for (int pass = 0; pass < 50; pass++)
 	{
-		gpuRayData->CopyToDevice();
+		gpuOrigRays->CopyTo( gpuRayData );
 		cwbvh_kernel->Run( N * 8, 64, 0, &event ); // for now, todo.
 		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
@@ -625,16 +657,22 @@ float Experiment::RunGPU_CWBVH_Any( char* raySet, const int N )
 	cwbvhNodes.CopyToDevice();
 	cwbvhTris.CopyToDevice();
 	// create rays and send them to the gpu side
-	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+	if (!gpuRayData) 
+	{
+		gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+		gpuOrigRays = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */, 0, tinyocl::Buffer::DEVICEONLY );
+	}
 	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	cwbvh_kernel_any->SetArguments( &cwbvhNodes, &cwbvhTris, gpuRayData );
 	int runs = 0;
+	gpuRayData->CopyToDevice();
+	gpuRayData->CopyTo( gpuOrigRays );
 	for (int pass = 0; pass < 50; pass++)
 	{
-		gpuRayData->CopyToDevice();
+		gpuOrigRays->CopyTo( gpuRayData );
 		cwbvh_kernel_any->Run( N * 8, 64, 0, &event ); // for now, todo.
 		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
@@ -656,16 +694,22 @@ float Experiment::RunGPU_AMD4( char* raySet, const int N, const char* tgaFile )
 	tinyocl::Buffer gpuNodes( bvh4_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh4_gpu->bvh4Data, tinyocl::Buffer::READONLY );
 	gpuNodes.CopyToDevice();
 	// create rays and send them to the gpu side
-	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+	if (!gpuRayData) 
+	{
+		gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+		gpuOrigRays = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */, 0, tinyocl::Buffer::DEVICEONLY );
+	}
 	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	amd4way_kernel->SetArguments( &gpuNodes, gpuRayData );
 	int runs = 0;
+	gpuRayData->CopyToDevice();
+	gpuRayData->CopyTo( gpuOrigRays );
 	for (int pass = 0; pass < 50; pass++)
 	{
-		gpuRayData->CopyToDevice();
+		gpuOrigRays->CopyTo( gpuRayData );
 		amd4way_kernel->Run( N * 8, 64, 0, &event );
 		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
@@ -687,16 +731,22 @@ float Experiment::RunGPU_AMD4_Any( char* raySet, const int N )
 	tinyocl::Buffer gpuNodes( bvh4_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh4_gpu->bvh4Data, tinyocl::Buffer::READONLY );
 	gpuNodes.CopyToDevice();
 	// create rays and send them to the gpu side
-	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+	if (!gpuRayData) 
+	{
+		gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+		gpuOrigRays = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */, 0, tinyocl::Buffer::DEVICEONLY );
+	}
 	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	amd4way_kernel_any->SetArguments( &gpuNodes, gpuRayData );
 	int runs = 0;
+	gpuRayData->CopyToDevice();
+	gpuRayData->CopyTo( gpuOrigRays );
 	for (int pass = 0; pass < 50; pass++)
 	{
-		gpuRayData->CopyToDevice();
+		gpuOrigRays->CopyTo( gpuRayData );
 		amd4way_kernel_any->Run( N * 8, 64, 0, &event );
 		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
@@ -718,16 +768,22 @@ float Experiment::RunGPU_AMD8( char* raySet, const int N, const char* tgaFile )
 	tinyocl::Buffer gpuNodes( bvh8_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh8_gpu->bvh8Data, tinyocl::Buffer::READONLY );
 	gpuNodes.CopyToDevice();
 	// create rays and send them to the gpu side
-	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+	if (!gpuRayData) 
+	{
+		gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+		gpuOrigRays = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */, 0, tinyocl::Buffer::DEVICEONLY );
+	}
 	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	amd8way_kernel->SetArguments( &gpuNodes, gpuRayData );
 	int runs = 0;
+	gpuRayData->CopyToDevice();
+	gpuRayData->CopyTo( gpuOrigRays );
 	for (int pass = 0; pass < 50; pass++)
 	{
-		gpuRayData->CopyToDevice();
+		gpuOrigRays->CopyTo( gpuRayData );
 		amd8way_kernel->Run( N * 8, 64, 0, &event );
 		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
@@ -749,16 +805,22 @@ float Experiment::RunGPU_AMD8_Any( char* raySet, const int N )
 	tinyocl::Buffer gpuNodes( bvh8_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh8_gpu->bvh8Data, tinyocl::Buffer::READONLY );
 	gpuNodes.CopyToDevice();
 	// create rays and send them to the gpu side
-	if (!gpuRayData) gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+	if (!gpuRayData) 
+	{
+		gpuRayData = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */ );
+		gpuOrigRays = new tinyocl::Buffer( N * 64 * 8 /* size of Ray on GPU */, 0, tinyocl::Buffer::DEVICEONLY );
+	}
 	for (int o = 0, j = 0; j < 8; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	amd8way_kernel_any->SetArguments( &gpuNodes, gpuRayData );
 	int runs = 0;
+	gpuRayData->CopyToDevice();
+	gpuRayData->CopyTo( gpuOrigRays );
 	for (int pass = 0; pass < 50; pass++)
 	{
-		gpuRayData->CopyToDevice();
+		gpuOrigRays->CopyTo( gpuRayData );
 		amd8way_kernel_any->Run( N * 8, 64, 0, &event );
 		clWaitForEvents( 1, &event ); // OpenCL kernels run asynchronously
 		clGetEventProfilingInfo( event, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
