@@ -80,7 +80,7 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 #define ENABLE_HWRT			true	// display info on hardware RT pipeline performance
 #define ENABLE_BVH2			false	// display info on BVH_GPU performance
 #define ENABLE_BVH4			false	// display info on BVH4_GPU performance
-#define ENABLE_CWBVH		true	// display info on BVH8_CWBVH performance
+#define ENABLE_CWBVH		false	// display info on BVH8_CWBVH performance
 #define ENABLE_RAY_QUERIES	false	// display info on inline ray query performance
 #define ENABLE_VALIDATION	false	// VK_LAYER_KHRONOS_validation; costs performance
 #define BARRIER_BETWEEN_DISPATCHES false
@@ -89,27 +89,27 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 // OpenCL interleaving. The OpenCL backends trace the same rays through the same
 // scene as the compute shaders: BVH_GPU with shaders/traverse.cl, the AMD layouts
 // with shaders/traverse_amd.cl, so the two APIs can be compared one frame apart.
-#define ENABLE_OPENCL		false	// init OpenCL and put its backends in the rotation
+#define ENABLE_OPENCL		true	// init OpenCL and put its backends in the rotation
 #define ENABLE_OCL_BVH2		true	// display info on OpenCL BVH_GPU performance
 #define ENABLE_OCL_AMD_BVH4	false	// display info on AMD BVH4 hardware traversal (RDNA3/RDNA4)
-#define ENABLE_OCL_AMD_BVH8	false	// display info on AMD BVH8 hardware traversal (RDNA4)
+#define ENABLE_OCL_AMD_BVH8	true	// display info on AMD BVH8 hardware traversal (RDNA4)
 #define OCL_PRESENT_RESULT	false	// show what OpenCL traced; costs a 4MB readback + upload per frame
 #define OCL_DEVICE_INDEX	-1		// -1: use the GPU Vulkan runs on; else an index from the list printed at startup
 
 #if 0
 
 const char* triMesh = "../../testdata/cryteksponza.bin";
-const char* raySetPath = "../../view3rays.bin";
+const char* raySetPath = "../../testdata/view3rays.bin";
 
 #else
 
-const char* triMesh = "../../testdata/legoporsche.bin";
-const char* raySetPath = "../../view3rays_sm.bin";
+const char* triMesh = "../../testdata/conference.bin";
+const char* raySetPath = "../../testdata/view2rays_cnf.bin";
 
 #endif
 
 constexpr uint32_t NUM_INSTANCES = 1, FRAME_COUNT = 2;
-constexpr uint32_t NUM_DISPATCHES = 100;
+constexpr uint32_t NUM_DISPATCHES = 1;
 constexpr uint32_t NUM_SHADER_GROUPS = 3; // raygen, miss, hit group
 
 // The ray tracing backends that are cycled through, one per frame. Everything from
@@ -988,6 +988,9 @@ static void CopyBVH2( BVH& copy )
 
 static void InitAMDBVH4()
 {
+#if 0
+
+#else
 	printf("converting to AMD4... ");
 	CopyBVH2( bvh2AMD4 );
 	bvh2AMD4.SplitLeafs( 1 );
@@ -995,6 +998,7 @@ static void InitAMDBVH4()
 	mbvh4AMD.ConvertFrom( bvh2AMD4, true );
 	bvh4AMD.ConvertFrom( mbvh4AMD );
 	printf("done.\n");
+#endif
 }
 
 static void InitAMDBVH8()
