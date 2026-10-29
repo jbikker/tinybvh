@@ -103,12 +103,12 @@ const char* raySetPath = "../../testdata/view3rays.bin";
 #else
 
 const char* triMesh = "../../testdata/conference.bin";
-const char* raySetPath = "../../testdata/view3rays_cnf.bin";
+const char* raySetPath = "../../testdata/view1rays_cnf.bin";
 
 #endif
 
 constexpr uint32_t NUM_INSTANCES = 1, FRAME_COUNT = 2;
-constexpr uint32_t NUM_DISPATCHES = 100;
+constexpr uint32_t NUM_DISPATCHES = 10;
 constexpr uint32_t NUM_SHADER_GROUPS = 3; // raygen, miss, hit group
 
 // The ray tracing backends that are cycled through, one per frame. Everything from
