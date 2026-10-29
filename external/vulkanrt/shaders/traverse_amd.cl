@@ -89,9 +89,7 @@ inline uint id_to_type( uint id ) { return id & 7u; }
 // BVH descriptor: zero base, distance sorting, 42-bit size, pointer flags enabled.
 // Type 8; triangle results are (t numerator, denominator, u numerator, v numerator).
 // Reference: AMD RDNA3 ISA, section 10.9, BVH Resource Descriptor.
-#define BVH_DESCRIPTOR                        \
-	( (uint4)( 0u, ( 1u << 31 ), 0xffffffffu, \
-			   ( 1u << 31 ) | ( 1u << 24 ) | ( 1u << 23 ) | 0x3ffu ) )
+#define BVH_DESCRIPTOR 	((uint4)( 0u, 1u << 31, 0xffffffffu, (1u << 31) | (1u << 24) | (1u << 23) | 0x3ffu))
 
 float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const float4 D, const float4 rD, const float tmax, __local uint* hwStack )
 {
@@ -102,15 +100,12 @@ float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 	uint stackAddr = ( ( (uint)(size_t)hwStack >> 2 ) + ( lane & 31u ) +
 					  ( lane >> 5 ) * ( 32u * HW_BVH_STACK_ENTRIES ) ) << HW_BVH_STACK_BASE_SHIFT;
 	float4 hit = (float4)( tmax, 0.0f, 0.0f, as_float( INVALID_NODE ) );
-
 	uint currentNodeID = 5; // start at root BOX32 node at byte offset zero.
 	while (1)
 	{
 		uint2 stackResults;
 		ulong currentPointer = encoded_base + (ulong)currentNodeID;
-		uint4 dst4 = __builtin_amdgcn_image_bvh_intersect_ray_l(
-			currentPointer, hit.x, O, D, rD, BVH_DESCRIPTOR );
-
+		uint4 dst4 = __builtin_amdgcn_image_bvh_intersect_ray_l( currentPointer, hit.x, O, D, rD, BVH_DESCRIPTOR );
 		uint lastVisited = BVH_STACK_TERMINAL_NODE;
 		uint type = id_to_type( currentNodeID );
 		if (type == TRIANGLE)
@@ -118,12 +113,8 @@ float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 			float4 triData = as_float4( dst4 );
 			float invDet = native_recip( triData[1] );
 			float t = triData[0] * invDet;
-
-			const global uint* triWords =
-				(const global uint*)( (const global uchar*)alt4Node +
-									  id_to_offset( currentNodeID ) );
+			const global uint* triWords = (const global uint*)( (const global uchar*)alt4Node + id_to_offset( currentNodeID ) );
 			uint id = triWords[12];
-
 			if (t >= 0.0f && t <= hit.x)
 			{
 				float u = triData[2] * invDet;
@@ -134,39 +125,29 @@ float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 			#endif
 				hit = (float4)( t, u, v, as_float( id ) );
 			}
-			stackResults = __builtin_amdgcn_ds_bvh_stack_push4_pop1_rtn(
-				stackAddr, BVH_STACK_TERMINAL_NODE, (uint4)INVALID_NODE, BVH_STACK_CONTROLS );
+			stackResults = __builtin_amdgcn_ds_bvh_stack_push4_pop1_rtn( stackAddr, BVH_STACK_TERMINAL_NODE, (uint4)INVALID_NODE, BVH_STACK_CONTROLS );
 		}
 		else
 		{
-			stackResults = __builtin_amdgcn_ds_bvh_stack_push4_pop1_rtn(
-				stackAddr, prevNode, dst4, BVH_STACK_CONTROLS );
+			stackResults = __builtin_amdgcn_ds_bvh_stack_push4_pop1_rtn( stackAddr, prevNode, dst4, BVH_STACK_CONTROLS );
 		}
-
 		uint nextNodeID = stackResults.x;
 		stackAddr = stackResults.y;
 		prevNode = INVALID_NODE;
-
 		if (nextNodeID != INVALID_NODE && nextNodeID != BVH_STACK_TERMINAL_NODE)
 		{
 			currentNodeID = nextNodeID;
 			continue;
 		}
-		else if (nextNodeID == BVH_STACK_TERMINAL_NODE)
-		{
-			break;
-		}
-
+		else if (nextNodeID == BVH_STACK_TERMINAL_NODE) break;
 		// continue with nearest node or first node on the stack
-		#ifndef ISRDNA4
+	#ifndef ISRDNA4
 		// Restore the GFX11 stack index after an empty-stack pop.
 		stackAddr += 1u;
-		#endif
+	#endif
 		prevNode = currentNodeID;
 		uint parentID;
-		const global uint* words =
-			(const global uint*)( (const global uchar*)alt4Node +
-								  id_to_offset( currentNodeID ) );
+		const global uint* words = (const global uint*)( (const global uchar*)alt4Node + id_to_offset( currentNodeID ) );
 		if (type == TRIANGLE)
 		{
 			parentID = words[14]; // TinyBVH parent ID at byte 56
@@ -176,11 +157,7 @@ float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 			parentID = words[31]; // TinyBVH parent ID at byte 124.
 		}
 		currentNodeID = parentID;
-
-		if (currentNodeID == INVALID_NODE)
-		{
-			break;
-		}
+		if (currentNodeID == INVALID_NODE) break;
 	}
 	return hit;
 }
