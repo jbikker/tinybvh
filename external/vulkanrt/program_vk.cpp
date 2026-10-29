@@ -104,7 +104,7 @@ const char* raySetPath = "../../testdata/view3rays.bin";
 #else
 
 const char* triMesh = "../../testdata/conference.bin";
-const char* raySetPath = "../../testdata/view2rays_cnf.bin";
+const char* raySetPath = "../../testdata/view1rays_cnf.bin";
 
 #endif
 
