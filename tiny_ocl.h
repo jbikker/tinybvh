@@ -747,7 +747,7 @@ void Buffer::CopyFromDevice( const int offset, const int byteCount, const bool b
 // ----------------------------------------------------------------------------
 void Buffer::CopyTo( Buffer* buffer )
 {
-	if (size > 0) 
+	if (size > 0)
 	{
 		cl_int error;
 		CHECKCL( error = clEnqueueCopyBuffer( Kernel::GetQueue(), deviceBuffer, buffer->deviceBuffer, 0, 0, size, 0, 0, 0 ) );
