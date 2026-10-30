@@ -4,8 +4,8 @@
 // Any of the BVH layouts with an Intersect method can be used.
 
 #define FENSTER_APP_IMPLEMENTATION
-#define SCRWIDTH 800
-#define SCRHEIGHT 800
+#define SCRWIDTH 1600
+#define SCRHEIGHT 900
 #include "external/fenster.h" // https://github.com/zserge/fenster
 
 #define TINYBVH_IMPLEMENTATION
@@ -33,9 +33,10 @@ void AddMesh( const char* file, float scale = 1, bvhvec3 pos = {}, int c = 0, in
 {
 	std::fstream s{ file, s.binary | s.in };
 	s.read( (char*)&N, 4 );
-	bvhvec4* data = (bvhvec4*)malloc64( (size_t)(N + triCount) * 48 );
-	if (verts) memcpy( data, verts, triCount * 48 ), free64( verts );
-	verts = data, s.read( (char*)verts + triCount * 48, N * 48 ), triCount += N;
+	size_t bytes = ((size_t)N + (size_t)triCount) * 48;
+	bvhvec4* data = (bvhvec4*)malloc64( bytes );
+	if (verts) memcpy( data, verts, (size_t)triCount * 48 ), free64( verts );
+	verts = data, s.read( (char*)verts + (size_t)triCount * 48, N * 48 ), triCount += N;
 	for (int* b = (int*)verts + (triCount - N) * 12, i = 0; i < N * 3; i++)
 		*(bvhvec3*)b = *(bvhvec3*)b * scale + pos, b[3] = c ? c : b[3], b += 4;
 }
@@ -64,15 +65,10 @@ void Init()
 	freopen_s( &file, "CON", "w", stderr );
 	SetWindowPos( GetConsoleWindow(), HWND_BOTTOM, 0, 0, 800, 600, 0 );
 	// prepare scene
-#if 1
-	AddMesh( "./testdata/cryteksponza.bin" );		// Load one .bin file with triangle data,
-	// AddMesh( "./testdata/sanmiguel.bin" );
-#else
-	AddMesh( "./testdata/bistro_ext_part1.bin" );		// ..or several.
-	AddMesh( "./testdata/bistro_ext_part2.bin" );		// See ./testdata for a collection of meshes.
-#endif
-	bvh.settings.postOptimize = true;
-	bvh.BuildHQ( verts, triCount );
+	AddMesh( "./testdata/cryteksponza.bin" );
+	printf( "triangles: %i\n", triCount );
+	bvh.Build( verts, triCount );
+	bvh.Save( "./testdata/bistro_opt.bvh" );
 	// load serialized camera position / direction from file
 	std::fstream s = std::fstream{ "camera.bin", s.binary | s.in };
 	if (!s.is_open()) return;
@@ -95,7 +91,17 @@ void UpdateCamera( float dt, fenster& f )
 	// recalculate right, up
 	right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), view ) ), up = 0.8f * tinybvh_cross( view, right );
 	bvhvec3 center = eye + 1.2f * view;
-	p1 = center - right + up, p2 = center + right + up, p3 = center - right - up;
+	constexpr static float aspect = (float)SCRWIDTH / (float)SCRHEIGHT;
+	p1 = center - aspect * right + up, p2 = center + aspect * right + up, p3 = center - aspect * right - up;
+}
+
+bvhvec3 heat( float t )
+{
+    float r = 0.1357f + t * (4.5974f + t * (-42.3277f + t * (130.5887f + t * (-150.5666f + t * 58.1375f))));
+    float g = 0.0914f + t * (2.1856f + t * (4.8052f + t * (-14.0195f + t * (4.2109f + t * 2.7747f))));
+    float b = 0.1067f + t * (12.5925f + t * (-60.1097f + t * (109.0745f + t * (-88.5066f + t * 26.8183f))));
+    r = r < 0 ? 0 : (r > 1 ? 1 : r); g = g < 0 ? 0 : (g > 1 ? 1 : g); b = b < 0 ? 0 : (b > 1 ? 1 : b);
+	return bvhvec3( r, g, b );
 }
 
 // Worker thread renders tiles until no unclaimed tiles are left.
@@ -115,17 +121,24 @@ void TraceWorkerThread( uint32_t* buf, int threadIdx )
 			const bvhvec3 D = tinybvh_normalize( p1 + u * (p2 - p1) + v * (p3 - p1) - eye );
 			// trace
 			Ray ray( eye, D );
-			bvh.Intersect( ray );
+		#if 1
+			// heatmap viewer
+			static float rms = 1.0f / 256;
+			bvhvec3 E = heat( tinybvh_min( 1.0f, (float)bvh.Intersect( ray ) * rms ) );
+			if (ray.hit.t == BVH_FAR) E = bvhvec3( 1 );
+		#else
+			// regular viewer
 			bvhvec3 E( 0.6f, 0.7f, 1 ); // sky color
 			if (ray.hit.t < BVH_FAR)
 			{
 				bvhvec3 N = TriangleNormal( ray.hit.prim & PRIM_IDX_MASK );
 				if (tinybvh_dot( N, ray.D ) > 0) N *= -1.0f;
 				static bvhvec3 L = tinybvh_normalize( bvhvec3( 1, 1, 0 ) );
-				float light = tinybvh_clamp( tinybvh_dot( N, L ), 0.2f, 0.999f );
+				float light = 1; // tinybvh_clamp( tinybvh_dot( N, L ), 0.5f, 0.999f );
 				// E = TriangleColor( ray.hit.prim & PRIM_IDX_MASK ) * light;
 				E = (N + 1) * 0.5f; // encode normal as rgb color
 			}
+		#endif
 			float r = 255.0f * E.x, g = 255.0f * E.y, b = 255.0f * E.z;
 			// store color in Fenster pixel buffer
 			buf[pixelIdx] = (int)b + ((int)g << 8) + ((int)r << 16);
