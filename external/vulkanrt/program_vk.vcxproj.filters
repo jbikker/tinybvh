@@ -67,5 +67,8 @@
     <None Include="shaders\traverse.cl">
       <Filter>Shaders</Filter>
     </None>
+    <None Include="shaders\traverse_amd.cl">
+      <Filter>Shaders</Filter>
+    </None>
   </ItemGroup>
 </Project>

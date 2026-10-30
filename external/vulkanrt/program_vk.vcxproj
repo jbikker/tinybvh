@@ -124,6 +124,7 @@
     <!-- included by the shaders below, not compiled on its own -->
     <None Include="shaders\common.glsl" />
     <None Include="shaders\traverse.cl" />
+    <None Include="shaders\traverse_amd.cl" />
   </ItemGroup>
   <ItemGroup>
     <!--
