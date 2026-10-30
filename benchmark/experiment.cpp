@@ -18,7 +18,6 @@ extern tinyocl::Kernel* amd8way_kernel;
 extern tinyocl::Kernel* amd8way_kernel_any;
 extern tinyocl::Kernel* cwbvh_kernel;
 extern tinyocl::Kernel* cwbvh_kernel_any;
-cl_event event;
 cl_ulong startTime, endTime;
 tinyocl::Buffer* gpuRayData = 0;
 tinyocl::Buffer* gpuOrigRays = 0;
@@ -103,7 +102,8 @@ void Experiment::Run()
 {
 #if defined _WIN32 && defined _MSC_VER
 	// force processing to one core to improve cache coherence - TODO: gcc.
-	SetThreadAffinityMask( GetCurrentProcess(), 1 );
+	const uint32_t hw = (uint32_t)std::thread::hardware_concurrency();
+	if (hw >= 4) SetThreadAffinityMask( GetCurrentThread(), 4 );
 #endif
 	// run actual experiment
 	if (raySet != UNSPECIFIED) RunTraceExperiment(); else RunBuildExperiment();
@@ -164,37 +164,37 @@ void Experiment::RunTraceExperiment()
 #ifdef ENABLE_OPENCL
 	if (flags & USE_GPU && bvh->layout == GPU_BVH)
 	{
-		traceTime = RunGPU_BVH2( extensionRays, N, tgaFile );
+		traceTime = RunGPU_BVH2( extensionRays, N, false );
 		raysPerSecond = (float)(N * 8) / traceTime;
-		runs = 40;
+		runs = 100;
 		if (tgaFile) WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 	}
 	else if (flags & USE_GPU && bvh->layout == GPU_BVH4)
 	{
-		traceTime = RunGPU_BVH4( extensionRays, N, tgaFile );
+		traceTime = RunGPU_BVH4( extensionRays, N, false );
 		raysPerSecond = (float)(N * 8) / traceTime;
-		runs = 40;
+		runs = 100;
 		if (tgaFile) WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 	}
 	else if (flags & USE_GPU && bvh->layout == CWBVH)
 	{
-		traceTime = RunGPU_CWBVH( extensionRays, N, tgaFile );
+		traceTime = RunGPU_CWBVH( extensionRays, N, false );
 		raysPerSecond = (float)(N * 8) / traceTime;
-		runs = 40;
+		runs = 100;
 		if (tgaFile) WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 	}
 	else if (flags & USE_GPU && bvh->layout == AMD_HWRT)
 	{
-		traceTime = RunGPU_AMD4( extensionRays, N, tgaFile );
+		traceTime = RunGPU_AMD4( extensionRays, N, false );
 		raysPerSecond = (float)(N * 8) / traceTime;
-		runs = 40;
+		runs = 100;
 		if (tgaFile) WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 	}
 	else if (flags & USE_GPU && bvh->layout == AMD_HWRT8)
 	{
-		traceTime = RunGPU_AMD8( extensionRays, N, tgaFile );
+		traceTime = RunGPU_AMD8( extensionRays, N, false );
 		raysPerSecond = (float)(N * 8) / traceTime;
-		runs = 40;
+		runs = 100;
 		if (tgaFile) WriteImage( 0, (char*)gpuRayData->GetHostPtr() );
 	}
 	else
@@ -460,21 +460,22 @@ static constexpr int ocl_runs = 100;
 
 int ExperimentCore( tinyocl::Kernel* kernel, const int N, uint64_t& traceTime )
 {
-	int runs = 0;
 	gpuRayData->CopyToDevice();
 	gpuRayData->CopyTo( gpuOrigRays );
-	cl_event events[ocl_runs];
+	cl_event events[ocl_runs] = {};
 	for (int pass = -20 /* warm up */; pass < ocl_runs; pass++)
 	{
 		gpuOrigRays->CopyTo( gpuRayData );
 		kernel->Run( N * 8, 64, 0, pass >= 0 ? &events[pass] : 0 );
 	}
 	clFinish( kernel->GetQueue() );
+	traceTime = 0x3fffffffffffffffu;
 	for (int pass = 0; pass < ocl_runs; pass++)
 	{
 		clGetEventProfilingInfo( events[pass], CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
 		clGetEventProfilingInfo( events[pass], CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );
-		traceTime += endTime - startTime;
+		uint64_t elapsed = endTime - startTime;
+		if (elapsed < traceTime) traceTime = elapsed;
 		clReleaseEvent( events[pass] );
 	}
 	return ocl_runs;
@@ -504,7 +505,7 @@ float Experiment::RunGPU_BVH2( char* raySet, const int N, bool anyHit )
 	int runs = ExperimentCore( kernel, N, traceTime );
 	// get results from GPU for verification
 	if (!anyHit) gpuRayData->CopyFromDevice();
-	return (traceTime / runs) * 1e-9f;
+	return (float)traceTime * 1e-9f;
 }
 
 float Experiment::RunGPU_BVH4( char* raySet, const int N, bool anyHit )
@@ -528,7 +529,7 @@ float Experiment::RunGPU_BVH4( char* raySet, const int N, bool anyHit )
 	int runs = ExperimentCore( kernel, N, traceTime );
 	// get results from GPU for verification.
 	if (!anyHit) gpuRayData->CopyFromDevice();
-	return (traceTime / runs) * 1e-9f;
+	return (float)traceTime * 1e-9f;
 }
 
 float Experiment::RunGPU_CWBVH( char* raySet, const int N, bool anyHit )
@@ -558,14 +559,14 @@ float Experiment::RunGPU_CWBVH( char* raySet, const int N, bool anyHit )
 	int runs = ExperimentCore( kernel, N, traceTime );
 	// get results from GPU for verification.
 	if (!anyHit) gpuRayData->CopyFromDevice();
-	return (traceTime / runs) * 1e-9f;
+	return (float)traceTime * 1e-9f;
 }
 
 float Experiment::RunGPU_AMD4( char* raySet, const int N, bool anyHit )
 {
 	// load AMD-specific kernel
-	amd4way_kernel = new tinyocl::Kernel( "kernels/traverse_amd_hw.cl", "batch_gpu4wayHW" );
-	amd4way_kernel_any = new tinyocl::Kernel( "kernels/traverse_amd_hw.cl", "batch_gpu4wayHW_any" );
+	if (!amd4way_kernel) amd4way_kernel = new tinyocl::Kernel( "kernels/traverse_amd_hw.cl", "batch_gpu4wayHW" );
+	if (!amd4way_kernel_any) amd4way_kernel_any = new tinyocl::Kernel( "kernels/traverse_amd_hw.cl", "batch_gpu4wayHW_any" );
 	// trace 'first hit' rays on GPU using a 4-wide BVH
 	BVH4_AMD_HW* bvh4_gpu = (BVH4_AMD_HW*)bvh->GetBVH();
 	tinyocl::Buffer gpuNodes( bvh4_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh4_gpu->bvh4Data, tinyocl::Buffer::READONLY );
@@ -585,14 +586,14 @@ float Experiment::RunGPU_AMD4( char* raySet, const int N, bool anyHit )
 	int runs = ExperimentCore( kernel, N, traceTime );
 	// get results from GPU for verification.
 	if (!anyHit) gpuRayData->CopyFromDevice();
-	return (traceTime / runs) * 1e-9f;
+	return (float)traceTime * 1e-9f;
 }
 
 float Experiment::RunGPU_AMD8( char* raySet, const int N, bool anyHit )
 {
 	// load AMD-specific kernel
-	amd8way_kernel = new tinyocl::Kernel( "kernels/traverse_amd_hw.cl", "batch_gpu8wayHW" );
-	amd8way_kernel_any = new tinyocl::Kernel( "kernels/traverse_amd_hw.cl", "batch_gpu8wayHW" );
+	if (!amd8way_kernel) amd8way_kernel = new tinyocl::Kernel( "kernels/traverse_amd_hw.cl", "batch_gpu8wayHW" );
+	if (!amd8way_kernel_any) amd8way_kernel_any = new tinyocl::Kernel( "kernels/traverse_amd_hw.cl", "batch_gpu8wayHW_any" );
 	// trace 'first hit' rays on GPU using an 8-wide BVH
 	CWBVH8_AMD_HW* bvh8_gpu = (CWBVH8_AMD_HW*)bvh->GetBVH();
 	tinyocl::Buffer gpuNodes( bvh8_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh8_gpu->bvh8Data, tinyocl::Buffer::READONLY );
@@ -612,7 +613,7 @@ float Experiment::RunGPU_AMD8( char* raySet, const int N, bool anyHit )
 	int runs = ExperimentCore( kernel, N, traceTime );
 	// get results from GPU for verification.
 	if (!anyHit) gpuRayData->CopyFromDevice();
-	return (traceTime / runs) * 1e-9f;
+	return (float)traceTime * 1e-9f;
 }
 
 #endif

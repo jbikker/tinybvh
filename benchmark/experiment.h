@@ -38,16 +38,16 @@ private:
 	void RunBuildExperiment();
 	void RunTraceExperiment();
 	void WriteImage( char* raySet, const char* tracedRays = 0 );
-	float RunGPU_BVH2( char* raySet, const int N, bool anyHit = false );
-	float RunGPU_BVH4( char* raySet, const int N, bool anyHit = false );
-	float RunGPU_CWBVH( char* raySet, const int N, bool anyHit = false );
-	float RunGPU_AMD4( char* raySet, const int N, bool anyHit = false );
-	float RunGPU_AMD8( char* raySet, const int N, bool anyHit = false );
+	float RunGPU_BVH2( char* raySet, const int N, bool anyHit );
+	float RunGPU_BVH4( char* raySet, const int N, bool anyHit );
+	float RunGPU_CWBVH( char* raySet, const int N, bool anyHit );
+	float RunGPU_AMD4( char* raySet, const int N, bool anyHit );
+	float RunGPU_AMD8( char* raySet, const int N, bool anyHit );
 	RaySet raySet = UNSPECIFIED;
 	Scene primSet = (Scene)0;
 	AccStruc* bvh = 0;
 	ExperimentFlags flags;
-	char* title = 0, *tgaFile = 0, * bakedBVH = 0;
+	char* title = 0, * tgaFile = 0, * bakedBVH = 0;
 	float buildTime = 0; // in seconds.
 	inline static PrimitiveSet* cachedPrimSet[99] = { 0 };
 	inline static RayDistribution* cachedRaySet[99] = { 0 };
