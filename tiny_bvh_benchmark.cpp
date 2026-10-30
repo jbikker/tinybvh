@@ -24,7 +24,7 @@ int main()
 	vector<Experiment*> experiment;
 	// construct list of experiments
 
-#if 0
+#if 1
 	
 	// experiments for slide 41: TinyBVH tree quality. TODO: should we do a basic optimization step after H-PLOC to make it fair?
 	/* scene = STANFORD_DRAGON;
