@@ -2022,6 +2022,274 @@ static const CandidateInfo g_candidate[] = {
 
 static const char* CandidateName( const uint32_t c ) { return g_candidate[c].name; }
 
+// ----------------------------------------------------------------------------------------
+// subtree rebuild pre-pass
+// ----------------------------------------------------------------------------------------
+//
+// A finished subtree is not the best tree over its own references. The fragments it holds were
+// shaped by split planes chosen higher up, and the splits inside it were chosen by a greedy that
+// had already committed to those. Rebuilding the subtree standalone lets both be re-decided
+// against nothing but the box it has to fit in, which is fixed and therefore makes the exchange
+// exactly local: the replacement's root box is clipped to the original's, so no node above it
+// sees a different box and no cost above it changes.
+//
+// Measured on 370k triangles of San Miguel, over subtrees of 16 to 128 references: standalone,
+// the restart alone is worth 0.20% of whole-tree cost, spatial splits add 0.19% for 1% more
+// references, and sweeping the bin count adds a further 0.27%. Inside the pipeline the object
+// split variant is worth almost nothing - bvhopt builds with keepSplitting, so the surrounding
+// tree already has one reference per leaf and the leaf sizing freedom that produced most of that
+// 0.20% does not exist - which is why only the spatial variant survives here. The bin sweep only
+// exists when spatial splits are on: hqbvhbins is read in BuildHQ and nowhere in the binned
+// object-split path.
+//
+// The search is exhaustive rather than sampled: every bin count in [minBins, maxBins], each with
+// and without hqbvhoddeven, which gives odd levels one bin more. 50 builds per subtree at the
+// defaults. Nothing here is cheap and nothing here is meant to be.
+//
+// Size matters more than any of that. At 20k references and up the greedy reproduces what it
+// already built whatever the bin count, and 2 of 13 subtrees improved at all; the gain lives
+// between 16 and a few hundred references, which is the band that treelets (7 to 10 leaves) and
+// exact bottoms (14 references) cannot reach and the cost-carrying rebuild does not target.
+//
+// This runs before everything else in Optimizer::Run, on the tree as built.
+
+struct PrePass
+{
+	bool on = false;			// -prepass
+	uint32_t minRefs = 16;		// the band; see the note above on where the gain lives
+	uint32_t maxRefs = 128;
+	uint32_t minBins = 8;		// every bin count in [minBins, maxBins], each with and without
+	uint32_t maxBins = 32;		// hqbvhoddeven, which gives odd levels one bin more
+	uint32_t Configs() const { return (maxBins - minBins + 1) * 2; }
+};
+
+// Half the surface area of a box, clipped to [lo,hi]; zero if the clip is empty.
+static float ClippedArea( const bvhvec3& bmin, const bvhvec3& bmax, const bvhvec3& lo, const bvhvec3& hi )
+{
+	const bvhvec3 a = tinybvh_max( bmin, lo ), b = tinybvh_min( bmax, hi ), e = b - a;
+	if (e.x < 0 || e.y < 0 || e.z < 0) return 0;
+	return e.x * e.y + e.y * e.z + e.z * e.x;
+}
+
+// Cost of a subtree with every box clipped to [lo,hi]. Unnormalized - the division by root area
+// cancels when two subtrees over the same box are compared, and leaving it out lets costs add.
+static double SubtreeCost( const tinybvh::BVH& bvh, const uint32_t root, const bvhvec3& lo, const bvhvec3& hi,
+	uint32_t& refs, uint32_t& nodes )
+{
+	std::vector<uint32_t> stack;
+	uint32_t node = root;
+	double trav = 0, isect = 0;
+	for (;;)
+	{
+		const tinybvh::BVH::BVHNode& n = bvh.bvhNode[node];
+		const float a = ClippedArea( n.aabbMin, n.aabbMax, lo, hi );
+		if (n.isLeaf()) isect += (double)a * n.triCount, refs += n.triCount;
+		else
+		{
+			trav += a, nodes++;
+			stack.push_back( (uint32_t)n.leftFirst + 1 ), stack.push_back( (uint32_t)n.leftFirst );
+		}
+		if (stack.empty()) break;
+		node = stack.back(), stack.pop_back();
+	}
+	return trav * bvh.c_trav + isect * bvh.c_int;
+}
+
+static void CollectPrims( const tinybvh::BVH& bvh, const uint32_t root, std::vector<uint32_t>& out )
+{
+	std::vector<uint32_t> stack;
+	uint32_t node = root;
+	for (;;)
+	{
+		const tinybvh::BVH::BVHNode& n = bvh.bvhNode[node];
+		if (n.isLeaf()) for (uint32_t i = 0; i < n.triCount; i++) out.push_back( bvh.primIdx[n.leftFirst + i] );
+		else stack.push_back( (uint32_t)n.leftFirst + 1 ), stack.push_back( (uint32_t)n.leftFirst );
+		if (stack.empty()) break;
+		node = stack.back(), stack.pop_back();
+	}
+}
+
+// One accepted replacement: the tree to splice in and the triangle id behind each of its prims.
+struct Replacement
+{
+	tinybvh::BVH tree;
+	std::vector<uint32_t> prim;
+	uint32_t nodes = 0, refs = 0;
+};
+
+// Copy a replacement's subtree into the new node list, clipping every box to the box of the node
+// it replaces, which only shrinks them and keeps the root box exactly equal to the original's.
+static void EmitReplacement( const Replacement& r, const uint32_t src, const uint32_t dst,
+	const bvhvec3& lo, const bvhvec3& hi, std::vector<tinybvh::BVH::BVHNode>& node, std::vector<uint32_t>& prim )
+{
+	std::vector<std::pair<uint32_t, uint32_t>> stack;
+	stack.push_back( std::make_pair( src, dst ) );
+	while (!stack.empty())
+	{
+		const uint32_t s = stack.back().first, d = stack.back().second;
+		stack.pop_back();
+		const tinybvh::BVH::BVHNode& in = r.tree.bvhNode[s];
+		tinybvh::BVH::BVHNode& out = node[d];
+		out.aabbMin = tinybvh_max( in.aabbMin, lo ), out.aabbMax = tinybvh_min( in.aabbMax, hi );
+		if (in.isLeaf())
+		{
+			out.leftFirst = (uint32_t)prim.size(), out.triCount = in.triCount;
+			for (uint32_t i = 0; i < in.triCount; i++) prim.push_back( r.prim[r.tree.primIdx[in.leftFirst + i]] );
+		}
+		else
+		{
+			const uint32_t slot = (uint32_t)node.size();
+			node.resize( slot + 2 );
+			node[d].leftFirst = slot, node[d].triCount = 0;
+			stack.push_back( std::make_pair( (uint32_t)in.leftFirst, slot ) );
+			stack.push_back( std::make_pair( (uint32_t)in.leftFirst + 1, slot + 1 ) );
+		}
+	}
+}
+
+// Returns the cost removed, as a share of the whole tree, or 0 if nothing was spliced.
+// Geometry comes from the tree's own vertex slice rather than from a caller's array, so this
+// serves both entry points: a mesh built with --target, and a .bvh loaded with its geometry.
+static double RebuildSubtrees( tinybvh::BVH& bvh, const PrePass& pre )
+{
+	if (!bvh.hasOrderedNodes()) bvh.Compact();
+	uint32_t wholeRefs = 0, wholeNodes = 0;
+	const double whole = SubtreeCost( bvh, 0, bvh.bvhNode[0].aabbMin, bvh.bvhNode[0].aabbMax, wholeRefs, wholeNodes );
+	const uint32_t total = (uint32_t)bvh.usedNodes;
+
+	// Children sit above their parent only in a depth-first tree, which is what the descending
+	// pass below relies on - and a Bonsai build is not one (BuildSIMD leaves orderedNodes false),
+	// so its node list has parents above children and the pass would read counts that were never
+	// written. Compacting first costs one pass and is what the optimizer does later anyway.
+	// References owned per node.
+	std::vector<uint32_t> owned( total, 0 );
+	for (int32_t i = (int32_t)total - 1; i >= 0; i--)
+	{
+		const tinybvh::BVH::BVHNode& n = bvh.bvhNode[i];
+		owned[i] = n.isLeaf() ? n.triCount : owned[n.leftFirst] + owned[n.leftFirst + 1];
+	}
+	// Candidates: the first node on each path whose reference count falls in the band. Disjoint by
+	// construction, so their costs add and they can be replaced independently.
+	std::vector<uint32_t> cand;
+	{
+		std::vector<uint32_t> stack;
+		uint32_t node = 0;
+		for (;;)
+		{
+			const tinybvh::BVH::BVHNode& n = bvh.bvhNode[node];
+			if (!n.isLeaf())
+			{
+				if (owned[node] <= pre.maxRefs && owned[node] >= pre.minRefs) cand.push_back( node );
+				else if (owned[node] > pre.maxRefs)
+					stack.push_back( (uint32_t)n.leftFirst + 1 ), stack.push_back( (uint32_t)n.leftFirst );
+			}
+			if (stack.empty()) break;
+			node = stack.back(), stack.pop_back();
+		}
+	}
+	std::vector<Replacement> repl;
+	std::vector<int32_t> replOf( total, -1 );
+	double gained = 0;
+	int64_t refDelta = 0, nodeDelta = 0;
+	uint64_t winBins = 0, winOddEven = 0;	// which configuration actually won, over all accepted
+	for (size_t c = 0; c < cand.size(); c++)
+	{
+		const tinybvh::BVH::BVHNode& nd = bvh.bvhNode[cand[c]];
+		const bvhvec3 lo = nd.aabbMin, hi = nd.aabbMax;
+		uint32_t refs = 0, nodes = 0;
+		const double was = SubtreeCost( bvh, cand[c], lo, hi, refs, nodes );
+		std::vector<uint32_t> prim;
+		CollectPrims( bvh, cand[c], prim );
+		std::sort( prim.begin(), prim.end() );
+		prim.erase( std::unique( prim.begin(), prim.end() ), prim.end() );
+		std::vector<bvhvec4> sub( prim.size() * 3 );
+		for (size_t t = 0; t < prim.size(); t++) for (uint32_t k = 0; k < 3; k++)
+			sub[t * 3 + k] = bvh.verts[(size_t)prim[t] * 3 + k];
+		Replacement best;
+		double bestCost = was;
+		uint32_t bestBins = 0;
+		bool bestOddEven = false;
+		for (uint32_t b = pre.minBins; b <= pre.maxBins; b++) for (uint32_t oe = 0; oe < 2; oe++)
+		{
+			Replacement cur;
+			// Inherit the surrounding build's settings before overriding the ones this pass is
+			// about. Leaf sizing in particular: bvhopt builds with keepSplitting, so the tree
+			// around the subtree has one reference per leaf, and a rebuild at default leaf sizing
+			// is priced against it as a huge win that the optimizer's own explode step then
+			// throws away. Comparing two trees built under different rules measures the rules.
+			cur.tree.settings = bvh.settings;
+			cur.tree.settings.useSpatialSplits = true;
+			cur.tree.settings.binnedBVH = true;
+			cur.tree.hqbvhbins = b, cur.tree.hqbvhoddeven = oe != 0;
+			cur.tree.c_trav = bvh.c_trav, cur.tree.c_int = bvh.c_int;
+			cur.tree.Build( sub.data(), (uint32_t)prim.size() );
+			uint32_t rrefs = 0, rnodes = 0;
+			const double now = SubtreeCost( cur.tree, 0, lo, hi, rrefs, rnodes );
+			if (now >= bestCost) continue;
+			cur.prim = prim, cur.nodes = rnodes, cur.refs = rrefs;
+			best = std::move( cur ), bestCost = now, bestBins = b, bestOddEven = oe != 0;
+		}
+		if (bestCost >= was) continue;
+		// The new arrays are written into the ones the BVH already owns, so a replacement is taken
+		// only while the running totals stay inside what was allocated for them. Object-split
+		// rebuilds never grow the reference list, so this only ever binds on the spatial variant.
+		if ((int64_t)wholeRefs + refDelta + (int64_t)best.refs - (int64_t)refs > (int64_t)bvh.idxCount) continue;
+		if ((int64_t)total + nodeDelta + 2 * ((int64_t)best.nodes - (int64_t)nodes) > (int64_t)bvh.allocatedNodes) continue;
+		refDelta += (int64_t)best.refs - (int64_t)refs;
+		nodeDelta += 2 * ((int64_t)best.nodes - (int64_t)nodes);
+		gained += was - bestCost;
+		winBins += bestBins, winOddEven += bestOddEven ? 1 : 0;
+		replOf[cand[c]] = (int32_t)repl.size();
+		repl.push_back( std::move( best ) );
+	}
+	if (repl.empty()) return 0;
+
+	// One depth-first pass writes the whole tree afresh: untouched nodes copied, replaced ones
+	// emitted from their rebuild. The result is compacted and depth-first by construction.
+	std::vector<tinybvh::BVH::BVHNode> node( 1 );
+	std::vector<uint32_t> prim;
+	prim.reserve( wholeRefs + (size_t)(refDelta > 0 ? refDelta : 0) );
+	std::vector<std::pair<uint32_t, uint32_t>> stack;
+	stack.push_back( std::make_pair( 0u, 0u ) );
+	while (!stack.empty())
+	{
+		const uint32_t src = stack.back().first, dst = stack.back().second;
+		stack.pop_back();
+		const tinybvh::BVH::BVHNode& in = bvh.bvhNode[src];
+		if (replOf[src] >= 0)
+		{
+			EmitReplacement( repl[replOf[src]], 0, dst, in.aabbMin, in.aabbMax, node, prim );
+			continue;
+		}
+		node[dst].aabbMin = in.aabbMin, node[dst].aabbMax = in.aabbMax;
+		if (in.isLeaf())
+		{
+			node[dst].leftFirst = (uint32_t)prim.size(), node[dst].triCount = in.triCount;
+			for (uint32_t i = 0; i < in.triCount; i++) prim.push_back( bvh.primIdx[in.leftFirst + i] );
+		}
+		else
+		{
+			const uint32_t slot = (uint32_t)node.size();
+			node.resize( slot + 2 );
+			node[dst].leftFirst = slot, node[dst].triCount = 0;
+			stack.push_back( std::make_pair( (uint32_t)in.leftFirst, slot ) );
+			stack.push_back( std::make_pair( (uint32_t)in.leftFirst + 1, slot + 1 ) );
+		}
+	}
+	memcpy( bvh.bvhNode, node.data(), node.size() * sizeof( tinybvh::BVH::BVHNode ) );
+	memcpy( bvh.primIdx, prim.data(), prim.size() * sizeof( uint32_t ) );
+	bvh.usedNodes = (uint32_t)node.size(), bvh.idxCount = (uint32_t)prim.size();
+	// The rewrite is depth-first and gap-free by construction, so no hole or ordering flag needs
+	// clearing; refittability is the builder's to decide and a spatial-split rebuild only adds
+	// the duplicate references an SBVH build would already have produced inside this box.
+	printf( "prepass: %u of %u subtrees (%u..%u refs) rebuilt from %u configurations, SAH -%.2f%%, refs %+.2f%%\n",
+		(uint32_t)repl.size(), (uint32_t)cand.size(), pre.minRefs, pre.maxRefs, pre.Configs(),
+		100.0 * gained / whole, 100.0 * refDelta / (double)wholeRefs );
+	printf( "         winning config: %.1f bins mean, odd/even in %.0f%% of them\n",
+		(double)winBins / (double)repl.size(), 100.0 * (double)winOddEven / (double)repl.size() );
+	return gained / whole;
+}
+
 struct WideSettings
 {
 	bool target[TGT_COUNT] = {};
@@ -2032,9 +2300,172 @@ struct WideSettings
 	uint32_t timingRuns = 3;		// timed passes per tree; the best one is reported
 	uint32_t candidates = CAND_DEFAULT;	// -sweep raises this to the full set; see g_candidate
 	std::string outStem;
+	PrePass pre;				// -prepass: rebuild small subtrees before optimizing
+	bool audit = false;			// -audit: report what is wrong with the mesh
+	bool fix = false;			// -fix: and keep it out of the tree
 	bool Any() const { for (uint32_t t = 0; t < TGT_COUNT; t++) if (target[t]) return true; return false; }
 };
 
+// ----------------------------------------------------------------------------------------
+// geometry audit
+// ----------------------------------------------------------------------------------------
+//
+// Three defects make a region of a mesh cost far more to traverse than its triangle count
+// suggests, and no builder can do anything about any of them:
+//
+//   Exact duplicates. Coincident triangles have coincident centroids and coincident boxes, so
+//   no object split separates them - every candidate plane puts all of them on one side, and
+//   the builder falls through to halving a range, which gives two children with the parent's
+//   box and no SAH improvement at all, level after level. Spatial splits do not help either:
+//   each copy spans the whole box, so any plane cuts all of them and both sides keep all of
+//   them. Every ray entering the region then tests every copy. This is normally an authoring
+//   accident - an object instanced several times at one transform and flattened on export.
+//
+//   Zero-area triangles. They carry a box but can never be hit, so they are pure cost.
+//
+//   Non-finite vertices. One NaN or infinity in one vertex propagates into the root box and
+//   ruins the whole tree, not just its own neighbourhood.
+//
+// The audit is -audit and reports only; acting on it is -fix. Both are off by default: the
+// audit costs a sort over the whole mesh, and dropping a triangle changes
+// what a renderer can report as hit: the surviving copy wins, and if the copies carried
+// different materials the choice between them was arbitrary to begin with, since they occupy
+// the same space. Nothing is renumbered either way - see GeometryFilter.
+
+struct GeometryIssues
+{
+	uint32_t nonFinite = 0;		// triangles with a NaN or an infinity in a vertex
+	uint32_t degenerate = 0;	// zero area, hence unhittable
+	uint32_t redundant = 0;		// copies of a triangle beyond the first
+	uint32_t worstCopies = 0;	// copies of the single most duplicated triangle
+	float worstAt[3] = { 0, 0, 0 };
+	bool clean() const { return nonFinite + degenerate + redundant == 0; }
+};
+
+// Canonical form of a triangle: the rotation starting at the lexicographically smallest vertex,
+// compared as raw bytes. Rotation only, never reflection - a triangle and its flipped copy
+// occupy the same space but face opposite ways, and a renderer that culls backfaces can tell
+// them apart, so they are not treated as the same triangle here.
+static void CanonicalTri( const bvhvec4* tri, float* out )
+{
+	uint32_t first = 0;
+	for (uint32_t i = 1; i < 3; i++)
+	{
+		const float* a = (const float*)&tri[i];
+		const float* b = (const float*)&tri[first];
+		if (a[0] < b[0] || (a[0] == b[0] && (a[1] < b[1] || (a[1] == b[1] && a[2] < b[2])))) first = i;
+	}
+	for (uint32_t i = 0; i < 3; i++)
+	{
+		const float* v = (const float*)&tri[(first + i) % 3];
+		out[i * 3] = v[0], out[i * 3 + 1] = v[1], out[i * 3 + 2] = v[2];
+	}
+}
+
+static uint64_t HashTri( const float* c )
+{
+	uint64_t h = 0xcbf29ce484222325ull;
+	const uint32_t* w = (const uint32_t*)c;
+	for (uint32_t i = 0; i < 9; i++) h = (h ^ w[i]) * 0x100000001b3ull;
+	return h;
+}
+
+// Which triangles the BVH should index, and the original id of each one it does. The filter is
+// applied by building over an index list rather than by compacting the mesh, and the primitive
+// indices are mapped back to original triangle ids immediately afterwards - so the finished tree
+// is an ordinary tree over the original mesh that simply never references what was dropped.
+// Triangle ids are what a renderer looks materials up by, and they do not move.
+struct GeometryFilter
+{
+	std::vector<uint32_t> keep;		// original triangle id, per kept triangle
+	std::vector<uint32_t> vertIdx;	// three vertex indices per kept triangle, into the original array
+	bool active() const { return !keep.empty(); }
+};
+
+// One pass for the pointwise defects, then a sort to group identical triangles. The sort is on a
+// hash, so equal hashes are compared as bytes before anything is called a duplicate.
+static GeometryIssues AuditGeometry( const std::vector<bvhvec4>& tris, const bool fix, GeometryFilter& filter )
+{
+	GeometryIssues issue;
+	const uint32_t n = (uint32_t)(tris.size() / 3);
+	std::vector<uint8_t> drop( n, 0 );
+	for (uint32_t t = 0; t < n; t++)
+	{
+		const bvhvec4* v = &tris[(size_t)t * 3];
+		bool finite = true;
+		for (uint32_t i = 0; i < 3; i++) for (uint32_t a = 0; a < 3; a++)
+		{
+			const float f = ((const float*)&v[i])[a];
+			if (f != f || f > 3.0e38f || f < -3.0e38f) finite = false;
+		}
+		if (!finite) { issue.nonFinite++, drop[t] = 1; continue; }
+		const bvhvec3 e1 = bvhvec3( v[1] ) - bvhvec3( v[0] ), e2 = bvhvec3( v[2] ) - bvhvec3( v[0] );
+		if (tinybvh::tinybvh_length( tinybvh::tinybvh_cross( e1, e2 ) ) == 0) issue.degenerate++, drop[t] = 1;
+	}
+	std::vector<std::pair<uint64_t, uint32_t>> byHash( n );
+	std::vector<float> canon( (size_t)n * 9 );
+	for (uint32_t t = 0; t < n; t++)
+	{
+		CanonicalTri( &tris[(size_t)t * 3], &canon[(size_t)t * 9] );
+		byHash[t] = std::make_pair( HashTri( &canon[(size_t)t * 9] ), t );
+	}
+	std::sort( byHash.begin(), byHash.end() );
+	for (uint32_t i = 0; i < n; )
+	{
+		uint32_t j = i + 1;
+		while (j < n && byHash[j].first == byHash[i].first) j++;
+		// One hash bucket. Compare members as bytes, since a hash collision between different
+		// triangles would otherwise delete real geometry.
+		for (uint32_t a = i; a < j; a++)
+		{
+			if (drop[byHash[a].second]) continue;
+			uint32_t copies = 1;
+			for (uint32_t b = a + 1; b < j; b++)
+			{
+				if (drop[byHash[b].second]) continue;
+				if (memcmp( &canon[(size_t)byHash[a].second * 9], &canon[(size_t)byHash[b].second * 9], 9 * sizeof( float ) ) != 0) continue;
+				copies++, issue.redundant++, drop[byHash[b].second] = 1;
+			}
+			if (copies > issue.worstCopies)
+			{
+				issue.worstCopies = copies;
+				const bvhvec4* v = &tris[(size_t)byHash[a].second * 3];
+				for (uint32_t k = 0; k < 3; k++)
+					issue.worstAt[k] = (((const float*)&v[0])[k] + ((const float*)&v[1])[k] + ((const float*)&v[2])[k]) / 3.0f;
+			}
+		}
+		i = j;
+	}
+	if (fix && !issue.clean())
+	{
+		filter.keep.reserve( n ), filter.vertIdx.reserve( (size_t)n * 3 );
+		for (uint32_t t = 0; t < n; t++)
+		{
+			if (drop[t]) continue;
+			filter.keep.push_back( t );
+			for (uint32_t k = 0; k < 3; k++) filter.vertIdx.push_back( t * 3 + k );
+		}
+	}
+	return issue;
+}
+
+static void ReportGeometry( const GeometryIssues& issue, const uint32_t n, const bool fix )
+{
+	if (issue.clean())
+	{
+		printf( "audit  : no duplicate, degenerate or non-finite triangles.\n" );
+		return;
+	}
+	printf( "audit  :" );
+	if (issue.nonFinite) printf( " %u non-finite,", issue.nonFinite );
+	if (issue.degenerate) printf( " %u zero-area,", issue.degenerate );
+	if (issue.redundant) printf( " %u redundant copies,", issue.redundant );
+	printf( " of %u triangles (%.2f%%)\n", n, 100.0 * (issue.nonFinite + issue.degenerate + issue.redundant) / n );
+	if (issue.worstCopies > 1) printf( "         worst: one triangle present %u times, around %g %g %g\n",
+		issue.worstCopies, issue.worstAt[0], issue.worstAt[1], issue.worstAt[2] );
+	if (fix) printf( "         dropped from the tree; triangle ids are unchanged.\n" );
+	else printf( "         reported only; -fix drops them from the tree without renumbering.\n" );
+}
 
 struct WideResult
 {
@@ -2058,7 +2489,8 @@ struct CandidateStats
 // is final before the visit field is measured on it: the collapse must see the same node
 // indices the field was built on.
 static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tris, const uint32_t candidate,
-	Optimizer::Settings set, const TargetInfo& info, CandidateStats& st )
+	Optimizer::Settings set, const TargetInfo& info, CandidateStats& st, const GeometryFilter& filter,
+	const PrePass& pre )
 {
 	const Clock::time_point t0 = Clock::now();
 	const CandidateInfo& cand = g_candidate[candidate];
@@ -2078,7 +2510,19 @@ static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tri
 	// they recover them exactly. Which is only worth doing if the optimizer is going to take the
 	// leaves apart anyway; with -noexplode it works with the ones the builder produced.
 	bvh.settings.keepSplitting = set.explodeLeaves;
-	bvh.Build( tris.data(), (uint32_t)tris.size() / 3 );
+	if (filter.active())
+	{
+		// Build over the kept triangles only, as an indexed mesh. The tree stays indexed for the
+		// whole of the optimizer: its primitive indices are then positions in the kept list, which
+		// is what the builder's own fragment array is sized for, and triangle lookups go through
+		// vertIdx and land on the right vertices. Unindexing happens at the end, once nothing is
+		// reading those arrays any more - see the bottom of this function.
+		bvh.Build( tinybvh::bvhvec4slice( tris.data(), (uint32_t)tris.size(), sizeof( bvhvec4 ) ),
+			filter.vertIdx.data(), (uint32_t)filter.keep.size() );
+	}
+	else bvh.Build( tris.data(), (uint32_t)tris.size() / 3 );
+	// Before anything else touches the tree: see RebuildSubtrees.
+	if (pre.on) RebuildSubtrees( bvh, pre );
 	st.seconds = MilliSec( t0, Clock::now() ) / 1000.0;
 	st.sahPre = bvh.SAHCost(), st.epoPre = bvh.EPOCost();
 	const Clock::time_point t1 = Clock::now();
@@ -2100,6 +2544,21 @@ static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tri
 	if (capped) { if (info.fitLeaves) bvh.FitLeafs( info.leafPrims ); else bvh.SplitLeafs( info.leafPrims ); }
 	st.seconds += MilliSec( t1, Clock::now() ) / 1000.0;
 	st.sahPost = bvh.SAHCost(), st.epoPost = bvh.EPOCost();
+	if (filter.active())
+	{
+		// Unindex: map each primitive index from a position in the kept list to the triangle id it
+		// came from, drop the index array, and restore the mesh's primitive count. What is left is
+		// an ordinary non-indexed tree over the original mesh - leaf fetch reads verts[prim*3+k],
+		// exactly as it would have without the filter - that happens not to reference what the
+		// audit dropped, and that Load accepts against the original geometry.
+		//
+		// This has to happen here and not a line earlier. Until the optimizer is finished, the
+		// builder's fragment array is live and is indexed BY these primitive indices while being
+		// sized for the kept count; renumbering them into the mesh's range reads past its end, for
+		// a crash that depends on where the allocation happens to sit.
+		for (uint32_t i = 0; i < bvh.idxCount; i++) bvh.primIdx[i] = filter.keep[bvh.primIdx[i]];
+		bvh.vertIdx = 0, bvh.triCount = (uint32_t)(tris.size() / 3);
+	}
 }
 
 // What the optimizer achieved on the tree that won, which with several candidates in play is
@@ -2291,6 +2750,8 @@ static int RunWideTargets( const std::string& meshPath, const Optimizer::Setting
 		return 1;
 	}
 	printf( "input  : %s\n         %u triangles\n", meshPath.c_str(), (uint32_t)tris.size() / 3 );
+	GeometryFilter filter;
+	if (w.audit || w.fix) ReportGeometry( AuditGeometry( tris, w.fix, filter ), (uint32_t)tris.size() / 3, w.fix );
 	const std::string stem = w.outStem.empty() ? StripExtension( meshPath ) : w.outStem;
 	// Targets that want the same leaf budget share their binary trees; the rest get their own,
 	// since the optimizer's final collapse is what produces leaves of the right size.
@@ -2307,7 +2768,7 @@ static int RunWideTargets( const std::string& meshPath, const Optimizer::Setting
 		CandidateStats stat[CAND_MAX] = {};
 		for (uint32_t c = 0; c < w.candidates; c++)
 		{
-			PrepareCandidate( bvh[c], tris, c, set, regime, stat[c] );
+			PrepareCandidate( bvh[c], tris, c, set, regime, stat[c], filter, w.pre );
 			printf( "  %-10s %u references, %u nodes, SAH %.4f, EPO %.4f, %.1f s\n", CandidateName( c ),
 				bvh[c].idxCount, bvh[c].usedNodes, stat[c].sahPost, stat[c].epoPost, stat[c].seconds );
 		}
@@ -2364,6 +2825,16 @@ static void Usage()
 		"  Every layout with a cache format of its own gets the collapsed tree, which its Load\n"
 		"  reads back directly; the rest get the binary tree their Load converts.\n"
 		"\n"
+		"  -prepass           before optimizing, rebuild every subtree of 16..128 references\n"
+		"                     standalone with spatial splits and keep the cheapest result over\n"
+		"                     every bin count in 8..32, with and without odd/even. 50 builds\n"
+		"                     per subtree; costs about 1%% more references\n"
+		"  -audit             report duplicate, zero-area and non-finite triangles, and where\n"
+		"                     the worst of them are; off by default, and changes nothing\n"
+		"  -fix               audit, and keep what it finds out of the tree. Triangle ids are\n"
+		"                     not renumbered, so a renderer indexing materials by primitive id\n"
+		"                     is unaffected; see AuditGeometry for what this does and does not\n"
+		"                     justify doing to a mesh\n"
 		"  --target L         comma-separated, or 'all': bvh, bvhgpu, bvh4cpu, bvh8cpu,\n"
 		"                     bvh4gpu, bvh8cwbvh, bvh4amdhw, cwbvh8amdhw\n"
 		"  -rays N            sample rays per set (default 100000; each adds one bounce)\n"
@@ -2427,6 +2898,9 @@ int main( int argc, char** argv )
 		else if (a == "-noweight") wide.weighted = false;
 		else if (a == "-noplain") wide.plain = false;
 		else if (a == "-sweep") wide.candidates = CAND_MAX;
+		else if (a == "-audit") wide.audit = true;
+		else if (a == "-prepass") wide.pre.on = true;
+		else if (a == "-fix") wide.fix = true;
 		else if (a == "-out") { if (i + 1 < argc) wide.outStem = argv[++i]; }
 		else if (a == "--target" || a == "-target")
 		{
@@ -2477,6 +2951,10 @@ int main( int argc, char** argv )
 	if (bvh.vertIdx) { printf( "error: indexed BVHs are not supported yet.\n" ); return 1; }
 
 	printf( "input  : %s\n", bvhPath.c_str() );
+	// Before anything else touches the tree, and before the figures it is judged against are
+	// taken: see RebuildSubtrees. It rewrites nodes and references, so it has to precede both
+	// RecoverRef, which reads the leaf boxes, and the conversion to BVH_Verbose.
+	if (wide.pre.on) RebuildSubtrees( bvh, wide.pre );
 	Clock::time_point t0 = Clock::now();
 	const float sah0 = bvh.SAHCost();
 	const double sahMs = MilliSec( t0, Clock::now() );
