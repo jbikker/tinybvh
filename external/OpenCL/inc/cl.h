@@ -17,8 +17,8 @@
 #ifndef __OPENCL_CL_H
 #define __OPENCL_CL_H
 
-#include <cl_version.h>
-#include <cl_platform.h>
+#include <CL/cl_version.h>
+#include <CL/cl_platform.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -1437,7 +1437,7 @@ clGetKernelInfo(cl_kernel       kernel,
 
 extern CL_API_ENTRY cl_int CL_API_CALL
 clGetKernelArgInfo(cl_kernel       kernel,
-                   cl_uint         arg_indx,
+                   cl_uint         arg_index,
                    cl_kernel_arg_info  param_name,
                    size_t          param_value_size,
                    void *          param_value,

@@ -1189,7 +1189,7 @@ typedef cl_int CL_API_CALL clGetKernelSuggestedLocalWorkSize_t(
     cl_uint work_dim,
     const size_t* global_work_offset,
     const size_t* global_work_size,
-    size_t* suggested_local_work_size) CL_API_SUFFIX__VERSION_3_1;
+    size_t* suggested_local_work_size);
 
 typedef clGetKernelSuggestedLocalWorkSize_t *
 clGetKernelSuggestedLocalWorkSize_fn CL_API_SUFFIX__VERSION_3_1;
