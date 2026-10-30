@@ -390,17 +390,17 @@ template <> void impl::BVH4_CPU<float, uint32_t>::EmitNode( impl::MBVH<4, float,
 }
 
 // SlotPermutation, AVX2.
-template <> uint32_t impl::BVH8_CWBVH<float, uint32_t>::SlotPermutation( const impl::MBVH<8, float, uint32_t>& bvh8, const uint32_t nodeIdx,
+template <> uint32_t impl::BVH8_CWBVH<float, uint32_t>::SlotPermutation( const impl::MBVH<8, float, uint32_t>& mbvh8, const uint32_t nodeIdx,
 	const bvhvec3& nodeLo, const float rsx, const float rsy, const float rsz, uint8_t* const qbase ) const
 {
-	const MBVH<8, float, uint32_t>::MBVHNode* const orig = &bvh8.mbvhNode[nodeIdx];
+	const MBVH<8, float, uint32_t>::MBVHNode* const orig = &mbvh8.mbvhNode[nodeIdx];
 	// An absent child reads node 0; its lane is masked out of the assignment and
 	// its slot is filled with an inverted box at the end.
 	const __m256i childIdx = tinybvh_load8i( orig->child );
 	__m128 lo[8], hi[8];
 	for (uint32_t i = 0; i < 8; i++)
 	{
-		const __m256 v = tinybvh_load8( &bvh8.mbvhNode[orig->child[i]] );	// min.xyz, firstTri, max.xyz, triCount
+		const __m256 v = tinybvh_load8( &mbvh8.mbvhNode[orig->child[i]] );	// min.xyz, firstTri, max.xyz, triCount
 		lo[i] = _mm256_castps256_ps128( v ), hi[i] = _mm256_extractf128_ps( v, 1 );
 	}
 	_MM_TRANSPOSE4_PS( lo[0], lo[1], lo[2], lo[3] );
