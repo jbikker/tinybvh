@@ -110,10 +110,10 @@ float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 		}
 
 		// continue with nearest node or first node on the stack
-		#ifndef ISRDNA4
+	#ifndef ISRDNA4
 		// Restore the GFX11 stack index after an empty-stack pop.
 		stackAddr += 1u;
-		#endif
+	#endif
 		prevNode = currentNodeID;
 		uint parentID;
 		const global uint* words =
