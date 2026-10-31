@@ -1661,7 +1661,7 @@ public:
 		uint32_t perm[4];		// sorted lane order per octant, see ConvertFrom.
 	};
 	struct ALIGNED( 64 ) CacheLine { uint8_t data[64]; };
-	BVH4_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH4_CPU; context = ctx; c_int = 2; lQuads = true; }
+	BVH4_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH4_CPU; context = ctx; lQuads = true; }
 	BVH4_CPU( const BVH4_CPU& ) = delete; // owns its allocations, so it cannot be copied
 	BVH4_CPU( BVH4_CPU&& ) noexcept;
 	BVH4_CPU& operator=( BVH4_CPU&& ) noexcept;
@@ -1867,7 +1867,7 @@ public:
 		uint32_t cbminmaxx[4], cbminmaxy[4];						// 32, total: 128
 	};
 	struct ALIGNED( 64 ) CacheLine { uint8_t data[64]; };
-	BVH8_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH8_SIMD; context = ctx; c_int = 2; lQuads = true; }
+	BVH8_CPU( BVHContext ctx = {} ) { layout = LAYOUT_BVH8_SIMD; context = ctx; lQuads = true; }
 	BVH8_CPU( const BVH8_CPU& ) = delete; // owns its allocations, so it cannot be copied
 	BVH8_CPU( BVH8_CPU&& ) noexcept;
 	BVH8_CPU& operator=( BVH8_CPU&& ) noexcept;
@@ -4863,7 +4863,8 @@ TEMPLATED void BVH_Verbose<Float, Index>::Compact()
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH_Verbose::Compact(), bvhNode == 0." );
 	if (bvhNode[0].isLeaf()) return; // nothing to compact.
 	hasHoles = false; // by definition: the sweep below only copies reachable nodes.
-	BVHNode* tmp = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * usedNodes );
+	const Index capacity = usedNodes;
+	BVHNode* tmp = (BVHNode*)AlignedAlloc( sizeof( BVHNode ) * capacity );
 	memcpy( tmp, bvhNode, 2 * sizeof( BVHNode ) );
 	Index newNodePtr = 2, nodeIdx = 0, stack[TINYBVH_STACK_SIZE], stackPtr = 0;
 	while (1)
@@ -4891,7 +4892,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::Compact()
 	}
 	usedNodes = newNodePtr;
 	AlignedFree( bvhNode );
-	bvhNode = tmp;
+	bvhNode = tmp, allocatedNodes = capacity;
 	hasHoles = false; // the relocated node list is contiguous again.
 }
 
