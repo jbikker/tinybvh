@@ -67,8 +67,8 @@ THE SOFTWARE.
 // #define HQBVHBINS 32     - the number of bins to use in SBVH construction. Default is 8; at most MAXHQBINS (128).
 // #define INST_IDX_BITS 10 - the number of bits to use for the instance index. Default is 32,
 //                            which stores the bits in a separate field in tinybvh::Intersection.
-// #define C_INT 1          - the estimated cost of a primitive intersection test. Default is 1.
-// #define C_TRAV 1         - the estimated cost of a traversal step. Default is 1.
+// #define C_INT 1          - the estimated cost of a primitive intersection test. Default is 0.9f.
+// #define C_TRAV 1         - the estimated cost of a traversal step. Default is 1.0f.
 
 // A manual for TinyBVH can be found here:
 // https://jacco.ompf2.com/2025/01/24/tinybvh-manual-basic-use
@@ -160,7 +160,7 @@ THE SOFTWARE.
 #endif
 
 // SAH BVH building: Heuristic parameters
-// CPU traversal: C_INT = 1, C_TRAV = 1 seems optimal.
+// CPU traversal: C_INT = 1, C_TRAV = 1 is (near-)optimal for BVH2.
 // These are defaults, which initialize the public members c_int and c_trav in
 // BVHBase (and thus each BVH instance).
 #ifndef C_INT
