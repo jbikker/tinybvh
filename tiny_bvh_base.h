@@ -6315,15 +6315,19 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::ConvertFrom( const MBVH<4, Float, Inde
 		ownBVH4 = false; // bvh isn't ours; don't delete in destructor.
 	}
 	bvh4.ReferenceFrom( original );
-	uint32_t blocksNeeded = bvh4.usedNodes * 8; // here, a 'block' is 16 bytes. 8 blocks for interior 128B.
-	blocksNeeded += 4 * bvh4.triCount; // 4 blocks need for 64B leaf nodes w/ 1 triangle per leaf.
+	// here, a 'block' is 16 bytes: 8 blocks per 128B interior node, plus up to 4 blocks of padding that
+	// keep it 128B-aligned, and 4 blocks per 64B leaf node w/ 1 triangle per leaf.
+	// Node IDs hold 32-bit byte offsets, so the tree must stay below 4 GB (2^28 blocks).
+	const uint64_t blocks64 = (uint64_t)bvh4.usedNodes * 12 + (uint64_t)bvh4.triCount * 4;
+	BVH_FATAL_ERROR_IF( blocks64 > (1ull << 28), "BVH4_AMD_HW::ConvertFrom, BVH exceeds the 4 GB addressable by node IDs." );
+	const uint32_t blocksNeeded = (uint32_t)blocks64;
 	if (allocatedBlocks < blocksNeeded)
 	{
 		AlignedFree( bvh4Data );
-		bvh4Data = (bvhvec4*)AlignedAlloc( blocksNeeded * 16 );
+		bvh4Data = (bvhvec4*)AlignedAlloc( (size_t)blocksNeeded * 16 );
 		allocatedBlocks = blocksNeeded;
 	}
-	memset( bvh4Data, 0, 16 * blocksNeeded );
+	memset( bvh4Data, 0, (size_t)blocksNeeded * 16 );
 	const BVHContext ctx = context;
 	CopyBasePropertiesFrom( bvh4 );
 	context = ctx; // keep the allocator paired with our hardware buffer.
@@ -6334,6 +6338,9 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::ConvertFrom( const MBVH<4, Float, Inde
 		const typename MBVH<4, Float, Index>::MBVHNode& orig = bvh4.mbvhNode[nodeIdx];
 		// convert BVH4 node - must be an interior node. For HW this is 128 B
 		assert( !orig.isLeaf() );
+		// Start every 128B interior node on a 128B boundary: after an odd number of 64B leaf
+		// nodes it would straddle two cache lines. The 4-block gap stays zero.
+		newAlt4Ptr = (newAlt4Ptr + 7) & ~7u;
 		bvhvec4* nodeBase = bvh4Data + newAlt4Ptr;
 		uint32_t baseAlt4Ptr = newAlt4Ptr;
 		newAlt4Ptr += 8; // 8 since HW interiors are 128B
@@ -6456,6 +6463,7 @@ TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Build( const Slice& vertices, const 
 	// build underlying layout
 	bvh8.bvh.Build( vertices, indices, prims );
 	bvh8.bvh.SplitLeafs( 2 ); // One triangle pair per leaf; ConvertFrom packs the leaves of a box node into shared records.
+	bvh8.leafPrimLimit = 2; // the collapse may merge single triangles into a pair leaf
 	bvh8.ConvertFrom( bvh8.bvh );
 	// convert to AMD format
 	ConvertFrom( bvh8 );
@@ -6856,7 +6864,7 @@ TEMPLATED void CWBVH8_AMD_HW<Float, Index>::ConvertFrom( const MBVH<8, Float, In
 	if (bvh8Data == 0 || nodeCap > allocatedBlocks)
 	{
 		AlignedFree( bvh8Data );
-		bvh8Data = (bvhvec4*)AlignedAlloc( nodeCap * 16 );
+		bvh8Data = (bvhvec4*)AlignedAlloc( (size_t)nodeCap * 16 );
 		allocatedBlocks = nodeCap;
 	}
 
@@ -6876,9 +6884,12 @@ TEMPLATED void CWBVH8_AMD_HW<Float, Index>::ConvertFrom( const MBVH<8, Float, In
 
 		if (nodeDataPtr + 64 > allocatedBlocks)
 		{
-			const uint32_t newCap = tinybvh_max( allocatedBlocks + (allocatedBlocks >> 1), nodeDataPtr + 64 );
-			bvhvec4* newData = (bvhvec4*)AlignedAlloc( newCap * 16 );
-			memcpy( newData, bvh8Data, nodeDataPtr * 16 );
+			// Node IDs hold 32-bit byte offsets, so the tree must stay below 4 GB (2^28 16-byte blocks).
+			BVH_FATAL_ERROR_IF( nodeDataPtr + 64ull > (1ull << 28), "CWBVH8_AMD_HW::ConvertFrom, BVH exceeds the 4 GB addressable by node IDs." );
+			const uint64_t grown = tinybvh_max( (uint64_t)allocatedBlocks + (allocatedBlocks >> 1), (uint64_t)nodeDataPtr + 64 );
+			const uint32_t newCap = (uint32_t)tinybvh_min( grown, (uint64_t)1 << 28 );
+			bvhvec4* newData = (bvhvec4*)AlignedAlloc( (size_t)newCap * 16 );
+			memcpy( newData, bvh8Data, (size_t)nodeDataPtr * 16 );
 			AlignedFree( bvh8Data );
 			bvh8Data = newData, allocatedBlocks = newCap;
 		}
@@ -9125,6 +9136,7 @@ TEMPLATED CWBVH8_AMD_HW<Float, Index> CWBVH8_AMD_HW<Float, Index>::Load( const c
 	result.PassSettingsTo( result.bvh8 );
 	result.bvh8.bvh = tinybvh_move( src );
 	result.bvh8.bvh.SplitLeafs( 2 ); // One triangle pair per leaf, as in Build.
+	result.bvh8.leafPrimLimit = 2;
 	result.bvh8.ConvertFrom( result.bvh8.bvh );
 	result.ConvertFrom( result.bvh8 );
 	result.bvh8 = MBVH<8, Float, Index>( result.context );
