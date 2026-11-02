@@ -184,8 +184,118 @@ void printMBVHSAH(const char* tableName) {
 	std::cout << std::endl;
 }
 
-void printDOBBSAHAndStats() {
+void printDOBBSAHAndStats(const char* tableName) {
+	static constexpr uint32_t MAX_DEPTH = 128;
+	float internalSAs[MAX_DEPTH] = { 0.0f }, leafSAs[MAX_DEPTH] = { 0.0f };
+	uint32_t internalBoxCount[MAX_DEPTH] = { 0 }, leafBoxCount[MAX_DEPTH] = { 0 };
+	uint32_t rotatedInternalBoxCount[MAX_DEPTH] = { 0 }, rotatedLeafBoxCount[MAX_DEPTH] = { 0 };
 
+	// Root: its own world-space box, internal, never rotated
+	const float rootSA = BoxSurfaceArea(dobbBvh.aabbMin, dobbBvh.aabbMax);
+	internalSAs[0] = rootSA;
+	internalBoxCount[0] = 1;
+
+	StackEntryDepth nodeStack[512];
+	uint32_t stackIdx = 0;
+	nodeStack[stackIdx++] = { 0, 0 };
+
+	uint32_t maxDepth = 0;
+
+	while (stackIdx > 0) {
+		const StackEntryDepth currEntry = nodeStack[--stackIdx];
+		const BVH_DOBB::BVHNode& currNode = dobbBvh.dobbNode[currEntry.nodeIdx];
+		const bool isRotated = currNode.Rotation() != 255;
+		const uint32_t childDepth = tinybvh_min(currEntry.depth + 1, MAX_DEPTH - 1);
+		maxDepth = tinybvh_max(maxDepth, childDepth);
+
+		const float stepSize[3] = {
+			ldexpf(1.0f, currNode.exponent[0]),
+			ldexpf(1.0f, currNode.exponent[1]),
+			ldexpf(1.0f, currNode.exponent[2])
+		};
+
+		for (uint32_t slot = 0; slot < 8; slot++) {
+			if (currNode.meta[slot] == 0) continue;   // empty slot
+
+			// Decode the quantized child box (in this node's frame; rotation keeps the area)
+			const bvhvec3 slotMin = currNode.nodeMinPoint + bvhvec3(
+				currNode.qLo[0][slot] * stepSize[0], currNode.qLo[1][slot] * stepSize[1], currNode.qLo[2][slot] * stepSize[2]);
+			const bvhvec3 slotMax = currNode.nodeMinPoint + bvhvec3(
+				currNode.qHi[0][slot] * stepSize[0], currNode.qHi[1][slot] * stepSize[1], currNode.qHi[2][slot] * stepSize[2]);
+			const float slotSA = BoxSurfaceArea(slotMin, slotMax);
+
+			if (currNode.iMask & (1u << slot)) {
+				internalSAs[childDepth] += slotSA;
+				internalBoxCount[childDepth]++;
+				if (isRotated) rotatedInternalBoxCount[childDepth]++;
+
+				const uint32_t childNodeIdx = currNode.ChildBaseIndex() +
+					(uint32_t)std::popcount((uint32_t)(currNode.iMask & ((1u << slot) - 1)));
+				nodeStack[stackIdx++] = { childNodeIdx, currEntry.depth + 1 };
+			}
+			else {
+				leafSAs[childDepth] += slotSA;
+				leafBoxCount[childDepth]++;
+				if (isRotated) rotatedLeafBoxCount[childDepth]++;
+			}
+		}
+	}
+
+	// Totals over all depths
+	float totalInternalSA = 0.0f, totalLeafSA = 0.0f;
+	uint32_t totalInternalBoxes = 0, totalLeafBoxes = 0, totalRotatedInternal = 0, totalRotatedLeaf = 0;
+	for (uint32_t depth = 0; depth <= maxDepth; depth++) {
+		totalInternalSA += internalSAs[depth];
+		totalLeafSA += leafSAs[depth];
+		totalInternalBoxes += internalBoxCount[depth];
+		totalLeafBoxes += leafBoxCount[depth];
+		totalRotatedInternal += rotatedInternalBoxCount[depth];
+		totalRotatedLeaf += rotatedLeafBoxCount[depth];
+	}
+
+	// Percentage with a guard for levels without boxes of that kind
+	auto percentage = [](const uint32_t part, const uint32_t whole) {
+		return whole > 0 ? 100.0f * part / whole : 0.0f;
+		};
+
+	static const int firstColWidth = 12, colWidth = 12;
+
+	const std::ios_base::fmtflags previousFlags = std::cout.flags();
+	const std::streamsize previousPrecision = std::cout.precision();
+	std::cout << std::fixed << std::setprecision(3);
+
+	std::cout << std::left << std::setw(firstColWidth) << tableName << std::right
+		<< " | " << std::setw(colWidth) << "Internal SAH"
+		<< " | " << std::setw(colWidth) << "Leaf SAH"
+		<< " | " << std::setw(colWidth) << "All SAH"
+		<< " | " << std::setw(colWidth) << "Int. rot. %"
+		<< " | " << std::setw(colWidth) << "Leaf rot. %"
+		<< " | " << std::setw(colWidth) << "All rot. %" << " | " << std::endl;
+	std::cout << std::left << std::setw(firstColWidth) << "Total:" << std::right
+		<< " | " << std::setw(colWidth) << totalInternalSA / rootSA
+		<< " | " << std::setw(colWidth) << totalLeafSA / rootSA
+		<< " | " << std::setw(colWidth) << (totalInternalSA + totalLeafSA) / rootSA
+		<< " | " << std::setw(colWidth) << percentage(totalRotatedInternal, totalInternalBoxes)
+		<< " | " << std::setw(colWidth) << percentage(totalRotatedLeaf, totalLeafBoxes)
+		<< " | " << std::setw(colWidth) << percentage(totalRotatedInternal + totalRotatedLeaf, totalInternalBoxes + totalLeafBoxes)
+		<< " | " << std::endl;
+
+	for (uint32_t depth = 0; depth <= maxDepth; depth++) {
+		const std::string depthLabel = "Depth " + std::to_string(depth) + ":";
+		std::cout << std::left << std::setw(firstColWidth) << depthLabel << std::right
+			<< " | " << std::setw(colWidth) << internalSAs[depth] / rootSA
+			<< " | " << std::setw(colWidth) << leafSAs[depth] / rootSA
+			<< " | " << std::setw(colWidth) << (internalSAs[depth] + leafSAs[depth]) / rootSA
+			<< " | " << std::setw(colWidth) << percentage(rotatedInternalBoxCount[depth], internalBoxCount[depth])
+			<< " | " << std::setw(colWidth) << percentage(rotatedLeafBoxCount[depth], leafBoxCount[depth])
+			<< " | " << std::setw(colWidth) << percentage(rotatedInternalBoxCount[depth] + rotatedLeafBoxCount[depth],
+				internalBoxCount[depth] + leafBoxCount[depth])
+			<< " | " << std::endl;
+	}
+	std::cout << std::endl;
+
+	std::cout.flags(previousFlags);
+	std::cout.precision(previousPrecision);
 }
 
 // Same signature and behaviour as BVHBase::IntersectTri (Möller–Trumbore, no opacity maps)
@@ -917,6 +1027,7 @@ void Tick(float delta_time_s, fenster& f, uint32_t* buf)
 
 		// Print stats of BVHs
 		printMBVHSAH("MBVH8 Nodes");
+		printDOBBSAHAndStats("DOBB Nodes");
 
 		// Init and swap to the next phase
 		viewPointIdx = 0;
