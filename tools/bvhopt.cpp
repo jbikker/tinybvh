@@ -23,6 +23,9 @@
 #include <vector>
 #include <algorithm>
 #include <memory>
+#include <thread>
+#include <mutex>
+#include <atomic>
 
 using tinybvh::bvhvec3;
 using tinybvh::bvhvec4;
@@ -1792,7 +1795,7 @@ void Optimizer::Progress( const uint32_t round, const Clock::time_point& t0, con
 // ----------------------------------------------------------------------------------------
 
 static Optimizer::Ref RecoverRef( const tinybvh::bvhvec4slice& verts, const uint32_t* vertIdx, const uint32_t prim,
-	const bvhvec3& bmin, const bvhvec3& bmax )
+	const bvhvec3& bmin, const bvhvec3& bmax, const bool whole = false )
 {
 	bvhvec3 v0, v1, v2;
 	const uint32_t vidx = prim * 3;
@@ -1802,6 +1805,11 @@ static Optimizer::Ref RecoverRef( const tinybvh::bvhvec4slice& verts, const uint
 	r.primIdx = prim, r.clipped = 1;
 	r.bmin = tinybvh::tinybvh_min( v0, tinybvh::tinybvh_min( v1, v2 ) );
 	r.bmax = tinybvh::tinybvh_max( v0, tinybvh::tinybvh_max( v1, v2 ) );
+	// 'whole' keeps the triangle's own box instead of clipping it to the leaf that holds it.
+	// Clipping recovers a spatial split exactly, which is the point of it everywhere else, but
+	// under -nosplits it would reintroduce by the back door the one thing that stops a tree
+	// from refitting.
+	if (whole) { r.clipped = 0; return r; }
 	r.bmin = tinybvh::tinybvh_max( r.bmin, bmin ), r.bmax = tinybvh::tinybvh_min( r.bmax, bmax );
 	for (uint32_t k = 0; k < 3; k++) if (!(r.bmax[k] >= r.bmin[k])) { r.bmin = bmin, r.bmax = bmax; break; }
 	return r;
@@ -2452,28 +2460,52 @@ static RoundGate* MakeGate( const uint32_t targetId, const TargetInfo& info, con
 	}
 }
 
+// Which effort settings the user named on the command line. A rung must not overwrite those:
+// a profile is a starting point, and -profile extreme -reinsert 400 has to mean 400. Before
+// this existed the rungs stomped every one of these, so the flags were accepted and ignored.
+struct EffortSet
+{
+	bool rounds = false, reinsert = false, sweeps = false, treelet = false;
+	bool exact = false, rebuild = false, attempts = false, agglom = false, anneal = false;
+};
+
 // ApplyProfileRung: the effort settings for one rung of the ladder. Everything here is search
 // effort; nothing here changes what is being minimized, which is the metric's job.
-static void ApplyProfileRung( Optimizer::Settings& set, const uint32_t rung )
+//
+// hq is the default profile, so it has to be at least as thorough as the tool's own defaults
+// were before profiles existed - rounds 16 and 100 reinsertion iterations - or the default
+// command line quietly gets worse trees than it used to.
+static void ApplyProfileRung( Optimizer::Settings& set, const uint32_t rung, const EffortSet& user )
 {
+	Optimizer::Settings r = set;
 	if (rung == PROF_FAST)
 	{
-		set.rounds = 2, set.reinsertIters = 10, set.treeletSweeps = 1;
-		set.treeletSize = 7, set.treeletSizeTop = 7, set.exactBottomSize = 0;
-		set.rebuildSubtrees = 0, set.agglomSize = 0, set.anneal = 0;
+		r.rounds = 4, r.reinsertIters = 25, r.treeletSweeps = 1;
+		r.treeletSize = 7, r.treeletSizeTop = 7, r.exactBottomSize = 0;
+		r.rebuildSubtrees = 0, r.agglomSize = 0, r.anneal = 0;
 	}
 	else if (rung == PROF_HQ)
 	{
-		set.rounds = 8, set.reinsertIters = 25, set.treeletSweeps = 2;
-		set.treeletSize = 7, set.treeletSizeTop = 10, set.exactBottomSize = 12;
-		set.rebuildSubtrees = 0, set.agglomSize = 24, set.anneal = 0.02f;
+		r.rounds = 16, r.reinsertIters = 100, r.treeletSweeps = 2;
+		r.treeletSize = 7, r.treeletSizeTop = 10, r.exactBottomSize = 12;
+		r.rebuildSubtrees = 0, r.agglomSize = 24, r.anneal = 0.02f;
 	}
 	else
 	{
-		set.rounds = 24, set.reinsertIters = 60, set.treeletSweeps = 3;
-		set.treeletSize = 9, set.treeletSizeTop = 12, set.exactBottomSize = 14;
-		set.rebuildSubtrees = 64, set.rebuildAttempts = 8, set.agglomSize = 48, set.anneal = 0.05f;
+		r.rounds = 32, r.reinsertIters = 200, r.treeletSweeps = 3;
+		r.treeletSize = 9, r.treeletSizeTop = 12, r.exactBottomSize = 14;
+		r.rebuildSubtrees = 64, r.rebuildAttempts = 8, r.agglomSize = 48, r.anneal = 0.05f;
 	}
+	// whatever the user named stays as they named it.
+	if (!user.rounds) set.rounds = r.rounds;
+	if (!user.reinsert) set.reinsertIters = r.reinsertIters;
+	if (!user.sweeps) set.treeletSweeps = r.treeletSweeps;
+	if (!user.treelet) set.treeletSize = r.treeletSize, set.treeletSizeTop = r.treeletSizeTop;
+	if (!user.exact) set.exactBottomSize = r.exactBottomSize;
+	if (!user.rebuild) set.rebuildSubtrees = r.rebuildSubtrees;
+	if (!user.attempts) set.rebuildAttempts = r.rebuildAttempts;
+	if (!user.agglom) set.agglomSize = r.agglomSize;
+	if (!user.anneal) set.anneal = r.anneal;
 }
 
 // ----------------------------------------------------------------------------------------
@@ -2957,16 +2989,73 @@ struct CandidateInfo
 	bool binned;			// true: SBVH (binnedBVH). false: Bonsai HQ.
 	uint32_t bins;			// SBVH: hqbvhbins. Ignored by Bonsai HQ.
 	float prune;			// Bonsai HQ: bonsaiPruneFactor. Ignored by the SBVH.
+	bool oddEven;			// SBVH: hqbvhoddeven, one extra bin on odd levels.
 };
+// The first two are what fast and hq use, so a higher profile's set contains a lower one's and
+// the ladder's guarantee survives the widening. Everything after them is the extreme profile's
+// sweep: every bin count from 8 to 32 with and without the odd/even extra bin, plus the two
+// Bonsai variants. Which bin count wins is scene-dependent and cheap to settle by trying them
+// all, once each candidate is a thread rather than a turn in a queue.
 static const CandidateInfo g_candidate[] = {
-	{ "sbvh b8",   true,   8, 0.1f },	// the two defaults
-	{ "bonsai-hq", false,  8, 0.1f },
-	{ "sbvh b4",   true,   4, 0.1f },	// -sweep adds these
-	{ "sbvh b16",  true,  16, 0.1f },
-	{ "sbvh b32",  true,  32, 0.1f },
-	{ "bonsai np", false,  8, 0.0f }
+	{ "sbvh b8",    true,   8, 0.1f, false },	// the two defaults
+	{ "bonsai-hq",  false,  8, 0.1f, false },
+	{ "sbvh b4",    true,   4, 0.1f, false },	// -sweep adds these
+	{ "sbvh b16",   true,  16, 0.1f, false },
+	{ "sbvh b32",   true,  32, 0.1f, false },
+	{ "bonsai np",  false,  8, 0.0f, false },
+	// -profile extreme adds every bin count from 8 to 32 not already here, in both
+	// odd/even states. Which one wins is scene-dependent and not worth predicting when
+	// a candidate costs a thread rather than a turn in a queue.
+	{ "sbvh b9",    true,   9, 0.1f, false },
+	{ "sbvh b10",   true,  10, 0.1f, false },
+	{ "sbvh b11",   true,  11, 0.1f, false },
+	{ "sbvh b12",   true,  12, 0.1f, false },
+	{ "sbvh b13",   true,  13, 0.1f, false },
+	{ "sbvh b14",   true,  14, 0.1f, false },
+	{ "sbvh b15",   true,  15, 0.1f, false },
+	{ "sbvh b17",   true,  17, 0.1f, false },
+	{ "sbvh b18",   true,  18, 0.1f, false },
+	{ "sbvh b19",   true,  19, 0.1f, false },
+	{ "sbvh b20",   true,  20, 0.1f, false },
+	{ "sbvh b21",   true,  21, 0.1f, false },
+	{ "sbvh b22",   true,  22, 0.1f, false },
+	{ "sbvh b23",   true,  23, 0.1f, false },
+	{ "sbvh b24",   true,  24, 0.1f, false },
+	{ "sbvh b25",   true,  25, 0.1f, false },
+	{ "sbvh b26",   true,  26, 0.1f, false },
+	{ "sbvh b27",   true,  27, 0.1f, false },
+	{ "sbvh b28",   true,  28, 0.1f, false },
+	{ "sbvh b29",   true,  29, 0.1f, false },
+	{ "sbvh b30",   true,  30, 0.1f, false },
+	{ "sbvh b31",   true,  31, 0.1f, false },
+	{ "sbvh b8oe",  true,   8, 0.1f, true  },
+	{ "sbvh b9oe",  true,   9, 0.1f, true  },
+	{ "sbvh b10oe", true,  10, 0.1f, true  },
+	{ "sbvh b11oe", true,  11, 0.1f, true  },
+	{ "sbvh b12oe", true,  12, 0.1f, true  },
+	{ "sbvh b13oe", true,  13, 0.1f, true  },
+	{ "sbvh b14oe", true,  14, 0.1f, true  },
+	{ "sbvh b15oe", true,  15, 0.1f, true  },
+	{ "sbvh b16oe", true,  16, 0.1f, true  },
+	{ "sbvh b17oe", true,  17, 0.1f, true  },
+	{ "sbvh b18oe", true,  18, 0.1f, true  },
+	{ "sbvh b19oe", true,  19, 0.1f, true  },
+	{ "sbvh b20oe", true,  20, 0.1f, true  },
+	{ "sbvh b21oe", true,  21, 0.1f, true  },
+	{ "sbvh b22oe", true,  22, 0.1f, true  },
+	{ "sbvh b23oe", true,  23, 0.1f, true  },
+	{ "sbvh b24oe", true,  24, 0.1f, true  },
+	{ "sbvh b25oe", true,  25, 0.1f, true  },
+	{ "sbvh b26oe", true,  26, 0.1f, true  },
+	{ "sbvh b27oe", true,  27, 0.1f, true  },
+	{ "sbvh b28oe", true,  28, 0.1f, true  },
+	{ "sbvh b29oe", true,  29, 0.1f, true  },
+	{ "sbvh b30oe", true,  30, 0.1f, true  },
+	{ "sbvh b31oe", true,  31, 0.1f, true  },
+	{ "sbvh b32oe", true,  32, 0.1f, true  },
 };
 #define CAND_DEFAULT	2
+#define CAND_SWEEP		6
 #define CAND_MAX		(uint32_t)(sizeof( g_candidate ) / sizeof( CandidateInfo ))
 
 static const char* CandidateName( const uint32_t c ) { return g_candidate[c].name; }
@@ -3005,6 +3094,7 @@ static const char* CandidateName( const uint32_t c ) { return g_candidate[c].nam
 struct PrePass
 {
 	bool on = false;			// -prepass
+	bool quiet = false;			// set when candidates run in parallel; see the note at the report
 	uint32_t minRefs = 16;		// the band; see the note above on where the gain lives
 	uint32_t maxRefs = 128;
 	uint32_t minBins = 8;		// every bin count in [minBins, maxBins], each with and without
@@ -3167,7 +3257,7 @@ static double RebuildSubtrees( tinybvh::BVH& bvh, const PrePass& pre )
 			// is priced against it as a huge win that the optimizer's own explode step then
 			// throws away. Comparing two trees built under different rules measures the rules.
 			cur.tree.settings = bvh.settings;
-			cur.tree.settings.useSpatialSplits = true;
+			cur.tree.settings.useSpatialSplits = bvh.settings.useSpatialSplits;	// honours -nosplits
 			cur.tree.settings.binnedBVH = true;
 			cur.tree.hqbvhbins = b, cur.tree.hqbvhoddeven = oe != 0;
 			cur.tree.c_trav = bvh.c_trav, cur.tree.c_int = bvh.c_int;
@@ -3231,11 +3321,17 @@ static double RebuildSubtrees( tinybvh::BVH& bvh, const PrePass& pre )
 	// The rewrite is depth-first and gap-free by construction, so no hole or ordering flag needs
 	// clearing; refittability is the builder's to decide and a spatial-split rebuild only adds
 	// the duplicate references an SBVH build would already have produced inside this box.
-	printf( "prepass: %u of %u subtrees (%u..%u refs) rebuilt from %u configurations, SAH -%.2f%%, refs %+.2f%%\n",
-		(uint32_t)repl.size(), (uint32_t)cand.size(), pre.minRefs, pre.maxRefs, pre.Configs(),
-		100.0 * gained / whole, 100.0 * refDelta / (double)wholeRefs );
-	printf( "         winning config: %.1f bins mean, odd/even in %.0f%% of them\n",
-		(double)winBins / (double)repl.size(), 100.0 * (double)winOddEven / (double)repl.size() );
+	// One candidate's prepass has nothing to say to another's, and with a thread per candidate
+	// these lines arrive interleaved with the progress log and with each other. In that mode the
+	// per-candidate line printed on completion is the report.
+	if (!pre.quiet)
+	{
+		printf( "prepass: %u of %u subtrees (%u..%u refs) rebuilt from %u configurations, SAH -%.2f%%, refs %+.2f%%\n",
+			(uint32_t)repl.size(), (uint32_t)cand.size(), pre.minRefs, pre.maxRefs, pre.Configs(),
+			100.0 * gained / whole, 100.0 * refDelta / (double)wholeRefs );
+		printf( "         winning config: %.1f bins mean, odd/even in %.0f%% of them\n",
+			(double)winBins / (double)repl.size(), 100.0 * (double)winOddEven / (double)repl.size() );
+	}
 	return gained / whole;
 }
 
@@ -3260,6 +3356,9 @@ struct WideSettings
 	bool hotOrder = false;		// -hotorder: lay the tree out with the visited child first
 	uint32_t profile = PROF_HQ;	// -profile fast|hq|extreme: how hard to look
 	uint32_t metric = METRIC_SAH;	// -metric sah|epo|raycost: what to minimize
+	uint32_t threads = 0;		// -threads: candidates to run at once; 0 asks the machine
+	bool noSplits = false;		// -nosplits: no spatial splits anywhere, so the result refits
+	EffortSet effort;			// which effort settings came from the command line
 	bool Any() const { for (uint32_t t = 0; t < TGT_COUNT; t++) if (target[t]) return true; return false; }
 };
 
@@ -3461,7 +3560,8 @@ static float MetricRank( const CandidateStats& st, const uint32_t metric, const 
 static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tris, const uint32_t candidate,
 	Optimizer::Settings set, const TargetInfo& info, CandidateStats& st, const GeometryFilter& filter,
 	const PrePass& pre, const float cTrav, const float cInt, const RoundGate* gate,
-	const uint32_t profile, const uint32_t metric )
+	const uint32_t profile, const uint32_t metric, const bool serial, const bool noSplits,
+	const EffortSet& user )
 {
 	const Clock::time_point t0 = Clock::now();
 	const CandidateInfo& cand = g_candidate[candidate];
@@ -3471,12 +3571,21 @@ static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tri
 	// budget that cannot bind.
 	const bool capped = info.leafPrims > 0;
 	set.maxLeafPrims = capped ? info.leafPrims : ~0u;
-	bvh.settings.useSpatialSplits = true;
+	// -nosplits: no reference is ever clipped, so the tree holds one reference per triangle and
+	// every leaf box is the union of whole triangle boxes. That is what makes it refittable - a
+	// refit recomputes bounds from the triangles, and a clipped reference's box is smaller than
+	// the triangle it stands for, so a split tree silently grows on the first refit.
+	bvh.settings.useSpatialSplits = !noSplits;
 	bvh.settings.binnedBVH = cand.binned;		// SBVH with, Bonsai HQ without
-	bvh.hqbvhbins = cand.bins;
+	bvh.hqbvhbins = cand.bins, bvh.hqbvhoddeven = cand.oddEven;
 	bvh.settings.bonsaiPruneFactor = cand.prune;
 	bvh.hqLeafPrims = capped ? info.leafPrims : 0, bvh.lQuads = info.quadLeaves;
 	bvh.c_trav = cTrav, bvh.c_int = cInt;
+	// One candidate per thread means the work inside one has to stay on its own thread: the
+	// library's build pool is process-wide, and several candidates driving it at once would
+	// oversubscribe the machine and interleave unpredictably. Scaling comes from the candidates
+	// instead, which is the better axis - they are independent from first node to last.
+	bvh.settings.enableThreading = !serial;
 	// RecoverRef below rebuilds each reference box by clipping its triangle to the box of the leaf
 	// holding it, so smaller leaves recover the spatial splits more exactly - and for a leaf of one
 	// they recover them exactly. Which is only worth doing if the optimizer is going to take the
@@ -3516,11 +3625,15 @@ static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tri
 					bvh.primIdx[node.leftFirst + i], node.aabbMin, node.aabbMax );
 		}
 	};
-	// The ladder. Each rung runs on the tree the rung below it left behind, so the search for
-	// 'extreme' contains the search for 'hq', which contains the search for 'fast'. Between rungs
-	// the tree is scored by the metric and the best one seen is kept, which is what makes a higher
-	// profile a guarantee rather than a hope: a rung that wanders off - and annealing exists to
-	// make it wander - cannot cost anything, because its result is simply not the one returned.
+	// The ladder. Every rung starts from the tree the builder produced, runs its own settings on
+	// it, and is scored by the metric; the best rung is what comes out. Two properties follow,
+	// and the first version of this had only the second: a rung is exactly what that profile
+	// would have produced on its own, and a higher profile cannot return a worse tree.
+	//
+	// It used to continue each rung from the one below instead, which cost real quality - a weak
+	// rung leaves the tree in a local optimum the next one then has to climb out of, and on a
+	// small test scene that was worth 0.25% SAH against simply running the hq settings from the
+	// build. The ladder is there to make profiles comparable, not to save the work of a restart.
 	//
 	// Each rung gets a fresh BVH_Verbose, rebuilt from the tree the last rung produced. Run ends
 	// by compacting, which shrinks the node array, and the next rung starts by exploding every
@@ -3534,9 +3647,19 @@ static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tri
 	uint32_t bestRung = 0, keepUsed = 0, keepIdx = 0;
 	std::vector<tinybvh::BVH::BVHNode> keepNode;
 	std::vector<uint32_t> keepPrim;
+	// the tree as built, kept so every rung can start from it.
+	const uint32_t builtUsed = bvh.usedNodes, builtIdx = bvh.idxCount;
+	std::vector<tinybvh::BVH::BVHNode> builtNode( bvh.bvhNode, bvh.bvhNode + builtUsed );
+	std::vector<uint32_t> builtPrim( bvh.primIdx, bvh.primIdx + builtIdx );
 	for (uint32_t r = 0; r <= topRung; r++)
 	{
-		ApplyProfileRung( rung, r );
+		if (r > 0)
+		{
+			memcpy( bvh.bvhNode, builtNode.data(), builtUsed * sizeof( tinybvh::BVH::BVHNode ) );
+			memcpy( bvh.primIdx, builtPrim.data(), builtIdx * sizeof( uint32_t ) );
+			bvh.usedNodes = builtUsed, bvh.idxCount = builtIdx;
+		}
+		ApplyProfileRung( rung, r, user );
 		RecoverRefBoxes();
 		float score = BVH_FAR;
 		{
@@ -3566,7 +3689,7 @@ static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tri
 		if (set.verbose) printf( "  %-10s rung %s: %s %.4f%s\n", CandidateName( candidate ),
 			g_profileName[r], g_metricName[metric], score, bestRung == r ? "" : " (kept the rung below)" );
 	}
-	if (bestRung != topRung)
+	if (bestRung != topRung)	// the last rung is already in place; any other has to be put back
 	{
 		memcpy( bvh.bvhNode, keepNode.data(), keepUsed * sizeof( tinybvh::BVH::BVHNode ) );
 		memcpy( bvh.primIdx, keepPrim.data(), keepIdx * sizeof( uint32_t ) );
@@ -3602,14 +3725,16 @@ static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tri
 //
 // It is capped and leaf-fitted the same way the finished tree is, so the two numbers describe
 // trees of the same shape and the ratio between them means something.
-struct Baseline { float sah = 0, epo = 0; bool fromInput = false; };
+struct Baseline { float sah = 0, epo = 0; bool fromInput = false, noSplits = false; };
 
 static Baseline BuildBaseline( const std::vector<bvhvec4>& tris, const GeometryFilter& filter,
-	const TargetInfo& info, const float cTrav, const float cInt )
+	const TargetInfo& info, const float cTrav, const float cInt, const bool noSplits )
 {
 	tinybvh::BVH ref;
 	const bool capped = info.leafPrims > 0;
-	ref.settings.useSpatialSplits = true;		// BonsaiS: Bonsai, with spatial splits
+	// BonsaiS normally; plain Bonsai under -nosplits, since a baseline the run could not have
+	// produced is not a baseline, it is a different experiment.
+	ref.settings.useSpatialSplits = !noSplits;
 	ref.settings.binnedBVH = false;
 	ref.hqLeafPrims = capped ? info.leafPrims : 0, ref.lQuads = info.quadLeaves;
 	ref.c_trav = cTrav, ref.c_int = cInt;
@@ -3629,7 +3754,8 @@ static void ReportWinner( const CandidateStats& st, const Baseline& base )
 	printf( "  SAH %10.4f -> %10.4f (%+6.2f%%)\n", base.sah, st.sahPost, 100.0f * (st.sahPost - base.sah) / base.sah );
 	printf( "  EPO %10.4f -> %10.4f (%+6.2f%%)\n", base.epo, st.epoPost, 100.0f * (st.epoPost - base.epo) / base.epo );
 	printf( "         'before' is %s, not the winning candidate's own starting point\n",
-		base.fromInput ? "the tree that was handed in" : "a stock BonsaiS build" );
+		base.fromInput ? "the tree that was handed in" : base.noSplits ? "a stock Bonsai build"
+		: "a stock BonsaiS build" );
 }
 
 // BVH_GPU packs a leaf into a single child slot: seven bits of triangle count, twenty-four
@@ -3983,22 +4109,68 @@ static int RunWideTargets( const std::string& meshPath, const Optimizer::Setting
 		{
 			input.c_trav = cTrav, input.c_int = cInt, input.lQuads = regime.quadLeaves;
 			base.sah = input.SAHCost(), base.epo = input.EPOCost(), base.fromInput = true;
+			base.noSplits = w.noSplits;
 			printf( "  baseline:  the input tree, SAH %.4f, EPO %.4f\n", base.sah, base.epo );
 		}
 		else
 		{
-			base = BuildBaseline( tris, filter, regime, cTrav, cInt );
-			printf( "  baseline:  stock BonsaiS build, SAH %.4f, EPO %.4f\n", base.sah, base.epo );
+			base = BuildBaseline( tris, filter, regime, cTrav, cInt, w.noSplits );
+			base.noSplits = w.noSplits;
+			printf( "  baseline:  stock %s build, SAH %.4f, EPO %.4f\n",
+				w.noSplits ? "Bonsai" : "BonsaiS", base.sah, base.epo );
 		}
 		tinybvh::BVH bvh[CAND_MAX];
 		CandidateStats stat[CAND_MAX] = {};
-		for (uint32_t c = 0; c < w.candidates; c++)
+		const uint32_t useMetric = (w.metric == METRIC_RAYCOST && !gateable) ? (uint32_t)METRIC_SAH : w.metric;
+		// Candidates are independent: separate trees, separate statistics, nothing shared but the
+		// mesh they read. So with more than a handful of them the machine is better spent running
+		// one per thread with each pipeline serial, than running them in turn with a threaded
+		// build inside. The second only parallelises the build; the first parallelises everything,
+		// and the slowest candidate rather than the sum of them sets the wall clock.
+		const uint32_t cores = w.threads ? w.threads :
+			tinybvh::tinybvh_max( 1u, (uint32_t)std::thread::hardware_concurrency() );
+		const uint32_t workers = w.candidates > 2 ? tinybvh::tinybvh_min( w.candidates, cores ) : 1;
+		if (workers > 1) printf( "  %u candidates over %u threads, each pipeline single-threaded:\n",
+			w.candidates, workers );
+		std::atomic<uint32_t> nextCandidate( 0 ), finished( 0 );
+		std::mutex report;
+		auto RunCandidate = [&]( const uint32_t c, const RoundGate* own )
 		{
-			PrepareCandidate( bvh[c], tris, c, set, regime, stat[c], filter, w.pre, cTrav, cInt, gate,
-				w.profile, (w.metric == METRIC_RAYCOST && !gateable) ? METRIC_SAH : w.metric );
-			printf( "  %-10s %u references, %u nodes, SAH %.4f, EPO %.4f, %.1f s\n", CandidateName( c ),
+			Optimizer::Settings mine = set;
+			if (workers > 1) mine.verbose = false;	// interleaved rung traces are unreadable
+			PrePass pre = w.pre;
+			pre.quiet = workers > 1;
+			PrepareCandidate( bvh[c], tris, c, mine, regime, stat[c], filter, pre, cTrav, cInt, own,
+				w.profile, useMetric, workers > 1, w.noSplits, w.effort );
+			const uint32_t done = ++finished;
+			std::lock_guard<std::mutex> lock( report );
+			if (workers > 1) printf( "  [%2u/%2u] %-10s %u refs, %u nodes, SAH %.4f, EPO %.4f, rung %s, %.1f s\n",
+				done, w.candidates, CandidateName( c ), bvh[c].idxCount, bvh[c].usedNodes,
+				stat[c].sahPost, stat[c].epoPost, g_profileName[stat[c].rung], stat[c].seconds );
+			else printf( "  %-10s %u references, %u nodes, SAH %.4f, EPO %.4f, %.1f s\n", CandidateName( c ),
 				bvh[c].idxCount, bvh[c].usedNodes, stat[c].sahPost, stat[c].epoPost, stat[c].seconds );
+			fflush( stdout );
+		};
+		if (workers > 1)
+		{
+			// The gate keeps a scratch tree of its own and is written to on every score, so one
+			// per worker rather than one shared between them.
+			std::vector<std::thread> pool;
+			for (uint32_t t = 0; t < workers; t++) pool.push_back( std::thread( [&]()
+			{
+				RoundGate* own = (w.gate && gateable) ?
+					MakeGate( rep, g_target[rep], fit, cTrav, cInt, w.gateTime, w.timingRuns ) : 0;
+				for (;;)
+				{
+					const uint32_t c = nextCandidate++;
+					if (c >= w.candidates) break;
+					RunCandidate( c, own );
+				}
+				delete own;
+			} ) );
+			for (std::thread& t : pool) t.join();
 		}
+		else for (uint32_t c = 0; c < w.candidates; c++) RunCandidate( c, gate );
 		delete gate;
 		if (w.hotOrder) for (uint32_t c = 0; c < w.candidates; c++)
 		{
@@ -4039,7 +4211,10 @@ static int RunWideTargets( const std::string& meshPath, const Optimizer::Setting
 	return 0;
 }
 
-static void Usage()
+// The short help is the three decisions that matter: what to build, how hard to look,
+// and what to look for. Everything else is there for someone taking one of those apart,
+// and a wall of it on a bare invocation buries the three that are not optional.
+static void Usage( const bool advanced )
 {
 	printf(
 		"usage: bvhopt <file.bvh> [options]                     optimize a binary BVH\n"
@@ -4056,6 +4231,27 @@ static void Usage()
 		"  Every layout with a cache format of its own gets the collapsed tree, which its Load\n"
 		"  reads back directly; the rest get the binary tree their Load converts.\n"
 		"\n"
+		"  --target L         comma-separated, or 'all': bvh, bvhgpu, bvh4cpu, bvh8cpu,\n"
+		"                     bvh4gpu, bvh8cwbvh, bvh4amdhw, cwbvh8amdhw\n"
+		"  -profile P         how hard to look: fast, hq (default) or extreme. Each is run from the\n"
+		"                     tree the builder produced and scored by -metric, and the best of them\n"
+		"                     is what comes out - so a higher profile cannot return a worse tree,\n"
+		"                     only a slower answer. extreme explores every bin count in 8..32 with\n"
+		"                     and without odd/even, one candidate per thread\n"
+		"  -metric M          what to minimize: sah (default), epo, or raycost. sah is the model,\n"
+		"                     epo corrects for where rays stop, raycost counts node and primitive\n"
+		"                     tests on real rays through the collapsed tree in the target layout.\n"
+		"                     Sets the per-round test and the local guidance to match; both can\n"
+		"                     still be overridden by flags given after it\n"
+		"\n" );
+	if (!advanced)
+	{
+		printf(
+			"  -advanced          list every other option: ray counts, candidate sweeps, the cost\n"
+			"                     model calibration, the round gate, layout and threading controls\n" );
+		return;
+	}
+	printf(
 		"  -prepass           before optimizing, rebuild every subtree of 16..128 references\n"
 		"                     standalone with spatial splits and keep the cheapest result over\n"
 		"                     every bin count in 8..32, with and without odd/even. 50 builds\n"
@@ -4066,8 +4262,6 @@ static void Usage()
 		"                     not renumbered, so a renderer indexing materials by primitive id\n"
 		"                     is unaffected; see AuditGeometry for what this does and does not\n"
 		"                     justify doing to a mesh\n"
-		"  --target L         comma-separated, or 'all': bvh, bvhgpu, bvh4cpu, bvh8cpu,\n"
-		"                     bvh4gpu, bvh8cwbvh, bvh4amdhw, cwbvh8amdhw\n"
 		"  -rays N            sample rays per set (default 100000; each adds one bounce)\n"
 		"  -visitmin N        visit count below which a node falls back to surface area (default 8)\n"
 		"  -timingruns N      timed passes per tree, best reported (default 3)\n"
@@ -4106,15 +4300,13 @@ static void Usage()
 		"  -anneal F          let reinsertion accept uphill moves, starting at a temperature of F\n"
 		"                     times the root box area and cooling to zero within each call, so the\n"
 		"                     walk can leave a local minimum and still end in one (try 0.02)\n"
-		"  -profile P         how hard to look: fast, hq (default) or extreme. The three are rungs\n"
-		"                     of one ladder - hq continues from the tree fast produced, extreme from\n"
-		"                     the tree hq produced, and the best by -metric is kept - so a higher\n"
-		"                     profile cannot return a worse tree, only a slower answer\n"
-		"  -metric M          what to minimize: sah (default), epo, or raycost. sah is the model,\n"
-		"                     epo corrects for where rays stop, raycost counts node and primitive\n"
-		"                     tests on real rays through the collapsed tree in the target layout.\n"
-		"                     Sets the per-round test and the local guidance to match; both can\n"
-		"                     still be overridden by flags given after it\n"
+		"  -nosplits          build and optimize without spatial splits anywhere. One reference per\n"
+		"                     triangle, no clipped boxes, so the result can be refitted. The final\n"
+		"                     improvement is then quoted against a stock Bonsai build rather than\n"
+		"                     a BonsaiS one\n"
+		"  -threads N         candidates to explore at once, each on its own thread with its own\n"
+		"                     pipeline kept serial. Default is one per core. Only engages with more\n"
+		"                     than two candidates, which in practice means -profile extreme\n"
 		"  -hotorder          lay each tree out with the more visited sibling first, so the nodes\n"
 		"                     rays reach sit next to their parent. A relabeling of the tree, not a\n"
 		"                     change to it: the same queries return the same answers\n"
@@ -4135,7 +4327,15 @@ static void Usage()
 
 int main( int argc, char** argv )
 {
-	if (argc < 2) { Usage(); return 1; }
+	if (argc < 2) { Usage( false ); return 1; }
+	// The help flags are looked for before anything else: argv[1] is otherwise the input path,
+	// and 'bvhopt -advanced' would be read as a request to optimize a file of that name.
+	for (int32_t i = 1; i < argc; i++)
+	{
+		const std::string a = argv[i];
+		if (a == "-advanced") { Usage( true ); return 0; }
+		if (a == "-h" || a == "--help") { Usage( false ); return 0; }
+	}
 	std::string bvhPath = argv[1];
 	Optimizer::Settings set;
 	WideSettings wide;
@@ -4143,11 +4343,11 @@ int main( int argc, char** argv )
 	{
 		const std::string a = argv[i];
 		auto num = [&]( uint32_t def ) { return i + 1 < argc ? (uint32_t)atoi( argv[++i] ) : def; };
-		if (a == "-rounds") set.rounds = num( 16 );
-		else if (a == "-reinsert") set.reinsertIters = num( 100 );
-		else if (a == "-sweeps") set.treeletSweeps = num( 2 );
-		else if (a == "-rebuild") set.rebuildSubtrees = num( 0 );
-		else if (a == "-exact") set.exactBottomSize = num( 10 );
+		if (a == "-rounds") set.rounds = num( 16 ), wide.effort.rounds = true;
+		else if (a == "-reinsert") set.reinsertIters = num( 100 ), wide.effort.reinsert = true;
+		else if (a == "-sweeps") set.treeletSweeps = num( 2 ), wide.effort.sweeps = true;
+		else if (a == "-rebuild") set.rebuildSubtrees = num( 0 ), wide.effort.rebuild = true;
+		else if (a == "-exact") set.exactBottomSize = num( 10 ), wide.effort.exact = true;
 		else if (a == "-leaf") set.maxLeafPrims = num( 4 );
 		else if (a == "-seed") set.seed = num( 0x12345678u );
 		else if (a == "-epogate") set.epoGate = true;
@@ -4164,13 +4364,15 @@ int main( int argc, char** argv )
 		else if (a == "-timingruns") wide.timingRuns = num( 3 );
 		else if (a == "-noweight") wide.weighted = false;
 		else if (a == "-noplain") wide.plain = false;
-		else if (a == "-sweep") wide.candidates = CAND_MAX;
+		else if (a == "-sweep") wide.candidates = CAND_SWEEP;
 		else if (a == "-audit") wide.audit = true;
 		else if (a == "-fitcost") wide.fitCost = true;
 		else if (a == "-nofitcost") wide.fitCost = false;
 		else if (a == "-fitdetail") wide.fitDetail = true;
 		else if (a == "-calibrate") wide.calibrateOnly = true;
 		else if (a == "-hotorder") wide.hotOrder = true;
+		else if (a == "-threads") wide.threads = num( 0 );
+		else if (a == "-nosplits") wide.noSplits = true;
 		else if (a == "-profile" && i + 1 < argc)
 		{
 			const std::string v = argv[++i];
@@ -4181,7 +4383,7 @@ int main( int argc, char** argv )
 			// Effort that is not per-candidate: how many starting trees, and whether to spend the
 			// prepass. Candidates 0 and 1 are the ones the lower profiles use, so a higher
 			// profile's set contains a lower one's and the ladder's guarantee survives it.
-			wide.candidates = wide.profile == PROF_FAST ? 1u : wide.profile == PROF_HQ ? 2u : CAND_MAX;
+			wide.candidates = wide.profile == PROF_FAST ? 1u : wide.profile == PROF_HQ ? CAND_DEFAULT : CAND_MAX;
 			wide.pre.on = wide.profile != PROF_FAST;
 		}
 		else if (a == "-metric" && i + 1 < argc)
@@ -4198,8 +4400,8 @@ int main( int argc, char** argv )
 			set.epoGate = wide.metric == METRIC_EPO;
 			set.epoGuide = wide.metric == METRIC_SAH ? 0.0f : wide.metric == METRIC_EPO ? 1.0f : 0.5f;
 		}
-		else if (a == "-agglom") set.agglomSize = num( 24 );
-		else if (a == "-anneal") set.anneal = i + 1 < argc ? (float)atof( argv[++i] ) : 0.02f;
+		else if (a == "-agglom") set.agglomSize = num( 24 ), wide.effort.agglom = true;
+		else if (a == "-anneal") set.anneal = i + 1 < argc ? (float)atof( argv[++i] ) : 0.02f, wide.effort.anneal = true;
 		else if (a == "-gate") wide.gate = true;
 		else if (a == "-gatetime") wide.gate = true, wide.gateTime = true;
 		else if (a == "-gatepatience") set.gatePatience = num( 3 );
@@ -4228,6 +4430,7 @@ int main( int argc, char** argv )
 		else if (a == "-out") { if (i + 1 < argc) wide.outStem = argv[++i]; }
 		else if (a == "-treelet")
 		{
+			wide.effort.treelet = true;
 			if (i + 1 < argc)
 			{
 				const std::string v = argv[++i];
@@ -4236,7 +4439,8 @@ int main( int argc, char** argv )
 				set.treeletSizeTop = comma == std::string::npos ? set.treeletSize : (uint32_t)atoi( v.c_str() + comma + 1 );
 			}
 		}
-		else if (a == "-h" || a == "--help") { Usage(); return 0; }
+		else if (a == "-h" || a == "--help") { Usage( false ); return 0; }
+		else if (a == "-advanced") { Usage( true ); return 0; }
 		else { printf( "error: unexpected argument '%s'\n", a.c_str() ); return 1; }
 	}
 	set.treeletSize = (uint32_t)tinybvh::tinybvh_clamp( (int32_t)set.treeletSize, 3, (int32_t)MAX_TREELET );
@@ -4256,8 +4460,18 @@ int main( int argc, char** argv )
 			if (!wide.Any()) wide.target[derived] = true;
 		}
 	}
-	if (wide.Any()) return RunWideTargets( bvhPath, set, wide );
+	if (wide.Any())
+	{
+		// Wall clock for everything the run did: builds, calibration, the ladder, the measurements.
+		// With -profile extreme the interesting number is this one rather than any single
+		// candidate's, since the candidates overlap and the slowest of them sets the total.
+		const Clock::time_point runStart = Clock::now();
+		const int result = RunWideTargets( bvhPath, set, wide );
+		printf( "\ntotal: %.1f s\n", MilliSec( runStart, Clock::now() ) / 1000.0 );
+		return result;
+	}
 
+	const Clock::time_point startAll = Clock::now();	// wall clock for the whole run
 	tinybvh::BVH bvh = tinybvh::BVH::Load( bvhPath.c_str() );
 	if (bvh.usedNodes == 0)
 	{
@@ -4290,7 +4504,7 @@ int main( int argc, char** argv )
 		if (!node.isLeaf() || node.triCount == 0) continue;
 		for (uint32_t i = 0; i < node.triCount; i++)
 			refBox[node.leftFirst + i] = RecoverRef( bvh.verts, bvh.vertIdx,
-				bvh.primIdx[node.leftFirst + i], node.aabbMin, node.aabbMax );
+				bvh.primIdx[node.leftFirst + i], node.aabbMin, node.aabbMax, wide.noSplits );
 	}
 	tinybvh::BVH_Verbose verbose;
 	verbose.ConvertFrom( bvh );
@@ -4323,5 +4537,6 @@ int main( int argc, char** argv )
 	const std::string outPath = OutputName( bvhPath );
 	bvh.Save( outPath.c_str() );
 	printf( "output : %s\n", outPath.c_str() );
+	printf( "\ntotal: %.1f s\n", MilliSec( startAll, Clock::now() ) / 1000.0 );
 	return 0;
 }
