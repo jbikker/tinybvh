@@ -423,6 +423,8 @@ namespace tinybvh {
 		uint32_t allocatedPrimIndices = 0;
 		MBVH<8> bvh8;
 		bool ownBVH8 = true;
+		
+		bool forceInternalAABB = false;
 
 	private:
 		// SAH optimal widening, via Claude
@@ -972,6 +974,8 @@ namespace tinybvh {
 
 			float rotatedAxesExtents[6];
 
+			bool hasLeafSlot = false;
+
 			// Values for e
 			float DOBBSASum = 0.0f;
 			bvhvec3 childMinPoint[8], childMaxPoint[8];
@@ -1023,12 +1027,19 @@ namespace tinybvh {
 				float b = childMaxPoint[childIdx].y - childMinPoint[childIdx].y;
 				float c = childMaxPoint[childIdx].z - childMinPoint[childIdx].z;
 				DOBBSASum += 2 * (a * b + a * c + b * c);
+
+				// Check if child is a leaf slot
+				if (bvh8.mbvhNode[currChildIdx].isLeaf()) 
+					hasLeafSlot = true;
 			}
 
 			// Determine chosen rotation, record extents if no rotation
 			uint8_t chosenRotation;
 
-			if (DOBBSASum < ALPHA * sideband[currBvhIdx].AABBSASum) {
+			// Helper for forcing AABB
+			bool shouldBeAABB = forceInternalAABB && !hasLeafSlot;
+
+			if (!shouldBeAABB && DOBBSASum < ALPHA * sideband[currBvhIdx].AABBSASum) {
 				chosenRotation = candidateRotationIdx;
 			}
 			else {

@@ -951,6 +951,7 @@ void convertMBVHToCompressedBounds() {
 // to measure BVH quality
 void InitBvhs() 
 {
+	dobbBvh.forceInternalAABB = true;
 	dobbBvh.Build(tris, triCount);
 	convertMBVHToCompressedBounds();
 }
