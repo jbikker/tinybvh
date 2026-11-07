@@ -410,8 +410,8 @@ template <> uint32_t impl::BVH8_CWBVH<float, uint32_t>::SlotPermutation( const i
 	const __m256 minx = _mm256_set_m128( lo[4], lo[0] ), miny = _mm256_set_m128( lo[5], lo[1] ), minz = _mm256_set_m128( lo[6], lo[2] );
 	const __m256 maxx = _mm256_set_m128( hi[4], hi[0] ), maxy = _mm256_set_m128( hi[5], hi[1] ), maxz = _mm256_set_m128( hi[6], hi[2] );
 	// centroid offsets, unhalved: a common factor of two does not change the order.
-	const __m256 nodeSum = _mm256_add_ps( _mm256_broadcast_ps( (const __m128*)&orig->aabbMin ),
-		_mm256_broadcast_ps( (const __m128*)&orig->aabbMax ) );
+	const __m256 nodeSum = _mm256_add_ps( _mm256_broadcast_ps( (const __m128*) & orig->aabbMin ),
+		_mm256_broadcast_ps( (const __m128*) & orig->aabbMax ) );
 	const __m256 dx = _mm256_sub_ps( _mm256_add_ps( minx, maxx ), _mm256_permute_ps( nodeSum, 0x00 ) );
 	const __m256 dy = _mm256_sub_ps( _mm256_add_ps( miny, maxy ), _mm256_permute_ps( nodeSum, 0x55 ) );
 	const __m256 dz = _mm256_sub_ps( _mm256_add_ps( minz, maxz ), _mm256_permute_ps( nodeSum, 0xAA ) );
@@ -1558,42 +1558,42 @@ template <> PER_OCTANT int32_t impl::BVH8_CPU<float, uint32_t>::IntersectOctant(
 				combined = _mm_and_ps( combined, tinybvh_load4( omask ) );
 				imask = _mm_movemask_ps( combined );
 			}
-			if (imask)
-			{
-				// compute broadcasted horizontal minimum of dist4
-				const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
-				const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
-				const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
-				const uint32_t lane = tinybvh_bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
-				// update hit record.
-				const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
-				const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
-				ray.hit.t = t;
-				ray.hit.u = _mm_cvtss_f32( _mm_permutevar_ps( u4, lane4 ) );
-				ray.hit.v = _mm_cvtss_f32( _mm_permutevar_ps( v4, lane4 ) );
-			#if INST_IDX_BITS == 32
-				ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
-			#else
-				ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
-			#endif
-				t8 = _mm256_set1_ps( t );
-				// compress stack
-				int32_t outStackPtr = 0;
-				for (int32_t i = 0; i < stackPtr; i += 8)
+				if (imask)
 				{
-					const int32_t numItems = tinybvh_min( 8, stackPtr - i );
-					const __m256i valid8 = _mm256_cmpgt_epi32( _mm256_set1_epi32( numItems ), lane8 );
-					__m256i node8 = _mm256_maskload_epi32( (const int32_t*)(nodeStack + i), valid8 );
-					__m256 dist8 = _mm256_maskload_ps( distStack + i, valid8 );
-					const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) ) & ((1u << numItems) - 1);
-					const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
-					dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
-					_mm256_storeu_ps( distStack + outStackPtr, dist8 );
-					_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
-					outStackPtr += tinybvh_popc( mask );
+					// compute broadcasted horizontal minimum of dist4
+					const __m128 dist4 = _mm_blendv_ps( inf4, ta4, combined );
+					const __m128 a = _mm_min_ps( dist4, _mm_shuffle_ps( dist4, dist4, _MM_SHUFFLE( 2, 1, 0, 3 ) ) );
+					const __m128 c = _mm_min_ps( a, _mm_shuffle_ps( a, a, _MM_SHUFFLE( 1, 0, 3, 2 ) ) );
+					const uint32_t lane = tinybvh_bfind( _mm_movemask_ps( _mm_cmpeq_ps( c, dist4 ) ) );
+					// update hit record.
+					const __m128i lane4 = _mm_set1_epi32( (int32_t)lane );
+					const float t = _mm_cvtss_f32( _mm_permutevar_ps( dist4, lane4 ) );
+					ray.hit.t = t;
+					ray.hit.u = _mm_cvtss_f32( _mm_permutevar_ps( u4, lane4 ) );
+					ray.hit.v = _mm_cvtss_f32( _mm_permutevar_ps( v4, lane4 ) );
+				#if INST_IDX_BITS == 32
+					ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
+				#else
+					ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
+				#endif
+					t8 = _mm256_set1_ps( t );
+					// compress stack
+					int32_t outStackPtr = 0;
+					for (int32_t i = 0; i < stackPtr; i += 8)
+					{
+						const int32_t numItems = tinybvh_min( 8, stackPtr - i );
+						const __m256i valid8 = _mm256_cmpgt_epi32( _mm256_set1_epi32( numItems ), lane8 );
+						__m256i node8 = _mm256_maskload_epi32( (const int32_t*)(nodeStack + i), valid8 );
+						__m256 dist8 = _mm256_maskload_ps( distStack + i, valid8 );
+						const uint32_t mask = _mm256_movemask_ps( _mm256_cmp_ps( dist8, t8, _CMP_LE_OQ ) ) & ((1u << numItems) - 1);
+						const __m256i cpi = _mm256_load_si256( (const __m256i*)idxLUT256[255 - mask] );
+						dist8 = _mm256_permutevar8x32_ps( dist8, cpi ), node8 = _mm256_permutevar8x32_epi32( node8, cpi );
+						_mm256_storeu_ps( distStack + outStackPtr, dist8 );
+						_mm256_storeu_si256( (__m256i*)(nodeStack + outStackPtr), node8 );
+						outStackPtr += tinybvh_popc( mask );
+					}
+					stackPtr = outStackPtr;
 				}
-				stackPtr = outStackPtr;
-			}
 		}
 		if (!stackPtr) ISUNLIKELY break;
 		nodeIdx = nodeStack[--stackPtr];
@@ -1660,12 +1660,12 @@ template <> PER_OCTANT bool impl::BVH8_CPU<float, uint32_t>::IsOccludedOctant( c
 				nodeIdx = nodeStack[--stackPtr];
 			}
 		}
-		if (stackPtr) ISLIKELY
-		{
-			const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
-			_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 128, _MM_HINT_T0 );
-		}
-		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles.
+			if (stackPtr) ISLIKELY
+			{
+				const char* next = (const char*)(bvh8Data + (nodeStack[stackPtr - 1] & 0x1fffffff));
+				_mm_prefetch( next, _MM_HINT_T0 ), _mm_prefetch( next + 128, _MM_HINT_T0 );
+			}
+				// Moeller-Trumbore ray/triangle intersection algorithm for four triangles.
 		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh8Data + (nodeIdx & 0x1fffffff));
 		const __m128 hx4 = _mm_fmsub_ps( dy4, _mm_load_ps( leaf->e2z ), _mm_mul_ps( dz4, _mm_load_ps( leaf->e2y ) ) );
 		const __m128 hy4 = _mm_fmsub_ps( dz4, _mm_load_ps( leaf->e2x ), _mm_mul_ps( dx4, _mm_load_ps( leaf->e2z ) ) );
