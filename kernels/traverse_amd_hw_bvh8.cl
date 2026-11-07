@@ -8,6 +8,8 @@
 
 inline uint bvh8_id_to_offset( uint id ) { return ( id & ( ~7u ) ) << 3; }
 inline uint bvh8_id_to_type( uint id ) { return id & 7u; }
+// Types 0..3 are a triangle pair; the type is the pair's index in its record (ID bit 3 adds 4).
+inline bool bvh8_is_triangle( uint type ) { return type < 4u; }
 
 #define TRIANGLE 0u
 #define INVALID_NODE 0xffffffffu
@@ -65,7 +67,7 @@ float4 traverse_gpu8wayHW( const global float4* alt4Node, const float4 O, const 
 			encoded_base, prevNode != INVALID_NODE ? tmax : hit.x, (uchar)0xff, O.xyz, D.xyz, currentNodeID, BVH8_DESCRIPTOR, &outOrigin, &outDirection);
 
 		uint type = bvh8_id_to_type( currentNodeID );
-		if (type == TRIANGLE)
+		if (bvh8_is_triangle( type ))
 		{
 			for (uint i = 0; i < 2; ++i)
 			{
@@ -113,7 +115,7 @@ float4 traverse_gpu8wayHW( const global float4* alt4Node, const float4 O, const 
 		const global uint* words =
 			(const global uint*)( (const global uchar*)alt4Node +
 								  bvh8_id_to_offset( currentNodeID ) );
-		if (type == TRIANGLE)
+		if (bvh8_is_triangle( type ))
 		{
 			parentID = parentBoxID;
 		}
@@ -150,7 +152,7 @@ bool isoccluded_gpu8wayHW( const global float4* alt4Node, const float4 O, const 
 			encoded_base, tmax, (uchar)0xff, O.xyz, D.xyz, currentNodeID, BVH8_DESCRIPTOR, &outOrigin, &outDirection);
 
 		uint type = bvh8_id_to_type( currentNodeID );
-		if (type == TRIANGLE)
+		if (bvh8_is_triangle( type ))
 		{
 			for (uint i = 0; i < 2; ++i)
 			{
@@ -191,7 +193,7 @@ bool isoccluded_gpu8wayHW( const global float4* alt4Node, const float4 O, const 
 		const global uint* words =
 			(const global uint*)( (const global uchar*)alt4Node +
 								  bvh8_id_to_offset( currentNodeID ) );
-		if (type == TRIANGLE)
+		if (bvh8_is_triangle( type ))
 		{
 			parentID = parentBoxID;
 		}

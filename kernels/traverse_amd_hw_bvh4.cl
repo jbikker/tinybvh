@@ -21,7 +21,10 @@ inline uint id_to_type( uint id ) { return id & 7u; }
 #error "AMD hardware BVH stacks require 8, 16, 32 or 64 entries per ray."
 #endif
 #ifdef ISRDNA4
-// GFX12 stack encoding.
+// GFX12 stack encoding: the entry count is a 5-bit field, so 32 or 64 would encode an empty stack.
+#if HW_BVH_STACK_ENTRIES != 8 && HW_BVH_STACK_ENTRIES != 16
+#error "GFX12 hardware BVH stacks support 8 or 16 entries per ray in this kernel."
+#endif
 #define BVH_STACK_CONTROLS HW_BVH_STACK_ENTRIES
 #define HW_BVH_STACK_BASE_SHIFT 15
 #else
