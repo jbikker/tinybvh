@@ -30,6 +30,15 @@ enum Phase {
 	END
 };
 
+enum RenderOption {
+	HEATMAP,
+	LEAFXRAY
+};
+
+// Render options and helpers
+static RenderOption renderOption = LEAFXRAY;
+static const bvhvec3 leafHitColor(0.01f, 0.02f, 0.04f);
+
 // For instrumentation for experiment
 struct TraversalStats {
 	uint64_t rayCount = 0;
@@ -340,8 +349,10 @@ static bool TriOccludes(const Ray& ray, const bvhvec4slice& verts, const uint32_
 }
 
 // Copy of DOBB Intersect with instrumentation
-void IntersectionInstrumented(const BVH_DOBB& bvh, Ray& ray, TraversalStats* stats = nullptr) {
+uint32_t IntersectionInstrumented(const BVH_DOBB& bvh, Ray& ray, TraversalStats* stats = nullptr) {
 	if (stats) stats->rayCount++;
+
+	uint32_t numberOfLeafHits = 0;
 
 	BVH_DOBB::StackEntry nodeStack[512]; uint32_t stackIdx = 0;
 	nodeStack[stackIdx++] = { 0, -BVH_FAR };
@@ -408,6 +419,8 @@ void IntersectionInstrumented(const BVH_DOBB& bvh, Ray& ray, TraversalStats* sta
 			if (currNode.iMask & (1u << slot)) continue;
 			if (slotDistance[slot] >= ray.hit.t) break;   // sorted: all remaining are farther
 
+			numberOfLeafHits++;
+
 			// Intersect triangles
 			const uint32_t firstTri = currNode.triBaseIndex + (currNode.meta[slot] & 31);
 			const uint32_t triCount = __popc(currNode.meta[slot] >> 5);
@@ -435,6 +448,8 @@ void IntersectionInstrumented(const BVH_DOBB& bvh, Ray& ray, TraversalStats* sta
 			};
 		}
 	}
+
+	return numberOfLeafHits;
 }
 
 // Copy of DOBB isOccluded with instrumentation
@@ -529,8 +544,10 @@ bool isOccludedInstrumented(const BVH_DOBB& bvh, const Ray& ray, TraversalStats*
 }
 
 // MBVH Intersect matching with DOBB processing order
-void IntersectionInstrumented(const MBVH<8>& bvh8, Ray& ray, TraversalStats* stats) {
+uint32_t IntersectionInstrumented(const MBVH<8>& bvh8, Ray& ray, TraversalStats* stats) {
 	if (stats) stats->rayCount++;
+
+	uint32_t numberOfLeafHits = 0;
 
 	BVH_DOBB::StackEntry nodeStack[512];
 	uint32_t stackIdx = 0;
@@ -543,6 +560,8 @@ void IntersectionInstrumented(const MBVH<8>& bvh8, Ray& ray, TraversalStats* sta
 		const MBVH<8>::MBVHNode& currNode = bvh8.mbvhNode[entry.nodeIdx];
 
 		if (currNode.isLeaf()) {
+			numberOfLeafHits++;
+
 			uint32_t i0, i1, i2;
 			for (uint32_t triOffset = 0; triOffset < currNode.triCount; triOffset++) {
 				if (stats) stats->triTests++;
@@ -591,6 +610,8 @@ void IntersectionInstrumented(const MBVH<8>& bvh8, Ray& ray, TraversalStats* sta
 			}
 		}
 	}
+
+	return numberOfLeafHits;
 }
 
 // MBVH isOccluded matching with DOBB processing order
@@ -729,12 +750,14 @@ template <class BVHType>
 bvhvec3 Trace(const BVHType& bvh, Ray ray, unsigned& seed, uint64_t& traceCost, 
 	TraversalStats& threadPrimHitStats, TraversalStats& threadSecondHitStats, TraversalStats& threadShadowStats, unsigned depth = 0)
 {
+	uint32_t numberOfLeafHits = 0;
 	// find primary intersection
-	if (depth == 0) IntersectionInstrumented(bvh, ray, &threadPrimHitStats);
+	if (depth == 0) numberOfLeafHits = IntersectionInstrumented(bvh, ray, &threadPrimHitStats);
 	else			IntersectionInstrumented(bvh, ray, &threadSecondHitStats);
 	// shade
 	if (ray.hit.t == 1e30f)
-		return bvhvec3(0.6f, 0.7f, 1); // hit nothing
+		if (renderOption == HEATMAP) return bvhvec3(0.6f, 0.7f, 1); // hit nothing
+		else return leafHitColor * (float)numberOfLeafHits;
 	bvhvec3 I = ray.O + ray.hit.t * ray.D;
 	bvhvec3 N = TriangleNormal(ray.hit.prim);
 	if (tinybvh_dot(N, ray.D) > 0) N = -N;
@@ -757,7 +780,10 @@ bvhvec3 Trace(const BVHType& bvh, Ray ray, unsigned& seed, uint64_t& traceCost,
 		indirect = BRDF * irradiance * (1.0f / pdf);
 	}
 	// finalize
-	return direct + indirect;
+	if (renderOption == HEATMAP)
+		return direct + indirect;
+	else
+		return leafHitColor * (float)numberOfLeafHits;
 }
 
 template <class BVHType>
@@ -781,22 +807,28 @@ void TraceWorkerThread(const BVHType& bvh, uint32_t* buf, float scale, int threa
 			const bvhvec3 D = tinybvh_normalize(cam.p1 + u * (cam.p2 - cam.p1) + v * (cam.p3 - cam.p1) - cam.eye);
 			// trace
 			const TraversalStats primHitBefore = threadPrimHitStats, secondHitBefore = threadSecondHitStats, shadowBefore = threadShadowStats;
-			Trace(bvh, Ray(cam.eye, D), seed, localCost, threadPrimHitStats, threadSecondHitStats, threadShadowStats);
-			// red: total node visits; green: total triangle tests; blue: total box tests
-			accumulator[pixelIdx] += bvhvec3(
-				nodeVisitScale * 
-					((threadPrimHitStats.nodeVisits - primHitBefore.nodeVisits) + 
-					(threadSecondHitStats.nodeVisits - secondHitBefore.nodeVisits) + 
-					(threadShadowStats.nodeVisits - shadowBefore.nodeVisits)),
-				triTestScale * 
-					((threadPrimHitStats.triTests - primHitBefore.triTests) + 
-					(threadSecondHitStats.triTests - secondHitBefore.triTests) +
-					(threadShadowStats.triTests - shadowBefore.triTests)),
-				boxTestScale *
+			const bvhvec3 traceResult = Trace(bvh, Ray(cam.eye, D), seed, localCost, threadPrimHitStats, threadSecondHitStats, threadShadowStats);
+			if (renderOption == HEATMAP) {
+				// red: total node visits; green: total triangle tests; blue: total box tests
+				accumulator[pixelIdx] += bvhvec3(
+					nodeVisitScale *
+					((threadPrimHitStats.nodeVisits - primHitBefore.nodeVisits) +
+						(threadSecondHitStats.nodeVisits - secondHitBefore.nodeVisits) +
+						(threadShadowStats.nodeVisits - shadowBefore.nodeVisits)),
+					triTestScale *
+					((threadPrimHitStats.triTests - primHitBefore.triTests) +
+						(threadSecondHitStats.triTests - secondHitBefore.triTests) +
+						(threadShadowStats.triTests - shadowBefore.triTests)),
+					boxTestScale *
 					((threadPrimHitStats.boxTests - primHitBefore.boxTests) +
-					(threadSecondHitStats.boxTests - secondHitBefore.boxTests) +
-					(threadShadowStats.boxTests - shadowBefore.boxTests))
-			);
+						(threadSecondHitStats.boxTests - secondHitBefore.boxTests) +
+						(threadShadowStats.boxTests - shadowBefore.boxTests))
+				);
+			}
+			else {
+				accumulator[pixelIdx] += traceResult;
+			}
+			
 			const bvhvec3 E = accumulator[pixelIdx] * scale;
 			// visualize, with a poor man's gamma correct
 			const int r = (int)tinybvh_min(255.0f, sqrtf(E.x) * 255.0f);
