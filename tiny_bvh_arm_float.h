@@ -344,7 +344,7 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 				tinybvh_parallel_for( context, slices, [&]( uint32_t i )
 				{
 					BuildSIMDBinTask( first0 + SliceStart( count0, i, slices ), first0 + SliceStart( count0, i + 1, slices ),
-						slicebinbox[0] + i * 3 * AVXBINS, slicecount[0] + i * NEONCOUNTSTRIDE, (const float*)&nmin4, (const float*)&rpd4 );
+						slicebinbox[i], slicecount[i], (const float*)&nmin4, (const float*)&rpd4 );
 				} );
 				// combine results from slices; slice-major, so each slice is a linear sweep.
 				for (uint32_t slice = 1; slice < slices; slice++)
