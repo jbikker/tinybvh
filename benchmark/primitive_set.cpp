@@ -17,8 +17,8 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 		// load raw vertex data for Crytek's Sponza
 		AddMesh( "./testdata/cryteksponza.bin" );
 		camPos[0] = bvhvec3( -15.24f, 21.5f, 2.54f ), camDir[0] = tinybvh_normalize( bvhvec3( 0.826f, -0.438f, -0.356f ) );
-		camPos[1] = bvhvec3( -34, 5, 11.26f ), camDir[1] = tinybvh_normalize( bvhvec3( 0.9427, 0.0292, -0.3324 ) );
-		camPos[2] = bvhvec3( -1.3, 4.96, 12.28 ), camDir[2] = tinybvh_normalize( bvhvec3( -0.9886, 0.0507, -0.1419 ) );
+		camPos[1] = bvhvec3( -34, 5, 11.26f ), camDir[1] = tinybvh_normalize( bvhvec3( 0.9427f, 0.0292f, -0.3324f ) );
+		camPos[2] = bvhvec3( -1.3, 4.96, 12.28 ), camDir[2] = tinybvh_normalize( bvhvec3( -0.9886f, 0.0507f, -0.1419f ) );
 	}
 	else if (scene == Scene::BISTRO_EXTERIOR)
 	{
@@ -28,6 +28,14 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 		camPos[0] = bvhvec3( -24.2f, -8.2f, -2.0f ), camDir[0] = tinybvh_normalize( bvhvec3( -13.55f, -8.26f, -1.74f ) - camPos[0] );
 		camPos[1] = bvhvec3( -19.8f, 16.4f, -9.3f ), camDir[1] = tinybvh_normalize( bvhvec3( -15.17f, -9.57f, -11.34f ) - camPos[1] );
 		camPos[2] = bvhvec3( 30.9f, 1.4f, 26.2f ), camDir[2] = tinybvh_normalize( bvhvec3( 26.74f, -3.48f, 21.52f ) - camPos[2] );
+	}
+	else if (scene == Scene::SAN_MIGUEL)
+	{
+		// load 30 million triangles for San Miguel
+		AddMesh( "./testdata/sanmiguel.bin" );
+		camPos[0] = bvhvec3( 20.89f, 1.25f, 7.13f ), camDir[0] = tinybvh_normalize( bvhvec3( -1, 0, -0.07f ) );
+		camPos[1] = bvhvec3( 9.73f, 2.05f, -1.04f ), camDir[1] = tinybvh_normalize( bvhvec3( -0.69f, -0.67f, -0.28f ) );
+		camPos[2] = bvhvec3( 18.83f, 8.02f, -2.84f ), camDir[2] = tinybvh_normalize( bvhvec3( -0.26f, -0.18f, 0.95f ) );
 	}
 	else if (scene == CONFERENCE_ROOM)
 	{
@@ -53,6 +61,30 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 		camPos[1] = bvhvec3( -4.8f, 2.1f, -7.2f ), camDir[1] = tinybvh_normalize( bvhvec3( -0.53f, 0.80f, -1.88f ) - camPos[1] );
 		camPos[2] = bvhvec3( -0.7f, 4.9f, 0.4f ), camDir[2] = tinybvh_normalize( bvhvec3( 0.13f, 3.28f, -1.36f ) - camPos[2] );
 	}
+	else if (scene == LEGO_PORSCHE)
+	{
+		// load the Lego Porsche model
+		AddMesh( "./testdata/legoporsche.bin" );
+		camPos[0] = bvhvec3( 0.33f, -2.31f, 0.30f ), camDir[0] = tinybvh_normalize( bvhvec3( -0.11f, 0.72f, 0.69f ) );
+		camPos[1] = bvhvec3( 0.29f, 0.55f, -2.02f ), camDir[1] = tinybvh_normalize( bvhvec3( -0.24f, -0.28f, 0.93f ) );
+		camPos[2] = bvhvec3( 3.98f, 1.67f, 4.28f ), camDir[2] = tinybvh_normalize( bvhvec3( -0.70f, -0.48f, -0.53f ) );
+	}
+	else if (scene == VICTORIAN_HOUSE)
+	{
+		// load the Victorian House
+		AddMesh( "./testdata/victorianhouse.bin" );
+		camPos[0] = bvhvec3( 0.16f, -0.68f, 1.23f ), camDir[0] = tinybvh_normalize( bvhvec3( -0.20f, 0.12f, -0.97f ) );
+		camPos[1] = bvhvec3( -2.33f, 1.36f, -0.39f ), camDir[1] = tinybvh_normalize( bvhvec3( 0.72f, -0.66f, 0.21f ) );
+		camPos[2] = bvhvec3( -0.82f, -0.66f, 2.33f ), camDir[2] = tinybvh_normalize( bvhvec3( 0.35f, 0.16f, -0.92f ) );
+	}
+	else if (scene == HAIRBALL)
+	{
+		// load the Victorian House
+		AddMesh( "./testdata/hairball.bin" );
+		camPos[0] = bvhvec3( -1.04f, -6.64f, -1.79f ), camDir[0] = tinybvh_normalize( bvhvec3( 0.12f, 0.95f, 0.28f ) );
+		camPos[1] = bvhvec3( -3.05f, -1.61f, 0.60f ), camDir[1] = tinybvh_normalize( bvhvec3( 0.96f, 0.24f, 0.13f ) );
+		camPos[2] = bvhvec3( -4.61f, -2.00f, 0.38f ), camDir[2] = tinybvh_normalize( bvhvec3( 0.41f, 0.89f, 0.21f ) );
+	}
 	else
 	{
 		exit( 0 ); // invalid scene.
@@ -75,6 +107,12 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 		strncpy( shrt, "bistro", 64 ); 
 		break;
 	}
+	case Scene::SAN_MIGUEL: 
+	{
+		strncpy( desc, "San Miguel", 128 ); 
+		strncpy( shrt, "sanmiguel", 64 ); 
+		break;
+	}
 	case Scene::CONFERENCE_ROOM: 
 	{
 		strncpy( desc, "Conference Room", 128 ); 
@@ -91,6 +129,24 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	{
 		strncpy( desc, "Stanford Dragon", 128 ); 
 		strncpy( shrt, "dragon", 64 ); 
+		break;
+	}
+	case Scene::VICTORIAN_HOUSE: 
+	{
+		strncpy( desc, "Victorian House", 128 ); 
+		strncpy( shrt, "house", 64 ); 
+		break;
+	}
+	case Scene::HAIRBALL: 
+	{
+		strncpy( desc, "Hairball", 128 ); 
+		strncpy( shrt, "hairball", 64 ); 
+		break;
+	}
+	case Scene::LEGO_PORSCHE: 
+	{
+		strncpy( desc, "Lego Porsche", 128 ); 
+		strncpy( shrt, "porsche", 64 ); 
 		break;
 	}
 	default: 

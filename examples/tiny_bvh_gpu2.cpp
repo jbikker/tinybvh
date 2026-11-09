@@ -129,7 +129,11 @@ void Init()
 	blasInstances = new Buffer( (DRAGONS + 1) * sizeof( BLASInstance ), instance );
 	blasInstances->CopyToDevice();
 	dragonNodes = new Buffer( dragon.usedBlocks * sizeof( bvhvec4 ), dragon.bvh8Data );
+#ifdef CWBVH_COMPRESSED_TRIS
+	dragonTris = new Buffer( dragon.idxCount * 4 * sizeof( bvhvec4 ), dragon.bvh8Tris );
+#else
 	dragonTris = new Buffer( dragon.idxCount * 3 * sizeof( bvhvec4 ), dragon.bvh8Tris );
+#endif
 	drVerts = new Buffer( triCount * 3 * sizeof( bvhvec4 ), verts );
 	dragonNodes->CopyToDevice();
 	dragonTris->CopyToDevice();

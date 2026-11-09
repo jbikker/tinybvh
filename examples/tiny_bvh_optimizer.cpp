@@ -23,14 +23,14 @@
 // 6: San Miguel
 // 7: Living Room
 // 8: Living Room, rotated
-#define SCENE	9
+#define SCENE	1
 
 // STAGES:
 // --------------------------------------------------
 // 1: Determine best bin count
 // 2: Optimize using reinsertion & RRS
 // 3: Report
-#define STAGE	2
+#define STAGE	1
 
 // EXPERIMENT SETTINGS:
 // --------------------------------------------------
@@ -212,7 +212,7 @@ Ray* rayset = new Ray[RRS_SIZE];
 void RepresentativeRays( const uint32_t setType )
 {
 	// Build an intermedite BVH.
-	BVH tmp;
+	BVH4_CPU tmp;
 	tmp.BuildHQ( tris, triCount );
 	// Common preparations:
 	bvhvec3 S[512], bmin = tmp.aabbMin, bext = tmp.aabbMax - tmp.aabbMin;
@@ -252,8 +252,9 @@ void RepresentativeRays( const uint32_t setType )
 				// Random bounce.
 				if (ray.hit.t == BVH_FAR) break;
 				uint32_t i0, i1, i2, triIdx = ray.hit.prim;
-				GET_PRIM_INDICES_I0_I1_I2( tmp, triIdx );
-				const bvhvec4 v0 = tmp.verts[i0], v1 = tmp.verts[i1], v2 = tmp.verts[i2];
+				GET_PRIM_INDICES_I0_I1_I2( tmp.bvh4.bvh, triIdx );
+				const bvhvec4 v0 = tmp.bvh4.bvh.verts[i0], 
+				v1 = tmp.bvh4.bvh.verts[i1], v2 = tmp.bvh4.bvh.verts[i2];
 				bvhvec3 N = tinybvh_normalize( tinybvh_cross( v1 - v0, v2 - v0 ) );
 				if (tinybvh_dot( N, ray.D ) > 0) N *= -1.0f;
 				R = tinybvh_rndvec3( seed );
@@ -286,8 +287,9 @@ void RepresentativeRays( const uint32_t setType )
 				// Random bounce.
 				if (ray.hit.t == BVH_FAR) break;
 				uint32_t i0, i1, i2, triIdx = ray.hit.prim;
-				GET_PRIM_INDICES_I0_I1_I2( tmp, triIdx );
-				const bvhvec4 v0 = tmp.verts[i0], v1 = tmp.verts[i1], v2 = tmp.verts[i2];
+				GET_PRIM_INDICES_I0_I1_I2( tmp.bvh4.bvh, triIdx );
+				const bvhvec4 v0 = tmp.bvh4.bvh.verts[i0], 
+				v1 = tmp.bvh4.bvh.verts[i1], v2 = tmp.bvh4.bvh.verts[i2];
 				bvhvec3 N = tinybvh_normalize( tinybvh_cross( v1 - v0, v2 - v0 ) );
 				if (tinybvh_dot( N, ray.D ) > 0) N *= -1.0f;
 				R = tinybvh_rndvec3( seed );
@@ -306,8 +308,8 @@ void UpdateBVHOnGPU( const BVH* bvh )
 	bvhgpu.ConvertFrom( *bvh );
 	if (!ailalaine_kernel)
 	{
-		ailalaine_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_ailalaine" );
-		ailalaine_rrs_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_ailalaine_rrs" );
+		ailalaine_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_nearest" );
+		ailalaine_rrs_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_rrs" );
 		gpuNodes = new tinyocl::Buffer( bvh->allocatedNodes * 2 /* room for growth */ * sizeof( BVH_GPU::BVHNode ) );
 		idxData = new tinyocl::Buffer( bvh->idxCount * 2 /* room for growth */ * sizeof( unsigned ) );
 		rayData = new tinyocl::Buffer( RRS_SIZE * 64 /* sizeof( tinybvh::Ray ) */ );
@@ -344,7 +346,7 @@ void TraceCostThread( const BVH* bvh, const BVH* refBVH, const int set, const in
 }
 float RRSTraceCost( const BVH* bvh, const BVH* refBVH = 0 )
 {
-#if 0
+#if 1
 	// calculate RRS cost on CPU
 	std::vector<std::thread> threads;
 	for (uint32_t i = 0; i < 8; i++) threads.emplace_back( &TraceCostThread, bvh, refBVH, i, 8 );
@@ -457,14 +459,16 @@ int main()
 #if STAGE == 1 // STAGE 1: Find optimal bin count between 8 and 99, also try 'odd/even' counts.
 
 	int bins = 8, bestCostBins = -1;
-	float bestSAH = 1e30f, bestRRSCost, baseCost = 0, baseEpo, bestEpo;
+	float bestSAH = 1e30f, bestRRSCost, baseCost = 0, baseSAH, baseEpo, bestEpo;
 	// reference: 8 bins
-	printf( "Building reference BVH (8 bins)... " );
+	printf( "Building reference BVH (bonsai HQ)... " );
 	BVH bvh;
-	bvh.hqbvhbins = 8;
-	bvh.BuildHQ( tris, triCount );
+	bvh.settings.useSpatialSplits = true;
+	bvh.Build( tris, triCount );
 	printf( "done.\n" );
 	baseCost = bestRRSCost = RRSTraceCost( &bvh );
+	baseSAH = bvh.SAHCost();
+	printf( "base cost: %.2f\n", baseCost );
 #ifdef CALCULATE_EPO
 	baseEpo = bestEpo = bvh.EPOCost();
 #else
@@ -478,23 +482,28 @@ int main()
 	{
 		Timer t;
 		// use 'bins' splits, with one extra for odd tree levels.
+		bvh.settings.binnedBVH = true;
+		bvh.settings.useSpatialSplits = true;
+		bvh.settings.minSpatialOverlap = 1e-3f;
+		bvh.settings.spatialSkipSmallestAxis = false;
 		bvh.hqbvhbins = bins;
 		bvh.hqbvhoddeven = odd;
 		odd = !odd;
-		bvh.BuildHQ( tris, triCount );
+		bvh.Build( tris, triCount );
 		float buildTime = t.elapsed();
 		// Evaluate traversal cost using RRS
 		float sah = bvh.SAHCost(), epo = 0;
 		float RRScost = RRSTraceCost( &bvh );
-		float RRSpercentage = baseCost * 100 / RRScost;
+		float RRSpercentage = RRScost * 100 / baseCost;
+		float sahPercentage = sah * 100 / baseSAH;
 	#ifdef CALCULATE_EPO
 		epo = bvh.EPOCost();
-		float EPOpercentage = baseEpo * 100 / epo;
-		printf( "SBVH, %i.%i bins (%.1fs): SAH=%5.1f, RRS %.2f [%.2f%%], EPO %.2f [%.2f%%] ",
-			bins, (bvh.hqbvhoddeven ? 5 : 0), buildTime, sah, RRScost, RRSpercentage, epo, EPOpercentage );
+		float EPOpercentage = epo * 100 / baseEpo;
+		printf( "SBVH, %2i.%i bins (%.1fs): SAH=%5.1f [%.2f%%], RRS %.2f [%.2f%%], EPO %.2f [%.2f%%] ",
+			bins, (bvh.hqbvhoddeven ? 5 : 0), buildTime, sah, sahPercentage, RRScost, RRSpercentage, epo, EPOpercentage );
 	#else
-		printf( "SBVH, %i.%i bins (%.1fs): SAH=%5.1f, RRS %.2f [%.2f%%] ",
-			bins, (bvh.hqbvhoddeven ? 5 : 0), buildTime, sah, RRScost, RRSpercentage );
+		printf( "SBVH, %2i.%i bins (%.1fs): SAH=%5.1f [%.2f%%], RRS %.2f [%.2f%%] ",
+			bins, (bvh.hqbvhoddeven ? 5 : 0), buildTime, sah, sahPercentage, RRScost, RRSpercentage );
 	#endif
 		fprintf( f, "bins,%i.%i,time,%f,SAH,%f,RRS,%f,EPO,%f\n", bins, (bvh.hqbvhoddeven ? 5 : 0), buildTime, sah, RRScost, epo );
 		// if (epo < bestEpo)		// we optimize for EPO cost

@@ -1,0 +1,1986 @@
+// Vulkan port of the D3D12 tinybvh GPU ray tracing benchmark (program.cpp).
+
+#if defined(_WIN32)
+#define VK_USE_PLATFORM_WIN32_KHR
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#define VK_USE_PLATFORM_XCB_KHR
+#include <xcb/xcb.h>
+#include <unistd.h>
+#include <time.h>
+#endif
+#include <vulkan/vulkan.h>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdint>
+#include <cstring>
+#include <cstdlib>
+#include <fstream>
+#include <vector>
+
+// GPU selection.
+#define USE_INTEGRATED_GPU	false	// run the experiment on the iGPU instead of the dGPU
+
+#if defined(_WIN32)
+extern "C" { __declspec( dllexport ) DWORD NvOptimusEnablement = USE_INTEGRATED_GPU ? 0 : 1; }
+extern "C" { __declspec( dllexport ) int AmdPowerXpressRequestHighPerformance = USE_INTEGRATED_GPU ? 0 : 1; }
+#endif
+#if defined(_MSC_VER)
+#pragma comment(lib, "user32")
+#pragma comment(lib, "vulkan-1")
+#endif
+
+#include <chrono>
+struct Timer
+{
+	Timer() { reset(); }
+	float elapsed() const
+	{
+		auto t2 = std::chrono::high_resolution_clock::now();
+		return (float)std::chrono::duration_cast<std::chrono::duration<double>>(t2 - start).count();
+	}
+	void reset() { start = std::chrono::high_resolution_clock::now(); }
+	std::chrono::high_resolution_clock::time_point start;
+};
+
+// ----------------------------------------------------------------------------
+// platform primitives
+// ----------------------------------------------------------------------------
+
+#if defined(_WIN32)
+static void* AlignedAlloc64( size_t bytes ) { return _aligned_malloc( bytes, 64 ); }
+static void AlignedFree64( void* p ) { _aligned_free( p ); }
+static void SleepMs( unsigned ms ) { Sleep( ms ); }
+static void GetCwd( char* buf, size_t n ) { if (!GetCurrentDirectoryA( (DWORD)n, buf )) buf[0] = 0; }
+static void ShowFatal( const char* msg ) { MessageBoxA( nullptr, msg, "tinybvh Vulkan benchmark", MB_OK | MB_ICONERROR ); }
+static void QuitProcess() { ExitProcess( 1 ); }
+#else
+static void* AlignedAlloc64( size_t bytes )
+{
+	// aligned_alloc requires a size that is a multiple of the alignment.
+	void* p = nullptr;
+	if (posix_memalign( &p, 64, (bytes + 63) & ~(size_t)63 ) != 0) return nullptr;
+	return p;
+}
+static void AlignedFree64( void* p ) { free( p ); }
+static void SleepMs( unsigned ms ) { struct timespec t{ ms / 1000, (long)(ms % 1000) * 1000000L }; nanosleep( &t, nullptr ); }
+static void GetCwd( char* buf, size_t n ) { if (!getcwd( buf, n )) buf[0] = 0; }
+static void ShowFatal( const char* /*msg*/ ) {} // the console message is enough
+static void QuitProcess() { exit( 1 ); }
+#endif
+
+// settings
+constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
+#define ENABLE_HWRT			true	// display info on hardware RT pipeline performance
+#define ENABLE_BVH2			false	// display info on BVH_GPU performance
+#define ENABLE_BVH4			false	// display info on BVH4_GPU performance
+#define ENABLE_CWBVH		false	// display info on BVH8_CWBVH performance
+#define ENABLE_RAY_QUERIES	false	// display info on inline ray query performance
+#define ENABLE_VALIDATION	false	// VK_LAYER_KHRONOS_validation; costs performance
+#define BARRIER_BETWEEN_DISPATCHES false
+#define ALLOW_SYNTHETIC_RAYS false
+
+// OpenCL interleaving. The OpenCL backends trace the same rays through the same
+// scene as the compute shaders: BVH_GPU with shaders/traverse.cl, the AMD layouts
+// with shaders/traverse_amd.cl, so the two APIs can be compared one frame apart.
+#define ENABLE_OPENCL		true	// init OpenCL and put its backends in the rotation
+#define ENABLE_OCL_BVH2		false	// display info on OpenCL BVH_GPU performance
+#define ENABLE_OCL_AMD_BVH8	true	// display info on AMD BVH8 hardware traversal (RDNA4)
+#define OCL_PRESENT_RESULT	true	// show what OpenCL traced; costs a 4MB readback + upload per frame
+#define OCL_DEVICE_INDEX	-1		// -1: use the GPU Vulkan runs on; else an index from the list printed at startup
+
+#if 0
+
+const char* triMesh = "../../testdata/cryteksponza.bin";
+const char* raySetPath = "../../testdata/view3rays.bin";
+
+#else
+
+const char* triMesh = "../../testdata/conference.bin";
+const char* raySetPath = "../../testdata/view1rays_cnf.bin";
+
+#endif
+
+constexpr uint32_t NUM_INSTANCES = 1, FRAME_COUNT = 2;
+constexpr uint32_t NUM_DISPATCHES = 10;
+constexpr uint32_t NUM_SHADER_GROUPS = 3; // raygen, miss, hit group
+
+// The ray tracing backends that are cycled through, one per frame. Everything from
+// BACKEND_OCL_* onwards runs outside Vulkan, on the OpenCL queue.
+enum Backend {
+	BACKEND_HWRT = 0, BACKEND_BVH_GPU, BACKEND_BVH4_GPU, BACKEND_BVH8_CWBVH, BACKEND_RAYQUERY,
+	BACKEND_OCL_BVH_GPU, BACKEND_OCL_AMD_BVH8, BACKEND_COUNT
+};
+static const char* backendName[BACKEND_COUNT] = { "HWRT", "BVH_GPU", "BVH4_GPU", "CWBVH", "RayQuery",
+	"CL/BVH_GPU", "CL/AMD_BVH8" };
+static const bool backendPrint[BACKEND_COUNT] = { ENABLE_HWRT, ENABLE_BVH2, ENABLE_BVH4, ENABLE_CWBVH,
+	ENABLE_RAY_QUERIES, ENABLE_OCL_BVH2,ENABLE_OCL_AMD_BVH8 };
+static bool BackendIsOpenCL( const int b ) { return b >= BACKEND_OCL_BVH_GPU; }
+static bool rayQuerySupported = false;
+// Backends that can actually run on this machine, in rotation order; built by
+// BuildSchedule() once the device and OpenCL are up.
+static int schedule[BACKEND_COUNT] = {}, scheduleLen = 0;
+
+#define TINYBVH_IMPLEMENTATION
+#include "../../tiny_bvh.h"
+using namespace tinybvh;
+
+// Interface only: the tinyocl implementation lives in tiny_ocl_impl.cpp, because
+// it does a global 'using namespace tinyocl', which would collide with the Buffer
+// struct below.
+#include "../../tiny_ocl.h"
+
+// tinybvh BVH_GPU node.
+struct GPUBVHNode
+{
+	bvhvec3 lmin; unsigned left;
+	bvhvec3 lmax; unsigned right;
+	bvhvec3 rmin; unsigned triCount;
+	bvhvec3 rmax; unsigned firstTri; // total: 64 bytes
+};
+
+// One high-quality (SBVH) BVH2 is built; BVH_GPU and BVH4_GPU are derived from it.
+static BVH bvh2;
+static BVH_GPU bvh;
+static MBVH<4> mbvh4;
+static BVH4_GPU bvh4;
+static BVH8_CWBVH cwbvh;
+
+// ----------------------------------------------------------------------------
+// Vulkan state
+// ----------------------------------------------------------------------------
+
+static VkInstance instance = VK_NULL_HANDLE;
+static VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+static VkDevice device = VK_NULL_HANDLE;
+static uint32_t queueFamily = 0;
+static VkQueue queue = VK_NULL_HANDLE;
+static VkPhysicalDeviceMemoryProperties memProps{};
+static VkPhysicalDeviceProperties deviceProps{};
+static VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps{};
+static VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtProps{};
+// PCI address of the Vulkan device, where VK_EXT_pci_bus_info is available: the one
+// thing that identifies the same GPU on the OpenCL side without comparing names.
+static bool vkPCIValid = false;
+static uint32_t vkPCIDomain = 0, vkPCIBus = 0, vkPCIDevice = 0;
+static uint64_t timestampMask = ~0ull;
+
+static VkSurfaceKHR surface = VK_NULL_HANDLE;
+static VkSwapchainKHR swapChain = VK_NULL_HANDLE;
+static VkFormat swapFormat = VK_FORMAT_UNDEFINED;
+static VkExtent2D swapExtent{};
+static std::vector<VkImage> swapImages;
+static std::vector<VkSemaphore> renderFinished; // one per swapchain image
+
+static VkImage renderTarget = VK_NULL_HANDLE;
+static VkDeviceMemory renderTargetMem = VK_NULL_HANDLE;
+static VkImageView renderTargetView = VK_NULL_HANDLE;
+
+static VkCommandPool cmdPool = VK_NULL_HANDLE, setupPool = VK_NULL_HANDLE;
+static VkCommandBuffer cmdBufs[FRAME_COUNT]{};
+static VkFence frameFences[FRAME_COUNT]{};
+static VkSemaphore imageAvailable[FRAME_COUNT]{};
+static bool frameSubmitted[FRAME_COUNT] = {};
+
+static VkQueryPool timestampPool = VK_NULL_HANDLE;
+
+static VkDescriptorSetLayout descLayout = VK_NULL_HANDLE;
+static VkDescriptorPool descPool = VK_NULL_HANDLE;
+static VkDescriptorSet descSet = VK_NULL_HANDLE;
+static VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+
+static VkPipeline rtPipeline = VK_NULL_HANDLE;
+static VkPipeline computePso = VK_NULL_HANDLE, computePso4 = VK_NULL_HANDLE;
+static VkPipeline computePso8 = VK_NULL_HANDLE, computePsoRQ = VK_NULL_HANDLE;
+
+static struct VulkanFns
+{
+	PFN_vkGetBufferDeviceAddressKHR GetBufferDeviceAddress;
+	PFN_vkCreateAccelerationStructureKHR CreateAccelerationStructure;
+	PFN_vkDestroyAccelerationStructureKHR DestroyAccelerationStructure;
+	PFN_vkGetAccelerationStructureBuildSizesKHR GetAccelerationStructureBuildSizes;
+	PFN_vkGetAccelerationStructureDeviceAddressKHR GetAccelerationStructureDeviceAddress;
+	PFN_vkCmdBuildAccelerationStructuresKHR CmdBuildAccelerationStructures;
+	PFN_vkCmdWriteAccelerationStructuresPropertiesKHR CmdWriteAccelerationStructuresProperties;
+	PFN_vkCmdCopyAccelerationStructureKHR CmdCopyAccelerationStructure;
+	PFN_vkCreateRayTracingPipelinesKHR CreateRayTracingPipelines;
+	PFN_vkGetRayTracingShaderGroupHandlesKHR GetRayTracingShaderGroupHandles;
+	PFN_vkCmdTraceRaysKHR CmdTraceRays;
+} vk{};
+
+// ----------------------------------------------------------------------------
+// small helpers
+// ----------------------------------------------------------------------------
+
+static void Fatal( const char* fmt, ... )
+{
+	char msg[1024];
+	va_list args;
+	va_start( args, fmt );
+	vsnprintf( msg, sizeof( msg ), fmt, args );
+	va_end( args );
+	printf( "fatal: %s\n", msg );
+	fflush( stdout );
+	ShowFatal( msg );
+	QuitProcess();
+}
+
+static void CheckVk( VkResult r, const char* expr, int line )
+{
+	if (r != VK_SUCCESS) Fatal( "%s failed with VkResult %d (line %d)", expr, (int)r, line );
+}
+#define VK_CHECK(x) CheckVk( (x), #x, __LINE__ )
+
+template <typename T> static T AlignUp( T v, T a ) { return (v + a - 1) & ~(a - 1); }
+
+static uint32_t FindMemoryType( uint32_t typeBits, VkMemoryPropertyFlags want )
+{
+	for (uint32_t i = 0; i < memProps.memoryTypeCount; i++)
+		if ((typeBits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & want) == want) return i;
+	Fatal( "no memory type with properties 0x%X", (unsigned)want );
+	return 0;
+}
+
+struct Buffer
+{
+	VkBuffer buf = VK_NULL_HANDLE;
+	VkDeviceMemory mem = VK_NULL_HANDLE;
+	VkDeviceSize size = 0;
+	VkDeviceAddress addr = 0;
+	void* mapped = nullptr;
+};
+
+static Buffer CreateBuffer( VkDeviceSize size, VkBufferUsageFlags usage,
+	VkMemoryPropertyFlags props, bool keepMapped = false )
+{
+	Buffer b;
+	b.size = size ? size : 1; // zero-size buffers are invalid
+	VkBufferCreateInfo bi{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	bi.size = b.size;
+	bi.usage = usage;
+	bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	VK_CHECK( vkCreateBuffer( device, &bi, nullptr, &b.buf ) );
+	VkMemoryRequirements mr;
+	vkGetBufferMemoryRequirements( device, b.buf, &mr );
+	VkMemoryAllocateFlagsInfo fi{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };
+	fi.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+	VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+	ai.allocationSize = mr.size;
+	ai.memoryTypeIndex = FindMemoryType( mr.memoryTypeBits, props );
+	if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) ai.pNext = &fi;
+	VK_CHECK( vkAllocateMemory( device, &ai, nullptr, &b.mem ) );
+	VK_CHECK( vkBindBufferMemory( device, b.buf, b.mem, 0 ) );
+	if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
+	{
+		VkBufferDeviceAddressInfo di{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+		di.buffer = b.buf;
+		b.addr = vk.GetBufferDeviceAddress( device, &di );
+	}
+	if (keepMapped) VK_CHECK( vkMapMemory( device, b.mem, 0, VK_WHOLE_SIZE, 0, &b.mapped ) );
+	return b;
+}
+
+static void DestroyBuffer( Buffer& b )
+{
+	if (b.mapped) vkUnmapMemory( device, b.mem ), b.mapped = nullptr;
+	if (b.buf) vkDestroyBuffer( device, b.buf, nullptr ), b.buf = VK_NULL_HANDLE;
+	if (b.mem) vkFreeMemory( device, b.mem, nullptr ), b.mem = VK_NULL_HANDLE;
+}
+
+static VkCommandBuffer BeginOneShot()
+{
+	VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+	ai.commandPool = setupPool;
+	ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	ai.commandBufferCount = 1;
+	VkCommandBuffer cb;
+	VK_CHECK( vkAllocateCommandBuffers( device, &ai, &cb ) );
+	VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	VK_CHECK( vkBeginCommandBuffer( cb, &bi ) );
+	return cb;
+}
+
+static void EndOneShot( VkCommandBuffer cb )
+{
+	VK_CHECK( vkEndCommandBuffer( cb ) );
+	VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &cb;
+	VK_CHECK( vkQueueSubmit( queue, 1, &si, VK_NULL_HANDLE ) );
+	VK_CHECK( vkQueueWaitIdle( queue ) );
+	vkFreeCommandBuffers( device, setupPool, 1, &cb );
+}
+
+static Buffer MakeDeviceBuffer( const void* src, VkDeviceSize srcBytes, VkDeviceSize size,
+	VkBufferUsageFlags usage, const char* /*name*/ = nullptr )
+{
+	if (size == 0) size = 1;
+	Buffer staging = CreateBuffer( size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true );
+	memset( staging.mapped, 0, (size_t)size );        // zero the unused tail (e.g. spare nodes)
+	if (src) memcpy( staging.mapped, src, (size_t)srcBytes ); // then the real data
+	Buffer dst = CreateBuffer( size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT );
+	VkCommandBuffer cb = BeginOneShot();
+	VkBufferCopy region{ 0, 0, size };
+	vkCmdCopyBuffer( cb, staging.buf, dst.buf, 1, &region );
+	EndOneShot( cb );
+	DestroyBuffer( staging );
+	return dst;
+}
+
+// ----------------------------------------------------------------------------
+// resources
+// ----------------------------------------------------------------------------
+
+static Buffer meshVB{};        // triangle soup for the hardware BLAS
+static Buffer rayBuffer{};     // the ray set, device local
+static std::vector<float> hostRays; // the same ray set on the host: 8 floats per ray, O and D
+static Buffer oclPresentStaging{};  // OCL_PRESENT_RESULT: host visible copy of the OpenCL image
+static Buffer instanceBuffer{};// VkAccelerationStructureInstanceKHR array, host visible
+static Buffer sbt{};           // shader binding table
+static VkStridedDeviceAddressRegionKHR sbtRaygen{}, sbtMiss{}, sbtHit{}, sbtCallable{};
+
+// Software-RT compute inputs.
+static Buffer bvhNodeBuffer{}, bvhIdxBuffer{}, bvhVertBuffer{};
+static Buffer bvh4DataBuffer{};
+static Buffer cwbvhNodeBuffer{}, cwbvhTriBuffer{};
+
+struct AccelStruct
+{
+	VkAccelerationStructureKHR handle = VK_NULL_HANDLE;
+	Buffer buffer{};
+	VkDeviceAddress addr = 0;
+};
+
+static AccelStruct blas{}, tlas{};
+static Buffer tlasUpdateScratch{};
+
+// Scene management - Append a file, with optional position, scale and color override, tinyfied
+static int triCount = 0;
+static bvhvec4* verts = 0;
+static void AddMesh( const char* file, int N = 0 )
+{
+	std::fstream s{ file, s.binary | s.in };
+	if (!s.is_open()) Fatal( "could not open mesh '%s'", file );
+	s.read( (char*)&N, 4 );
+	bvhvec4* data = (bvhvec4*)AlignedAlloc64( (size_t)(N + triCount) * 48 );
+	if (verts) memcpy( data, verts, (size_t)triCount * 48 ), AlignedFree64( verts );
+	verts = data, s.read( (char*)verts + triCount * 48, N * 48 ), triCount += N;
+}
+
+// ----------------------------------------------------------------------------
+// window
+// ----------------------------------------------------------------------------
+
+static bool windowClosed = false, windowResized = false;
+
+#if defined(_WIN32)
+
+#define PLATFORM_SURFACE_EXTENSION_NAME VK_KHR_WIN32_SURFACE_EXTENSION_NAME
+static HWND g_hwnd = nullptr;
+
+static LRESULT WINAPI WndProc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+	switch (msg)
+	{
+	case WM_CLOSE: case WM_DESTROY: windowClosed = true; return 0;
+	case WM_SIZE: windowResized = true; return 0;
+	default: return DefWindowProcW( hwnd, msg, wparam, lparam );
+	}
+}
+
+static void CreateAppWindow( uint32_t w, uint32_t h )
+{
+	SetProcessDpiAwarenessContext( DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 );
+	WNDCLASSW wcw = { .lpfnWndProc = &WndProc, .hCursor = LoadCursor( nullptr, IDC_ARROW ), .lpszClassName = L"uVKRT" };
+	RegisterClassW( &wcw );
+	// size the window so its client area is exactly w x h, keeping the presentation blit 1:1
+	RECT r = { 0, 0, (LONG)w, (LONG)h };
+	AdjustWindowRect( &r, WS_OVERLAPPEDWINDOW, FALSE );
+	g_hwnd = CreateWindowExW( 0, L"uVKRT", L"_VK", WS_VISIBLE | WS_OVERLAPPEDWINDOW,
+		CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, 0, 0, 0, 0 );
+	if (!g_hwnd) Fatal( "could not create a window" );
+}
+
+static VkSurfaceKHR CreatePlatformSurface( VkInstance inst )
+{
+	VkWin32SurfaceCreateInfoKHR ci{ VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR };
+	ci.hinstance = GetModuleHandleW( nullptr );
+	ci.hwnd = g_hwnd;
+	VkSurfaceKHR s;
+	VK_CHECK( vkCreateWin32SurfaceKHR( inst, &ci, nullptr, &s ) );
+	return s;
+}
+
+static void PumpEvents()
+{
+	for (MSG msg; PeekMessageW( &msg, nullptr, 0, 0, PM_REMOVE );)
+	{
+		if (msg.message == WM_QUIT) { windowClosed = true; return; }
+		TranslateMessage( &msg );
+		DispatchMessageW( &msg );
+	}
+}
+
+#else // XCB
+
+#define PLATFORM_SURFACE_EXTENSION_NAME VK_KHR_XCB_SURFACE_EXTENSION_NAME
+static xcb_connection_t* g_conn = nullptr;
+static xcb_window_t g_window = 0;
+static xcb_atom_t g_atomDeleteWindow = 0;
+static uint16_t g_winW = 0, g_winH = 0;
+
+static xcb_atom_t InternAtom( const char* name, uint8_t onlyIfExists )
+{
+	xcb_intern_atom_cookie_t c = xcb_intern_atom( g_conn, onlyIfExists, (uint16_t)strlen( name ), name );
+	xcb_intern_atom_reply_t* r = xcb_intern_atom_reply( g_conn, c, nullptr );
+	const xcb_atom_t a = r ? r->atom : (xcb_atom_t)0;
+	free( r );
+	return a;
+}
+
+static void CreateAppWindow( uint32_t w, uint32_t h )
+{
+	int screenIndex = 0;
+	g_conn = xcb_connect( nullptr, &screenIndex );
+	if (!g_conn || xcb_connection_has_error( g_conn ))
+		Fatal( "could not connect to an X server (is DISPLAY set? Wayland-only\n"
+			"sessions need XWayland, which is normally present)" );
+	xcb_screen_iterator_t it = xcb_setup_roots_iterator( xcb_get_setup( g_conn ) );
+	for (int i = 0; i < screenIndex; i++) xcb_screen_next( &it );
+	xcb_screen_t* screen = it.data;
+	g_window = xcb_generate_id( g_conn );
+	const uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK;
+	const uint32_t values[2] = { screen->black_pixel, XCB_EVENT_MASK_STRUCTURE_NOTIFY };
+	xcb_create_window( g_conn, XCB_COPY_FROM_PARENT, g_window, screen->root,
+		0, 0, (uint16_t)w, (uint16_t)h, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
+		screen->root_visual, mask, values );
+	g_winW = (uint16_t)w, g_winH = (uint16_t)h;
+	const char* title = "_VK";
+	xcb_change_property( g_conn, XCB_PROP_MODE_REPLACE, g_window, XCB_ATOM_WM_NAME,
+		XCB_ATOM_STRING, 8, (uint32_t)strlen( title ), title );
+	// Ask the window manager to send a ClientMessage on close instead of just severing the connection.
+	const xcb_atom_t protocols = InternAtom( "WM_PROTOCOLS", 1 );
+	g_atomDeleteWindow = InternAtom( "WM_DELETE_WINDOW", 0 );
+	if (protocols && g_atomDeleteWindow)
+		xcb_change_property( g_conn, XCB_PROP_MODE_REPLACE, g_window, protocols,
+			XCB_ATOM_ATOM, 32, 1, &g_atomDeleteWindow );
+	xcb_map_window( g_conn, g_window );
+	xcb_flush( g_conn );
+	// Wait for the map to complete.
+	for (int spins = 0; spins < 1000; spins++)
+	{
+		xcb_generic_event_t* e = xcb_poll_for_event( g_conn );
+		if (!e) { SleepMs( 2 ); continue; }
+		const uint8_t type = e->response_type & 0x7F;
+		free( e );
+		if (type == XCB_MAP_NOTIFY) break;
+	}
+}
+
+static VkSurfaceKHR CreatePlatformSurface( VkInstance inst )
+{
+	VkXcbSurfaceCreateInfoKHR ci{ VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR };
+	ci.connection = g_conn;
+	ci.window = g_window;
+	VkSurfaceKHR s;
+	VK_CHECK( vkCreateXcbSurfaceKHR( inst, &ci, nullptr, &s ) );
+	return s;
+}
+
+static void PumpEvents()
+{
+	for (xcb_generic_event_t* e; (e = xcb_poll_for_event( g_conn )) != nullptr; free( e ))
+	{
+		switch (e->response_type & 0x7F)
+		{
+		case XCB_CLIENT_MESSAGE:
+			if (((xcb_client_message_event_t*)e)->data.data32[0] == g_atomDeleteWindow)
+				windowClosed = true;
+			break;
+		case XCB_CONFIGURE_NOTIFY:
+		{
+			const xcb_configure_notify_event_t* c = (const xcb_configure_notify_event_t*)e;
+			if (c->width != g_winW || c->height != g_winH) g_winW = c->width, g_winH = c->height, windowResized = true;
+			break;
+		}
+		case XCB_DESTROY_NOTIFY: windowClosed = true; break;
+		default: break;
+		}
+	}
+	if (xcb_connection_has_error( g_conn )) windowClosed = true;
+}
+
+#endif
+
+// ----------------------------------------------------------------------------
+// device
+// ----------------------------------------------------------------------------
+
+static bool HasExtension( const std::vector<VkExtensionProperties>& list, const char* name )
+{
+	for (const VkExtensionProperties& e : list) if (!strcmp( e.extensionName, name )) return true;
+	return false;
+}
+
+static const char* DeviceTypeName( const VkPhysicalDeviceType type )
+{
+	switch (type)
+	{
+	case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return "discrete";
+	case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "integrated";
+	case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return "virtual";
+	case VK_PHYSICAL_DEVICE_TYPE_CPU: return "cpu";
+	default: return "other";
+	}
+}
+
+static void InitDevice()
+{
+	// instance
+	VkApplicationInfo app{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
+	app.pApplicationName = "tinybvh Vulkan benchmark";
+	app.apiVersion = VK_API_VERSION_1_2; // ray tracing needs SPIR-V 1.4, core in 1.2
+	const char* instExt[] = { VK_KHR_SURFACE_EXTENSION_NAME, PLATFORM_SURFACE_EXTENSION_NAME };
+	const char* layers[] = { "VK_LAYER_KHRONOS_validation" };
+	VkInstanceCreateInfo ici{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
+	ici.pApplicationInfo = &app;
+	ici.enabledExtensionCount = 2;
+	ici.ppEnabledExtensionNames = instExt;
+	if (ENABLE_VALIDATION) ici.enabledLayerCount = 1, ici.ppEnabledLayerNames = layers;
+	if (vkCreateInstance( &ici, nullptr, &instance ) != VK_SUCCESS)
+	{
+		// retry without the validation layer, which may not be installed
+		ici.enabledLayerCount = 0;
+		VK_CHECK( vkCreateInstance( &ici, nullptr, &instance ) );
+	}
+	// Physical device: a GPU of the type USE_INTEGRATED_GPU asks for that can do ray
+	// tracing pipelines. The other type stays a candidate one rank down, so the
+	// benchmark still runs when the requested type is absent or cannot ray trace; it
+	// says which of the two happened rather than switching silently.
+	uint32_t count = 0;
+	VK_CHECK( vkEnumeratePhysicalDevices( instance, &count, nullptr ) );
+	if (count == 0) Fatal( "no Vulkan devices found" );
+	std::vector<VkPhysicalDevice> devices( count );
+	VK_CHECK( vkEnumeratePhysicalDevices( instance, &count, devices.data() ) );
+	const VkPhysicalDeviceType wantedType = USE_INTEGRATED_GPU ?
+		VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU : VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+	const VkPhysicalDeviceType otherType = USE_INTEGRATED_GPU ?
+		VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU : VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+	int bestScore = -1;
+	bool wantedTypeSeen = false; // of any capability: tells 'not there' from 'cannot ray trace'
+	std::vector<VkExtensionProperties> bestExt;
+	for (VkPhysicalDevice pd : devices)
+	{
+		VkPhysicalDeviceProperties p;
+		vkGetPhysicalDeviceProperties( pd, &p );
+		if (p.deviceType == wantedType) wantedTypeSeen = true;
+		uint32_t n = 0;
+		vkEnumerateDeviceExtensionProperties( pd, nullptr, &n, nullptr );
+		std::vector<VkExtensionProperties> ext( n );
+		vkEnumerateDeviceExtensionProperties( pd, nullptr, &n, ext.data() );
+		if (!HasExtension( ext, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME )) continue;
+		if (!HasExtension( ext, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME )) continue;
+		if (p.apiVersion < VK_API_VERSION_1_2) continue;
+		const int score = (p.deviceType == wantedType) ? 3 : (p.deviceType == otherType ? 2 : 1);
+		if (score > bestScore) bestScore = score, physicalDevice = pd, bestExt = ext, deviceProps = p;
+	}
+	if (physicalDevice == VK_NULL_HANDLE)
+		Fatal( "no device with VK_KHR_acceleration_structure + VK_KHR_ray_tracing_pipeline" );
+	if (deviceProps.deviceType != wantedType)
+	{
+		const char* wanted = DeviceTypeName( wantedType );
+		if (wantedTypeSeen)
+			printf( "warning: the %s GPU does not expose VK_KHR_acceleration_structure +\n"
+				"         VK_KHR_ray_tracing_pipeline; using '%s' instead.\n", wanted, deviceProps.deviceName );
+		else
+			printf( "warning: no %s GPU found; using '%s' instead.\n", wanted, deviceProps.deviceName );
+	}
+	rayQuerySupported = HasExtension( bestExt, VK_KHR_RAY_QUERY_EXTENSION_NAME );
+	if (!rayQuerySupported)
+		printf( "VK_KHR_ray_query not available; the %s backend is disabled.\n", backendName[BACKEND_RAYQUERY] );
+	printf( "device: %s (%s)\n", deviceProps.deviceName, DeviceTypeName( deviceProps.deviceType ) );
+	vkGetPhysicalDeviceMemoryProperties( physicalDevice, &memProps );
+	// ray tracing / acceleration structure limits
+	asProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+	rtProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+	asProps.pNext = &rtProps;
+	VkPhysicalDevicePCIBusInfoPropertiesEXT pciProps{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT };
+	const bool pciInfoSupported = HasExtension( bestExt, VK_EXT_PCI_BUS_INFO_EXTENSION_NAME );
+	if (pciInfoSupported) rtProps.pNext = &pciProps;
+	VkPhysicalDeviceProperties2 props2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+	props2.pNext = &asProps;
+	vkGetPhysicalDeviceProperties2( physicalDevice, &props2 );
+	deviceProps = props2.properties;
+	rtProps.pNext = nullptr; // pciProps is a local; do not leave rtProps pointing at it
+	if (pciInfoSupported)
+		vkPCIValid = true, vkPCIDomain = pciProps.pciDomain,
+		vkPCIBus = pciProps.pciBus, vkPCIDevice = pciProps.pciDevice;
+	if (deviceProps.limits.timestampPeriod == 0.0f) Fatal( "device does not support timestamp queries" );
+	// queue: one graphics+compute family, which is also the present family on Windows
+	uint32_t qCount = 0;
+	vkGetPhysicalDeviceQueueFamilyProperties( physicalDevice, &qCount, nullptr );
+	std::vector<VkQueueFamilyProperties> qProps( qCount );
+	vkGetPhysicalDeviceQueueFamilyProperties( physicalDevice, &qCount, qProps.data() );
+	bool found = false;
+	for (uint32_t i = 0; i < qCount && !found; i++)
+		if ((qProps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (qProps[i].queueFlags & VK_QUEUE_COMPUTE_BIT) &&
+			qProps[i].timestampValidBits > 0)
+			queueFamily = i, found = true;
+	if (!found) Fatal( "no graphics+compute queue with timestamp support" );
+	const uint32_t validBits = qProps[queueFamily].timestampValidBits;
+	timestampMask = (validBits >= 64) ? ~0ull : ((1ull << validBits) - 1ull);
+	// device
+	std::vector<const char*> devExt = {
+		VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+		VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+		VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+		VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME };
+	if (rayQuerySupported) devExt.push_back( VK_KHR_RAY_QUERY_EXTENSION_NAME );
+	if (pciInfoSupported) devExt.push_back( VK_EXT_PCI_BUS_INFO_EXTENSION_NAME );
+	VkPhysicalDeviceRayQueryFeaturesKHR fRQ{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
+	fRQ.rayQuery = VK_TRUE;
+	VkPhysicalDeviceRayTracingPipelineFeaturesKHR fRT{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR };
+	fRT.rayTracingPipeline = VK_TRUE;
+	fRT.pNext = rayQuerySupported ? (void*)&fRQ : nullptr;
+	VkPhysicalDeviceAccelerationStructureFeaturesKHR fAS{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
+	fAS.accelerationStructure = VK_TRUE;
+	fAS.pNext = &fRT;
+	VkPhysicalDeviceVulkan12Features f12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+	f12.bufferDeviceAddress = VK_TRUE; // acceleration structure builds need it
+	f12.pNext = &fAS;
+	VkPhysicalDeviceFeatures2 f2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+	f2.pNext = &f12;
+	const float priority = 1.0f;
+	VkDeviceQueueCreateInfo qci{ VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
+	qci.queueFamilyIndex = queueFamily;
+	qci.queueCount = 1;
+	qci.pQueuePriorities = &priority;
+	VkDeviceCreateInfo dci{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
+	dci.pNext = &f2;
+	dci.queueCreateInfoCount = 1;
+	dci.pQueueCreateInfos = &qci;
+	dci.enabledExtensionCount = (uint32_t)devExt.size();
+	dci.ppEnabledExtensionNames = devExt.data();
+	VK_CHECK( vkCreateDevice( physicalDevice, &dci, nullptr, &device ) );
+	vkGetDeviceQueue( device, queueFamily, 0, &queue );
+	vk.GetBufferDeviceAddress = (PFN_vkGetBufferDeviceAddressKHR)vkGetDeviceProcAddr( device, "vkGetBufferDeviceAddress" );
+	if (!vk.GetBufferDeviceAddress)
+		vk.GetBufferDeviceAddress = (PFN_vkGetBufferDeviceAddressKHR)vkGetDeviceProcAddr( device, "vkGetBufferDeviceAddressKHR" );
+	if (!vk.GetBufferDeviceAddress) Fatal( "could not load vkGetBufferDeviceAddress" );
+#define LOAD_FN(name) \
+	vk.name = (PFN_vk##name##KHR)vkGetDeviceProcAddr( device, "vk" #name "KHR" ); \
+	if (!vk.name) Fatal( "could not load vk" #name "KHR" )
+	LOAD_FN( CreateAccelerationStructure );
+	LOAD_FN( DestroyAccelerationStructure );
+	LOAD_FN( GetAccelerationStructureBuildSizes );
+	LOAD_FN( GetAccelerationStructureDeviceAddress );
+	LOAD_FN( CmdBuildAccelerationStructures );
+	LOAD_FN( CmdWriteAccelerationStructuresProperties );
+	LOAD_FN( CmdCopyAccelerationStructure );
+	LOAD_FN( CreateRayTracingPipelines );
+	LOAD_FN( GetRayTracingShaderGroupHandles );
+	LOAD_FN( CmdTraceRays );
+#undef LOAD_FN
+}
+
+static void InitCommand()
+{
+	VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+	pci.queueFamilyIndex = queueFamily;
+	pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+	VK_CHECK( vkCreateCommandPool( device, &pci, nullptr, &cmdPool ) );
+	pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+	VK_CHECK( vkCreateCommandPool( device, &pci, nullptr, &setupPool ) );
+	VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+	ai.commandPool = cmdPool;
+	ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	ai.commandBufferCount = FRAME_COUNT;
+	VK_CHECK( vkAllocateCommandBuffers( device, &ai, cmdBufs ) );
+	// Fences start signalled so the first pass through Render() does not block.
+	VkFenceCreateInfo fci{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+	fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+	VkSemaphoreCreateInfo sci{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+	for (uint32_t i = 0; i < FRAME_COUNT; i++)
+	{
+		VK_CHECK( vkCreateFence( device, &fci, nullptr, &frameFences[i] ) );
+		VK_CHECK( vkCreateSemaphore( device, &sci, nullptr, &imageAvailable[i] ) );
+	}
+}
+
+static void InitQueryPool()
+{
+	VkQueryPoolCreateInfo qpi{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+	qpi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+	qpi.queryCount = FRAME_COUNT * 2;
+	VK_CHECK( vkCreateQueryPool( device, &qpi, nullptr, &timestampPool ) );
+}
+
+// ----------------------------------------------------------------------------
+// surfaces
+// ----------------------------------------------------------------------------
+
+static void DestroySwapChain()
+{
+	for (VkSemaphore s : renderFinished) vkDestroySemaphore( device, s, nullptr );
+	renderFinished.clear();
+	if (swapChain) vkDestroySwapchainKHR( device, swapChain, nullptr ), swapChain = VK_NULL_HANDLE;
+	VkSemaphoreCreateInfo sci{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+	for (uint32_t i = 0; i < FRAME_COUNT; i++)
+	{
+		if (imageAvailable[i]) vkDestroySemaphore( device, imageAvailable[i], nullptr );
+		VK_CHECK( vkCreateSemaphore( device, &sci, nullptr, &imageAvailable[i] ) );
+	}
+}
+
+static void CreateSwapChain()
+{
+	VkSurfaceCapabilitiesKHR caps;
+	VK_CHECK( vkGetPhysicalDeviceSurfaceCapabilitiesKHR( physicalDevice, surface, &caps ) );
+	if (caps.currentExtent.width == 0xFFFFFFFF)
+		swapExtent = { rtWidth, rtHeight };
+	else
+		swapExtent = caps.currentExtent;
+	if (swapExtent.width == 0 || swapExtent.height == 0) return; // minimized
+	uint32_t n = 0;
+	vkGetPhysicalDeviceSurfaceFormatsKHR( physicalDevice, surface, &n, nullptr );
+	std::vector<VkSurfaceFormatKHR> formats( n );
+	vkGetPhysicalDeviceSurfaceFormatsKHR( physicalDevice, surface, &n, formats.data() );
+	VkSurfaceFormatKHR chosen = formats[0];
+	for (const VkSurfaceFormatKHR& f : formats)
+		if (f.format == VK_FORMAT_R8G8B8A8_UNORM && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { chosen = f; break; }
+	swapFormat = chosen.format;
+	vkGetPhysicalDeviceSurfacePresentModesKHR( physicalDevice, surface, &n, nullptr );
+	std::vector<VkPresentModeKHR> modes( n );
+	vkGetPhysicalDeviceSurfacePresentModesKHR( physicalDevice, surface, &n, modes.data() );
+	VkPresentModeKHR present = VK_PRESENT_MODE_FIFO_KHR;
+	for (VkPresentModeKHR m : modes) if (m == VK_PRESENT_MODE_MAILBOX_KHR) present = m;
+	for (VkPresentModeKHR m : modes) if (m == VK_PRESENT_MODE_IMMEDIATE_KHR) present = m;
+	uint32_t imageCount = caps.minImageCount < FRAME_COUNT ? FRAME_COUNT : caps.minImageCount;
+	if (caps.maxImageCount && imageCount > caps.maxImageCount) imageCount = caps.maxImageCount;
+	VkSwapchainCreateInfoKHR sci{ VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
+	sci.surface = surface;
+	sci.minImageCount = imageCount;
+	sci.imageFormat = swapFormat;
+	sci.imageColorSpace = chosen.colorSpace;
+	sci.imageExtent = swapExtent;
+	sci.imageArrayLayers = 1;
+	sci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	sci.preTransform = caps.currentTransform;
+	sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	sci.presentMode = present;
+	sci.clipped = VK_TRUE;
+	VK_CHECK( vkCreateSwapchainKHR( device, &sci, nullptr, &swapChain ) );
+	VK_CHECK( vkGetSwapchainImagesKHR( device, swapChain, &n, nullptr ) );
+	swapImages.resize( n );
+	VK_CHECK( vkGetSwapchainImagesKHR( device, swapChain, &n, swapImages.data() ) );
+	VkSemaphoreCreateInfo semci{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+	renderFinished.resize( n );
+	for (uint32_t i = 0; i < n; i++) VK_CHECK( vkCreateSemaphore( device, &semci, nullptr, &renderFinished[i] ) );
+}
+
+static void InitSurfaces()
+{
+	surface = CreatePlatformSurface( instance );
+	VkBool32 ok = VK_FALSE;
+	VK_CHECK( vkGetPhysicalDeviceSurfaceSupportKHR( physicalDevice, queueFamily, surface, &ok ) );
+	if (!ok) Fatal( "queue family %u cannot present to this surface", queueFamily );
+	CreateSwapChain();
+	VkImageCreateInfo ii{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+	ii.imageType = VK_IMAGE_TYPE_2D;
+	ii.format = VK_FORMAT_R8G8B8A8_UNORM;
+	ii.extent = { rtWidth, rtHeight, 1 };
+	ii.mipLevels = 1;
+	ii.arrayLayers = 1;
+	ii.samples = VK_SAMPLE_COUNT_1_BIT;
+	ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+	ii.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VK_CHECK( vkCreateImage( device, &ii, nullptr, &renderTarget ) );
+	VkMemoryRequirements mr;
+	vkGetImageMemoryRequirements( device, renderTarget, &mr );
+	VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+	ai.allocationSize = mr.size;
+	ai.memoryTypeIndex = FindMemoryType( mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT );
+	VK_CHECK( vkAllocateMemory( device, &ai, nullptr, &renderTargetMem ) );
+	VK_CHECK( vkBindImageMemory( device, renderTarget, renderTargetMem, 0 ) );
+	VkImageViewCreateInfo vi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+	vi.image = renderTarget;
+	vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	vi.format = VK_FORMAT_R8G8B8A8_UNORM;
+	vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+	VK_CHECK( vkCreateImageView( device, &vi, nullptr, &renderTargetView ) );
+	// UNDEFINED -> GENERAL once; it stays in GENERAL except during the blit.
+	VkCommandBuffer cb = BeginOneShot();
+	VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+	b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+	b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	b.image = renderTarget;
+	b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+	b.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b );
+	EndOneShot( cb );
+}
+
+// ----------------------------------------------------------------------------
+// scene and BVH data
+// ----------------------------------------------------------------------------
+
+static void InitMeshes()
+{
+	AddMesh( triMesh );
+	meshVB = MakeDeviceBuffer( verts, (VkDeviceSize)triCount * 3 * sizeof( bvhvec4 ),
+		(VkDeviceSize)triCount * 3 * sizeof( bvhvec4 ),
+		VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, "meshVB" );
+	// One spatial-split build, converted to both GPU layouts.
+	bvh2.settings.useSpatialSplits = true; // triggers a high-quality BonsaiS build
+	// bvh2.settings.postOptimize = true; // triggers post-optimization
+	Timer t;
+	printf("building base BVH... ");
+	bvh2.Build( verts, triCount );
+	printf("done (%.2fs).\nconverting to MBVH<4>...", t.elapsed() );
+	t.reset();
+	bvh.ConvertFrom(bvh2, true);    // Aila & Laine 64-byte nodes + primIdx + separate tris
+	mbvh4.ConvertFrom( bvh2, true );  // collapse the BVH2 into a 4-wide BVH
+	printf("done (%.2fs).\nconverting to bvh4...", t.elapsed() );
+	t.reset();
+	bvh4.ConvertFrom(mbvh4, true);  // quantize into the single-blob BVH4_GPU layout
+	printf("done (%.2fs).\nconverting to cwbvh...", t.elapsed() );
+	t.reset();
+	cwbvh.settings.useSpatialSplits = true; // triggers a high-quality BonsaiS build
+	cwbvh.settings.postOptimize = true; // triggers post-optimization
+	cwbvh.Build( verts, triCount ); // separate SBVH build: see the note at 'cwbvh'.
+	printf("done (%.2fs).\n", t.elapsed() );
+}
+
+static void InitBVHBuffers()
+{
+	const VkDeviceSize nodeBytes = (VkDeviceSize)bvh.allocatedNodes * sizeof( GPUBVHNode );
+	const VkDeviceSize idxBytes = (VkDeviceSize)bvh.bvh.idxCount * sizeof( unsigned );
+	const VkDeviceSize vertBytes = (VkDeviceSize)bvh.bvh.idxCount * 3 * sizeof( bvhvec4 );
+	// BVH4_GPU counts storage in 16-byte 'blocks'; usedBlocks is what traversal touches.
+	const VkDeviceSize bvh4Bytes = (VkDeviceSize)bvh4.usedBlocks * sizeof( bvhvec4 );
+	// CWBVH keeps nodes (5 blocks each, again counted in usedBlocks) and triangles
+	// in two separate blobs; the triangle stride must match the tiny8.comp define.
+	const VkDeviceSize cwbvhNodeBytes = (VkDeviceSize)cwbvh.usedBlocks * sizeof( bvhvec4 );
+#ifdef CWBVH_COMPRESSED_TRIS
+	const VkDeviceSize cwbvhTriBytes = (VkDeviceSize)cwbvh.idxCount * 4 * sizeof( bvhvec4 );
+#else
+	const VkDeviceSize cwbvhTriBytes = (VkDeviceSize)cwbvh.idxCount * 3 * sizeof( bvhvec4 );
+#endif
+	const VkBufferUsageFlags use = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+	bvhNodeBuffer = MakeDeviceBuffer( bvh.bvhNode, nodeBytes, nodeBytes, use, "bvhNodeBuffer" );
+	bvhIdxBuffer = MakeDeviceBuffer( bvh2.primIdx, idxBytes, idxBytes, use, "bvhIdxBuffer" );
+	bvhVertBuffer = MakeDeviceBuffer( (bvhvec4*)bvh.orderedVerts.data, vertBytes, vertBytes, use, "bvhVertBuffer" );
+	bvh4DataBuffer = MakeDeviceBuffer( bvh4.bvh4Data, bvh4Bytes, bvh4Bytes, use, "bvh4DataBuffer" );
+	cwbvhNodeBuffer = MakeDeviceBuffer( cwbvh.bvh8Data, cwbvhNodeBytes, cwbvhNodeBytes, use, "cwbvhNodeBuffer" );
+	cwbvhTriBuffer = MakeDeviceBuffer( cwbvh.bvh8Tris, cwbvhTriBytes, cwbvhTriBytes, use, "cwbvhTriBuffer" );
+}
+
+static void UpdateRayBuffer()
+{
+	const uint32_t rayCount = rtWidth * rtHeight;
+	const VkDeviceSize size = 32ull * rayCount; // 32 bytes per ray
+	// Kept on the host as well: the OpenCL side needs the same rays in its own
+	// 64-byte layout, and both APIs must trace exactly the same set.
+	hostRays.assign( (size_t)rayCount * 8, 0.0f );
+	float* data = hostRays.data();
+	FILE* f = fopen( raySetPath, "rb" );
+	if (f)
+	{
+		// the file holds all origins first, then all directions, 3 floats each
+		size_t got = 0;
+		for (uint32_t i = 0; i < rayCount; i++) got += fread( data + i * 8, 4, 3, f );
+		for (uint32_t i = 0; i < rayCount; i++) got += fread( data + i * 8 + 4, 4, 3, f );
+		fclose( f );
+		if (got != (size_t)rayCount * 6) Fatal( "'%s' holds fewer than %u x %u rays", raySetPath, rtWidth, rtHeight );
+		printf( "rays: %s, %u x %u\n", raySetPath, rtWidth, rtHeight );
+	}
+	else
+	{
+		char cwd[1024] = {};
+		GetCwd( cwd, sizeof( cwd ) );
+		Fatal( "could not open '%s' (working directory: %s).\n\n", raySetPath, cwd );
+	}
+	Buffer staging = CreateBuffer( size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true );
+	memcpy( staging.mapped, data, (size_t)size );
+	// Device-local buffer the shaders actually read from on every ray.
+	rayBuffer = CreateBuffer( size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT );
+	VkCommandBuffer cb = BeginOneShot();
+	VkBufferCopy region{ 0, 0, size };
+	vkCmdCopyBuffer( cb, staging.buf, rayBuffer.buf, 1, &region );
+	EndOneShot( cb );
+	DestroyBuffer( staging );
+}
+
+
+// ----------------------------------------------------------------------------
+// OpenCL
+// ----------------------------------------------------------------------------
+
+// The OpenCL backends trace the ray set from UpdateRayBuffer(). CL/BVH_GPU uses the
+// very same tinybvh blobs as the compute shaders, with shaders/traverse.cl. The AMD
+// backends convert the same BVH2 to the hardware layouts and use shaders/traverse_amd.cl,
+// a copy of the traversal in kernels/traverse_amd_hw*.cl. All entry points match what
+// the GLSL does (tmax is always 1e30, the output is one RGBA8 pixel per ray).
+//
+// There is no interop: Vulkan and OpenCL get their own context, their own copy of
+// the data and their own GPU timer (timestamp queries vs. events). What makes the
+// comparison fair is that the two are never busy at the same time - Render() drains
+// Vulkan before it enqueues OpenCL work, and the OpenCL run is finished before the
+// frame's command buffer is submitted.
+//
+// Both sides read the same 32-byte rays - the OpenCL buffer is filled straight from
+// hostRays, the array that feeds the Vulkan ray buffer - and both derive rD in the
+// kernel with the same safe_rcp. The remaining difference worth knowing about when
+// reading the numbers is that the two compilers are told different things:
+// -cl-fast-relaxed-math for OpenCL.
+//
+// The kernel is launched 2D, in 8x8 tiles, and keeps its traversal stack in local
+// memory, so it matches tiny.comp on both counts; OCL_GROUP_X/Y below must stay in
+// sync with GROUP_X/GROUP_Y in traverse.cl.
+
+// Workgroup shape for the OpenCL kernel; must match GROUP_X/GROUP_Y in traverse.cl,
+// which declares reqd_work_group_size, so a mismatch is a launch failure, not a
+// silent slowdown.
+constexpr int OCL_GROUP_X = 8, OCL_GROUP_Y = 8;
+
+static tinyocl::Kernel* oclKernel[BACKEND_COUNT] = {}; // null: backend not available
+static tinyocl::Buffer* oclBVH2Nodes = 0, * oclBVH2Verts = 0, * oclBVH4Data = 0;
+static tinyocl::Buffer* oclCWBVHNodes = 0, * oclCWBVHTris = 0;
+static tinyocl::Buffer* oclAMD8Data = 0;
+static tinyocl::Buffer* oclRays = 0, * oclPixels = 0;
+static bool openclReady = false;
+
+// AMD hardware layouts, converted from the shared bvh2 so that every software
+// backend traverses the same tree. This mirrors BVH4_AMD_HW::Build and
+// CWBVH8_AMD_HW::Build, minus the build: split leaves to what the hardware
+// accepts (1 triangle for BVH4, 2 for BVH8), collapse, convert. SplitLeafs works
+// in place, so each layout gets its own copy of bvh2.
+static BVH bvh2AMD4, bvh2AMD8;
+static MBVH<4> mbvh4AMD;
+static MBVH<8> mbvh8AMD;
+static CWBVH8_AMD_HW bvh8AMD;
+
+static void CopyBVH2( BVH& copy )
+{
+	// Through BVH_Verbose, without compaction: that keeps the 3 x triCount node
+	// capacity SplitLeafs appends into (it does not check bounds itself).
+	BVH_Verbose verbose;
+	verbose.ConvertFrom( bvh2 );
+	copy.ConvertFrom( verbose, false );
+}
+
+static void InitAMDBVH8()
+{
+	printf("converting to AMD8... ");
+	CopyBVH2( bvh2AMD8 );
+	bvh2AMD8.SplitLeafs( 2 );
+	mbvh8AMD.leafPrimLimit = 2;
+	mbvh8AMD.ConvertFrom( bvh2AMD8, true );
+	bvh8AMD.ConvertFrom( mbvh8AMD );
+	printf("done.\n");
+}
+
+static void RunOpenCL( const int backend, cl_event* event = 0 )
+{
+	oclKernel[backend]->Run2D( tinyocl::oclint2( rtWidth, rtHeight ),
+		tinyocl::oclint2( OCL_GROUP_X, OCL_GROUP_Y ), 0, event );
+}
+
+// ----------------------------------------------------------------------------
+// OpenCL device selection
+// ----------------------------------------------------------------------------
+
+// tinyocl chooses a device by itself: InitCL() takes the first platform that has a
+// GPU, NVIDIA first and AMD second, and it does that inside tiny_ocl_impl.cpp, out
+// of reach of USE_INTEGRATED_GPU - which is how the OpenCL backends end up on the
+// discrete card while Vulkan traces on the iGPU. So the device is chosen here and
+// handed to tinyocl before any Kernel or Buffer exists; both only call InitCL()
+// while clStarted is false. InitOpenCL() then checks that the device tinyocl ends
+// up with is the one installed here, and drops the OpenCL backends if it is not:
+// timing two different GPUs against each other is worse than not timing at all.
+
+// From cl_khr_pci_bus_info and cl_nv_device_attribute_query, spelled out because
+// only cl.h is included here and older cl_ext.h headers predate the KHR version.
+#ifndef CL_DEVICE_PCI_BUS_INFO_KHR
+#define CL_DEVICE_PCI_BUS_INFO_KHR	0x410F
+typedef struct _cl_device_pci_bus_info_khr
+{
+	cl_uint pci_domain, pci_bus, pci_device, pci_function;
+}
+cl_device_pci_bus_info_khr;
+#endif
+#ifndef CL_DEVICE_PCI_BUS_ID_NV
+#define CL_DEVICE_PCI_BUS_ID_NV		0x4008
+#endif
+#ifndef CL_DEVICE_PCI_SLOT_ID_NV
+#define CL_DEVICE_PCI_SLOT_ID_NV	0x4009
+#endif
+#ifndef CL_DEVICE_PCI_DOMAIN_ID_NV
+#define CL_DEVICE_PCI_DOMAIN_ID_NV	0x400A
+#endif
+
+struct OCLDevice
+{
+	cl_platform_id platform = nullptr;
+	cl_device_id id = nullptr;
+	char name[256] = {};
+	cl_uint vendorID = 0;
+	cl_bool unified = CL_FALSE;
+	bool hasPCI = false;
+	cl_uint pciDomain = 0, pciBus = 0, pciDevice = 0;
+};
+
+static cl_device_id oclSelectedDevice = nullptr; // what SelectOpenCLDevice() installed
+
+// The PCI function is left out on purpose: NVIDIA reports a slot id instead of a
+// device + function pair, and a GPU sits on function 0 anyway.
+static bool OCLPCIAddress( cl_device_id id, cl_uint& domain, cl_uint& bus, cl_uint& dev )
+{
+	cl_device_pci_bus_info_khr khr{};
+	if (clGetDeviceInfo( id, CL_DEVICE_PCI_BUS_INFO_KHR, sizeof( khr ), &khr, 0 ) == CL_SUCCESS)
+	{
+		domain = khr.pci_domain, bus = khr.pci_bus, dev = khr.pci_device;
+		return true;
+	}
+	cl_uint nvBus = 0, nvSlot = 0, nvDomain = 0;
+	if (clGetDeviceInfo( id, CL_DEVICE_PCI_BUS_ID_NV, sizeof( nvBus ), &nvBus, 0 ) == CL_SUCCESS &&
+		clGetDeviceInfo( id, CL_DEVICE_PCI_SLOT_ID_NV, sizeof( nvSlot ), &nvSlot, 0 ) == CL_SUCCESS)
+	{
+		if (clGetDeviceInfo( id, CL_DEVICE_PCI_DOMAIN_ID_NV, sizeof( nvDomain ), &nvDomain, 0 ) != CL_SUCCESS)
+			nvDomain = 0;
+		domain = nvDomain, bus = nvBus, dev = nvSlot;
+		return true;
+	}
+	return false;
+}
+
+// How much this OpenCL device looks like the GPU Vulkan picked. 0 means 'not it':
+// the vendor on its own cannot tell two GPUs of the same make apart, and a name on
+// its own is not always there.
+static int ScoreOpenCLDevice( const OCLDevice& d )
+{
+	int score = 0;
+	// Same bus address is the same piece of silicon, whatever the two APIs call it.
+	// It is a bonus rather than a verdict because the NVIDIA slot id and the KHR
+	// device number need not agree, and a mismatch there should not veto a device
+	// the name and vendor do agree on.
+	if (d.hasPCI && vkPCIValid && d.pciDomain == vkPCIDomain && d.pciBus == vkPCIBus && d.pciDevice == vkPCIDevice)
+		score += 100;
+	if (d.name[0] && (strstr( d.name, deviceProps.deviceName ) || strstr( deviceProps.deviceName, d.name ))) score += 4;
+	if (d.vendorID == deviceProps.vendorID) score += 2;
+	// CL_DEVICE_HOST_UNIFIED_MEMORY is deprecated, but it is still the only hint
+	// OpenCL gives that a device is integrated, and it is what separates an iGPU
+	// from a dGPU of the same make - the AMD case, where OpenCL reports the GFX
+	// target and Vulkan the marketing name, so the names never match.
+	if ((d.unified == CL_TRUE) == (deviceProps.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)) score += 1;
+	return score >= 3 ? score : 0;
+}
+
+// Vendor detection, cut down from the one in tiny_ocl's InitCL(), which no longer
+// runs. Only what this benchmark reads is set: the IS* defines the .cl sources are
+// compiled with, and the RDNA flags that gate the AMD hardware traversal backends.
+static void SetTinyOCLVendorFlags( const char* clDeviceName )
+{
+	char d[256] = {};
+	for (int i = 0; i < 255 && clDeviceName[i]; i++)
+		d[i] = (clDeviceName[i] >= 'A' && clDeviceName[i] <= 'Z') ? (char)(clDeviceName[i] + 32) : clDeviceName[i];
+	using tinyocl::Kernel;
+	if (strstr( d, "nvidia" ))
+	{
+		Kernel::isNVidia = true;
+		if (strstr( d, "5050" ) || strstr( d, "5060" ) || strstr( d, "5070" ) ||
+			strstr( d, "5080" ) || strstr( d, "5090" )) Kernel::isBlackwell = Kernel::isAda = true;
+		else if (strstr( d, "4050" ) || strstr( d, "4060" ) || strstr( d, "4070" ) ||
+			strstr( d, "4080" ) || strstr( d, "4090" )) Kernel::isAda = true;
+		else if (strstr( d, "3050" ) || strstr( d, "3060" ) || strstr( d, "3070" ) ||
+			strstr( d, "3080" ) || strstr( d, "3090" ) || strstr( d, "a2000" ) || strstr( d, "a3000" ) ||
+			strstr( d, "a4000" ) || strstr( d, "a5000" ) || strstr( d, "a6000" )) Kernel::isAmpere = true;
+		else if (strstr( d, "2060" ) || strstr( d, "2070" ) || strstr( d, "2080" ) ||
+			strstr( d, "titan rtx" ) || strstr( d, "1650" ) || strstr( d, "1660" )) Kernel::isTuring = true;
+		else if (strstr( d, "1010" ) || strstr( d, "1030" ) || strstr( d, "1050" ) || strstr( d, "1060" ) ||
+			strstr( d, "1070" ) || strstr( d, "1080" ) || strstr( d, "titan x" ) || strstr( d, "p1000" ) ||
+			strstr( d, "p2000" ) || strstr( d, "p5000" )) Kernel::isPascal = true;
+	}
+	else if (strstr( d, "intel" )) Kernel::isIntel = true;
+	else if (strstr( d, "amd" ) || strstr( d, "radeon" ) || strstr( d, "gfx" ))
+	{
+		Kernel::isAMD = true;
+		// A GFX target where the driver reports one, the marketing name otherwise.
+		Kernel::isRDNA2 = strstr( d, "gfx103" ) || strstr( d, "680m" ) || strstr( d, "660m" ) || strstr( d, "610m" );
+		Kernel::isRDNA3 = strstr( d, "gfx110" ) || strstr( d, "780m" ) || strstr( d, "760m" ) || strstr( d, "740m" );
+		Kernel::isRDNA35 = strstr( d, "gfx115" ) || strstr( d, "890m" ) || strstr( d, "880m" ) ||
+			strstr( d, "860m" ) || strstr( d, "840m" ) || strstr( d, "820m" );
+		Kernel::isRDNA4 = strstr( d, "gfx1200" ) || strstr( d, "gfx1201" );
+	}
+	else Kernel::isOther = true;
+}
+
+// Picks the OpenCL device and installs it in tinyocl. Must run before the first
+// Kernel or Buffer is constructed. False means no usable device, in which case the
+// OpenCL backends stay out of the rotation.
+static bool SelectOpenCLDevice()
+{
+	std::vector<OCLDevice> devs;
+	cl_uint platformCount = 0;
+	if (clGetPlatformIDs( 0, nullptr, &platformCount ) == CL_SUCCESS && platformCount > 0)
+	{
+		std::vector<cl_platform_id> platforms( platformCount );
+		if (clGetPlatformIDs( platformCount, platforms.data(), nullptr ) == CL_SUCCESS)
+			for (cl_platform_id plat : platforms)
+			{
+				cl_uint devCount = 0;
+				if (clGetDeviceIDs( plat, CL_DEVICE_TYPE_GPU, 0, nullptr, &devCount ) != CL_SUCCESS) continue;
+				if (devCount == 0) continue;
+				std::vector<cl_device_id> ids( devCount );
+				if (clGetDeviceIDs( plat, CL_DEVICE_TYPE_GPU, devCount, ids.data(), nullptr ) != CL_SUCCESS) continue;
+				for (cl_device_id id : ids)
+				{
+					OCLDevice d;
+					d.platform = plat, d.id = id;
+					clGetDeviceInfo( id, CL_DEVICE_NAME, sizeof( d.name ), d.name, 0 );
+					clGetDeviceInfo( id, CL_DEVICE_VENDOR_ID, sizeof( d.vendorID ), &d.vendorID, 0 );
+					clGetDeviceInfo( id, CL_DEVICE_HOST_UNIFIED_MEMORY, sizeof( d.unified ), &d.unified, 0 );
+					d.hasPCI = OCLPCIAddress( id, d.pciDomain, d.pciBus, d.pciDevice );
+					devs.push_back( d );
+				}
+			}
+	}
+	if (devs.empty())
+	{
+		printf( "OpenCL: no GPU device found; the OpenCL backends are disabled.\n" );
+		return false;
+	}
+	// The whole list is printed: it shows which GPUs OpenCL can see at all, and it
+	// is what OCL_DEVICE_INDEX indexes into.
+	printf( "OpenCL GPUs:\n" );
+	int best = -1, bestScore = 0;
+	for (int i = 0; i < (int)devs.size(); i++)
+	{
+		const OCLDevice& d = devs[i];
+		const int score = ScoreOpenCLDevice( d );
+		if (score > bestScore) bestScore = score, best = i;
+		char pci[32] = "no PCI info";
+		if (d.hasPCI) snprintf( pci, sizeof( pci ), "%04x:%02x:%02x",
+			(unsigned)d.pciDomain, (unsigned)d.pciBus, (unsigned)d.pciDevice );
+		printf( "  #%i: %s [vendor %04x, %s, %s]%s\n", i, d.name[0] ? d.name : "<unnamed>",
+			(unsigned)d.vendorID, d.unified ? "integrated" : "discrete", pci, score > 0 ? " <- matches Vulkan" : "" );
+	}
+	if (OCL_DEVICE_INDEX >= 0)
+	{
+		if (OCL_DEVICE_INDEX >= (int)devs.size())
+		{
+			printf( "OpenCL: OCL_DEVICE_INDEX %i does not exist; the OpenCL backends are disabled.\n",
+				OCL_DEVICE_INDEX );
+			return false;
+		}
+		best = OCL_DEVICE_INDEX; // deliberate: no match check, the choice was made by hand
+	}
+	else if (best < 0)
+	{
+		// Nothing here is the GPU Vulkan is on - usually an iGPU whose vendor ships
+		// no OpenCL runtime. Tracing on one of the others would compare two different
+		// GPUs, which is exactly what this benchmark must not do, so OpenCL sits out.
+		printf( "OpenCL: no device is the GPU Vulkan runs on ('%s');\n"
+			"        the OpenCL backends are disabled. Set OCL_DEVICE_INDEX to pick one by hand.\n",
+			deviceProps.deviceName );
+		return false;
+	}
+	const OCLDevice& sel = devs[best];
+	cl_device_id id = sel.id;
+	cl_int err = CL_SUCCESS;
+	cl_context_properties props[] = { CL_CONTEXT_PLATFORM, (cl_context_properties)sel.platform, 0 };
+	cl_context ctx = clCreateContext( props, 1, &id, nullptr, nullptr, &err );
+	if (err != CL_SUCCESS || !ctx)
+	{
+		printf( "OpenCL: clCreateContext failed (%i); the OpenCL backends are disabled.\n", (int)err );
+		return false;
+	}
+	// Profiling queues: TraceOpenCL() times the kernels with event profiling info.
+	const cl_queue_properties qProps[] = { CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE, 0 };
+	cl_command_queue q1 = clCreateCommandQueueWithProperties( ctx, id, qProps, &err );
+	cl_command_queue q2 = err == CL_SUCCESS ? clCreateCommandQueueWithProperties( ctx, id, qProps, &err ) : nullptr;
+	if (err != CL_SUCCESS || !q1 || !q2)
+	{
+		if (q2) clReleaseCommandQueue( q2 );
+		if (q1) clReleaseCommandQueue( q1 );
+		clReleaseContext( ctx );
+		printf( "OpenCL: could not create a profiling queue (%i); the OpenCL backends are disabled.\n", (int)err );
+		return false;
+	}
+	// Hand it over. The accessors return the tinyocl statics by reference, and
+	// clStarted keeps Kernel and Buffer from running InitCL(); KillCL() releases the
+	// queues and the context, so ownership goes with them.
+	if (!tinyocl::OpenCL::GetInstance()) tinyocl::OpenCL::CreateInstance( {} ); // Buffer's host-side allocator
+	tinyocl::Kernel::GetContext() = ctx;
+	tinyocl::Kernel::GetDevice() = id;
+	tinyocl::Kernel::GetQueue() = q1;
+	tinyocl::Kernel::GetQueue2() = q2;
+	SetTinyOCLVendorFlags( sel.name );
+	tinyocl::Kernel::clStarted = true;
+	oclSelectedDevice = id;
+	printf( "OpenCL: using #%i for the OpenCL backends.\n", best );
+	return true;
+}
+
+static void InitOpenCL()
+{
+	const uint32_t rayCount = rtWidth * rtHeight;
+	oclKernel[BACKEND_OCL_BVH_GPU] = new tinyocl::Kernel( "shaders/traverse.cl", "bench_bvh2" );
+	char clDeviceName[256] = {};
+	clGetDeviceInfo( tinyocl::Kernel::GetDevice(), CL_DEVICE_NAME, sizeof( clDeviceName ), clDeviceName, 0 );
+	printf( "OpenCL device: %s\n", clDeviceName[0] ? clDeviceName : "<unnamed>" );
+	// Device identity, not device names. The name test this replaces could not tell
+	// 'gfx1103' from 'AMD Radeon 780M Graphics', and it went quiet altogether when the
+	// name came back empty, because every string contains the empty string - so a
+	// backend running on the wrong GPU could pass it without a word.
+	if (tinyocl::Kernel::GetDevice() != oclSelectedDevice)
+	{
+		printf( "warning: tinyocl initialized itself on a device of its own choosing;\n"
+			"         the OpenCL backends are disabled rather than timed against another GPU.\n" );
+		delete oclKernel[BACKEND_OCL_BVH_GPU], oclKernel[BACKEND_OCL_BVH_GPU] = 0;
+		tinyocl::Kernel::KillCL();
+		return; // openclReady stays false, so BuildSchedule() leaves them out
+	}
+	// Exactly the bytes the Vulkan side uploads in InitBVHBuffers().
+	const unsigned nodeBytes = (unsigned)(bvh.allocatedNodes * sizeof( GPUBVHNode ));
+	const unsigned vertBytes = (unsigned)(bvh.bvh.idxCount * 3 * sizeof( bvhvec4 ));
+	const unsigned bvh4Bytes = (unsigned)(bvh4.usedBlocks * sizeof( bvhvec4 ));
+	const unsigned cwNodeBytes = (unsigned)(cwbvh.usedBlocks * sizeof( bvhvec4 ));
+#ifdef CWBVH_COMPRESSED_TRIS
+	const unsigned cwTriBytes = (unsigned)(cwbvh.idxCount * 4 * sizeof( bvhvec4 ));
+#else
+	const unsigned cwTriBytes = (unsigned)(cwbvh.idxCount * 3 * sizeof( bvhvec4 ));
+#endif
+	oclBVH2Nodes = new tinyocl::Buffer( nodeBytes, bvh.bvhNode, tinyocl::Buffer::DEVICEONLY);
+	oclBVH2Verts = new tinyocl::Buffer( vertBytes, (bvhvec4*)bvh.orderedVerts.data, tinyocl::Buffer::DEVICEONLY);
+	oclBVH4Data = new tinyocl::Buffer( bvh4Bytes, bvh4.bvh4Data, tinyocl::Buffer::DEVICEONLY);
+	oclCWBVHNodes = new tinyocl::Buffer( cwNodeBytes, cwbvh.bvh8Data, tinyocl::Buffer::DEVICEONLY);
+	oclCWBVHTris = new tinyocl::Buffer( cwTriBytes, cwbvh.bvh8Tris, tinyocl::Buffer::DEVICEONLY);
+	// 32 bytes per ray, host side and all: hostRays is the array the Vulkan ray
+	// buffer was filled from, so there is nothing to convert and nothing that can
+	// drift between the two. Buffer does not take ownership of it.
+	oclRays = new tinyocl::Buffer( rayCount * 32, hostRays.data(), tinyocl::Buffer::DEVICEONLY);
+	oclPixels = new tinyocl::Buffer( rayCount * 4, 0, tinyocl::Buffer::WRITEONLY);
+	oclKernel[BACKEND_OCL_BVH_GPU]->SetArguments( oclBVH2Nodes, oclBVH2Verts, oclRays, oclPixels );
+	// AMD hardware traversal: the intrinsics exist on RDNA3 (BVH4) and RDNA4 (BVH4 + BVH8).
+	if (tinyocl::Kernel::isAMD && tinyocl::Kernel::isRDNA4)
+	{
+		InitAMDBVH8();
+		oclAMD8Data = new tinyocl::Buffer( (unsigned)(bvh8AMD.usedBlocks * sizeof( bvhvec4 )),
+			bvh8AMD.bvh8Data, tinyocl::Buffer::DEVICEONLY);
+		oclKernel[BACKEND_OCL_AMD_BVH8] = new tinyocl::Kernel( "shaders/traverse_amd.cl", "bench_amd_bvh8" );
+		oclKernel[BACKEND_OCL_AMD_BVH8]->SetArguments( oclAMD8Data, oclRays, oclPixels );
+	}
+	else printf( "%s disabled: requires AMD RDNA4.\n", backendName[BACKEND_OCL_AMD_BVH8] );
+	if (OCL_PRESENT_RESULT)
+		oclPresentStaging = CreateBuffer( rayCount * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true );
+	// One warm pass, which doubles as a sanity check: this traces the same scene the
+	// compute shaders do, so coverage and average depth should match what they show.
+	int be[] = { BACKEND_OCL_BVH_GPU , BACKEND_OCL_AMD_BVH8 };
+	for (int i = 0; i < 2; i++)
+	{
+		RunOpenCL(be[i]);
+		oclPixels->CopyFromDevice(); // blocking, so this also drains the queue
+		const uint32_t* px = oclPixels->GetHostPtr();
+		uint32_t hits = 0;
+		double sum = 0;
+		for (uint32_t i = 0; i < rayCount; i++) if (px[i] & 255) hits++, sum += (double)(px[i] & 255);
+		printf("%s: %.2f%% of rays hit, mean depth %.1f\n", backendName[be[i]],
+			100.0 * hits / rayCount, hits ? sum / hits : 0.0);
+	}
+	openclReady = true;
+}
+
+// Runs NUM_DISPATCHES passes back to back and returns the GPU time for all of them,
+// measured the same way the Vulkan side does it: from the start of the first pass to
+// the end of the last, so queue bubbles between passes are included.
+static double TraceOpenCL( const int backend )
+{
+	cl_event event[NUM_DISPATCHES] = {};
+	for (uint32_t i = 0; i < NUM_DISPATCHES; i++) RunOpenCL( backend, &event[i] );
+	clWaitForEvents( 1, &event[NUM_DISPATCHES - 1] );
+	cl_ulong start = 0, end = 0;
+	clGetEventProfilingInfo( event[0], CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &start, 0 );
+	clGetEventProfilingInfo( event[NUM_DISPATCHES - 1], CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &end, 0 );
+	for (uint32_t i = 0; i < NUM_DISPATCHES; i++) clReleaseEvent( event[i] );
+	if (OCL_PRESENT_RESULT)
+	{
+		oclPixels->CopyFromDevice();
+		memcpy( oclPresentStaging.mapped, oclPixels->GetHostPtr(), (size_t)rtWidth * rtHeight * 4 );
+	}
+	return (double)(end - start) * 1e-9; // event timing is in nanoseconds
+}
+
+static void ShutdownOpenCL()
+{
+	if (!openclReady)
+	{
+		// the context can exist without the backends: SelectOpenCLDevice() creates it
+		if (tinyocl::Kernel::clStarted) tinyocl::Kernel::KillCL();
+		return;
+	}
+	delete oclBVH2Nodes, delete oclBVH2Verts, delete oclBVH4Data;
+	delete oclCWBVHNodes, delete oclCWBVHTris;
+	delete oclAMD8Data;
+	delete oclRays, delete oclPixels;
+	for (int b = 0; b < BACKEND_COUNT; b++) delete oclKernel[b], oclKernel[b] = 0;
+	tinyocl::Kernel::KillCL();
+	openclReady = false;
+}
+
+static void BuildSchedule()
+{
+	scheduleLen = 0;
+	for (int b = 0; b < BACKEND_COUNT; b++)
+	{
+		if (b == BACKEND_RAYQUERY && !rayQuerySupported) continue;
+		if (BackendIsOpenCL( b ) && (!openclReady || !oclKernel[b])) continue;
+		schedule[scheduleLen++] = b;
+	}
+}
+
+// ----------------------------------------------------------------------------
+// acceleration structures
+// ----------------------------------------------------------------------------
+
+static VkDeviceAddress ASAddress( VkAccelerationStructureKHR as )
+{
+	VkAccelerationStructureDeviceAddressInfoKHR ai{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
+	ai.accelerationStructure = as;
+	return vk.GetAccelerationStructureDeviceAddress( device, &ai );
+}
+
+static AccelStruct MakeAccelerationStructure( VkAccelerationStructureTypeKHR type,
+	VkBuildAccelerationStructureFlagsKHR flags,
+	const VkAccelerationStructureGeometryKHR& geometry, uint32_t primitiveCount,
+	VkDeviceSize* updateScratchSize = nullptr )
+{
+	VkAccelerationStructureBuildGeometryInfoKHR bi{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+	bi.type = type;
+	bi.flags = flags;
+	bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+	bi.geometryCount = 1;
+	bi.pGeometries = &geometry;
+	VkAccelerationStructureBuildSizesInfoKHR sizes{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+	vk.GetAccelerationStructureBuildSizes( device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+		&bi, &primitiveCount, &sizes );
+	if (updateScratchSize) *updateScratchSize = sizes.updateScratchSize;
+	AccelStruct as;
+	as.buffer = CreateBuffer( sizes.accelerationStructureSize,
+		VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT );
+	VkAccelerationStructureCreateInfoKHR ci{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR };
+	ci.buffer = as.buffer.buf;
+	ci.size = sizes.accelerationStructureSize;
+	ci.type = type;
+	VK_CHECK( vk.CreateAccelerationStructure( device, &ci, nullptr, &as.handle ) );
+	const VkDeviceSize align = asProps.minAccelerationStructureScratchOffsetAlignment;
+	Buffer scratch = CreateBuffer( sizes.buildScratchSize + align,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT );
+	bi.dstAccelerationStructure = as.handle;
+	bi.scratchData.deviceAddress = AlignUp( scratch.addr, align );
+	VkAccelerationStructureBuildRangeInfoKHR range{};
+	range.primitiveCount = primitiveCount;
+	const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
+	VkCommandBuffer cb = BeginOneShot();
+	vk.CmdBuildAccelerationStructures( cb, 1, &bi, &pRange );
+	EndOneShot( cb );
+	DestroyBuffer( scratch );
+	as.addr = ASAddress( as.handle );
+	return as;
+}
+
+static AccelStruct MakeBLAS( const Buffer& vertexBuffer, uint32_t vertexCount, uint32_t vertexStride )
+{
+	VkAccelerationStructureGeometryKHR geom{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+	geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+	geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+	geom.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+	geom.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+	geom.geometry.triangles.vertexData.deviceAddress = vertexBuffer.addr;
+	geom.geometry.triangles.vertexStride = vertexStride;
+	geom.geometry.triangles.maxVertex = vertexCount - 1; // highest index, not the count
+	geom.geometry.triangles.indexType = VK_INDEX_TYPE_NONE_KHR;
+	return MakeAccelerationStructure( VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+		VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+		VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR,
+		geom, vertexCount / 3 );
+}
+
+static AccelStruct CompactBLAS( AccelStruct as )
+{
+	VkQueryPoolCreateInfo qpi{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+	qpi.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
+	qpi.queryCount = 1;
+	VkQueryPool pool;
+	VK_CHECK( vkCreateQueryPool( device, &qpi, nullptr, &pool ) );
+	VkCommandBuffer cb = BeginOneShot();
+	vkCmdResetQueryPool( cb, pool, 0, 1 );
+	// must barrier the build's writes before reading postbuild info
+	VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+	mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+	mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+		VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &mb, 0, nullptr, 0, nullptr );
+	vk.CmdWriteAccelerationStructuresProperties( cb, 1, &as.handle,
+		VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR, pool, 0 );
+	EndOneShot( cb );
+	VkDeviceSize compactedSize = 0;
+	VK_CHECK( vkGetQueryPoolResults( device, pool, 0, 1, sizeof( compactedSize ), &compactedSize,
+		sizeof( compactedSize ), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT ) );
+	vkDestroyQueryPool( device, pool, nullptr );
+	printf( "BLAS: %i tris, %.2f MB compacted\n", triCount, (double)compactedSize / (1024 * 1024) );
+	AccelStruct compacted;
+	compacted.buffer = CreateBuffer( compactedSize,
+		VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT );
+	VkAccelerationStructureCreateInfoKHR ci{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR };
+	ci.buffer = compacted.buffer.buf;
+	ci.size = compactedSize;
+	ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+	VK_CHECK( vk.CreateAccelerationStructure( device, &ci, nullptr, &compacted.handle ) );
+	cb = BeginOneShot();
+	VkCopyAccelerationStructureInfoKHR cpy{ VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR };
+	cpy.src = as.handle;
+	cpy.dst = compacted.handle;
+	cpy.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
+	vk.CmdCopyAccelerationStructure( cb, &cpy );
+	EndOneShot( cb );
+	vk.DestroyAccelerationStructure( device, as.handle, nullptr );
+	DestroyBuffer( as.buffer );
+	compacted.addr = ASAddress( compacted.handle );
+	return compacted;
+}
+
+static void InitScene()
+{
+	instanceBuffer = CreateBuffer( sizeof( VkAccelerationStructureInstanceKHR ) * NUM_INSTANCES,
+		VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true );
+	VkAccelerationStructureInstanceKHR* inst = (VkAccelerationStructureInstanceKHR*)instanceBuffer.mapped;
+	memset( inst, 0, sizeof( VkAccelerationStructureInstanceKHR ) * NUM_INSTANCES );
+	// row-major 3x4 identity, i.e. XMMatrixTranslation( 0, 0, 0 )
+	inst[0].transform.matrix[0][0] = inst[0].transform.matrix[1][1] = inst[0].transform.matrix[2][2] = 1.0f;
+	inst[0].instanceCustomIndex = 0;
+	inst[0].mask = 1; // the shaders trace with cull mask 0xFF, so this is visible
+	inst[0].instanceShaderBindingTableRecordOffset = 0;
+	inst[0].flags = 0;
+	inst[0].accelerationStructureReference = blas.addr;
+}
+
+static void InitTopLevel()
+{
+	VkAccelerationStructureGeometryKHR geom{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+	geom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+	geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+	geom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+	geom.geometry.instances.arrayOfPointers = VK_FALSE;
+	geom.geometry.instances.data.deviceAddress = instanceBuffer.addr;
+	VkDeviceSize updateScratchSize = 0;
+	tlas = MakeAccelerationStructure( VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+		VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+		VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
+		geom, NUM_INSTANCES, &updateScratchSize );
+	tlasUpdateScratch = CreateBuffer( updateScratchSize + asProps.minAccelerationStructureScratchOffsetAlignment,
+		VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT );
+}
+
+// ----------------------------------------------------------------------------
+// descriptors and pipelines
+// ----------------------------------------------------------------------------
+
+static void InitDescriptors()
+{
+	const VkShaderStageFlags stages = VK_SHADER_STAGE_COMPUTE_BIT |
+		VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+		VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+	VkDescriptorSetLayoutBinding bindings[9]{};
+	for (uint32_t i = 0; i < 9; i++)
+	{
+		bindings[i].binding = i;
+		bindings[i].descriptorCount = 1;
+		bindings[i].stageFlags = stages;
+		bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	}
+	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;            // render target
+	bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; // TLAS
+	VkDescriptorSetLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+	lci.bindingCount = 9;
+	lci.pBindings = bindings;
+	VK_CHECK( vkCreateDescriptorSetLayout( device, &lci, nullptr, &descLayout ) );
+	VkDescriptorPoolSize sizes[3] = {
+		{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 },
+		{ VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
+		{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7 } };
+	VkDescriptorPoolCreateInfo pci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+	pci.maxSets = 1;
+	pci.poolSizeCount = 3;
+	pci.pPoolSizes = sizes;
+	VK_CHECK( vkCreateDescriptorPool( device, &pci, nullptr, &descPool ) );
+	VkDescriptorSetAllocateInfo dai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+	dai.descriptorPool = descPool;
+	dai.descriptorSetCount = 1;
+	dai.pSetLayouts = &descLayout;
+	VK_CHECK( vkAllocateDescriptorSets( device, &dai, &descSet ) );
+	VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+	plci.setLayoutCount = 1;
+	plci.pSetLayouts = &descLayout;
+	VK_CHECK( vkCreatePipelineLayout( device, &plci, nullptr, &pipelineLayout ) );
+	VkDescriptorImageInfo imgInfo{ VK_NULL_HANDLE, renderTargetView, VK_IMAGE_LAYOUT_GENERAL };
+	VkWriteDescriptorSetAccelerationStructureKHR asInfo{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
+	asInfo.accelerationStructureCount = 1;
+	asInfo.pAccelerationStructures = &tlas.handle;
+	const Buffer* bufs[7] = { &rayBuffer, &bvhNodeBuffer, &bvhIdxBuffer, &bvhVertBuffer,
+		&bvh4DataBuffer, &cwbvhNodeBuffer, &cwbvhTriBuffer };
+	VkDescriptorBufferInfo bufInfo[7]{};
+	VkWriteDescriptorSet writes[9]{};
+	for (uint32_t i = 0; i < 9; i++)
+	{
+		writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[i].dstSet = descSet;
+		writes[i].dstBinding = i;
+		writes[i].descriptorCount = 1;
+	}
+	writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	writes[0].pImageInfo = &imgInfo;
+	writes[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+	writes[1].pNext = &asInfo;
+	for (uint32_t i = 0; i < 7; i++)
+	{
+		bufInfo[i] = { bufs[i]->buf, 0, VK_WHOLE_SIZE };
+		writes[i + 2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		writes[i + 2].pBufferInfo = &bufInfo[i];
+	}
+	vkUpdateDescriptorSets( device, 9, writes, 0, nullptr );
+}
+
+static VkShaderModule LoadShaderModule( const char* name )
+{
+	static const char* dirs[] = { "shaders/", "../shaders/", "../../shaders/", "" };
+	for (const char* dir : dirs)
+	{
+		char path[512];
+		snprintf( path, sizeof( path ), "%s%s", dir, name );
+		std::ifstream f( path, std::ios::binary | std::ios::ate );
+		if (!f.is_open()) continue;
+		const std::streamsize bytes = f.tellg();
+		if (bytes <= 0 || (bytes & 3)) Fatal( "'%s' is not a valid SPIR-V module", path );
+		std::vector<uint32_t> code( (size_t)bytes / 4 );
+		f.seekg( 0 );
+		f.read( (char*)code.data(), bytes );
+		VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+		ci.codeSize = (size_t)bytes;
+		ci.pCode = code.data();
+		VkShaderModule m;
+		VK_CHECK( vkCreateShaderModule( device, &ci, nullptr, &m ) );
+		return m;
+	}
+	Fatal( "could not find '%s'; run compile_shaders.bat first", name );
+	return VK_NULL_HANDLE;
+}
+
+static void InitPipeline()
+{
+	VkShaderModule rgen = LoadShaderModule( "trace.rgen.spv" );
+	VkShaderModule rmiss = LoadShaderModule( "trace.rmiss.spv" );
+	VkShaderModule rchit = LoadShaderModule( "trace.rchit.spv" );
+	VkPipelineShaderStageCreateInfo stages[3]{};
+	const VkShaderStageFlagBits stageBits[3] = { VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+		VK_SHADER_STAGE_MISS_BIT_KHR, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR };
+	const VkShaderModule modules[3] = { rgen, rmiss, rchit };
+	for (uint32_t i = 0; i < 3; i++)
+	{
+		stages[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stages[i].stage = stageBits[i];
+		stages[i].module = modules[i];
+		stages[i].pName = "main";
+	}
+	VkRayTracingShaderGroupCreateInfoKHR groups[NUM_SHADER_GROUPS]{};
+	for (uint32_t i = 0; i < NUM_SHADER_GROUPS; i++)
+	{
+		groups[i].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+		groups[i].generalShader = VK_SHADER_UNUSED_KHR;
+		groups[i].closestHitShader = VK_SHADER_UNUSED_KHR;
+		groups[i].anyHitShader = VK_SHADER_UNUSED_KHR;
+		groups[i].intersectionShader = VK_SHADER_UNUSED_KHR;
+	}
+	groups[0].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, groups[0].generalShader = 0;
+	groups[1].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, groups[1].generalShader = 1;
+	groups[2].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, groups[2].closestHitShader = 2;
+	VkRayTracingPipelineCreateInfoKHR ci{ VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR };
+	ci.stageCount = 3;
+	ci.pStages = stages;
+	ci.groupCount = NUM_SHADER_GROUPS;
+	ci.pGroups = groups;
+	ci.maxPipelineRayRecursionDepth = 1;
+	ci.layout = pipelineLayout;
+	VK_CHECK( vk.CreateRayTracingPipelines( device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &ci, nullptr, &rtPipeline ) );
+	for (VkShaderModule m : modules) vkDestroyShaderModule( device, m, nullptr );
+}
+
+static VkPipeline MakeComputePipeline( const char* spv )
+{
+	VkShaderModule m = LoadShaderModule( spv );
+	VkComputePipelineCreateInfo ci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+	ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	ci.stage.module = m;
+	ci.stage.pName = "main";
+	ci.layout = pipelineLayout;
+	VkPipeline p;
+	VK_CHECK( vkCreateComputePipelines( device, VK_NULL_HANDLE, 1, &ci, nullptr, &p ) );
+	vkDestroyShaderModule( device, m, nullptr );
+	return p;
+}
+
+static void InitComputePipeline()
+{
+	computePso = MakeComputePipeline( "tiny.comp.spv" );
+	computePso4 = MakeComputePipeline( "tiny4.comp.spv" );
+	computePso8 = MakeComputePipeline( "tiny8.comp.spv" );
+	if (rayQuerySupported) computePsoRQ = MakeComputePipeline( "tinyrq.comp.spv" );
+}
+
+static void InitShaderTables()
+{
+	const uint32_t handleSize = rtProps.shaderGroupHandleSize;
+	const uint32_t handleAlign = rtProps.shaderGroupHandleAlignment;
+	const uint32_t baseAlign = rtProps.shaderGroupBaseAlignment;
+	// aligning to the larger of the two satisfies both, as both are powers of two
+	const uint32_t stride = AlignUp( handleSize, handleAlign > baseAlign ? handleAlign : baseAlign );
+	std::vector<uint8_t> handles( (size_t)handleSize * NUM_SHADER_GROUPS );
+	VK_CHECK( vk.GetRayTracingShaderGroupHandles( device, rtPipeline, 0, NUM_SHADER_GROUPS,
+		handles.size(), handles.data() ) );
+	// over-allocate so the first record can start at an aligned device address
+	sbt = CreateBuffer( (VkDeviceSize)stride * NUM_SHADER_GROUPS + baseAlign,
+		VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true );
+	const VkDeviceAddress base = AlignUp( sbt.addr, (VkDeviceAddress)baseAlign );
+	uint8_t* dst = (uint8_t*)sbt.mapped + (base - sbt.addr);
+	memset( dst, 0, (size_t)stride * NUM_SHADER_GROUPS );
+	for (uint32_t i = 0; i < NUM_SHADER_GROUPS; i++)
+		memcpy( dst + (size_t)i * stride, handles.data() + (size_t)i * handleSize, handleSize );
+	sbtRaygen = { base + 0 * stride, stride, stride };
+	sbtMiss = { base + 1 * stride, stride, stride };
+	sbtHit = { base + 2 * stride, stride, stride };
+	sbtCallable = { 0, 0, 0 };
+}
+
+// ----------------------------------------------------------------------------
+// per-frame work
+// ----------------------------------------------------------------------------
+
+static void UpdateScene( VkCommandBuffer cb )
+{
+	VkAccelerationStructureGeometryKHR geom{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+	geom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+	geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+	geom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+	geom.geometry.instances.arrayOfPointers = VK_FALSE;
+	geom.geometry.instances.data.deviceAddress = instanceBuffer.addr;
+	VkAccelerationStructureBuildGeometryInfoKHR bi{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+	bi.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+	// Must match the flags the TLAS was originally built with.
+	bi.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+		VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+	bi.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+	bi.srcAccelerationStructure = tlas.handle;
+	bi.dstAccelerationStructure = tlas.handle; // in-place update
+	bi.geometryCount = 1;
+	bi.pGeometries = &geom;
+	bi.scratchData.deviceAddress = AlignUp( tlasUpdateScratch.addr,
+		(VkDeviceAddress)asProps.minAccelerationStructureScratchOffsetAlignment );
+	VkAccelerationStructureBuildRangeInfoKHR range{};
+	range.primitiveCount = NUM_INSTANCES;
+	const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
+	vk.CmdBuildAccelerationStructures( cb, 1, &bi, &pRange );
+	VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+	mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+	mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+		VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		0, 1, &mb, 0, nullptr, 0, nullptr );
+}
+
+static void ImageBarrier( VkCommandBuffer cb, VkImage image,
+	VkImageLayout oldLayout, VkImageLayout newLayout,
+	VkAccessFlags srcAccess, VkAccessFlags dstAccess,
+	VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage )
+{
+	VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+	b.srcAccessMask = srcAccess;
+	b.dstAccessMask = dstAccess;
+	b.oldLayout = oldLayout;
+	b.newLayout = newLayout;
+	b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	b.image = image;
+	b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+	vkCmdPipelineBarrier( cb, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b );
+}
+
+// Pushes the image OpenCL just traced into the render target, so the window shows
+// what the OpenCL backend produced rather than the last Vulkan frame. Off by
+// default: it is pure presentation cost, outside the measured window, but it does
+// slow the frame down.
+static void UploadOpenCLImage( VkCommandBuffer cb )
+{
+	const VkPipelineStageFlags traceStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+		VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+	ImageBarrier( cb, renderTarget, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+		VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, traceStage, VK_PIPELINE_STAGE_TRANSFER_BIT );
+	VkBufferImageCopy region{};
+	region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+	region.imageExtent = { rtWidth, rtHeight, 1 };
+	vkCmdCopyBufferToImage( cb, oclPresentStaging.buf, renderTarget, VK_IMAGE_LAYOUT_GENERAL, 1, &region );
+	ImageBarrier( cb, renderTarget, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+		VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT );
+}
+
+static void Resize();
+
+static void Render()
+{
+	static uint64_t frameCounter = 0;
+	static int slotBackend[FRAME_COUNT] = {};   // which backend last ran in each frame slot
+	static int slotSchedIdx[FRAME_COUNT] = {};  // and where it sat in the rotation
+	static double slotOclTime[FRAME_COUNT] = {};// OpenCL event timing for that slot, if any
+	const uint32_t slot = (uint32_t)(frameCounter % FRAME_COUNT);
+	const uint32_t baseQuery = slot * 2;
+	// Round-robin the ray tracing backends.
+	const int schedIdx = (int)(frameCounter % scheduleLen);
+	const int backend = schedule[schedIdx];
+	// A zero-size client area (minimized) leaves the swapchain uncreatable.
+	if (swapChain == VK_NULL_HANDLE) { Resize(); if (swapChain == VK_NULL_HANDLE) { SleepMs( 16 ); return; } }
+	VK_CHECK( vkWaitForFences( device, 1, &frameFences[slot], VK_TRUE, UINT64_MAX ) );
+	// This slot's previous submission has retired, so its timestamps are readable.
+	if (frameSubmitted[slot])
+	{
+		frameSubmitted[slot] = false; // consume it, so an early return cannot double count
+		const int k = slotBackend[slot]; // which backend produced this measurement
+		double rtTime;
+		if (BackendIsOpenCL( k ))
+		{
+			// already measured with OpenCL events, in the frame that ran it
+			rtTime = slotOclTime[slot];
+		}
+		else
+		{
+			uint64_t timestamps[2] = {};
+			VK_CHECK( vkGetQueryPoolResults( device, timestampPool, baseQuery, 2,
+				sizeof( timestamps ), timestamps, sizeof( uint64_t ),
+				VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT ) );
+			const uint64_t start = timestamps[0] & timestampMask, end = timestamps[1] & timestampMask;
+			// timestampPeriod is nanoseconds per tick
+			rtTime = (double)(end - start) * (double)deviceProps.limits.timestampPeriod * 1e-9;
+		}
+		rtTime /= (double)NUM_DISPATCHES;
+		const double raysPerSecond = rtTime > 0.0 ? (double)(rtWidth * rtHeight) / rtTime : 0.0;
+		static double smoothed[BACKEND_COUNT] = {};
+		static double alpha = 0.8;
+		static int frames[BACKEND_COUNT] = {};
+		static bool lineStarted = false;
+		if (++frames[k] == 1) smoothed[k] = raysPerSecond;
+		else smoothed[k] = alpha * smoothed[k] + (1 - alpha) * raysPerSecond;
+		if (alpha < 0.99) alpha += 0.005;
+		// the hardware RT pipeline is the reference; report the rest as a fraction of it.
+		const double ref = smoothed[BACKEND_HWRT];
+		if (backendPrint[k])
+		{
+			if (lineStarted) printf( "; " );
+			if (k == BACKEND_HWRT || ref <= 0.0)
+				printf( "%s: %6.1f MRays/s", backendName[k], smoothed[k] / 1e6 );
+			else
+				printf( "%s: %6.1f MRays/s, %4.1f%% of %s", backendName[k], smoothed[k] / 1e6,
+					100.0 * smoothed[k] / ref, backendName[BACKEND_HWRT] );
+			lineStarted = true;
+		}
+		if (slotSchedIdx[slot] == scheduleLen - 1 && lineStarted)
+			printf( "\n" ), fflush( stdout ), lineStarted = false;
+	}
+	// An OpenCL frame traces here, before anything is recorded or submitted: waiting
+	// on every frame fence first keeps the two APIs off the GPU at the same time, so
+	// neither backend is measured while the other is still running.
+	if (BackendIsOpenCL( backend ))
+	{
+		VK_CHECK( vkWaitForFences( device, FRAME_COUNT, frameFences, VK_TRUE, UINT64_MAX ) );
+		slotOclTime[slot] = TraceOpenCL( backend );
+	}
+	uint32_t imageIndex = 0;
+	VkResult acq = vkAcquireNextImageKHR( device, swapChain, UINT64_MAX,
+		imageAvailable[slot], VK_NULL_HANDLE, &imageIndex );
+	if (acq == VK_ERROR_OUT_OF_DATE_KHR) { Resize(); return; }
+	if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) VK_CHECK( acq );
+	VK_CHECK( vkResetFences( device, 1, &frameFences[slot] ) );
+	VkCommandBuffer cb = cmdBufs[slot];
+	VK_CHECK( vkResetCommandBuffer( cb, 0 ) );
+	VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+	bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	VK_CHECK( vkBeginCommandBuffer( cb, &bi ) );
+	vkCmdResetQueryPool( cb, timestampPool, baseQuery, 2 );
+	static bool sceneDirty = true;
+	if (sceneDirty) { UpdateScene( cb ); sceneDirty = false; }
+	if (BackendIsOpenCL( backend ))
+	{
+		// The trace already happened, on the OpenCL queue. Write both timestamps anyway:
+		// the readback above waits on this slot's queries whichever backend ran.
+		vkCmdWriteTimestamp( cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampPool, baseQuery );
+		vkCmdWriteTimestamp( cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampPool, baseQuery + 1 );
+		if (OCL_PRESENT_RESULT) UploadOpenCLImage( cb );
+	}
+	else if (backend != BACKEND_HWRT)
+	{
+		vkCmdBindPipeline( cb, VK_PIPELINE_BIND_POINT_COMPUTE,
+			backend == BACKEND_BVH4_GPU ? computePso4 :
+			backend == BACKEND_BVH8_CWBVH ? computePso8 :
+			backend == BACKEND_RAYQUERY ? computePsoRQ : computePso );
+		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout,
+			0, 1, &descSet, 0, nullptr );
+		vkCmdWriteTimestamp( cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampPool, baseQuery );
+		for (uint32_t i = 0; i < NUM_DISPATCHES; i++)
+		{
+			vkCmdDispatch( cb, (rtWidth + 7) / 8, (rtHeight + 7) / 8, 1 );
+			if (BARRIER_BETWEEN_DISPATCHES && i + 1 < NUM_DISPATCHES)
+			{
+				VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+				mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+				mb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+				vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+					VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr );
+			}
+		}
+		vkCmdWriteTimestamp( cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampPool, baseQuery + 1 );
+	}
+	else
+	{
+		vkCmdBindPipeline( cb, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rtPipeline );
+		vkCmdBindDescriptorSets( cb, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipelineLayout,
+			0, 1, &descSet, 0, nullptr );
+		vkCmdWriteTimestamp( cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampPool, baseQuery );
+		for (uint32_t i = 0; i < NUM_DISPATCHES; i++)
+		{
+			vk.CmdTraceRays( cb, &sbtRaygen, &sbtMiss, &sbtHit, &sbtCallable, rtWidth, rtHeight, 1 );
+			if (BARRIER_BETWEEN_DISPATCHES && i + 1 < NUM_DISPATCHES)
+			{
+				VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+				mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+				mb.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+				vkCmdPipelineBarrier( cb, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+					VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 1, &mb, 0, nullptr, 0, nullptr );
+			}
+		}
+		vkCmdWriteTimestamp( cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestampPool, baseQuery + 1 );
+	}
+	slotBackend[slot] = backend; // for the timing readback next time this slot runs
+	slotSchedIdx[slot] = schedIdx;
+	frameCounter++;
+	const VkPipelineStageFlags traceStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+		VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+	ImageBarrier( cb, renderTarget, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, traceStage, VK_PIPELINE_STAGE_TRANSFER_BIT );
+	ImageBarrier( cb, swapImages[imageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT );
+	VkImageBlit blit{};
+	blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+	blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+	blit.srcOffsets[1] = { (int32_t)rtWidth, (int32_t)rtHeight, 1 };
+	blit.dstOffsets[1] = { (int32_t)swapExtent.width, (int32_t)swapExtent.height, 1 };
+	vkCmdBlitImage( cb, renderTarget, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		swapImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR );
+	ImageBarrier( cb, swapImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+		VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT );
+	ImageBarrier( cb, renderTarget, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+		VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, traceStage );
+	VK_CHECK( vkEndCommandBuffer( cb ) );
+	const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+	VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	si.waitSemaphoreCount = 1;
+	si.pWaitSemaphores = &imageAvailable[slot];
+	si.pWaitDstStageMask = &waitStage;
+	si.commandBufferCount = 1;
+	si.pCommandBuffers = &cb;
+	si.signalSemaphoreCount = 1;
+	si.pSignalSemaphores = &renderFinished[imageIndex];
+	VK_CHECK( vkQueueSubmit( queue, 1, &si, frameFences[slot] ) );
+	frameSubmitted[slot] = true;
+	VkPresentInfoKHR pi{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+	pi.waitSemaphoreCount = 1;
+	pi.pWaitSemaphores = &renderFinished[imageIndex];
+	pi.swapchainCount = 1;
+	pi.pSwapchains = &swapChain;
+	pi.pImageIndices = &imageIndex;
+	const VkResult pres = vkQueuePresentKHR( queue, &pi );
+	if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR) Resize();
+	else if (pres != VK_SUCCESS) VK_CHECK( pres );
+}
+
+static void Resize()
+{
+	VK_CHECK( vkDeviceWaitIdle( device ) ); // must fully drain before touching swapchain images
+	DestroySwapChain();
+	CreateSwapChain();
+	for (uint32_t i = 0; i < FRAME_COUNT; i++) frameSubmitted[i] = false;
+}
+
+// ----------------------------------------------------------------------------
+// entry point
+// ----------------------------------------------------------------------------
+
+static void Init()
+{
+	InitDevice();
+	// Before anything can construct a tinyocl object: the device has to go in while
+	// Kernel::clStarted is still false, or tinyocl will have chosen one by itself.
+	bool openclDevice = false;
+	if (ENABLE_OPENCL) openclDevice = SelectOpenCLDevice();
+	InitCommand();
+	InitQueryPool();
+	InitSurfaces();
+	InitMeshes();
+	InitBVHBuffers();
+	UpdateRayBuffer();
+	blas = CompactBLAS( MakeBLAS( meshVB, triCount * 3, sizeof( bvhvec4 ) ) );
+	InitScene();
+	InitTopLevel();
+	InitDescriptors();
+	InitPipeline();
+	InitComputePipeline();
+	InitShaderTables();
+	if (openclDevice) InitOpenCL();
+	BuildSchedule();
+}
+
+int main()
+{
+	CreateAppWindow( rtWidth, rtHeight );
+	Init();
+	while (!windowClosed)
+		{
+		PumpEvents();
+		if (windowClosed) break;
+		if (windowResized) windowResized = false, Resize();
+		Render(); // Render the next frame
+	}
+	vkDeviceWaitIdle( device );
+	ShutdownOpenCL();
+	return 0;
+}

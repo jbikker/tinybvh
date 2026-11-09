@@ -6,9 +6,15 @@ namespace tinybvh
 enum Scene : uint32_t { 
 	CRYTEK_SPONZA, 
 	BISTRO_EXTERIOR,
+	SAN_MIGUEL, // *
 	CONFERENCE_ROOM,
 	BUNNY_10K,
-	STANFORD_DRAGON
+	STANFORD_DRAGON,
+	LEGO_PORSCHE, // *
+	VICTORIAN_HOUSE, // **
+	HAIRBALL, // **
+	// *: not included in GitHub repo due to size, request if needed.
+	// **: included in the repo but archived - unzip to use.
 };
 
 class PrimitiveSet
@@ -19,7 +25,7 @@ public:
 	bvhvec3 GetCameraPos( uint32_t i ) const { return camPos[i % 3]; }
 	bvhvec3 GetCameraDir( uint32_t i ) const { return camDir[i % 3]; }
 	Scene scene = CRYTEK_SPONZA;
-	uint32_t primCount;
+	uint32_t primCount = 0;
 	bvhvec4* verts = 0;
 	uint32_t* indices = 0;
 	char desc[128], shrt[64];

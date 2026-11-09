@@ -1,0 +1,22 @@
+// gpu-side code for hardware ray traversal
+
+struct Ray
+{
+	// Match the 64-byte ray layout used by traverse.cl.
+	float4 O, D, rD;
+	float4 hit;
+};
+
+// Includes for hardware traversal kernel implementations:
+// Minimum required for this to work. Does not check for
+// compiler compatability
+#if defined( ISAMD ) && ( defined( ISRDNA3 ) || defined( ISRDNA4 ) )
+#include "traverse_amd_hw_bvh4.cl"
+#if defined( ISRDNA4 )
+#include "traverse_amd_hw_bvh8.cl"
+#endif
+#else
+#error \
+	"TinyBVH AMD hardware ray tracing requires RDNA3/RDNA4 and compiler support "
+"for AMD BVH intrinsics."
+#endif

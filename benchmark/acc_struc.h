@@ -9,12 +9,15 @@ enum BuildFlags : int {
 	SIMDBUILD = 2,
 	FULLSWEEP = 4,
 	LBVH = 8,
-	PRESPLIT = 16,
-	SPATIALSPLITS = 32,
-	OPTIMIZE = 64,
-	LOW = 128, // low, medium, high: For Embree and Madmann91.
-	MEDIUM = 256,
-	HIGH = 512 
+	BONSAI = 16,
+	HPLOC = 32,
+	PRESPLIT = 64,
+	SPATIALSPLITS = 128,
+	OPTIMIZE = 256,
+	BAKED = 512,
+	LOW = 1024, // low, medium, high: For Embree and Madmann91.
+	MEDIUM = 2048,
+	HIGH = 4096 
 };
 
 enum BVHLayout
@@ -26,8 +29,10 @@ enum BVHLayout
 	GPU_BVH,	// BVH2 optimized for GPU traversal
 	GPU_BVH4,	// BVH4 optimized for GPU traversal
 	CWBVH,		// 'Compressed Wide BVH'
+	AMD_HWRT,	// Native AMD format
 	MADMANN91,	// for reference: latest madmann91 BVH lib
-	EMBREE		// for reference: latest Embree lib.
+	EMBREE,		// for reference: latest Embree lib.
+	AMD_HWRT8,	// Native AMD 8-wide format
 };
 
 class PrimitiveSet;
@@ -38,6 +43,7 @@ public:
 	char* GetDescription() { return desc; }
 	void PrepareBuild();
 	BVHBase* Build( PrimitiveSet* primSet );
+	BVHBase* LoadBVH( const char* bakedBVH );
 	void PostBuild();
 	BVHBase* GetBVH() { return bvh; }
 	float SAHCost();
@@ -46,6 +52,10 @@ public:
 	void IntersectBatchMT( char* rayData, const int rayCount );
 	void OcclusionBatch( char* rayData, const int rayCount );
 	void OcclusionBatchMT( char* rayData, const int rayCount );
+	float IntersectBatchPackets( char* rayData, const int rayCount );
+	void IntersectBatchMTPackets( char* rayData, const int rayCount );
+	void OcclusionBatchPackets( char* rayData, const int rayCount );
+	void OcclusionBatchMTPackets( char* rayData, const int rayCount );
 	bvhvec3 SceneExtent();
 	int NodeCount();
 	BVHLayout layout = BVH2;

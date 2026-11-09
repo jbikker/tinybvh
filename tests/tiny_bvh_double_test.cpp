@@ -84,11 +84,13 @@ static void TestCustomShadowRays()
 		CHECK( ray2.hit.t < 1e30 ); // a hit was found
 		CHECK( ray2.hit.prim == 0 );
 	}
-	// Ray into empty space; should not be occluded and should not hit.
+	// Ray into empty space; should not be occluded and should not hit. The sphere
+	// callbacks above assume a unit direction.
 	{
-		RayEx ray( bvhdbl3( 0, 0, 0 ), bvhdbl3( 0, 1, 1 ), 1e30 );
+		const bvhdbl3 dir = tinybvh_normalize( bvhdbl3( 0, 1, 1 ) );
+		RayEx ray( bvhdbl3( 0, 0, 0 ), dir, 1e30 );
 		CHECK( bvh.IsOccluded( ray ) == false );
-		RayEx ray2( bvhdbl3( 0, 0, 0 ), bvhdbl3( 0, 1, 1 ), 1e30 );
+		RayEx ray2( bvhdbl3( 0, 0, 0 ), dir, 1e30 );
 		bvh.Intersect( ray2 );
 		CHECK( ray2.hit.t == 1e30 ); // no hit
 	}
@@ -133,13 +135,13 @@ static void TestIndexedGeometry()
 	}
 
 	// index buffer (indexed mesh) and expanded soup (non-indexed), same prim order.
-	uint32_t* indices = new uint32_t[triCount * 3];
+	uint64_t* indices = new uint64_t[triCount * 3];
 	bvhdbl3* soup = new bvhdbl3[triCount * 3];
 	int t = 0;
 	for (int j = 0; j < G - 1; j++) for (int i = 0; i < G - 1; i++)
 	{
-		const uint32_t a = j * G + i, b = j * G + i + 1, c = (j + 1) * G + i, d = (j + 1) * G + i + 1;
-		const uint32_t tris[2][3] = { { a, b, c }, { b, d, c } };
+		const uint64_t a = j * G + i, b = j * G + i + 1, c = (j + 1) * G + i, d = (j + 1) * G + i + 1;
+		const uint64_t tris[2][3] = { { a, b, c }, { b, d, c } };
 		for (int k = 0; k < 2; k++, t++) for (int v = 0; v < 3; v++)
 		{
 			indices[t * 3 + v] = tris[k][v];

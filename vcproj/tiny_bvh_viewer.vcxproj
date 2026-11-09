@@ -28,7 +28,6 @@
     <ClInclude Include="..\tiny_bvh_base.h" />
     <ClInclude Include="..\tiny_bvh_x86_double.h" />
     <ClInclude Include="..\tiny_bvh_x86_float.h" />
-    <ClInclude Include="..\tiny_scene.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>

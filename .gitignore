@@ -21,12 +21,15 @@ errorlog.txt
 *.xlsx
 *.pptx
 *.fxh
+*.spv
 *.cso
 cache/ibl.dat
 external/glm
 external/cv2pdb
 reference
 path.txt
+microbvh.h
+_stash
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
