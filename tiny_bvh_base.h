@@ -653,6 +653,7 @@ enum BVHType : uint32_t
 	LAYOUT_CWBVH,
 	LAYOUT_BVH8_AVX2,
 	LAYOUT_VOXELSET,
+	LAYOUT_DOBB
 };
 
 namespace impl {

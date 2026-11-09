@@ -17,11 +17,6 @@
 #include <iostream>
 #include <stdio.h>
 
-// TODO: General refactor:
-//	- use const consistently
-//  - remove uneccessary declaration
-//	- you can index bvhvec3-s, use it where its useful
-
 namespace tinybvh {
 	static const bvhvec3 proxyKDopAxes[AXESNO] = {
 		// 3 Euclidian axes
@@ -400,7 +395,7 @@ namespace tinybvh {
 		struct StackEntry { uint32_t nodeIdx; float entryDistance; };
 
 		// TODO: add layout
-		BVH_DOBB(BVHContext ctx = {}) { context = ctx; } 
+		BVH_DOBB(BVHContext ctx = {}) { context = ctx; layout = LAYOUT_DOBB; }
 		~BVH_DOBB();
 
 		void Build(const bvhvec4* vertices, const uint32_t primCount);
@@ -481,11 +476,9 @@ namespace tinybvh {
 		// make sure we own bvh8 (a previous ConvertFrom may have left it referencing someone else's)
 		if (!ownBVH8) bvh8.DropReference(context), ownBVH8 = true;
 		bvh8.bvh.context = context;
-		// TODO: Decide whether or not to recreate H-PLOC
 		// Build binary BVH
 		bvh8.bvh.settings.useFullSweep = true;
 		bvh8.bvh.Build(vertices, indices, primCount);
-		// TODO: Decide to use Optimize() or not
 		// Quadify the BVH for next steps
 		quadify();
 		// SAH optimal widening
