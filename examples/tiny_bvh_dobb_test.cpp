@@ -6,8 +6,6 @@
 
 #define TINYBVH_IMPLEMENTATION
 #include "tiny_bvh.h"
-#define TINYBVH_DOBB_IMPLEMENTATION
-#include "tiny_bvh_dobb.h"
 using namespace tinybvh;
 
 // Other includes
@@ -371,7 +369,7 @@ uint32_t IntersectionInstrumented(const BVH_DOBB& bvh, Ray& ray, TraversalStats*
 		const uint32_t rotationIdx = currNode.Rotation();
 
 		if (rotationIdx != 255) {
-			const DOBB_LUT::Mat3f rotation = bvh.getLutEntry(rotationIdx);
+			const DOBB_LUT::Mat3f rotation = bvh.GetLUTEntry(rotationIdx);
 			const bvhvec3 rotationX = bvhvec3(rotation.m[0][0], rotation.m[1][0], rotation.m[2][0]);
 			const bvhvec3 rotationY = bvhvec3(rotation.m[0][1], rotation.m[1][1], rotation.m[2][1]);
 			const bvhvec3 rotationZ = bvhvec3(rotation.m[0][2], rotation.m[1][2], rotation.m[2][2]);
@@ -393,7 +391,7 @@ uint32_t IntersectionInstrumented(const BVH_DOBB& bvh, Ray& ray, TraversalStats*
 			if (stats) stats->boxTests++;
 
 			// Determine which is the next slot to process
-			uint32_t slot = (uint32_t)std::countr_zero(remainingSlots);
+			uint32_t slot = (uint32_t)tinybvh_ctz(remainingSlots);
 			remainingSlots &= remainingSlots - 1;
 
 			// Determine lower and higher extents of the BB
@@ -423,7 +421,7 @@ uint32_t IntersectionInstrumented(const BVH_DOBB& bvh, Ray& ray, TraversalStats*
 
 			// Intersect triangles
 			const uint32_t firstTri = currNode.triBaseIndex + (currNode.meta[slot] & 31);
-			const uint32_t triCount = __popc(currNode.meta[slot] >> 5);
+			const uint32_t triCount = tinybvh_popc(currNode.meta[slot] >> 5);
 
 			uint32_t i0, i1, i2;
 			for (uint32_t triIdx = 0; triIdx < triCount; triIdx++) {
@@ -443,7 +441,7 @@ uint32_t IntersectionInstrumented(const BVH_DOBB& bvh, Ray& ray, TraversalStats*
 
 			// Push internal node
 			nodeStack[stackIdx++] = {
-					currNode.ChildBaseIndex() + __popc(currNode.iMask & ((1u << slot) - 1)),
+					currNode.ChildBaseIndex() + tinybvh_popc(currNode.iMask & ((1u << slot) - 1)),
 					slotDistance[slot]
 			};
 		}
@@ -471,7 +469,7 @@ bool isOccludedInstrumented(const BVH_DOBB& bvh, const Ray& ray, TraversalStats*
 		const uint32_t rotationIdx = currNode.Rotation();
 
 		if (rotationIdx != 255) {
-			const DOBB_LUT::Mat3f& rotation = bvh.getLutEntry(rotationIdx);
+			const DOBB_LUT::Mat3f& rotation = bvh.GetLUTEntry(rotationIdx);
 
 			const bvhvec3 rotationX = bvhvec3(rotation.m[0][0], rotation.m[1][0], rotation.m[2][0]);
 			const bvhvec3 rotationY = bvhvec3(rotation.m[0][1], rotation.m[1][1], rotation.m[2][1]);
@@ -494,7 +492,7 @@ bool isOccludedInstrumented(const BVH_DOBB& bvh, const Ray& ray, TraversalStats*
 			if (stats) stats->boxTests++;
 
 			// Determine which is the next slot to process
-			uint32_t slot = (uint32_t)std::countr_zero(remainingSlots);
+			uint32_t slot = (uint32_t)tinybvh_ctz(remainingSlots);
 			remainingSlots &= remainingSlots - 1;
 
 			// Determine lower and higher extents of the BB
@@ -511,12 +509,12 @@ bool isOccludedInstrumented(const BVH_DOBB& bvh, const Ray& ray, TraversalStats*
 
 		// Process leaf hits
 		while (leafHitMask) {
-			const uint32_t slot = (uint32_t)std::countr_zero(leafHitMask);
+			const uint32_t slot = (uint32_t)tinybvh_ctz(leafHitMask);
 			leafHitMask &= leafHitMask - 1;
 
 			// Intersect triangles
 			const uint32_t firstTri = currNode.triBaseIndex + (currNode.meta[slot] & 31);
-			const uint32_t triCount = __popc(currNode.meta[slot] >> 5);
+			const uint32_t triCount = tinybvh_popc(currNode.meta[slot] >> 5);
 
 			uint32_t i0, i1, i2;
 			for (uint32_t triIdx = 0; triIdx < triCount; triIdx++) {
@@ -531,12 +529,12 @@ bool isOccludedInstrumented(const BVH_DOBB& bvh, const Ray& ray, TraversalStats*
 
 		// Process internal hits
 		while (internalHitMask) {
-			const uint32_t slot = (uint32_t)std::countr_zero(internalHitMask);
+			const uint32_t slot = (uint32_t)tinybvh_ctz(internalHitMask);
 			internalHitMask &= internalHitMask - 1;
 
 			// Push internal node
 			nodeStack[stackIdx++] = currNode.ChildBaseIndex() +
-				__popc(currNode.iMask & ((1u << slot) - 1));
+				tinybvh_popc(currNode.iMask & ((1u << slot) - 1));
 		}
 	}
 

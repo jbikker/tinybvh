@@ -685,7 +685,8 @@ enum BVHType : uint32_t
 	LAYOUT_BVH8_SIMD,
 	LAYOUT_VOXELSET,
 	LAYOUT_BVH4_AMD_HW,
-	LAYOUT_CWBVH8_AMD_HW
+	LAYOUT_CWBVH8_AMD_HW,
+	LAYOUT_DOBB
 };
 
 namespace impl {
@@ -701,6 +702,7 @@ TEMPLATED class BVH4_AMD_HW;
 TEMPLATED class CWBVH8_AMD_HW;
 TEMPLATED class BVH8_CWBVH;
 TEMPLATED class BVH8_CPU;
+TEMPLATED class BVH_DOBB;
 TEMPLATED class BLASInstance;
 TEMPLATED struct BVHTri4Leaf;
 
@@ -901,6 +903,7 @@ public:
 	template <typename, typename> friend class BVH4_CPU;
 	template <typename, typename> friend class BVH8_CPU;
 	template <typename, typename> friend class BVH8_CWBVH;
+	template <typename, typename> friend class BVH_DOBB;
 	template <int, typename, typename> friend class MBVH;
 	struct SubdivTask { Index node, sliceStart, sliceEnd; uint32_t depth; };
 	struct BVHNode
@@ -1348,6 +1351,7 @@ public:
 	template <typename, typename> friend class BVH4_CPU;
 	template <typename, typename> friend class BVH8_CPU;
 	template <typename, typename> friend class BVH8_CWBVH;
+	template <typename, typename> friend class BVH_DOBB;
 	void Build( const Vertex* vertices, const Index primCount );
 	void Build( const Slice& vertices );
 	void Build( const Vertex* vertices, const Index* indices, const Index primCount );
@@ -1916,6 +1920,169 @@ private:
 	BVH8_CPU& operator=( const BVH8_CPU& ) = default;
 };
 
+// DOBB-BVH: an 8-wide compressed BVH whose nodes store their child boxes in one of 104
+// discrete rotated frames. Based on "DOBB-BVH", Kern et al., HPG 2025,
+// https://arxiv.org/abs/2506.22849.
+#define TINYBVH_DOBB_BUILTIN
+#define DOBB_AXIS_COUNT 13			// proxy k-DOP axes; only |K| = 13 is implemented.
+#define DOBB_SMALL_M 4				// rotation steps per axis and direction ('m' in the paper).
+#define DOBB_ROTATION_COUNT (DOBB_AXIS_COUNT * DOBB_SMALL_M * 2) // 104 discrete rotations.
+#define DOBB_MAX_ROTATION_VALUES 44	// distinct values over all rotation matrix entries.
+#define DOBB_AABB_ROTATION 255		// rotation index of a node that is not rotated.
+#define DOBB_STACK_SIZE 512			// stack size for conversion and traversal.
+#ifndef DOBB_ALPHA
+#define DOBB_ALPHA 0.9f				// rotate a node if its oriented SA < alpha * AABB SA.
+#endif
+
+// Per-node data that only exists during BVH_DOBB::ConvertFrom.
+struct DOBBSidebandData
+{
+	bvhvec2 kDopExtents[DOBB_AXIS_COUNT];	// per proxy axis: x = min, y = max.
+	uint8_t rotation;						// candidate rotation, propagated upwards.
+	float AABBSASum;						// summed child AABB surface area; interior nodes only.
+};
+
+// Lookup tables for the discrete rotations: the rotations themselves, the reprojection
+// of a k-DOP onto a rotated frame, and the best rotation per (axis, angle) cell.
+class DOBB_LUT
+{
+public:
+	static constexpr float PI = 3.14159265358979f;
+	static constexpr uint32_t AZIMUTH_BINS = 32, POLAR_BINS = 16, ANGLE_BINS = 16;
+	struct Mat3f { float m[3][3]; };
+	struct Mat3i { uint8_t m[3][3]; };	// indices into rotationValues.
+	struct ReprojectionEntry
+	{
+		// the three proxy planes whose apex point bounds a k-DOP in one direction.
+		uint8_t axisIdx[3];
+		int sign[3];
+	};
+	DOBB_LUT()
+	{
+		BuildRotationLUT();
+		BuildReprojectionLUT();
+		BuildAxisAzimuthLUT();
+	}
+	Mat3f GetRawEntry( const uint32_t rotIdx ) const;
+	uint8_t GetRotationForBasis( const bvhvec3 (&basis)[3] ) const;
+	// LUT data
+	float rotationValues[DOBB_MAX_ROTATION_VALUES];
+	Mat3i rotations[DOBB_ROTATION_COUNT];
+	ReprojectionEntry reprojections[DOBB_ROTATION_COUNT][6];
+	uint8_t azimuthAngles[AZIMUTH_BINS * POLAR_BINS * ANGLE_BINS];
+private:
+	static Mat3f RodriguesRotMat( const bvhvec3& axis, const float angle );
+	static void BasisToAxisAngle( const bvhvec3 (&basis)[3], bvhvec3& axis, float& angle );
+	static uint32_t ToBin( const float fraction, const uint32_t binCount );
+	static uint32_t AxisAngleToCell( const bvhvec3& axis, const float angle );
+	static void FindQuadSphereTriangle( const bvhvec3& direction, ReprojectionEntry& entry );
+	static void QuadSpherePointToProxyAxis( const float quadSpherePoint[3], uint8_t& axisIdx, int& sign );
+	float Similarity( const bvhvec3 (&capitalB)[3], const uint32_t rotIdx ) const;
+	uint8_t BruteForceBestRotation( const bvhvec3 (&basis)[3] ) const;
+	void BuildRotationLUT();
+	void BuildReprojectionLUT();
+	void BuildAxisAzimuthLUT();
+};
+
+TEMPLATED class BVH_DOBB : public BVHBase<Float, Index>
+{
+public:
+	using Base = BVHBase<Float, Index>;
+	using typename Base::Vec3;
+	using typename Base::Vertex;
+	using typename Base::Slice;
+	using typename Base::Ray;
+	using typename Base::BVH;
+	using MBVH8 = MBVH<8, Float, Index>;
+	using Base::settings;
+	using Base::c_trav;
+	using Base::c_int;
+	using Base::context;
+	using Base::layout;
+	using Base::allocatedNodes;
+	using Base::usedNodes;
+	using Base::triCount;
+	using Base::idxCount;
+	using Base::aabbMin;
+	using Base::aabbMax;
+protected:
+	using Base::AlignedAlloc;
+	using Base::AlignedFree;
+	using Base::CopyBasePropertiesFrom;
+	using Base::PassSettingsTo;
+	using Base::IntersectTri;
+	using Base::TriOccludes;
+public:
+	// the compressed nodes, the LUT and the k-DOP projections are single precision.
+	static_assert( sizeof( Float ) == 4, "BVH_DOBB supports single precision only." );
+	struct ALIGNED( 16 ) BVHNode
+	{
+		// 80-byte compressed 8-wide node in the CWBVH layout (Ylitie et al., 2017). The top
+		// byte of childBaseIndexRotation holds the rotation of the frame the child boxes
+		// are stored in; DOBB_AABB_ROTATION means world space.
+		bvhvec3 nodeMinPoint;				// block 0: origin of the quantization grid,
+		int8_t exponent[3];					//          per axis: step size is 2^exponent,
+		uint8_t iMask;						//          bit set: slot holds an interior child.
+		uint32_t childBaseIndexRotation;	// block 1: bits 0..23: first child node, 24..31: rotation,
+		uint32_t triBaseIndex;				//          first entry of this node in dobbPrimIdx,
+		uint8_t meta[8];					//          per slot: child type and offset.
+		uint8_t qLo[3][8];					// block 2..4: quantized child bounds, per axis and slot.
+		uint8_t qHi[3][8];
+		static constexpr uint32_t CHILD_INDEX_BITS = 24;
+		static constexpr uint32_t CHILD_INDEX_MASK = (1u << CHILD_INDEX_BITS) - 1u;
+		uint32_t ChildBaseIndex() const { return childBaseIndexRotation & CHILD_INDEX_MASK; }
+		uint8_t Rotation() const { return (uint8_t)(childBaseIndexRotation >> CHILD_INDEX_BITS); }
+		void SetChildBaseIndexRotation( const uint32_t childBaseIndex, const uint8_t rotationIndex )
+		{
+			childBaseIndexRotation = (childBaseIndex & CHILD_INDEX_MASK) | ((uint32_t)rotationIndex << CHILD_INDEX_BITS);
+		}
+		uint8_t OccupiedMask() const
+		{
+			uint8_t occupied = 0;
+			for (uint8_t slot = 0; slot < 8; slot++) occupied |= (uint8_t)((meta[slot] != 0) << slot);
+			return occupied;
+		}
+		uint8_t LeafMask() const { return OccupiedMask() & ~iMask; }
+	};
+	static_assert( sizeof( BVHNode ) == 80, "BVH_DOBB::BVHNode must be 80 bytes." );
+	struct StackEntry { uint32_t nodeIdx; float entryDistance; }; // for ordered traversal.
+	BVH_DOBB( BVHContext ctx = {} ) { layout = LAYOUT_DOBB; context = ctx; }
+	BVH_DOBB( const BVH_DOBB& ) = delete; // owns its allocations, so it cannot be copied
+	~BVH_DOBB();
+	void Build( const Vertex* vertices, const Index primCount );
+	void Build( const Slice& vertices );
+	void Build( const Vertex* vertices, const Index* indices, const Index primCount );
+	void Build( const Slice& vertices, const Index* indices, const Index primCount );
+	void ConvertFrom( const MBVH8& original ); // leaves may hold at most 2 triangles.
+	int32_t Intersect( Ray& ray ) const;
+	bool IsOccluded( const Ray& ray ) const;
+	// the rotation tables, built on first use.
+	static const DOBB_LUT& GetLUT() { static const DOBB_LUT lut; return lut; }
+	static DOBB_LUT::Mat3f GetLUTEntry( const uint32_t idx ) { return GetLUT().GetRawEntry( idx ); }
+	// BVH data
+	BVHNode* dobbNode = 0;				// compressed nodes. Root is always in node 0.
+	Index* dobbPrimIdx = 0;				// primitive indices, contiguous per node.
+	Index allocatedPrimIndices = 0;		// size of the dobbPrimIdx allocation.
+	MBVH8 bvh8;							// BVH_DOBB is created from MBVH<8> and uses its data.
+	bool ownBVH8 = true;				// false when ConvertFrom receives an external bvh8.
+	bool forceInternalAABB = false;		// experiments: never rotate nodes without leaf children.
+private:
+	struct WideningData
+	{
+		// per binary node table for SAH-optimal widening (Ylitie et al., 2017).
+		float cost[8];					// cost[slots - 1] = C(n, slots).
+		uint8_t leftSlots[8];			// slots >= 2: split of Distribute(n, slots); 0: fewer slots was cheaper.
+		uint8_t internalLeftSlots;		// split of Distribute(n, 8), used when n becomes a wide interior node.
+		bool asLeaf;					// decision for C(n, 1).
+		Index firstTri, triCount;		// the subtree's contiguous range in primIdx.
+	};
+	void Quadify();
+	void WidenSAHOptimal();
+	void GatherSlots( const WideningData* table, const Index binaryIdx, const uint32_t slots,
+		Index* slotNodes, uint32_t& slotCount ) const;
+	static void CalcBasisVectorsFromTri( const bvhvec3* triVerts, bvhvec3& a0, bvhvec3& a1, bvhvec3& a2 );
+};
+
 // BLASInstance: A TLAS is built over BLAS instances, where a single BLAS can be
 // used with multiple transforms, and multiple BLASses can be combined in a complex
 // scene. The TLAS is built over the world-space AABBs of the BLAS root nodes.
@@ -1952,6 +2119,8 @@ using CWBVH8_AMD_HW = impl::CWBVH8_AMD_HW<float, uint32_t>;
 using BVH4_CPU = impl::BVH4_CPU<float, uint32_t>;
 using BVH8_CWBVH = impl::BVH8_CWBVH<float, uint32_t>;
 using BVH8_CPU = impl::BVH8_CPU<float, uint32_t>;
+using BVH_DOBB = impl::BVH_DOBB<float, uint32_t>;
+using DOBB_LUT = impl::DOBB_LUT;
 using BVHTri4Leaf = impl::BVHTri4Leaf<float, uint32_t>;
 using BLASInstance = impl::BLASInstance<float, uint32_t>;
 #ifdef DOUBLE_PRECISION_SUPPORT
@@ -7919,6 +8088,897 @@ TEMPLATED int32_t BVH8_CWBVH<Float, Index>::Intersect( Ray& ray ) const
 		}
 	} while (true);
 	return 0;
+}
+
+// DOBB_LUT implementation
+// ----------------------------------------------------------------------------
+
+// Proxy k-DOP axes: 3 coordinate axes, 6 edge diagonals, 4 cube-corner diagonals.
+static const bvhvec3 proxyKDopAxes[DOBB_AXIS_COUNT] = {
+	// coordinate axes
+	bvhvec3( 1.0f, 0.0f, 0.0f ),
+	bvhvec3( 0.0f, 1.0f, 0.0f ),
+	bvhvec3( 0.0f, 0.0f, 1.0f ),
+	// edge diagonals
+	tinybvh_normalize( bvhvec3( 1.0f, 1.0f, 0.0f ) ),
+	tinybvh_normalize( bvhvec3( 1.0f, -1.0f, 0.0f ) ),
+	tinybvh_normalize( bvhvec3( 1.0f, 0.0f, 1.0f ) ),
+	tinybvh_normalize( bvhvec3( 1.0f, 0.0f, -1.0f ) ),
+	tinybvh_normalize( bvhvec3( 0.0f, 1.0f, 1.0f ) ),
+	tinybvh_normalize( bvhvec3( 0.0f, 1.0f, -1.0f ) ),
+	// cube-corner diagonals, pointing towards the vertices of the unit cube
+	tinybvh_normalize( bvhvec3( 1.0f, 1.0f, 1.0f ) ),
+	tinybvh_normalize( bvhvec3( 1.0f, 1.0f, -1.0f ) ),
+	tinybvh_normalize( bvhvec3( 1.0f, -1.0f, 1.0f ) ),
+	tinybvh_normalize( bvhvec3( 1.0f, -1.0f, -1.0f ) ),
+};
+
+DOBB_LUT::Mat3f DOBB_LUT::GetRawEntry( const uint32_t rotIdx ) const
+{
+	// expand an indexed rotation into a float matrix.
+	Mat3f ret;
+	const Mat3i& rotMat = rotations[rotIdx];
+	for (uint32_t rowIdx = 0; rowIdx < 3; rowIdx++) for (uint32_t colIdx = 0; colIdx < 3; colIdx++)
+		ret.m[rowIdx][colIdx] = rotationValues[rotMat.m[rowIdx][colIdx]];
+	return ret;
+}
+
+uint8_t DOBB_LUT::GetRotationForBasis( const bvhvec3 (&basis)[3] ) const
+{
+	bvhvec3 axis;
+	float angle;
+	BasisToAxisAngle( basis, axis, angle );
+	return azimuthAngles[AxisAngleToCell( axis, angle )];
+}
+
+// Rodrigues' rotation formula, https://en.wikipedia.org/wiki/Rodrigues%27_rotation_formula.
+// Axis must be normalized.
+DOBB_LUT::Mat3f DOBB_LUT::RodriguesRotMat( const bvhvec3& axis, const float angle )
+{
+	const float cs = cosf( angle ), sn = sinf( angle ), oneMinusCos = 1 - cs;
+	Mat3f ret;
+	ret.m[0][0] = cs + oneMinusCos * axis.x * axis.x;
+	ret.m[0][1] = oneMinusCos * axis.x * axis.y - sn * axis.z;
+	ret.m[0][2] = oneMinusCos * axis.x * axis.z + sn * axis.y;
+	ret.m[1][0] = oneMinusCos * axis.x * axis.y + sn * axis.z;
+	ret.m[1][1] = cs + oneMinusCos * axis.y * axis.y;
+	ret.m[1][2] = oneMinusCos * axis.y * axis.z - sn * axis.x;
+	ret.m[2][0] = oneMinusCos * axis.x * axis.z - sn * axis.y;
+	ret.m[2][1] = oneMinusCos * axis.y * axis.z + sn * axis.x;
+	ret.m[2][2] = cs + oneMinusCos * axis.z * axis.z;
+	return ret;
+}
+
+void DOBB_LUT::BuildRotationLUT()
+{
+	// rotations by i * delta, i = 1..m, in both directions, about each proxy axis.
+	const float delta = PI / (2.0f * DOBB_SMALL_M);
+	Mat3f rawRotations[DOBB_ROTATION_COUNT];
+	uint32_t rotationsIdx = 0;
+	for (uint32_t axisIdx = 0; axisIdx < DOBB_AXIS_COUNT; axisIdx++) for (int i = 1; i <= DOBB_SMALL_M; i++)
+	{
+		rawRotations[rotationsIdx++] = RodriguesRotMat( proxyKDopAxes[axisIdx], i * delta );
+		rawRotations[rotationsIdx++] = RodriguesRotMat( proxyKDopAxes[axisIdx], i * -delta );
+	}
+	// store each matrix entry as an index into a table of distinct values.
+	uint8_t rotValUsed = 0;
+	for (uint32_t rotIdx = 0; rotIdx < DOBB_ROTATION_COUNT; rotIdx++)
+		for (uint32_t rowIdx = 0; rowIdx < 3; rowIdx++) for (uint32_t colIdx = 0; colIdx < 3; colIdx++)
+		{
+			const float currRawValue = rawRotations[rotIdx].m[rowIdx][colIdx];
+			bool found = false;
+			for (uint8_t rotValIdx = 0; rotValIdx < rotValUsed; rotValIdx++)
+				if (fabsf( rotationValues[rotValIdx] - currRawValue ) < 0.000001f)
+				{
+					found = true;
+					rotations[rotIdx].m[rowIdx][colIdx] = rotValIdx;
+					break;
+				}
+			if (found) continue;
+			rotationValues[rotValUsed] = currRawValue;
+			rotations[rotIdx].m[rowIdx][colIdx] = rotValUsed++;
+		}
+}
+
+void DOBB_LUT::BuildReprojectionLUT()
+{
+	// for each rotation and each signed local axis: the proxy planes to reproject with.
+	for (uint32_t rotationIdx = 0; rotationIdx < DOBB_ROTATION_COUNT; rotationIdx++)
+	{
+		const Mat3f rotation = GetRawEntry( rotationIdx );
+		for (uint32_t candidateRotAxisIdx = 0; candidateRotAxisIdx < 3; candidateRotAxisIdx++)
+		{
+			const bvhvec3 candidateAxis( rotation.m[0][candidateRotAxisIdx],
+				rotation.m[1][candidateRotAxisIdx], rotation.m[2][candidateRotAxisIdx] );
+			FindQuadSphereTriangle( candidateAxis, reprojections[rotationIdx][candidateRotAxisIdx * 2] );
+			FindQuadSphereTriangle( -candidateAxis, reprojections[rotationIdx][candidateRotAxisIdx * 2 + 1] );
+		}
+	}
+}
+
+void DOBB_LUT::BasisToAxisAngle( const bvhvec3 (&basis)[3], bvhvec3& axis, float& angle )
+{
+	// angle from the trace ("reverse Rodrigues").
+	const float trace = basis[0].x + basis[1].y + basis[2].z;
+	angle = acosf( tinybvh_clamp( (trace - 1.0f) * 0.5f, -1.0f, 1.0f ) );
+	const float sinAngle = sinf( angle );
+	if (sinAngle > 1e-4f)
+	{
+		// general case: axis from the antisymmetric part.
+		axis = tinybvh_normalize( bvhvec3( basis[1].z - basis[2].y, basis[2].x - basis[0].z, basis[0].y - basis[1].x ) );
+	}
+	else if (angle < 1.0f)
+	{
+		// angle is roughly 0: the axis is arbitrary.
+		axis = bvhvec3( 0.0f, 0.0f, 1.0f );
+	}
+	else
+	{
+		// angle is roughly PI: axis from the symmetric part.
+		const float diagonal[3] = { basis[0].x, basis[1].y, basis[2].z };
+		uint32_t largestIdx = 0;
+		if (diagonal[1] > diagonal[largestIdx]) largestIdx = 1;
+		if (diagonal[2] > diagonal[largestIdx]) largestIdx = 2;
+		float components[3];
+		components[largestIdx] = sqrtf( tinybvh_max( (diagonal[largestIdx] + 1.0f) * 0.5f, 0.0f ) );
+		for (uint32_t componentIdx = 0; componentIdx < 3; componentIdx++)
+		{
+			if (componentIdx == largestIdx) continue;
+			// m[largest][k] + m[k][largest]
+			const float symmetricSum = basis[componentIdx][largestIdx] + basis[largestIdx][componentIdx];
+			components[componentIdx] = symmetricSum / (4.0f * components[largestIdx]);
+		}
+		axis = tinybvh_normalize( bvhvec3( components[0], components[1], components[2] ) );
+	}
+}
+
+uint32_t DOBB_LUT::ToBin( const float fraction, const uint32_t binCount )
+{
+	return (uint32_t)tinybvh_clamp( fraction * binCount, 0.0f, (float)(binCount - 1) );
+}
+
+uint32_t DOBB_LUT::AxisAngleToCell( const bvhvec3& axis, const float angle )
+{
+	// slot an (axis, angle) combination into the quantized cells.
+	const float azimuth = atan2f( axis.y, axis.x );
+	const float polar = acosf( tinybvh_clamp( axis.z, -1.0f, 1.0f ) );
+	const uint32_t azimuthBin = ToBin( (azimuth + PI) / (2.0f * PI), AZIMUTH_BINS );
+	const uint32_t polarBin = ToBin( polar / PI, POLAR_BINS );
+	const uint32_t angleBin = ToBin( angle / PI, ANGLE_BINS );
+	return (angleBin * POLAR_BINS + polarBin) * AZIMUTH_BINS + azimuthBin;
+}
+
+float DOBB_LUT::Similarity( const bvhvec3 (&capitalB)[3], const uint32_t rotIdx ) const
+{
+	// absolute dot products of all axis pairs; the best permutation gives the similarity.
+	const Mat3f rotMat = GetRawEntry( rotIdx );
+	Mat3f dotMat;
+	for (uint32_t i = 0; i < 3; i++)
+	{
+		const bvhvec3 r( rotMat.m[0][i], rotMat.m[1][i], rotMat.m[2][i] );
+		for (uint32_t j = 0; j < 3; j++) dotMat.m[i][j] = fabsf( tinybvh_dot( r, capitalB[j] ) );
+	}
+	static const int Perms[6][3] = { { 0, 1, 2 }, { 0, 2, 1 }, { 1, 0, 2 }, { 1, 2, 0 }, { 2, 0, 1 }, { 2, 1, 0 } };
+	float maxSim = 0.0f;
+	for (uint32_t i = 0; i < 6; i++)
+		maxSim = tinybvh_max( maxSim, dotMat.m[0][Perms[i][0]] + dotMat.m[1][Perms[i][1]] + dotMat.m[2][Perms[i][2]] );
+	return maxSim;
+}
+
+uint8_t DOBB_LUT::BruteForceBestRotation( const bvhvec3 (&basis)[3] ) const
+{
+	float bestSim = -1.0f;
+	uint8_t bestRot = 0;
+	for (uint8_t rotationIdx = 0; rotationIdx < DOBB_ROTATION_COUNT; rotationIdx++)
+	{
+		const float sim = Similarity( basis, rotationIdx );
+		if (sim > bestSim) bestSim = sim, bestRot = rotationIdx;
+	}
+	return bestRot;
+}
+
+void DOBB_LUT::BuildAxisAzimuthLUT()
+{
+	// best rotation for the center of each (angle, polar, azimuth) cell.
+	for (uint32_t angleBin = 0; angleBin < ANGLE_BINS; angleBin++)
+		for (uint32_t polarBin = 0; polarBin < POLAR_BINS; polarBin++)
+			for (uint32_t azimuthBin = 0; azimuthBin < AZIMUTH_BINS; azimuthBin++)
+			{
+				const float angle = (angleBin + 0.5f) / ANGLE_BINS * PI;
+				const float polar = (polarBin + 0.5f) / POLAR_BINS * PI;
+				const float azimuth = (azimuthBin + 0.5f) / AZIMUTH_BINS * 2.0f * PI - PI;
+				const bvhvec3 axis( sinf( polar ) * cosf( azimuth ), sinf( polar ) * sinf( azimuth ), cosf( polar ) );
+				const Mat3f cellRotation = RodriguesRotMat( axis, angle );
+				const bvhvec3 basis[3] = {
+					bvhvec3( cellRotation.m[0][0], cellRotation.m[1][0], cellRotation.m[2][0] ),
+					bvhvec3( cellRotation.m[0][1], cellRotation.m[1][1], cellRotation.m[2][1] ),
+					bvhvec3( cellRotation.m[0][2], cellRotation.m[1][2], cellRotation.m[2][2] )
+				};
+				const uint32_t cellIdx = (angleBin * POLAR_BINS + polarBin) * AZIMUTH_BINS + azimuthBin;
+				azimuthAngles[cellIdx] = BruteForceBestRotation( basis );
+			}
+}
+
+// Each triangle of the quad sphere corresponds to a face center, an edge midpoint and
+// a corner of the unit cube.
+void DOBB_LUT::FindQuadSphereTriangle( const bvhvec3& direction, ReprojectionEntry& entry )
+{
+	const float components[3] = { direction.x, direction.y, direction.z };
+	// face center
+	float faceCenter[3] = { 0.0f, 0.0f, 0.0f };
+	uint8_t majorAxis = 0;
+	if (fabsf( components[1] ) > fabsf( components[majorAxis] )) majorAxis = 1;
+	if (fabsf( components[2] ) > fabsf( components[majorAxis] )) majorAxis = 2;
+	faceCenter[majorAxis] = components[majorAxis] >= 0.0f ? 1.0f : -1.0f;
+	QuadSpherePointToProxyAxis( faceCenter, entry.axisIdx[0], entry.sign[0] );
+	// cube corner
+	float cubeCorner[3] = { faceCenter[0], faceCenter[1], faceCenter[2] };
+	const int minorAxisFirst = (majorAxis + 1) % 3, minorAxisSecond = (majorAxis + 2) % 3;
+	const float minorAxisFirstSign = components[minorAxisFirst] >= 0.0f ? 1.0f : -1.0f;
+	const float minorAxisSecondSign = components[minorAxisSecond] >= 0.0f ? 1.0f : -1.0f;
+	cubeCorner[minorAxisFirst] = minorAxisFirstSign;
+	cubeCorner[minorAxisSecond] = minorAxisSecondSign;
+	QuadSpherePointToProxyAxis( cubeCorner, entry.axisIdx[1], entry.sign[1] );
+	// edge midpoint
+	float edgeMidPoint[3] = { faceCenter[0], faceCenter[1], faceCenter[2] };
+	if (fabsf( components[minorAxisFirst] ) >= fabsf( components[minorAxisSecond] ))
+		edgeMidPoint[minorAxisFirst] = minorAxisFirstSign;
+	else
+		edgeMidPoint[minorAxisSecond] = minorAxisSecondSign;
+	QuadSpherePointToProxyAxis( edgeMidPoint, entry.axisIdx[2], entry.sign[2] );
+}
+
+void DOBB_LUT::QuadSpherePointToProxyAxis( const float quadSpherePoint[3], uint8_t& axisIdx, int& sign )
+{
+	const bvhvec3 pointDirection = tinybvh_normalize( bvhvec3( quadSpherePoint[0], quadSpherePoint[1], quadSpherePoint[2] ) );
+	for (uint8_t proxyAxisIdx = 0; proxyAxisIdx < DOBB_AXIS_COUNT; proxyAxisIdx++)
+	{
+		const float alignment = tinybvh_dot( proxyKDopAxes[proxyAxisIdx], pointDirection );
+		if (alignment > 0.999f) { axisIdx = proxyAxisIdx, sign = 1; return; }
+		if (alignment < -0.999f) { axisIdx = proxyAxisIdx, sign = -1; return; }
+	}
+}
+
+// BVH_DOBB implementation
+// ----------------------------------------------------------------------------
+
+TEMPLATED BVH_DOBB<Float, Index>::~BVH_DOBB()
+{
+	if (!ownBVH8) bvh8.ReleaseOwnership(); // clear out pointers we don't own.
+	AlignedFree( dobbNode );
+	AlignedFree( dobbPrimIdx );
+}
+
+// forwarders
+TEMPLATED void BVH_DOBB<Float, Index>::Build( const Vertex* vertices, const Index primCount ) { Build( Slice( vertices, primCount * 3, sizeof( Vertex ) ), 0, 0 ); }
+TEMPLATED void BVH_DOBB<Float, Index>::Build( const Slice& vertices ) { Build( vertices, 0, 0 ); }
+TEMPLATED void BVH_DOBB<Float, Index>::Build( const Vertex* vertices, const Index* indices, const Index primCount ) { Build( Slice( vertices, primCount * 3, sizeof( Vertex ) ), indices, primCount ); }
+
+TEMPLATED void BVH_DOBB<Float, Index>::Build( const Slice& vertices, const Index* indices, const Index primCount )
+{
+	// a tree received through ConvertFrom is not ours to rebuild: drop the reference, start afresh.
+	if (!ownBVH8) bvh8.DropReference( context ), ownBVH8 = true;
+	// propagate settings for this layout to the underlying layout
+	this->PassSettingsTo( bvh8 ), this->PassSettingsTo( bvh8.bvh );
+	// build the binary BVH: full-sweep SAH, which keeps the node list ordered.
+	bvh8.bvh.settings.useFullSweep = true;
+	bvh8.bvh.Build( vertices, indices, primCount );
+	// leaves with at most 2 triangles, then SAH-optimal widening to 8
+	Quadify();
+	WidenSAHOptimal();
+	// create the oriented tree
+	ConvertFrom( bvh8 );
+}
+
+// Quadify: split leaves until they hold at most 2 triangles. The first triangle of a leaf
+// is paired with the triangle that minimizes the surface area of the pair's AABB.
+TEMPLATED void BVH_DOBB<Float, Index>::Quadify()
+{
+	BVH& bvh = bvh8.bvh;
+	Index stack[DOBB_STACK_SIZE], stackIdx = 0;
+	stack[stackIdx++] = 0;
+	while (stackIdx > 0)
+	{
+		typename BVH::BVHNode& currNode = bvh.bvhNode[stack[--stackIdx]];
+		if (currNode.triCount <= 2)
+		{
+			// interior node, or leaf with at most 2 triangles: nothing to split.
+			if (!currNode.isLeaf()) stack[stackIdx++] = currNode.leftFirst, stack[stackIdx++] = currNode.leftFirst + 1;
+			continue;
+		}
+		// leaf with more than 2 triangles: bounds of the first triangle
+		const Index firstTri = currNode.leftFirst;
+		Index i0, i1, i2;
+		GET_PRIM_INDICES_I0_I1_I2( bvh, bvh.primIdx[firstTri] );
+		const bvhvec3 vert0 = bvh.verts[i0], vert1 = bvh.verts[i1], vert2 = bvh.verts[i2];
+		const bvhvec3 firstTriMin = tinybvh_min( vert0, tinybvh_min( vert1, vert2 ) );
+		const bvhvec3 firstTriMax = tinybvh_max( vert0, tinybvh_max( vert1, vert2 ) );
+		// find the best partner
+		float minSA = BVH_FAR;
+		Index minPairIdx = firstTri + 1;
+		for (Index candidateIdx = firstTri + 1; candidateIdx < firstTri + currNode.triCount; candidateIdx++)
+		{
+			GET_PRIM_INDICES_I0_I1_I2( bvh, bvh.primIdx[candidateIdx] );
+			const bvhvec3 candidateVert0 = bvh.verts[i0], candidateVert1 = bvh.verts[i1], candidateVert2 = bvh.verts[i2];
+			const bvhvec3 extent =
+				tinybvh_max( firstTriMax, tinybvh_max( candidateVert0, tinybvh_max( candidateVert1, candidateVert2 ) ) ) -
+				tinybvh_min( firstTriMin, tinybvh_min( candidateVert0, tinybvh_min( candidateVert1, candidateVert2 ) ) );
+			const float candidateSA = extent.x * extent.y + extent.y * extent.z + extent.z * extent.x;
+			if (candidateSA < minSA) minSA = candidateSA, minPairIdx = candidateIdx;
+		}
+		// move the partner next to the first triangle
+		tinybvh_swap( bvh.primIdx[firstTri + 1], bvh.primIdx[minPairIdx] );
+		// split: left = the pair, right = the remainder; same scheme as BVH::SplitLeafs
+		const Index leftIdx = bvh.newNodePtr;
+		typename BVH::BVHNode& left = bvh.bvhNode[leftIdx], & right = bvh.bvhNode[leftIdx + 1];
+		left = currNode, right = currNode;
+		left.triCount = 2, right.triCount = currNode.triCount - 2;
+		right.leftFirst = currNode.leftFirst + 2;
+		currNode.leftFirst = leftIdx, currNode.triCount = 0;
+		bvh.newNodePtr += 2;
+		// the remainder may need further splitting
+		stack[stackIdx++] = leftIdx + 1;
+	}
+	bvh.usedNodes = bvh.newNodePtr, bvh.leafsSplit = 2;
+	bvh.Refit(); // the split nodes copied the bounds of their parent.
+}
+
+// GatherSlots: follow the stored Distribute decisions down to one-slot entries.
+// Part of SAH-optimal widening (Ylitie et al., 2017); written with Claude.
+TEMPLATED void BVH_DOBB<Float, Index>::GatherSlots( const WideningData* table, const Index binaryIdx, const uint32_t slots,
+	Index* slotNodes, uint32_t& slotCount ) const
+{
+	// one slot: this binary node becomes a child of the wide node
+	if (slots == 1) { slotNodes[slotCount++] = binaryIdx; return; }
+	const uint8_t leftSlots = table[binaryIdx].leftSlots[slots - 1];
+	// fewer slots was cheaper
+	if (leftSlots == 0) { GatherSlots( table, binaryIdx, slots - 1, slotNodes, slotCount ); return; }
+	// share the slots between the two binary children
+	const Index leftChildIdx = bvh8.bvh.bvhNode[binaryIdx].leftFirst;
+	GatherSlots( table, leftChildIdx, leftSlots, slotNodes, slotCount );
+	GatherSlots( table, leftChildIdx + 1, slots - leftSlots, slotNodes, slotCount );
+}
+
+// WidenSAHOptimal: collapse the binary bvh8.bvh into bvh8 with minimal SAH cost.
+// Based on "Efficient Incoherent Ray Traversal on GPUs Through Compressed Wide BVHs",
+// Ylitie et al. 2017; written with Claude.
+TEMPLATED void BVH_DOBB<Float, Index>::WidenSAHOptimal()
+{
+	BVH& bvh = bvh8.bvh;
+	BVH_FATAL_ERROR_IF( bvh.bvhNode[0].isLeaf(), "BVH_DOBB::WidenSAHOptimal(), binary root is a leaf." );
+	const float traversalCost = bvh.c_trav, intersectionCost = bvh.c_int;
+	WideningData* table = (WideningData*)AlignedAlloc( bvh.usedNodes * sizeof( WideningData ) );
+	// pass 1: bottom-up costs. A child always has a higher index than its parent.
+	for (int64_t nodeIdx = (int64_t)bvh.usedNodes - 1; nodeIdx >= 0; nodeIdx--)
+	{
+		if (nodeIdx == 1) continue; // node 1 is unused.
+		const typename BVH::BVHNode& node = bvh.bvhNode[nodeIdx];
+		WideningData& entry = table[nodeIdx];
+		const bvhvec3 extent = node.aabbMax - node.aabbMin;
+		const float area = 2.0f * (extent.x * extent.y + extent.y * extent.z + extent.z * extent.x);
+		if (node.isLeaf())
+		{
+			// binary leaf: can't be split, so the cost is the same for every slot budget.
+			const float leafCost = area * node.triCount * intersectionCost;
+			for (uint32_t slots = 1; slots <= 8; slots++) entry.cost[slots - 1] = leafCost, entry.leftSlots[slots - 1] = 0;
+			entry.internalLeftSlots = 0, entry.asLeaf = true;
+			entry.firstTri = node.leftFirst, entry.triCount = node.triCount;
+			continue;
+		}
+		const WideningData& leftEntry = table[node.leftFirst];
+		const WideningData& rightEntry = table[node.leftFirst + 1];
+		entry.firstTri = tinybvh_min( leftEntry.firstTri, rightEntry.firstTri );
+		entry.triCount = leftEntry.triCount + rightEntry.triCount;
+		// Distribute(n, slots): share the slots between the two children
+		float distributeCost[9];
+		uint8_t distributeLeftSlots[9];
+		for (uint32_t slots = 2; slots <= 8; slots++)
+		{
+			distributeCost[slots] = BVH_FAR, distributeLeftSlots[slots] = 1;
+			for (uint32_t leftSlots = 1; leftSlots < slots; leftSlots++)
+			{
+				const float splitCost = leftEntry.cost[leftSlots - 1] + rightEntry.cost[slots - leftSlots - 1];
+				if (splitCost < distributeCost[slots]) distributeCost[slots] = splitCost, distributeLeftSlots[slots] = (uint8_t)leftSlots;
+			}
+		}
+		// C(n, 1): one MBVH leaf, or one wide interior node
+		const float leafCost = entry.triCount <= 2 ? area * entry.triCount * intersectionCost : BVH_FAR;
+		const float internalCost = area * traversalCost + distributeCost[8];
+		entry.asLeaf = leafCost <= internalCost;
+		entry.cost[0] = entry.asLeaf ? leafCost : internalCost;
+		entry.leftSlots[0] = 0;
+		entry.internalLeftSlots = distributeLeftSlots[8];
+		// C(n, slots): split across the children, or use fewer slots
+		for (uint32_t slots = 2; slots <= 8; slots++)
+		{
+			if (distributeCost[slots] < entry.cost[slots - 2])
+				entry.cost[slots - 1] = distributeCost[slots], entry.leftSlots[slots - 1] = distributeLeftSlots[slots];
+			else
+				entry.cost[slots - 1] = entry.cost[slots - 2], entry.leftSlots[slots - 1] = 0;
+		}
+	}
+	// set up bvh8 as MBVH::ConvertFrom would; each wide node corresponds to a distinct binary
+	// node, so usedNodes nodes suffice.
+	bvh8.CopyBasePropertiesFrom( bvh );
+	if (bvh8.allocatedNodes < bvh.usedNodes)
+	{
+		bvh8.AlignedFree( bvh8.mbvhNode );
+		bvh8.mbvhNode = (typename MBVH8::MBVHNode*)bvh8.AlignedAlloc( bvh.usedNodes * sizeof( typename MBVH8::MBVHNode ) );
+		bvh8.allocatedNodes = bvh.usedNodes;
+	}
+	// pass 2: top-down, breadth-first; the mbvhNode array doubles as the queue.
+	Index* wideToBinary = (Index*)AlignedAlloc( bvh.usedNodes * sizeof( Index ) );
+	wideToBinary[0] = 0;
+	Index wideNodeCount = 1;
+	for (Index wideIdx = 0; wideIdx < wideNodeCount; wideIdx++)
+	{
+		const Index binaryIdx = wideToBinary[wideIdx];
+		const typename BVH::BVHNode& binaryNode = bvh.bvhNode[binaryIdx];
+		const WideningData& entry = table[binaryIdx];
+		typename MBVH8::MBVHNode& wideNode = bvh8.mbvhNode[wideIdx];
+		memset( &wideNode, 0, sizeof( wideNode ) );
+		wideNode.aabbMin = binaryNode.aabbMin, wideNode.aabbMax = binaryNode.aabbMax;
+		// MBVH leaf; the root is always interior
+		if (wideIdx != 0 && entry.asLeaf)
+		{
+			wideNode.firstTri = entry.firstTri, wideNode.triCount = entry.triCount;
+			continue;
+		}
+		// wide interior node: its slots come from Distribute(n, 8)
+		Index slotNodes[8];
+		uint32_t slotCount = 0;
+		GatherSlots( table, binaryNode.leftFirst, entry.internalLeftSlots, slotNodes, slotCount );
+		GatherSlots( table, binaryNode.leftFirst + 1, 8 - entry.internalLeftSlots, slotNodes, slotCount );
+		// children get the next indices: breadth-first, child > parent, no holes
+		wideNode.childCount = slotCount;
+		for (uint32_t slot = 0; slot < slotCount; slot++)
+		{
+			wideToBinary[wideNodeCount] = slotNodes[slot];
+			wideNode.child[slot] = wideNodeCount++;
+		}
+	}
+	bvh8.usedNodes = wideNodeCount;
+	bvh8.hasHoles = false, bvh8.orderedNodes = true; // breadth-first, without holes.
+	// cleanup
+	AlignedFree( wideToBinary );
+	AlignedFree( table );
+}
+
+// Convert an MBVH<8> with at most 2 triangles per leaf to the DOBB layout. Pass 1 builds
+// proxy k-DOPs and candidate rotations bottom-up; pass 2 emits compressed nodes top-down.
+TEMPLATED void BVH_DOBB<Float, Index>::ConvertFrom( const MBVH8& original )
+{
+	// get a copy of the original bvh8
+	if (&original != &bvh8)
+	{
+		if (ownBVH8) bvh8 = MBVH8( context ); else bvh8.DropReference( context );
+		ownBVH8 = false; // bvh8 isn't ours; don't delete in destructor.
+	}
+	// ConvertFrom does not handle scenes with 2 or fewer primitives
+	BVH_FATAL_ERROR_IF( bvh8.usedNodes == 0, "BVH_DOBB::ConvertFrom( .. ), source MBVH is empty." );
+	BVH_FATAL_ERROR_IF( bvh8.mbvhNode[0].isLeaf(), "BVH_DOBB::ConvertFrom( .. ), root is a leaf (scene has 2 triangles or fewer)." );
+	bvh8.ReferenceFrom( original );
+	CopyBasePropertiesFrom( bvh8 );
+	const DOBB_LUT& lut = GetLUT();
+	// proxy k-DOPs and rotations, per MBVH node
+	DOBBSidebandData* sideband = (DOBBSidebandData*)AlignedAlloc( bvh8.usedNodes * sizeof( DOBBSidebandData ) );
+	// every interior MBVH node becomes one DOBB node
+	Index nodesNeeded = 0;
+	// pass 1: bottom-up; a child always has a higher index than its parent.
+	for (int64_t nodeIdx = (int64_t)bvh8.usedNodes - 1; nodeIdx >= 0; nodeIdx--)
+	{
+		for (uint32_t axisIdx = 0; axisIdx < DOBB_AXIS_COUNT; axisIdx++)
+			sideband[nodeIdx].kDopExtents[axisIdx] = bvhvec2( BVH_FAR, -BVH_FAR );
+		const typename MBVH8::MBVHNode& currNode = bvh8.mbvhNode[nodeIdx];
+		if (currNode.isLeaf())
+		{
+			// leaf: gather vertices and determine the leaf frame B = (a0, a1, a2)
+			bvhvec3 leafVerts[6];
+			uint32_t noLeafVerts = 0;
+			Index i0, i1, i2; // for GET_PRIM_INDICES_I0_I1_I2
+			bvhvec3 a0, a1, a2;
+			if (currNode.triCount == 1)
+			{
+				noLeafVerts = 3;
+				const Index prim = bvh8.bvh.primIdx[currNode.firstTri];
+				GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, prim );
+				leafVerts[0] = bvh8.bvh.verts[i0], leafVerts[1] = bvh8.bvh.verts[i1], leafVerts[2] = bvh8.bvh.verts[i2];
+				CalcBasisVectorsFromTri( leafVerts, a0, a1, a2 );
+			}
+			else // leaf has 2 triangles
+			{
+				const Index prim0 = bvh8.bvh.primIdx[currNode.firstTri];
+				GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, prim0 );
+				leafVerts[0] = bvh8.bvh.verts[i0], leafVerts[1] = bvh8.bvh.verts[i1], leafVerts[2] = bvh8.bvh.verts[i2];
+				const Index prim1 = bvh8.bvh.primIdx[currNode.firstTri + 1];
+				GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, prim1 );
+				leafVerts[3] = bvh8.bvh.verts[i0], leafVerts[4] = bvh8.bvh.verts[i1], leafVerts[5] = bvh8.bvh.verts[i2];
+				// find shared vertices; 6 = none
+				uint32_t sharedVert1[2] = { 6, 6 }, sharedVert2[2] = { 6, 6 };
+				for (uint32_t tri1VertIdx = 0; tri1VertIdx < 3; tri1VertIdx++)
+					for (uint32_t tri2VertIdx = 3; tri2VertIdx < 6; tri2VertIdx++)
+					{
+						if (leafVerts[tri1VertIdx].x != leafVerts[tri2VertIdx].x ||
+							leafVerts[tri1VertIdx].y != leafVerts[tri2VertIdx].y ||
+							leafVerts[tri1VertIdx].z != leafVerts[tri2VertIdx].z) continue;
+						if (sharedVert1[0] == 6) sharedVert1[0] = tri1VertIdx, sharedVert1[1] = tri2VertIdx;
+						else sharedVert2[0] = tri1VertIdx, sharedVert2[1] = tri2VertIdx;
+					}
+				if (sharedVert2[0] == 6)
+				{
+					// no shared edge: frame of the first triangle, k-DOP over all distinct vertices
+					CalcBasisVectorsFromTri( leafVerts, a0, a1, a2 );
+					noLeafVerts = 6;
+					if (sharedVert1[0] != 6) leafVerts[sharedVert1[1]] = leafVerts[5], noLeafVerts = 5;
+				}
+				else
+				{
+					// shared edge: order the 4 vertices so the shared edge is in slots 1 and 2
+					noLeafVerts = 4;
+					bvhvec3 tmpLeafVerts[6];
+					for (uint32_t i = 0; i < 6; i++) tmpLeafVerts[i] = leafVerts[i];
+					for (uint32_t i = 0; i < 3; i++)
+					{
+						if (i != sharedVert1[0] && i != sharedVert2[0]) leafVerts[0] = tmpLeafVerts[i];
+						if (i == sharedVert1[0]) leafVerts[1] = tmpLeafVerts[i];
+						if (i == sharedVert2[0]) leafVerts[2] = tmpLeafVerts[i];
+					}
+					for (uint32_t i = 3; i < 6; i++)
+						if (i != sharedVert1[1] && i != sharedVert2[1]) leafVerts[3] = tmpLeafVerts[i];
+					// a0 and a1 from the unshared vertices to a vertex on the shared edge;
+					// their lengths don't matter.
+					a0 = leafVerts[0] - leafVerts[1];
+					a1 = leafVerts[3] - leafVerts[1];
+					a0 = tinybvh_normalize( a0 );
+					a2 = tinybvh_normalize( tinybvh_cross( a0, a1 ) );
+					a1 = tinybvh_normalize( tinybvh_cross( a2, a0 ) ); // normalized for safety
+				}
+			}
+			// best rotation candidate for the leaf frame
+			sideband[nodeIdx].rotation = lut.GetRotationForBasis( { a0, a1, a2 } );
+			// proxy k-DOP, to propagate upwards
+			for (uint32_t vertIdx = 0; vertIdx < noLeafVerts; vertIdx++)
+				for (uint32_t axisIdx = 0; axisIdx < DOBB_AXIS_COUNT; axisIdx++)
+				{
+					const float projection = tinybvh_dot( proxyKDopAxes[axisIdx], leafVerts[vertIdx] );
+					sideband[nodeIdx].kDopExtents[axisIdx].x = tinybvh_min( projection, sideband[nodeIdx].kDopExtents[axisIdx].x );
+					sideband[nodeIdx].kDopExtents[axisIdx].y = tinybvh_max( projection, sideband[nodeIdx].kDopExtents[axisIdx].y );
+				}
+			continue;
+		}
+		// interior node
+		nodesNeeded++;
+		// k-DOP: union of the children's k-DOPs
+		for (uint32_t childIdx = 0; childIdx < currNode.childCount; childIdx++)
+		{
+			const Index currChildIdx = currNode.child[childIdx];
+			for (uint32_t axisIdx = 0; axisIdx < DOBB_AXIS_COUNT; axisIdx++)
+			{
+				sideband[nodeIdx].kDopExtents[axisIdx].x = tinybvh_min( sideband[currChildIdx].kDopExtents[axisIdx].x, sideband[nodeIdx].kDopExtents[axisIdx].x );
+				sideband[nodeIdx].kDopExtents[axisIdx].y = tinybvh_max( sideband[currChildIdx].kDopExtents[axisIdx].y, sideband[nodeIdx].kDopExtents[axisIdx].y );
+			}
+		}
+		// candidate rotation: that of the child with the largest AABB surface area
+		float AABBSAMax = 0.0f;
+		uint8_t candidateRotationIdx = 0;
+		sideband[nodeIdx].AABBSASum = 0.0f;
+		for (uint32_t childIdx = 0; childIdx < currNode.childCount; childIdx++)
+		{
+			const Index currChildIdx = currNode.child[childIdx];
+			// child AABB from the coordinate axes of its k-DOP
+			const float a = fabsf( sideband[currChildIdx].kDopExtents[0].x - sideband[currChildIdx].kDopExtents[0].y );
+			const float b = fabsf( sideband[currChildIdx].kDopExtents[1].x - sideband[currChildIdx].kDopExtents[1].y );
+			const float c = fabsf( sideband[currChildIdx].kDopExtents[2].x - sideband[currChildIdx].kDopExtents[2].y );
+			const float childAABBSA = 2.0f * (a * b + b * c + c * a);
+			sideband[nodeIdx].AABBSASum += childAABBSA;
+			if (childAABBSA > AABBSAMax) AABBSAMax = childAABBSA, candidateRotationIdx = sideband[currChildIdx].rotation;
+		}
+		sideband[nodeIdx].rotation = candidateRotationIdx;
+	}
+	// allocate nodes and primitive indices
+	if (allocatedNodes < nodesNeeded)
+	{
+		AlignedFree( dobbNode );
+		dobbNode = (BVHNode*)AlignedAlloc( nodesNeeded * sizeof( BVHNode ) );
+		allocatedNodes = nodesNeeded;
+	}
+	if (allocatedPrimIndices < idxCount)
+	{
+		AlignedFree( dobbPrimIdx );
+		dobbPrimIdx = (Index*)AlignedAlloc( idxCount * sizeof( Index ) );
+		allocatedPrimIndices = idxCount;
+	}
+	// pass 2: top-down. Interior children get consecutive output indices when their
+	// parent is emitted; a node is written at its reserved index when popped.
+	Index stackBvhNodes[DOBB_STACK_SIZE], stackDobbNodes[DOBB_STACK_SIZE];
+	stackBvhNodes[0] = 0, stackDobbNodes[0] = 0;
+	Index stackIdx = 1, dobbNodeIdx = 1, dobbTriIdx = 0;
+	while (stackIdx > 0)
+	{
+		// pop the next (MBVH node, reserved DOBB node) pair
+		stackIdx--;
+		const Index currBvhIdx = stackBvhNodes[stackIdx], currDobbIdx = stackDobbNodes[stackIdx];
+		const typename MBVH8::MBVHNode& currBvhNode = bvh8.mbvhNode[currBvhIdx];
+		BVHNode& currDobbNode = dobbNode[currDobbIdx];
+		memset( &currDobbNode, 0, sizeof( BVHNode ) );
+		// signed axes of the candidate frame
+		const uint8_t candidateRotationIdx = sideband[currBvhIdx].rotation;
+		const DOBB_LUT::Mat3f candidateRotation = lut.GetRawEntry( candidateRotationIdx );
+		const bvhvec3 rotatedAxes[6] = {
+			bvhvec3( candidateRotation.m[0][0], candidateRotation.m[1][0], candidateRotation.m[2][0] ),
+			bvhvec3( -candidateRotation.m[0][0], -candidateRotation.m[1][0], -candidateRotation.m[2][0] ),
+			bvhvec3( candidateRotation.m[0][1], candidateRotation.m[1][1], candidateRotation.m[2][1] ),
+			bvhvec3( -candidateRotation.m[0][1], -candidateRotation.m[1][1], -candidateRotation.m[2][1] ),
+			bvhvec3( candidateRotation.m[0][2], candidateRotation.m[1][2], candidateRotation.m[2][2] ),
+			bvhvec3( -candidateRotation.m[0][2], -candidateRotation.m[1][2], -candidateRotation.m[2][2] )
+		};
+		float rotatedAxesExtents[6];
+		bool hasLeafSlot = false;
+		// child boxes in the candidate frame, and their summed surface area
+		float DOBBSASum = 0.0f;
+		bvhvec3 childMinPoint[8], childMaxPoint[8];
+		for (uint32_t childIdx = 0; childIdx < currBvhNode.childCount; childIdx++)
+		{
+			const Index currChildIdx = currBvhNode.child[childIdx];
+			// reproject the child's k-DOP onto each signed axis of the candidate frame
+			for (uint32_t rotatedAxesIdx = 0; rotatedAxesIdx < 6; rotatedAxesIdx++)
+			{
+				const DOBB_LUT::ReprojectionEntry& reprojection = lut.reprojections[candidateRotationIdx][rotatedAxesIdx];
+				// normals of the selected planes
+				const bvhvec3 v0 = proxyKDopAxes[reprojection.axisIdx[0]] * (float)reprojection.sign[0];
+				const bvhvec3 v1 = proxyKDopAxes[reprojection.axisIdx[1]] * (float)reprojection.sign[1];
+				const bvhvec3 v2 = proxyKDopAxes[reprojection.axisIdx[2]] * (float)reprojection.sign[2];
+				// distances of the selected planes
+				const bvhvec2* childExtents = sideband[currChildIdx].kDopExtents;
+				const float h0 = reprojection.sign[0] == 1 ? childExtents[reprojection.axisIdx[0]].y : -childExtents[reprojection.axisIdx[0]].x;
+				const float h1 = reprojection.sign[1] == 1 ? childExtents[reprojection.axisIdx[1]].y : -childExtents[reprojection.axisIdx[1]].x;
+				const float h2 = reprojection.sign[2] == 1 ? childExtents[reprojection.axisIdx[2]].y : -childExtents[reprojection.axisIdx[2]].x;
+				// apex point: intersection of the three planes
+				const bvhvec3 c0 = tinybvh_cross( v1, v2 );
+				const bvhvec3 apexPoint = (c0 * h0 + tinybvh_cross( v2, v0 ) * h1 + tinybvh_cross( v0, v1 ) * h2) / tinybvh_dot( v0, c0 );
+				// axis extent: projection of the apex point onto the axis
+				rotatedAxesExtents[rotatedAxesIdx] = tinybvh_dot( rotatedAxes[rotatedAxesIdx], apexPoint );
+			}
+			childMinPoint[childIdx] = bvhvec3( -rotatedAxesExtents[1], -rotatedAxesExtents[3], -rotatedAxesExtents[5] );
+			childMaxPoint[childIdx] = bvhvec3( rotatedAxesExtents[0], rotatedAxesExtents[2], rotatedAxesExtents[4] );
+			const float a = childMaxPoint[childIdx].x - childMinPoint[childIdx].x;
+			const float b = childMaxPoint[childIdx].y - childMinPoint[childIdx].y;
+			const float c = childMaxPoint[childIdx].z - childMinPoint[childIdx].z;
+			DOBBSASum += 2 * (a * b + a * c + b * c);
+			if (bvh8.mbvhNode[currChildIdx].isLeaf()) hasLeafSlot = true;
+		}
+		// rotation decision; without rotation, the child boxes are their exact AABBs
+		uint8_t chosenRotation;
+		const bool shouldBeAABB = forceInternalAABB && !hasLeafSlot;
+		if (!shouldBeAABB && DOBBSASum < DOBB_ALPHA * sideband[currBvhIdx].AABBSASum) chosenRotation = candidateRotationIdx; else
+		{
+			chosenRotation = DOBB_AABB_ROTATION;
+			for (uint32_t childIdx = 0; childIdx < currBvhNode.childCount; childIdx++)
+			{
+				const bvhvec2* childExtents = sideband[currBvhNode.child[childIdx]].kDopExtents;
+				childMinPoint[childIdx] = bvhvec3( childExtents[0].x, childExtents[1].x, childExtents[2].x );
+				childMaxPoint[childIdx] = bvhvec3( childExtents[0].y, childExtents[1].y, childExtents[2].y );
+			}
+		}
+		// quantization frame: union of the child boxes
+		bvhvec3 minPoint( BVH_FAR ), maxPoint( -BVH_FAR );
+		for (uint32_t childIdx = 0; childIdx < currBvhNode.childCount; childIdx++)
+		{
+			minPoint = tinybvh_min( minPoint, childMinPoint[childIdx] );
+			maxPoint = tinybvh_max( maxPoint, childMaxPoint[childIdx] );
+		}
+		currDobbNode.nodeMinPoint = minPoint;
+		float inverseScale[3]; // 2^-exponent, exact
+		for (uint32_t axisIdx = 0; axisIdx < 3; axisIdx++)
+		{
+			const float extent = maxPoint[axisIdx] - minPoint[axisIdx];
+			// guard against flat boxes
+			int32_t exponent = extent > 0.0f ? (int32_t)ceilf( log2f( extent / 255.0f ) ) : -126;
+			// clamp into int8_t range
+			exponent = tinybvh_clamp( exponent, -126, 127 );
+			// guard against ceil( log2f( .. ) ) rounding to an exponent that is too small
+			if (exponent < 127 && ldexpf( 255.0f, exponent ) < extent) exponent++;
+			currDobbNode.exponent[axisIdx] = (int8_t)exponent;
+			inverseScale[axisIdx] = ldexpf( 1.0f, -exponent );
+		}
+		// fill the slots: quantized bounds, then interior children or leaf triangles
+		Index currDobbNodeChildBaseIdx = 0, currDobbNodeInternalChildCount = 0, currDobbNodeTriCount = 0;
+		for (uint32_t childIdx = 0; childIdx < currBvhNode.childCount; childIdx++)
+		{
+			// quantize, rounding outwards
+			currDobbNode.qLo[0][childIdx] = (uint8_t)tinybvh_clamp( floorf( (childMinPoint[childIdx][0] - minPoint[0]) * inverseScale[0] ), 0.0f, 255.0f );
+			currDobbNode.qLo[1][childIdx] = (uint8_t)tinybvh_clamp( floorf( (childMinPoint[childIdx][1] - minPoint[1]) * inverseScale[1] ), 0.0f, 255.0f );
+			currDobbNode.qLo[2][childIdx] = (uint8_t)tinybvh_clamp( floorf( (childMinPoint[childIdx][2] - minPoint[2]) * inverseScale[2] ), 0.0f, 255.0f );
+			currDobbNode.qHi[0][childIdx] = (uint8_t)tinybvh_clamp( ceilf( (childMaxPoint[childIdx][0] - minPoint[0]) * inverseScale[0] ), 0.0f, 255.0f );
+			currDobbNode.qHi[1][childIdx] = (uint8_t)tinybvh_clamp( ceilf( (childMaxPoint[childIdx][1] - minPoint[1]) * inverseScale[1] ), 0.0f, 255.0f );
+			currDobbNode.qHi[2][childIdx] = (uint8_t)tinybvh_clamp( ceilf( (childMaxPoint[childIdx][2] - minPoint[2]) * inverseScale[2] ), 0.0f, 255.0f );
+			const Index currChildIdx = currBvhNode.child[childIdx];
+			const typename MBVH8::MBVHNode& currChild = bvh8.mbvhNode[currChildIdx];
+			if (!currChild.isLeaf())
+			{
+				// interior child: reserve the next output node; the first one is the child base.
+				if (currDobbNodeInternalChildCount++ == 0) currDobbNodeChildBaseIdx = dobbNodeIdx;
+				stackBvhNodes[stackIdx] = currChildIdx;
+				stackDobbNodes[stackIdx++] = dobbNodeIdx++;
+				currDobbNode.iMask |= (uint8_t)(1 << childIdx);
+				currDobbNode.meta[childIdx] = (uint8_t)(0b00100000 | (24 + childIdx));
+				continue;
+			}
+			// leaf child: append its triangles to this node's run in dobbPrimIdx
+			if (currDobbNodeTriCount == 0) currDobbNode.triBaseIndex = (uint32_t)dobbTriIdx;
+			const uint8_t unaryTriCount = currChild.triCount == 1 ? 0b001 : 0b011;
+			currDobbNode.meta[childIdx] = (uint8_t)((unaryTriCount << 5) | currDobbNodeTriCount);
+			currDobbNodeTriCount += currChild.triCount;
+			for (Index triIdx = 0; triIdx < currChild.triCount; triIdx++)
+				dobbPrimIdx[dobbTriIdx++] = bvh8.bvh.primIdx[currChild.firstTri + triIdx];
+		}
+		currDobbNode.SetChildBaseIndexRotation( (uint32_t)currDobbNodeChildBaseIdx, chosenRotation );
+	}
+	usedNodes = dobbNodeIdx;
+	// cleanup
+	AlignedFree( sideband );
+	sideband = 0;
+}
+
+TEMPLATED void BVH_DOBB<Float, Index>::CalcBasisVectorsFromTri( const bvhvec3* triVerts, bvhvec3& a0, bvhvec3& a1, bvhvec3& a2 )
+{
+	// a0 and a1 are the two shorter edges, from the vertex they share.
+	const bvhvec3 edges[3] = {
+		triVerts[1] - triVerts[0], // (v0, v1) = e0
+		triVerts[2] - triVerts[1], // (v1, v2) = e1
+		triVerts[0] - triVerts[2]  // (v2, v0) = e2
+	};
+	const float lengthsSqd[3] = { tinybvh_dot( edges[0], edges[0] ), tinybvh_dot( edges[1], edges[1] ), tinybvh_dot( edges[2], edges[2] ) };
+	uint32_t longestIdx = lengthsSqd[0] > lengthsSqd[1] ? 0 : 1;
+	if (lengthsSqd[2] > lengthsSqd[longestIdx]) longestIdx = 2;
+	const uint32_t midPointIdx = (longestIdx + 2) % 3;
+	if (lengthsSqd[midPointIdx] < lengthsSqd[(midPointIdx + 2) % 3])
+		a0 = edges[midPointIdx], a1 = -edges[(midPointIdx + 2) % 3];
+	else
+		a0 = -edges[(midPointIdx + 2) % 3], a1 = edges[midPointIdx];
+	// orthonormal basis B
+	a0 = tinybvh_normalize( a0 );
+	a2 = tinybvh_normalize( tinybvh_cross( a0, a1 ) );
+	a1 = tinybvh_normalize( tinybvh_cross( a2, a0 ) ); // normalized for safety
+}
+
+TEMPLATED int32_t BVH_DOBB<Float, Index>::Intersect( Ray& ray ) const
+{
+	VALIDATE_RAY( ray );
+	int32_t traversalSteps = 0;
+	StackEntry nodeStack[DOBB_STACK_SIZE];
+	uint32_t stackIdx = 0;
+	nodeStack[stackIdx++] = { 0, -BVH_FAR };
+	while (stackIdx > 0)
+	{
+		// skip entries behind the current hit
+		const StackEntry entry = nodeStack[--stackIdx];
+		if (entry.entryDistance >= ray.hit.t) continue;
+		traversalSteps += (int32_t)c_trav;
+		const BVHNode& currNode = dobbNode[entry.nodeIdx];
+		// transform the ray to the node's frame
+		Ray localRay;
+		localRay.hit.t = ray.hit.t;
+		const uint32_t rotationIdx = currNode.Rotation();
+		if (rotationIdx != DOBB_AABB_ROTATION)
+		{
+			const DOBB_LUT::Mat3f rotation = GetLUT().GetRawEntry( rotationIdx );
+			const Vec3 rotationX( rotation.m[0][0], rotation.m[1][0], rotation.m[2][0] );
+			const Vec3 rotationY( rotation.m[0][1], rotation.m[1][1], rotation.m[2][1] );
+			const Vec3 rotationZ( rotation.m[0][2], rotation.m[1][2], rotation.m[2][2] );
+			localRay.O = Vec3( tinybvh_dot( rotationX, ray.O ), tinybvh_dot( rotationY, ray.O ), tinybvh_dot( rotationZ, ray.O ) );
+			localRay.D = Vec3( tinybvh_dot( rotationX, ray.D ), tinybvh_dot( rotationY, ray.D ), tinybvh_dot( rotationZ, ray.D ) );
+		}
+		else localRay.O = ray.O, localRay.D = ray.D;
+		localRay.rD = tinybvh_rcp( localRay.D );
+		const float stepSize[3] = { ldexpf( 1.0f, currNode.exponent[0] ), ldexpf( 1.0f, currNode.exponent[1] ), ldexpf( 1.0f, currNode.exponent[2] ) };
+		// intersect the child boxes; hit slots are insertion-sorted by entry distance
+		float slotDistance[8];
+		uint32_t sortedSlots[8], sortedCount = 0;
+		uint32_t remainingSlots = currNode.OccupiedMask();
+		while (remainingSlots)
+		{
+			const uint32_t slot = tinybvh_ctz( remainingSlots );
+			remainingSlots &= remainingSlots - 1;
+			const bvhvec3 slotMinPoint = currNode.nodeMinPoint + bvhvec3( currNode.qLo[0][slot] * stepSize[0], currNode.qLo[1][slot] * stepSize[1], currNode.qLo[2][slot] * stepSize[2] );
+			const bvhvec3 slotMaxPoint = currNode.nodeMinPoint + bvhvec3( currNode.qHi[0][slot] * stepSize[0], currNode.qHi[1][slot] * stepSize[1], currNode.qHi[2][slot] * stepSize[2] );
+			const float entryDistance = tinybvh_intersect_aabb( localRay, slotMinPoint, slotMaxPoint );
+			if (!(entryDistance < BVH_FAR)) continue;
+			slotDistance[slot] = entryDistance;
+			uint32_t insertPos = sortedCount++;
+			while (insertPos > 0 && slotDistance[sortedSlots[insertPos - 1]] > entryDistance)
+				sortedSlots[insertPos] = sortedSlots[insertPos - 1], insertPos--;
+			sortedSlots[insertPos] = slot;
+		}
+		// leaf hits, nearest first
+		for (uint32_t sortedIdx = 0; sortedIdx < sortedCount; sortedIdx++)
+		{
+			const uint32_t slot = sortedSlots[sortedIdx];
+			if (currNode.iMask & (1u << slot)) continue;
+			if (slotDistance[slot] >= ray.hit.t) break; // sorted: all remaining are farther.
+			const uint32_t firstTri = currNode.triBaseIndex + (currNode.meta[slot] & 31);
+			const uint32_t triCount = tinybvh_popc( currNode.meta[slot] >> 5 );
+			Index i0, i1, i2;
+			for (uint32_t triIdx = 0; triIdx < triCount; triIdx++)
+			{
+				const Index primIdx = dobbPrimIdx[firstTri + triIdx];
+				GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, primIdx );
+				IntersectTri( ray, primIdx, bvh8.bvh.verts, i0, i1, i2 );
+			}
+		}
+		// interior hits, farthest first, so the nearest ends on top of the stack
+		for (uint32_t sortedIdx = sortedCount; sortedIdx-- > 0;)
+		{
+			const uint32_t slot = sortedSlots[sortedIdx];
+			if (!(currNode.iMask & (1u << slot))) continue;
+			if (slotDistance[slot] >= ray.hit.t) continue; // behind a leaf hit from this node.
+			nodeStack[stackIdx++] = { currNode.ChildBaseIndex() + tinybvh_popc( currNode.iMask & ((1u << slot) - 1) ), slotDistance[slot] };
+		}
+	}
+	return traversalSteps;
+}
+
+TEMPLATED bool BVH_DOBB<Float, Index>::IsOccluded( const Ray& ray ) const
+{
+	VALIDATE_RAY( ray );
+	uint32_t nodeStack[DOBB_STACK_SIZE], stackIdx = 0;
+	nodeStack[stackIdx++] = 0;
+	while (stackIdx > 0)
+	{
+		const BVHNode& currNode = dobbNode[nodeStack[--stackIdx]];
+		// transform the ray to the node's frame
+		Ray localRay;
+		localRay.hit.t = ray.hit.t;
+		const uint32_t rotationIdx = currNode.Rotation();
+		if (rotationIdx != DOBB_AABB_ROTATION)
+		{
+			const DOBB_LUT::Mat3f rotation = GetLUT().GetRawEntry( rotationIdx );
+			const Vec3 rotationX( rotation.m[0][0], rotation.m[1][0], rotation.m[2][0] );
+			const Vec3 rotationY( rotation.m[0][1], rotation.m[1][1], rotation.m[2][1] );
+			const Vec3 rotationZ( rotation.m[0][2], rotation.m[1][2], rotation.m[2][2] );
+			localRay.O = Vec3( tinybvh_dot( rotationX, ray.O ), tinybvh_dot( rotationY, ray.O ), tinybvh_dot( rotationZ, ray.O ) );
+			localRay.D = Vec3( tinybvh_dot( rotationX, ray.D ), tinybvh_dot( rotationY, ray.D ), tinybvh_dot( rotationZ, ray.D ) );
+		}
+		else localRay.O = ray.O, localRay.D = ray.D;
+		localRay.rD = tinybvh_rcp( localRay.D );
+		const float stepSize[3] = { ldexpf( 1.0f, currNode.exponent[0] ), ldexpf( 1.0f, currNode.exponent[1] ), ldexpf( 1.0f, currNode.exponent[2] ) };
+		// intersect the child boxes; the children can be visited in any order
+		uint32_t hitMask = 0;
+		uint32_t remainingSlots = currNode.OccupiedMask();
+		while (remainingSlots)
+		{
+			const uint32_t slot = tinybvh_ctz( remainingSlots );
+			remainingSlots &= remainingSlots - 1;
+			const bvhvec3 slotMinPoint = currNode.nodeMinPoint + bvhvec3( currNode.qLo[0][slot] * stepSize[0], currNode.qLo[1][slot] * stepSize[1], currNode.qLo[2][slot] * stepSize[2] );
+			const bvhvec3 slotMaxPoint = currNode.nodeMinPoint + bvhvec3( currNode.qHi[0][slot] * stepSize[0], currNode.qHi[1][slot] * stepSize[1], currNode.qHi[2][slot] * stepSize[2] );
+			if (tinybvh_intersect_aabb( localRay, slotMinPoint, slotMaxPoint ) < BVH_FAR) hitMask |= 1 << slot;
+		}
+		uint32_t leafHitMask = hitMask & ~(uint32_t)currNode.iMask;
+		uint32_t internalHitMask = hitMask & currNode.iMask;
+		// leaf hits
+		while (leafHitMask)
+		{
+			const uint32_t slot = tinybvh_ctz( leafHitMask );
+			leafHitMask &= leafHitMask - 1;
+			const uint32_t firstTri = currNode.triBaseIndex + (currNode.meta[slot] & 31);
+			const uint32_t triCount = tinybvh_popc( currNode.meta[slot] >> 5 );
+			Index i0, i1, i2;
+			for (uint32_t triIdx = 0; triIdx < triCount; triIdx++)
+			{
+				const Index primIdx = dobbPrimIdx[firstTri + triIdx];
+				GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, primIdx );
+				if (TriOccludes( ray, bvh8.bvh.verts, primIdx, i0, i1, i2 )) return true;
+			}
+		}
+		// interior hits
+		while (internalHitMask)
+		{
+			const uint32_t slot = tinybvh_ctz( internalHitMask );
+			internalHitMask &= internalHitMask - 1;
+			nodeStack[stackIdx++] = currNode.ChildBaseIndex() + tinybvh_popc( currNode.iMask & ((1u << slot) - 1) );
+		}
+	}
+	return false;
 }
 
 // Generic definitions of the members that the platform headers specialize.
