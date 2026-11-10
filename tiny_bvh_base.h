@@ -657,7 +657,7 @@ struct BVHBuildSettings
 	float bonsaiPruneFactor = 0.1f;	// Bonsai, Bonsai HQ: prune mini trees larger than this fraction of the average mini tree; 0 disables.
 	bool useHPLOC = false;			// H-PLOC builder; builds trees identical to NexusBVH CUDA code, for comparisons.
 	bool keepSplitting = false;		// subdivide regardless of what SAH prefers; see SplitLeafs.
-	bool postOptimize = false;		// optimize generated BVH using tree rotations.
+	bool postOptimize = false;		// optimize generated BVH by parallel reinsertion; see BVH_Verbose::Optimize.
 	int optimizeIterations = 25;	// default optimization iterations.
 	bool useSIMDifavailable = true;	// set to false to use the scalar reference builder, or SBVH with useSpatialSplits.
 #ifdef ENABLE_THREADED_BUILDS
@@ -1277,7 +1277,7 @@ public:
 	void MergeLeafs();
 	void Optimize( const uint32_t iterations = 25, uint32_t mu = 8, Float epsilon = Float( 0.1 ) );
 private:
-	void OptimizeSearch( const Index in, Float& dbest, Index& outbest ) const;
+	void OptimizeSearch( const Index in, const Float minGain, Float& dbest, Index& outbest ) const;
 	uint32_t OptimizeNodes( const Index in, const Index out, Index* node ) const;
 	void OptimizeReinsert( const Index in, const Index out );
 	Index CountSubtreeTris( const Index nodeIdx, Index* counters );
@@ -2448,7 +2448,7 @@ TEMPLATED void BVH<Float, Index>::Build( const Slice& vertices, const Index* ind
 	// keepSplitting leaves nothing for SplitLeafs to do; record the size the build guarantees. Only
 	// the SBVH builder honours hqLeafPrims, so it is an upper bound for the others - never a lie.
 	leafsSplit = settings.keepSplitting ? tinybvh_max( (Index)1, (Index)hqLeafPrims ) : 0;
-	if (settings.postOptimize) Optimize( settings.optimizeIterations ); // ..which merges leaves again
+	if (settings.postOptimize) Optimize( settings.optimizeIterations ); // moves whole subtrees: leaves, and leafsSplit, are unchanged.
 }
 
 TEMPLATED void BVH<Float, Index>::BuildAABB( const Vertex* aabbs, const Index aabbCount )
@@ -3781,8 +3781,11 @@ TEMPLATED void BVH<Float, Index>::ConvertFrom( const BVH_Verbose& original, bool
 			dstStack[stackPtr++] = newNodePtr++;
 		}
 	}
-	usedNodes = original.usedNodes;
-	orderedNodes = true; // the node list was rebuilt depth-first
+	// The node list was rebuilt depth-first from the reachable nodes only, so whatever holes the
+	// source had are gone, and the nodes in use are the ones written.
+	usedNodes = newNodePtr;
+	hasHoles = false;
+	orderedNodes = true;
 }
 
 TEMPLATED Float BVH<Float, Index>::TriArea( const Index triIdx ) const
@@ -4073,6 +4076,7 @@ TEMPLATED void BVH<Float, Index>::PresplitPostPass()
 
 TEMPLATED void BVH<Float, Index>::Optimize( const uint32_t iterations, uint32_t mu, Float epsilon )
 {
+	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::Optimize( .. ), bvhNode == 0." );
 	BVH_Verbose verbose; // ~BVH_Verbose only releases its own node pool
 	verbose.ConvertFrom( *this );
 	verbose.Optimize( iterations, mu, epsilon );
@@ -4686,7 +4690,7 @@ TEMPLATED uint32_t BVH<Float, Index>::Depth() const
 
 // Compact: Reduce the size of a BVH by removing any unused nodes.
 // This is useful after an SBVH build or multi-threaded build, but also after calling MergeLeafs.
-// Some operations, such as Optimize, *require* a compacted tree to work correctly.
+// Some operations, such as Refit, *require* a compacted tree to work correctly.
 TEMPLATED void BVH<Float, Index>::Compact()
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::Compact(), bvhNode == 0." );
@@ -4764,8 +4768,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::ConvertFrom( const BVH& original, bool
 	this->fragment = original.fragment;
 	this->primIdx = original.primIdx;
 	bvhNode[0].parent = (Index)-1; // root sentinel
-	// convert
-	Index nodeIdx = 0, parent = (Index)-1, stack[128], stackPtr = 0;
+	Index nodeIdx = 0, parent = (Index)-1, stack[2 * TINYBVH_STACK_SIZE], stackPtr = 0;
 	while (1)
 	{
 		const typename BVH::BVHNode& orig = original.bvhNode[nodeIdx];
@@ -4782,6 +4785,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::ConvertFrom( const BVH& original, bool
 		{
 			bvhNode[nodeIdx].left = orig.leftFirst;
 			bvhNode[nodeIdx].right = orig.leftFirst + 1;
+			BVH_FATAL_ERROR_IF( stackPtr == 2 * TINYBVH_STACK_SIZE, "BVH_Verbose::ConvertFrom( .. ), tree too deep." );
 			stack[stackPtr++] = nodeIdx;
 			stack[stackPtr++] = orig.leftFirst + 1;
 			parent = nodeIdx;
@@ -4941,13 +4945,18 @@ TEMPLATED void BVH_Verbose<Float, Index>::SortIndices()
 TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, uint32_t mu, const Float epsilon )
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH_Verbose::Optimize( .. ), bvhNode == 0." );
-	BVH_FATAL_ERROR_IF( hasHoles, "BVH_Verbose::Optimize( .. ), bvh may have holes; Compact() first." );
 	if (iterations == 0 || usedNodes < 6 || bvhNode[0].isLeaf()) return;
+	Compact();
+	memset( (void*)&bvhNode[1], 0, sizeof( BVHNode ) ), bvhNode[1].parent = (Index)-1;
 	const Index nodeCount = usedNodes;
 	Float* decrease = (Float*)AlignedAlloc( nodeCount * sizeof( Float ) );
 	Index* outNode = (Index*)AlignedAlloc( nodeCount * sizeof( Index ) );
 	std::atomic<uint64_t>* lock = (std::atomic<uint64_t>*)AlignedAlloc( nodeCount * sizeof( std::atomic<uint64_t> ) );
 	std::atomic<Index>* arrived = (std::atomic<Index>*)AlignedAlloc( nodeCount * sizeof( std::atomic<Index> ) );
+	uint8_t* moving = (uint8_t*)AlignedAlloc( nodeCount );
+	Index* jump = (Index*)AlignedAlloc( nodeCount * sizeof( Index ) );
+	Index* winner = (Index*)AlignedAlloc( nodeCount * sizeof( Index ) ); // per slice, from its first index
+	memset( moving, 0, nodeCount );
 	Index* leafList = (Index*)AlignedAlloc( nodeCount * sizeof( Index ) );
 	Index leafCount = 0;
 	for (Index i = 0; i < nodeCount; i++) if (bvhNode[i].isLeaf()) leafList[leafCount++] = i;
@@ -4959,12 +4968,13 @@ TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, u
 	const uint32_t tasks = TaskCount( threads, nodeCount, OPTIMIZE_NODES_PER_TASK, OPTIMIZE_TASKS );
 	const uint32_t leafTasks = TaskCount( threads, leafCount, OPTIMIZE_NODES_PER_TASK, OPTIMIZE_TASKS );
 	double* partial = (double*)AlignedAlloc( tasks * sizeof( double ) );
-	const Float rootArea = bvhNode[0].SA();
+	Index* winners = (Index*)AlignedAlloc( tasks * sizeof( Index ) );
+	const Float rootArea = bvhNode[0].SA(), minGain = Float( 1e-6 ) * rootArea;
 	if (mu == 0) mu = 1;
 	// The cost of the tree as the previous round left it, summed by the search pass rather than
 	// by a separate serial walk: it rides along for free, and the schedule only needs to compare
 	// one round against the last.
-	Float prevCost = SAHCost(), cost = prevCost;
+	Float prevCost = 0; // round 0 has nothing to compare against
 	for (uint32_t iter = 0; iter < iterations; iter++)
 	{
 		// 1. search, and claim: every selected node looks for the position that would gain the
@@ -4981,15 +4991,16 @@ TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, u
 				sum += (double)(n.isLeaf() ? (c_int * (Float)n.triCount) : c_trav) * (double)n.SA();
 				decrease[i] = 0, outNode[i] = 0;
 				if (i % mu != iter % mu) continue; // sparse search: round-robin over the nodes
-				OptimizeSearch( i, decrease[i], outNode[i] );
+				OptimizeSearch( i, minGain, decrease[i], outNode[i] );
 				if (!(decrease[i] > 0)) continue;
 				Index node[6];
 				const uint32_t n6 = OptimizeNodes( i, outNode[i], node );
 				if (n6 == 0) { decrease[i] = 0; continue; }
 				// positive floats compare the same as their bit patterns, so a single atomic max
 				// on (decrease, index) picks the better move and breaks ties on the index.
+				const float gain = (float)decrease[i];
 				uint32_t bits;
-				memcpy( &bits, &decrease[i], 4 );
+				memcpy( &bits, &gain, 4 );
 				const uint64_t claim = ((uint64_t)bits << 32) | (uint64_t)i;
 				for (uint32_t k = 0; k < 6; k++)
 				{
@@ -5005,7 +5016,9 @@ TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, u
 		// below, which rewrites the pointers this reads.
 		ParallelFor( threads, tasks, [&]( const uint32_t t )
 		{
-			for (Index i = SliceStart( nodeCount, t, tasks ), e = SliceStart( nodeCount, t + 1, tasks ); i < e; i++)
+			const Index first = SliceStart( nodeCount, t, tasks );
+			Index count = 0;
+			for (Index i = first, e = SliceStart( nodeCount, t + 1, tasks ); i < e; i++)
 			{
 				if (!(decrease[i] > 0)) continue;
 				Index node[6];
@@ -5015,8 +5028,46 @@ TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, u
 					decrease[i] = 0;
 					break;
 				}
+				if (decrease[i] > 0) moving[i] = 1, winner[first + count++] = i;
 			}
+			winners[t] = count;
 		} );
+		// 2b. disjoint claims do not stop winners from each landing inside a subtree another one moves
+		// away, which closes a loop off from the root. After the moves, a winner sits below the
+		// nearest winner above its output, so a loop in that chain is a loop in the tree; one move
+		// per loop, the cheapest, stands down. Loops are rare, so the repeat after a drop almost
+		// never runs.
+		for (bool dropped = true; dropped; )
+		{
+			ParallelFor( threads, tasks, [&]( const uint32_t t )
+			{
+				const Index* list = winner + SliceStart( nodeCount, t, tasks );
+				for (Index k = 0; k < winners[t]; k++) if (moving[list[k]])
+				{
+					const Index i = list[k];
+					Index w = bvhNode[outNode[i]].parent;
+					while (w != (Index)-1 && !moving[w]) w = bvhNode[w].parent;
+					jump[i] = w;
+				}
+			} );
+			dropped = false; // moving: 1 = winner, 2 = on this walk, 3 = walked
+			for (uint32_t t = 0; t < tasks; t++) for (Index k = 0, *list = winner + SliceStart( nodeCount, t, tasks ); k < winners[t]; k++)
+			{
+				const Index i = list[k];
+				if (moving[i] != 1) continue;
+				Index x = i, d = (Index)-1;
+				while (x != (Index)-1 && moving[x] == 1) moving[x] = 2, x = jump[x];
+				if (x != (Index)-1 && moving[x] == 2)
+				{
+					d = x;
+					for (Index y = jump[x]; y != x; y = jump[y]) if (decrease[y] < decrease[d]) d = y;
+				}
+				for (Index y = i; y != (Index)-1 && moving[y] == 2; y = jump[y]) moving[y] = 3;
+				if (d != (Index)-1) decrease[d] = 0, moving[d] = 0, dropped = true;
+			}
+			if (dropped) for (uint32_t t = 0; t < tasks; t++) for (Index k = 0, *list = winner + SliceStart( nodeCount, t, tasks ); k < winners[t]; k++)
+				if (moving[list[k]]) moving[list[k]] = 1;
+		}
 		// 3. move, and clear the claims for the next round: the winners are disjoint in the six
 		// nodes they touch, so they can run at once, and nothing reads the locks any more.
 		ParallelFor( threads, tasks, [&]( const uint32_t t )
@@ -5024,7 +5075,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, u
 			for (Index i = SliceStart( nodeCount, t, tasks ), e = SliceStart( nodeCount, t + 1, tasks ); i < e; i++)
 			{
 				if (decrease[i] > 0) OptimizeReinsert( i, outNode[i] );
-				lock[i].store( 0, std::memory_order_relaxed ), arrived[i].store( 0, std::memory_order_relaxed );
+				lock[i].store( 0, std::memory_order_relaxed ), arrived[i].store( 0, std::memory_order_relaxed ), moving[i] = 0;
 			}
 		} );
 		// 4. refit, bottom-up: a thread climbing from a leaf stops at the first node it reaches
@@ -5056,10 +5107,10 @@ TEMPLATED void BVH_Verbose<Float, Index>::Optimize( const uint32_t iterations, u
 			if (mu == 1) break;
 			mu--;
 		}
-		prevCost = cost, cost = newCost;
+		prevCost = newCost;
 	}
-	AlignedFree( partial );
-	AlignedFree( leafList ), AlignedFree( arrived ), AlignedFree( lock );
+	AlignedFree( winners ), AlignedFree( partial );
+	AlignedFree( winner ), AlignedFree( jump ), AlignedFree( moving ), AlignedFree( leafList ), AlignedFree( arrived ), AlignedFree( lock );
 	AlignedFree( outNode ), AlignedFree( decrease );
 }
 
@@ -5099,7 +5150,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptimizeReinsert( const Index in, cons
 
 // OptimizeSearch: Algorithm 1 of the paper. Walk every position the input node could be
 // reinserted at, accumulating what the move would gain, without touching the tree.
-TEMPLATED void BVH_Verbose<Float, Index>::OptimizeSearch( const Index in, Float& dbest, Index& outbest ) const
+TEMPLATED void BVH_Verbose<Float, Index>::OptimizeSearch( const Index in, const Float minGain, Float& dbest, Index& outbest ) const
 {
 	dbest = 0, outbest = 0;
 	if (in == 0) return;
@@ -5112,6 +5163,8 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptimizeSearch( const Index in, Float&
 	Vec3 bPivotMin( bvh_far<Float> ), bPivotMax( -bvh_far<Float> );
 	Index pivot = parentIdx;
 	Index out = bvhNode[parentIdx].left == in ? bvhNode[parentIdx].right : bvhNode[parentIdx].left;
+	// a move must gain at least minGain: starting the bound there prunes every descent that cannot.
+	dbest = minGain;
 	bool down = true;
 	Float d = 0;
 	while (1)
@@ -5157,6 +5210,7 @@ TEMPLATED void BVH_Verbose<Float, Index>::OptimizeSearch( const Index in, Float&
 			if (bvhNode[p].left == out) out = bvhNode[p].right, down = true; else out = p;
 		}
 	}
+	if (outbest == 0) dbest = 0;
 }
 
 TEMPLATED void BVH_Verbose<Float, Index>::SplitLeafs( const Index maxPrims )
@@ -6263,13 +6317,8 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::Build( const Slice& vertices, const In
 
 TEMPLATED void BVH4_AMD_HW<Float, Index>::Optimize( const uint32_t iterations, uint32_t mu )
 {
-	if (!ownBVH4)
-	{
-		const Slice vertices = bvh4.bvh.verts;
-		const Index* indices = bvh4.bvh.vertIdx;
-		const Index prims = bvh4.bvh.triCount;
-		Build( vertices, indices, prims );
-	}
+	// a tree received through ConvertFrom is optimized where it is, as in every other layout: the
+	// source BVH is the basis for this layout, not a product in its own right.
 	bvh4.Optimize( iterations, mu );
 	ConvertFrom( bvh4 );
 }
@@ -6471,13 +6520,8 @@ TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Build( const Slice& vertices, const 
 
 TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Optimize( const uint32_t iterations, uint32_t mu )
 {
-	if (!ownBVH8)
-	{
-		const Slice vertices = bvh8.bvh.verts;
-		const uint32_t* indices = bvh8.bvh.vertIdx;
-		const Index prims = bvh8.bvh.triCount;
-		Build( vertices, indices, prims );
-	}
+	// a tree received through ConvertFrom is optimized where it is, as in every other layout: the
+	// source BVH is the basis for this layout, not a product in its own right.
 	bvh8.Optimize( iterations, mu );
 	ConvertFrom( bvh8 );
 }
@@ -7033,7 +7077,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	// convert to BVH4_CPU layout
 	// only the SBVH path sizes its leaves for this layout (hqLeafPrims); the others split down to
 	// one prim per leaf and need the collapse in ConvertForCPULayout to group them again.
-	ConvertFrom( bvh4, settings.useSpatialSplits && settings.binnedBVH && !settings.postOptimize );
+	ConvertFrom( bvh4, settings.useSpatialSplits && settings.binnedBVH );
 }
 
 TEMPLATED void BVH4_CPU<Float, Index>::Save( const char* fileName )
@@ -7072,8 +7116,8 @@ TEMPLATED void BVH4_CPU<Float, Index>::Optimize( const uint32_t iterations, uint
 {
 	BVH_FATAL_ERROR_IF( !rebuildable, "BVH4_CPU::Optimize( .. ), converted from an external tree; Build() it instead." );
 	BVH_FATAL_ERROR_IF( bvh4.mbvhNode == 0, "BVH4_CPU::Optimize( .. ), no BVH4 to optimize (discarded, or loaded from file)." );
-	bvh4.Optimize( iterations, mu );
-	ConvertFrom( bvh4 );
+	bvh4.bvh.Optimize( iterations, mu ); // the conversion below does the one collapse
+	ConvertFrom( bvh4, settings.useSpatialSplits && settings.binnedBVH ); // as in Build
 }
 
 TEMPLATED void BVH4_CPU<Float, Index>::Refit()
@@ -7293,7 +7337,7 @@ TEMPLATED void BVH8_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	if (settings.discardIntermediates && ownBVH8 && bvh8.ownBVH) AlignedFree( bvh8.bvh.fragment ), bvh8.bvh.fragment = 0;
 	// convert to BVH8_CPU layout
 	// as for BVH4_CPU: only the SBVH path sizes its leaves here; the others need the collapse.
-	ConvertFrom( bvh8, settings.useSpatialSplits && settings.binnedBVH && !settings.postOptimize );
+	ConvertFrom( bvh8, settings.useSpatialSplits && settings.binnedBVH );
 }
 
 TEMPLATED void BVH8_CPU<Float, Index>::Save( const char* fileName )
@@ -7332,8 +7376,8 @@ TEMPLATED void BVH8_CPU<Float, Index>::Optimize( const uint32_t iterations, uint
 {
 	BVH_FATAL_ERROR_IF( !rebuildable, "BVH8_CPU::Optimize( .. ), converted from an external tree; Build() it instead." );
 	BVH_FATAL_ERROR_IF( bvh8.mbvhNode == 0, "BVH8_CPU::Optimize( .. ), no BVH8 to optimize (discarded, or loaded from file)." );
-	bvh8.Optimize( iterations, mu );
-	ConvertFrom( bvh8 );
+	bvh8.bvh.Optimize( iterations, mu ); // the conversion below does the one collapse
+	ConvertFrom( bvh8, settings.useSpatialSplits && settings.binnedBVH ); // as in Build
 }
 
 TEMPLATED void BVH8_CPU<Float, Index>::Refit()
