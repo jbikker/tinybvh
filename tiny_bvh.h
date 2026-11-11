@@ -408,6 +408,7 @@ template class impl::CWBVH8_AMD_HW<float, uint32_t>;
 template class impl::BVH4_CPU<float, uint32_t>;
 template class impl::BVH8_CWBVH<float, uint32_t>;
 template class impl::BVH8_CPU<float, uint32_t>;
+template class impl::BVH_DOBB<float, uint32_t>;
 template class impl::BLASInstance<float, uint32_t>;
 #ifdef DOUBLE_PRECISION_SUPPORT
 template class impl::BVHBase<double, uint64_t>;

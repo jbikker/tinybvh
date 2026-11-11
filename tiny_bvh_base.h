@@ -1964,7 +1964,7 @@ public:
 		BuildAxisAzimuthLUT();
 	}
 	Mat3f GetRawEntry( const uint32_t rotIdx ) const;
-	uint8_t GetRotationForBasis( const bvhvec3 (&basis)[3] ) const;
+	uint8_t GetRotationForBasis( const bvhvec3( &basis )[3] ) const;
 	// LUT data
 	float rotationValues[DOBB_MAX_ROTATION_VALUES];
 	Mat3i rotations[DOBB_ROTATION_COUNT];
@@ -1972,13 +1972,13 @@ public:
 	uint8_t azimuthAngles[AZIMUTH_BINS * POLAR_BINS * ANGLE_BINS];
 private:
 	static Mat3f RodriguesRotMat( const bvhvec3& axis, const float angle );
-	static void BasisToAxisAngle( const bvhvec3 (&basis)[3], bvhvec3& axis, float& angle );
+	static void BasisToAxisAngle( const bvhvec3( &basis )[3], bvhvec3& axis, float& angle );
 	static uint32_t ToBin( const float fraction, const uint32_t binCount );
 	static uint32_t AxisAngleToCell( const bvhvec3& axis, const float angle );
 	static void FindQuadSphereTriangle( const bvhvec3& direction, ReprojectionEntry& entry );
 	static void QuadSpherePointToProxyAxis( const float quadSpherePoint[3], uint8_t& axisIdx, int& sign );
-	float Similarity( const bvhvec3 (&capitalB)[3], const uint32_t rotIdx ) const;
-	uint8_t BruteForceBestRotation( const bvhvec3 (&basis)[3] ) const;
+	float Similarity( const bvhvec3( &capitalB )[3], const uint32_t rotIdx ) const;
+	uint8_t BruteForceBestRotation( const bvhvec3( &basis )[3] ) const;
 	void BuildRotationLUT();
 	void BuildReprojectionLUT();
 	void BuildAxisAzimuthLUT();
@@ -2046,14 +2046,16 @@ public:
 	};
 	static_assert( sizeof( BVHNode ) == 80, "BVH_DOBB::BVHNode must be 80 bytes." );
 	struct StackEntry { uint32_t nodeIdx; float entryDistance; }; // for ordered traversal.
+	// Build uses Bonsai - spatial splits and presplitting are not supported for now.
 	BVH_DOBB( BVHContext ctx = {} ) { layout = LAYOUT_DOBB; context = ctx; }
 	BVH_DOBB( const BVH_DOBB& ) = delete; // owns its allocations, so it cannot be copied
+	BVH_DOBB& operator=( const BVH_DOBB& ) = delete; // ... nor assigned
 	~BVH_DOBB();
 	void Build( const Vertex* vertices, const Index primCount );
 	void Build( const Slice& vertices );
 	void Build( const Vertex* vertices, const Index* indices, const Index primCount );
 	void Build( const Slice& vertices, const Index* indices, const Index primCount );
-	void ConvertFrom( const MBVH8& original ); // leaves may hold at most 2 triangles.
+	void ConvertFrom( const MBVH8& original ); // leaves may hold at most 3 triangles.
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// the rotation tables, built on first use.
@@ -2422,8 +2424,8 @@ TEMPLATED void BVHBase<Float, Index>::CopyBasePropertiesFrom( const BVHBase& ori
 	this->bvhOverAabbs = original.bvhOverAabbs;
 	this->bvhOverIndices = original.bvhOverIndices;
 	this->leafsSplit = 0;		// leaf sizes are a property of this layout, not of the source
-	this->context = original.context;
-	this->settings = original.settings;
+	// settings and context stay with this instance: a conversion runs with the configuration of the
+	// layout it is called on, and the buffers it allocates are released with that layout's allocator.
 	this->triCount = original.triCount;
 	this->idxCount = original.idxCount;
 	this->aabbMin = original.aabbMin, this->aabbMax = original.aabbMax;
@@ -4247,6 +4249,7 @@ TEMPLATED void BVH<Float, Index>::Optimize( const uint32_t iterations, uint32_t 
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH::Optimize( .. ), bvhNode == 0." );
 	BVH_Verbose verbose; // ~BVH_Verbose only releases its own node pool
+	this->PassSettingsTo( verbose );
 	verbose.ConvertFrom( *this );
 	verbose.Optimize( iterations, mu, epsilon );
 	verbose.SortIndices();
@@ -4256,6 +4259,7 @@ TEMPLATED void BVH<Float, Index>::Optimize( const uint32_t iterations, uint32_t 
 TEMPLATED void BVH<Float, Index>::MergeLeafs( const Index maxLeafPrims )
 {
 	BVH_Verbose verbose; // ~BVH_Verbose only releases its own node pool
+	this->PassSettingsTo( verbose );
 	verbose.ConvertFrom( *this );
 	verbose.mergeLeafCap = maxLeafPrims;
 	verbose.MergeLeafs();
@@ -5890,7 +5894,6 @@ TEMPLATED_M Float MBVH<M, Float, Index>::SAHCost( const Index nodeIdx ) const
 
 // Collapse a BVH2 into an M-wide BVH. Based on "Efficient Incoherent Ray Traversal on GPUs
 // Through Compressed Wide BVHs", Ylitie et al. 2017, section 4.2.
-static constexpr float c_leaf = C_INT * 0.8f;
 // DecodeWalk: the binary-tree nodes that become the children of output node 'src',
 // in slot order, following the slot distribution the dynamic program tabulated.
 TEMPLATED_M uint32_t MBVH<M, Float, Index>::DecodeWalk( const BVH& original, const Index src, const uint8_t* dist, Index* term ) const
@@ -5967,7 +5970,9 @@ TEMPLATED_M void MBVH<M, Float, Index>::DecodeWrite( const BVH& original, const 
 TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact )
 {
 	// the collapse sweeps the nodes in index order, which requires children to follow their parents.
-	// Compact reorders the node list of the original in place; it keeps the tree it describes.
+	// Compact reorders the node list of the original in place; it keeps the tree it describes, but
+	// not the node numbering that nodeProb is indexed by.
+	BVH_FATAL_ERROR_IF( nodeProb && !original.orderedNodes, "MBVH::ConvertFrom( .. ), nodeProb set for an unordered BVH; Compact() it before computing nodeProb." );
 	if (!original.orderedNodes) original.Compact();
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
@@ -6013,6 +6018,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 		if (!node.isLeaf()) flag[node.leftFirst] |= USED, flag[node.leftFirst + 1] |= USED;
 	}
 	// pass 2: bottom-up dynamic programming; same ordering argument, reversed.
+	const Float c_leaf = Float( 0.8 ) * c_int; // fixed cost of a leaf, on top of its primitives
 	for (int64_t n = (int64_t)N - 1; n >= 0; n--)
 	{
 		if (!(flag[n] & USED)) continue;
@@ -6546,9 +6552,7 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::ConvertFrom( const MBVH<4, Float, Inde
 		allocatedBlocks = blocksNeeded;
 	}
 	memset( bvh4Data, 0, (size_t)blocksNeeded * 16 );
-	const BVHContext ctx = context;
 	CopyBasePropertiesFrom( bvh4 );
-	context = ctx; // keep the allocator paired with our hardware buffer.
 	// start conversion
 	uint32_t nodeIdx = 0, newAlt4Ptr = 0, stack[TINYBVH_STACK_SIZE], stackPtr = 0, retValPos = UINT32_MAX;
 	while (1)
@@ -7026,9 +7030,7 @@ TEMPLATED void CWBVH8_AMD_HW<Float, Index>::ConvertFrom( const MBVH<8, Float, In
 		ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
 	}
 	bvh8.ReferenceFrom( original );
-	const BVHContext ctx = context;
 	CopyBasePropertiesFrom( bvh8 );
-	context = ctx;
 	const uint32_t nodeCap = tinybvh_max( 128u, bvh8.triCount >> 1 );
 	if (bvh8Data == 0 || nodeCap > allocatedBlocks)
 	{
@@ -7283,7 +7285,6 @@ TEMPLATED bool BVH4_CPU<Float, Index>::Load( const char* fileName, const Index e
 
 TEMPLATED void BVH4_CPU<Float, Index>::Optimize( const uint32_t iterations, uint32_t mu )
 {
-	BVH_FATAL_ERROR_IF( !rebuildable, "BVH4_CPU::Optimize( .. ), converted from an external tree; Build() it instead." );
 	BVH_FATAL_ERROR_IF( bvh4.mbvhNode == 0, "BVH4_CPU::Optimize( .. ), no BVH4 to optimize (discarded, or loaded from file)." );
 	bvh4.bvh.Optimize( iterations, mu ); // the conversion below does the one collapse
 	ConvertFrom( bvh4, settings.useSpatialSplits && settings.binnedBVH ); // as in Build
@@ -7291,7 +7292,6 @@ TEMPLATED void BVH4_CPU<Float, Index>::Optimize( const uint32_t iterations, uint
 
 TEMPLATED void BVH4_CPU<Float, Index>::Refit()
 {
-	BVH_FATAL_ERROR_IF( !rebuildable, "BVH4_CPU::Refit( .. ), converted from an external tree; Build() it instead." );
 	// refit the binary tree: the conversion below collapses from it, not from the bvh4 nodes.
 	bvh4.bvh.Refit();
 	ConvertFrom( bvh4, true ); // leaves were already combined by Build
@@ -7418,7 +7418,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& origi
 {
 	// get a copy of the input bvh4; as BVH8_CPU, with fewer lanes and without the null leaf.
 	if (&original != &bvh4) ownBVH4 = false; // bvh isn't ours; don't delete in destructor.
-	rebuildable = ownBVH4; // Refit and Optimize would modify an external tree in place
+	rebuildable = ownBVH4; // false: Refit and Optimize modify the external tree in place
 	bvh4.ReferenceFrom( original );
 	const bool discard = settings.discardIntermediates && ownBVH4;
 	bvh4.lQuads = lQuads, bvh4.c_int = c_int, bvh4.c_trav = c_trav;
@@ -7543,7 +7543,6 @@ TEMPLATED bool BVH8_CPU<Float, Index>::Load( const char* fileName, const Index e
 
 TEMPLATED void BVH8_CPU<Float, Index>::Optimize( const uint32_t iterations, uint32_t mu )
 {
-	BVH_FATAL_ERROR_IF( !rebuildable, "BVH8_CPU::Optimize( .. ), converted from an external tree; Build() it instead." );
 	BVH_FATAL_ERROR_IF( bvh8.mbvhNode == 0, "BVH8_CPU::Optimize( .. ), no BVH8 to optimize (discarded, or loaded from file)." );
 	bvh8.bvh.Optimize( iterations, mu ); // the conversion below does the one collapse
 	ConvertFrom( bvh8, settings.useSpatialSplits && settings.binnedBVH ); // as in Build
@@ -7551,7 +7550,6 @@ TEMPLATED void BVH8_CPU<Float, Index>::Optimize( const uint32_t iterations, uint
 
 TEMPLATED void BVH8_CPU<Float, Index>::Refit()
 {
-	BVH_FATAL_ERROR_IF( !rebuildable, "BVH8_CPU::Refit( .. ), converted from an external tree; Build() it instead." );
 	// refit the binary tree: the conversion below collapses from it, not from the bvh8 nodes.
 	bvh8.bvh.Refit();
 	ConvertFrom( bvh8, true ); // leaves were already combined by Build
@@ -7587,7 +7585,7 @@ TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& origi
 {
 	// get a copy of the input bvh8
 	if (&original != &bvh8) ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
-	rebuildable = ownBVH8; // Refit and Optimize would modify an external tree in place
+	rebuildable = ownBVH8; // false: Refit and Optimize modify the external tree in place
 	bvh8.ReferenceFrom( original );
 	const bool discard = settings.discardIntermediates && ownBVH8;
 	bvh8.lQuads = lQuads, bvh8.c_int = c_int, bvh8.c_trav = c_trav;
@@ -8167,7 +8165,7 @@ DOBB_LUT::Mat3f DOBB_LUT::GetRawEntry( const uint32_t rotIdx ) const
 	return ret;
 }
 
-uint8_t DOBB_LUT::GetRotationForBasis( const bvhvec3 (&basis)[3] ) const
+uint8_t DOBB_LUT::GetRotationForBasis( const bvhvec3( &basis )[3] ) const
 {
 	bvhvec3 axis;
 	float angle;
@@ -8219,6 +8217,7 @@ void DOBB_LUT::BuildRotationLUT()
 					break;
 				}
 			if (found) continue;
+			BVH_FATAL_ERROR_IF( rotValUsed >= DOBB_MAX_ROTATION_VALUES, "DOBB_LUT::BuildRotationLUT(), more distinct rotation values than DOBB_MAX_ROTATION_VALUES." );
 			rotationValues[rotValUsed] = currRawValue;
 			rotations[rotIdx].m[rowIdx][colIdx] = rotValUsed++;
 		}
@@ -8240,7 +8239,7 @@ void DOBB_LUT::BuildReprojectionLUT()
 	}
 }
 
-void DOBB_LUT::BasisToAxisAngle( const bvhvec3 (&basis)[3], bvhvec3& axis, float& angle )
+void DOBB_LUT::BasisToAxisAngle( const bvhvec3( &basis )[3], bvhvec3& axis, float& angle )
 {
 	// angle from the trace ("reverse Rodrigues").
 	const float trace = basis[0].x + basis[1].y + basis[2].z;
@@ -8292,7 +8291,7 @@ uint32_t DOBB_LUT::AxisAngleToCell( const bvhvec3& axis, const float angle )
 	return (angleBin * POLAR_BINS + polarBin) * AZIMUTH_BINS + azimuthBin;
 }
 
-float DOBB_LUT::Similarity( const bvhvec3 (&capitalB)[3], const uint32_t rotIdx ) const
+float DOBB_LUT::Similarity( const bvhvec3( &capitalB )[3], const uint32_t rotIdx ) const
 {
 	// absolute dot products of all axis pairs; the best permutation gives the similarity.
 	const Mat3f rotMat = GetRawEntry( rotIdx );
@@ -8309,7 +8308,7 @@ float DOBB_LUT::Similarity( const bvhvec3 (&capitalB)[3], const uint32_t rotIdx 
 	return maxSim;
 }
 
-uint8_t DOBB_LUT::BruteForceBestRotation( const bvhvec3 (&basis)[3] ) const
+uint8_t DOBB_LUT::BruteForceBestRotation( const bvhvec3( &basis )[3] ) const
 {
 	float bestSim = -1.0f;
 	uint8_t bestRot = 0;
@@ -8402,11 +8401,13 @@ TEMPLATED void BVH_DOBB<Float, Index>::Build( const Slice& vertices, const Index
 {
 	// a tree received through ConvertFrom is not ours to rebuild: drop the reference, start afresh.
 	if (!ownBVH8) bvh8.DropReference( context ), ownBVH8 = true;
+	BVH_FATAL_ERROR_IF( settings.useSpatialSplits, "BVH_DOBB::Build( .. ), spatial splits are not supported." );
+	BVH_FATAL_ERROR_IF( settings.usePresplitting, "BVH_DOBB::Build( .. ), presplitting is not supported." );
 	// propagate settings for this layout to the underlying layout
 	this->PassSettingsTo( bvh8 ), this->PassSettingsTo( bvh8.bvh );
-	// build the binary BVH: full-sweep SAH, which keeps the node list ordered.
-	bvh8.bvh.settings.useFullSweep = true;
+	// build the binary BVH: Bonsai, or the reference builder without the SIMD builders.
 	bvh8.bvh.Build( vertices, indices, primCount );
+	bvh8.bvh.Compact();
 	// leaves with at most 2 triangles, then SAH-optimal widening to 8
 	Quadify();
 	WidenSAHOptimal();
@@ -8419,6 +8420,12 @@ TEMPLATED void BVH_DOBB<Float, Index>::Build( const Slice& vertices, const Index
 TEMPLATED void BVH_DOBB<Float, Index>::Quadify()
 {
 	BVH& bvh = bvh8.bvh;
+	// room for the new nodes: a leaf of n > 2 triangles becomes ceil( n / 2 ) leaves. Builds without
+	// spatial splits allocate 2 nodes per triangle, which always suffices.
+	Index extra = 0;
+	for (Index i = 0; i < bvh.usedNodes; i++)
+		if (i != 1 && bvh.bvhNode[i].isLeaf() && bvh.bvhNode[i].triCount > 2) extra += 2 * ((bvh.bvhNode[i].triCount + 1) / 2 - 1);
+	BVH_FATAL_ERROR_IF( bvh.usedNodes + extra > bvh.allocatedNodes, "BVH_DOBB::Quadify(), the node pool has no room for the split leaves." );
 	Index stack[DOBB_STACK_SIZE], stackIdx = 0;
 	stack[stackIdx++] = 0;
 	while (stackIdx > 0)
@@ -8427,7 +8434,9 @@ TEMPLATED void BVH_DOBB<Float, Index>::Quadify()
 		if (currNode.triCount <= 2)
 		{
 			// interior node, or leaf with at most 2 triangles: nothing to split.
-			if (!currNode.isLeaf()) stack[stackIdx++] = currNode.leftFirst, stack[stackIdx++] = currNode.leftFirst + 1;
+			if (currNode.isLeaf()) continue;
+			BVH_FATAL_ERROR_IF( stackIdx + 2 > DOBB_STACK_SIZE, "BVH_DOBB::Quadify(), stack overflow; the tree is too deep." );
+			stack[stackIdx++] = currNode.leftFirst, stack[stackIdx++] = currNode.leftFirst + 1;
 			continue;
 		}
 		// leaf with more than 2 triangles: bounds of the first triangle
@@ -8592,16 +8601,24 @@ TEMPLATED void BVH_DOBB<Float, Index>::WidenSAHOptimal()
 // proxy k-DOPs and candidate rotations bottom-up; pass 2 emits compressed nodes top-down.
 TEMPLATED void BVH_DOBB<Float, Index>::ConvertFrom( const MBVH8& original )
 {
-	// get a copy of the original bvh8
+	// an external tree is referenced, not copied: bvh8 then isn't ours to delete.
 	if (&original != &bvh8)
 	{
 		if (ownBVH8) bvh8 = MBVH8( context ); else bvh8.DropReference( context );
-		ownBVH8 = false; // bvh8 isn't ours; don't delete in destructor.
+		bvh8.ReferenceFrom( original );
+		ownBVH8 = false;
 	}
-	// ConvertFrom does not handle scenes with 2 or fewer primitives
 	BVH_FATAL_ERROR_IF( bvh8.usedNodes == 0, "BVH_DOBB::ConvertFrom( .. ), source MBVH is empty." );
 	BVH_FATAL_ERROR_IF( bvh8.mbvhNode[0].isLeaf(), "BVH_DOBB::ConvertFrom( .. ), root is a leaf (scene has 2 triangles or fewer)." );
-	bvh8.ReferenceFrom( original );
+	// what the encoding and the passes below require of the source
+	for (Index nodeIdx = 0; nodeIdx < bvh8.usedNodes; nodeIdx++)
+	{
+		const typename MBVH8::MBVHNode& node = bvh8.mbvhNode[nodeIdx];
+		// a node slot holds up to 3 triangles ('meta' counts them in unary)
+		BVH_FATAL_ERROR_IF( node.isLeaf() && node.triCount > 3, "BVH_DOBB::ConvertFrom( .. ), a leaf holds more than 3 triangles." );
+		if (!node.isLeaf()) for (uint32_t childIdx = 0; childIdx < node.childCount; childIdx++)
+			BVH_FATAL_ERROR_IF( node.child[childIdx] <= nodeIdx, "BVH_DOBB::ConvertFrom( .. ), a child precedes its parent in the node list." );
+	}
 	CopyBasePropertiesFrom( bvh8 );
 	const DOBB_LUT& lut = GetLUT();
 	// proxy k-DOPs and rotations, per MBVH node
@@ -8618,18 +8635,16 @@ TEMPLATED void BVH_DOBB<Float, Index>::ConvertFrom( const MBVH8& original )
 		{
 			// leaf: gather vertices and determine the leaf frame B = (a0, a1, a2)
 			bvhvec3 leafVerts[6];
-			uint32_t noLeafVerts = 0;
 			Index i0, i1, i2; // for GET_PRIM_INDICES_I0_I1_I2
 			bvhvec3 a0, a1, a2;
 			if (currNode.triCount == 1)
 			{
-				noLeafVerts = 3;
 				const Index prim = bvh8.bvh.primIdx[currNode.firstTri];
 				GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, prim );
 				leafVerts[0] = bvh8.bvh.verts[i0], leafVerts[1] = bvh8.bvh.verts[i1], leafVerts[2] = bvh8.bvh.verts[i2];
 				CalcBasisVectorsFromTri( leafVerts, a0, a1, a2 );
 			}
-			else // leaf has 2 triangles
+			else // leaf has 2 triangles (or 3, from an external MBVH: the frame is that of the first two)
 			{
 				const Index prim0 = bvh8.bvh.primIdx[currNode.firstTri];
 				GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, prim0 );
@@ -8646,19 +8661,16 @@ TEMPLATED void BVH_DOBB<Float, Index>::ConvertFrom( const MBVH8& original )
 							leafVerts[tri1VertIdx].y != leafVerts[tri2VertIdx].y ||
 							leafVerts[tri1VertIdx].z != leafVerts[tri2VertIdx].z) continue;
 						if (sharedVert1[0] == 6) sharedVert1[0] = tri1VertIdx, sharedVert1[1] = tri2VertIdx;
-						else sharedVert2[0] = tri1VertIdx, sharedVert2[1] = tri2VertIdx;
+						else if (tri1VertIdx != sharedVert1[0] && tri2VertIdx != sharedVert1[1]) sharedVert2[0] = tri1VertIdx, sharedVert2[1] = tri2VertIdx;
 					}
 				if (sharedVert2[0] == 6)
 				{
-					// no shared edge: frame of the first triangle, k-DOP over all distinct vertices
+					// no shared edge: frame of the first triangle
 					CalcBasisVectorsFromTri( leafVerts, a0, a1, a2 );
-					noLeafVerts = 6;
-					if (sharedVert1[0] != 6) leafVerts[sharedVert1[1]] = leafVerts[5], noLeafVerts = 5;
 				}
 				else
 				{
 					// shared edge: order the 4 vertices so the shared edge is in slots 1 and 2
-					noLeafVerts = 4;
 					bvhvec3 tmpLeafVerts[6];
 					for (uint32_t i = 0; i < 6; i++) tmpLeafVerts[i] = leafVerts[i];
 					for (uint32_t i = 0; i < 3; i++)
@@ -8680,14 +8692,19 @@ TEMPLATED void BVH_DOBB<Float, Index>::ConvertFrom( const MBVH8& original )
 			}
 			// best rotation candidate for the leaf frame
 			sideband[nodeIdx].rotation = lut.GetRotationForBasis( { a0, a1, a2 } );
-			// proxy k-DOP, to propagate upwards
-			for (uint32_t vertIdx = 0; vertIdx < noLeafVerts; vertIdx++)
-				for (uint32_t axisIdx = 0; axisIdx < DOBB_AXIS_COUNT; axisIdx++)
-				{
-					const float projection = tinybvh_dot( proxyKDopAxes[axisIdx], leafVerts[vertIdx] );
-					sideband[nodeIdx].kDopExtents[axisIdx].x = tinybvh_min( projection, sideband[nodeIdx].kDopExtents[axisIdx].x );
-					sideband[nodeIdx].kDopExtents[axisIdx].y = tinybvh_max( projection, sideband[nodeIdx].kDopExtents[axisIdx].y );
-				}
+			// proxy k-DOP, to propagate upwards: over every vertex of every triangle in the leaf
+			for (Index triIdx = 0; triIdx < currNode.triCount; triIdx++)
+			{
+				GET_PRIM_INDICES_I0_I1_I2( bvh8.bvh, bvh8.bvh.primIdx[currNode.firstTri + triIdx] );
+				const bvhvec3 triVerts[3] = { bvh8.bvh.verts[i0], bvh8.bvh.verts[i1], bvh8.bvh.verts[i2] };
+				for (uint32_t vertIdx = 0; vertIdx < 3; vertIdx++)
+					for (uint32_t axisIdx = 0; axisIdx < DOBB_AXIS_COUNT; axisIdx++)
+					{
+						const float projection = tinybvh_dot( proxyKDopAxes[axisIdx], triVerts[vertIdx] );
+						sideband[nodeIdx].kDopExtents[axisIdx].x = tinybvh_min( projection, sideband[nodeIdx].kDopExtents[axisIdx].x );
+						sideband[nodeIdx].kDopExtents[axisIdx].y = tinybvh_max( projection, sideband[nodeIdx].kDopExtents[axisIdx].y );
+					}
+			}
 			continue;
 		}
 		// interior node
@@ -8719,6 +8736,8 @@ TEMPLATED void BVH_DOBB<Float, Index>::ConvertFrom( const MBVH8& original )
 		}
 		sideband[nodeIdx].rotation = candidateRotationIdx;
 	}
+	// the encoding addresses BVHNode::CHILD_INDEX_BITS worth of nodes
+	BVH_FATAL_ERROR_IF( nodesNeeded > BVHNode::CHILD_INDEX_MASK, "BVH_DOBB::ConvertFrom( .. ), too many nodes for the child index field." );
 	// allocate nodes and primitive indices
 	if (allocatedNodes < nodesNeeded)
 	{
@@ -8841,6 +8860,7 @@ TEMPLATED void BVH_DOBB<Float, Index>::ConvertFrom( const MBVH8& original )
 			if (!currChild.isLeaf())
 			{
 				// interior child: reserve the next output node; the first one is the child base.
+				BVH_FATAL_ERROR_IF( stackIdx >= DOBB_STACK_SIZE, "BVH_DOBB::ConvertFrom( .. ), stack overflow; the tree is too deep." );
 				if (currDobbNodeInternalChildCount++ == 0) currDobbNodeChildBaseIdx = dobbNodeIdx;
 				stackBvhNodes[stackIdx] = currChildIdx;
 				stackDobbNodes[stackIdx++] = dobbNodeIdx++;
@@ -8850,7 +8870,7 @@ TEMPLATED void BVH_DOBB<Float, Index>::ConvertFrom( const MBVH8& original )
 			}
 			// leaf child: append its triangles to this node's run in dobbPrimIdx
 			if (currDobbNodeTriCount == 0) currDobbNode.triBaseIndex = (uint32_t)dobbTriIdx;
-			const uint8_t unaryTriCount = currChild.triCount == 1 ? 0b001 : 0b011;
+			const uint8_t unaryTriCount = (uint8_t)((1u << currChild.triCount) - 1); // 1, 2 or 3 triangles
 			currDobbNode.meta[childIdx] = (uint8_t)((unaryTriCount << 5) | currDobbNodeTriCount);
 			currDobbNodeTriCount += currChild.triCount;
 			for (Index triIdx = 0; triIdx < currChild.triCount; triIdx++)
@@ -8951,7 +8971,7 @@ TEMPLATED int32_t BVH_DOBB<Float, Index>::Intersect( Ray& ray ) const
 			}
 		}
 		// interior hits, farthest first, so the nearest ends on top of the stack
-		for (uint32_t sortedIdx = sortedCount; sortedIdx-- > 0;)
+		for (uint32_t sortedIdx = sortedCount; sortedIdx-- > 0; )
 		{
 			const uint32_t slot = sortedSlots[sortedIdx];
 			if (!(currNode.iMask & (1u << slot))) continue;
@@ -10104,6 +10124,7 @@ TEMPLATED BVH_GPU<Float, Index> BVH_GPU<Float, Index>::Load( const char* fileNam
 	BVH_GPU result;
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
+	result.settings = src.settings; // as saved
 	result.bvh = tinybvh_move( src );
 	result.ConvertFrom( result.bvh, false );
 	result.bvh = BVH( result.context ); // traversal runs on orderedVerts; the tree is spent
@@ -10115,6 +10136,7 @@ TEMPLATED_M MBVH<M, Float, Index> MBVH<M, Float, Index>::Load( const char* fileN
 	MBVH result;
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
+	result.settings = src.settings; // as saved
 	result.bvh = tinybvh_move( src );
 	result.ConvertFrom( result.bvh );
 	// An MBVH keeps its source: its leaves index that tree's primIdx array, and the collapse to
@@ -10132,6 +10154,7 @@ TEMPLATED BVH4_GPU<Float, Index> BVH4_GPU<Float, Index>::Load( const char* fileN
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
+	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh4 );
 	result.bvh4.bvh = tinybvh_move( src );
 	result.bvh4.ConvertFrom( result.bvh4.bvh );
@@ -10149,6 +10172,7 @@ TEMPLATED BVH4_AMD_HW<Float, Index> BVH4_AMD_HW<Float, Index>::Load( const char*
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
+	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh4 );
 	result.bvh4.bvh = tinybvh_move( src );
 	result.bvh4.bvh.SplitLeafs( 1 );
@@ -10168,6 +10192,7 @@ TEMPLATED CWBVH8_AMD_HW<Float, Index> CWBVH8_AMD_HW<Float, Index>::Load( const c
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
+	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh8 );
 	result.bvh8.bvh = tinybvh_move( src );
 	result.bvh8.bvh.SplitLeafs( 2 ); // One triangle pair per leaf, as in Build.
@@ -10187,6 +10212,7 @@ TEMPLATED BVH4_CPU<Float, Index> BVH4_CPU<Float, Index>::Load( const char* fileN
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
+	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh4 );
 	result.bvh4.bvh = tinybvh_move( src );
 	// ConvertFrom collapses from the binary tree itself, so the bvh4 nodes are built on the way.
@@ -10204,6 +10230,7 @@ TEMPLATED BVH8_CWBVH<Float, Index> BVH8_CWBVH<Float, Index>::Load( const char* f
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
+	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh8 );
 	result.bvh8.bvh = tinybvh_move( src );
 	result.bvh8.bvh.FitLeafs( 3 ); // a cwbvh leaf slot holds at most 3 prims
@@ -10223,6 +10250,7 @@ TEMPLATED BVH8_CPU<Float, Index> BVH8_CPU<Float, Index>::Load( const char* fileN
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
 	BVH src = BVH::Load( fileName );
 	if (src.usedNodes == 0) return result;
+	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh8 );
 	result.bvh8.bvh = tinybvh_move( src );
 	result.ConvertFrom( result.bvh8 );
