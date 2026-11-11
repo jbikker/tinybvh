@@ -2470,11 +2470,14 @@ static void CountBinarySteps( const tinybvh::BVH& b, const RaySet& rays, const b
 // has to be run first, and whether they have a file format of their own. The CPU layouts
 // collapse from the binary tree themselves; the four GPU layouts take an MBVH that is
 // already collapsed. WideBuild returns the MBVH the result was encoded from, which is what
-// gets measured.
+// gets measured. ConvertFrom runs with the settings of the instance it is called on, and every
+// MBVH and layout made here is fresh, so each takes the source tree's first: that is how a
+// candidate built serially stays serial through its collapse and encoding.
 // ----------------------------------------------------------------------------------------
 
 static const tinybvh::MBVH<4>* WideBuild( tinybvh::BVH4_CPU& o, tinybvh::MBVH<4>& m )
 {
+	o.settings = o.bvh4.settings = m.bvh.settings;
 	o.bvh4.bvh.ReferenceFrom( m.bvh ), o.bvh4.ownBVH = false, o.bvh4.nodeProb = m.nodeProb;
 	o.ConvertFrom( o.bvh4, true );	// leaves were merged by the optimizer's collapse
 	return &o.bvh4;
@@ -2482,6 +2485,7 @@ static const tinybvh::MBVH<4>* WideBuild( tinybvh::BVH4_CPU& o, tinybvh::MBVH<4>
 
 static const tinybvh::MBVH<8>* WideBuild( tinybvh::BVH8_CPU& o, tinybvh::MBVH<8>& m )
 {
+	o.settings = o.bvh8.settings = m.bvh.settings;
 	o.bvh8.bvh.ReferenceFrom( m.bvh ), o.bvh8.ownBVH = false, o.bvh8.nodeProb = m.nodeProb;
 	o.ConvertFrom( o.bvh8, true );
 	return &o.bvh8;
@@ -2489,24 +2493,28 @@ static const tinybvh::MBVH<8>* WideBuild( tinybvh::BVH8_CPU& o, tinybvh::MBVH<8>
 
 static const tinybvh::MBVH<4>* WideBuild( tinybvh::BVH4_GPU& o, tinybvh::MBVH<4>& m )
 {
+	m.settings = o.settings = m.bvh.settings;
 	m.ConvertFrom( m.bvh, true ), o.ConvertFrom( m, true );
 	return &m;
 }
 
 static const tinybvh::MBVH<8>* WideBuild( tinybvh::BVH8_CWBVH& o, tinybvh::MBVH<8>& m )
 {
+	m.settings = o.settings = m.bvh.settings;
 	m.ConvertFrom( m.bvh, true ), o.ConvertFrom( m, true );
 	return &m;
 }
 
 static const tinybvh::MBVH<4>* WideBuild( tinybvh::BVH4_AMD_HW& o, tinybvh::MBVH<4>& m )
 {
+	m.settings = o.settings = m.bvh.settings;
 	m.ConvertFrom( m.bvh, true ), o.ConvertFrom( m );
 	return &m;
 }
 
 static const tinybvh::MBVH<8>* WideBuild( tinybvh::CWBVH8_AMD_HW& o, tinybvh::MBVH<8>& m )
 {
+	m.settings = o.settings = m.bvh.settings;
 	m.ConvertFrom( m.bvh, true ), o.ConvertFrom( m, true );
 	return &m;
 }
@@ -2609,6 +2617,7 @@ template <typename T, int M> struct WideGate : public RoundGate
 	const char* Unit() const override { return useTime ? "measured traversal time" : "measured traversal work"; }
 	double Score( const tinybvh::BVH_Verbose& tree ) const override
 	{
+		work.settings = tree.settings; // ConvertFrom keeps an instance's own
 		work.ConvertFrom( tree );
 		if (info->leafPrims) { if (info->fitLeaves) work.FitLeafs( info->leafPrims ); else work.SplitLeafs( info->leafPrims ); }
 		tinybvh::MBVH<M> m;
@@ -2635,6 +2644,7 @@ struct BinaryGate : public RoundGate
 	const char* Unit() const override { return useTime ? "measured traversal time" : "measured traversal work"; }
 	double Score( const tinybvh::BVH_Verbose& tree ) const override
 	{
+		work.settings = tree.settings; // ConvertFrom keeps an instance's own
 		work.ConvertFrom( tree );
 		double box, prim, nodes;
 		CountBinarySteps( work, *rays, rootTest, box, prim, nodes );
@@ -3144,6 +3154,7 @@ static CostFit FitBinaryCostModel( const std::vector<bvhvec4>& tris, const bool 
 		if (gpuLayout)
 		{
 			if (!FitsGPULayout( cal[ti] )) { CostFit f; f.why = "a calibration tree does not fit the layout"; return f; }
+			gpu[ti].settings = cal[ti].settings;
 			gpu[ti].ConvertFrom( cal[ti], true );
 		}
 		mb[ti] = (double)(cal[ti].usedNodes * sizeof( tinybvh::BVH::BVHNode )
@@ -3878,10 +3889,12 @@ static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tri
 		float score = BVH_FAR;
 		{
 			tinybvh::BVH_Verbose verbose;
+			// ConvertFrom copies flags, not settings or costs. Without the settings a candidate
+			// built serially would optimize and be gated on the thread pool; without the costs the
+			// optimizer would spend its whole run minimizing a different SAH than the one the
+			// builder used and the one the result is judged by.
+			verbose.settings = bvh.settings;
 			verbose.ConvertFrom( bvh );
-			// ConvertFrom copies flags, not costs, so without this the optimizer spends its whole
-			// run minimizing a different SAH than the one the builder used and the one the result
-			// is judged by.
 			verbose.c_trav = bvh.c_trav, verbose.c_int = bvh.c_int, verbose.lQuads = bvh.lQuads;
 			Optimizer opt( verbose, rung );
 			opt.SetGate( gate );
@@ -4029,6 +4042,7 @@ static void EvaluateGPUTarget( const TargetInfo& info, tinybvh::BVH* bvh, const 
 		CountBinarySteps( bvh[c], score, false, box, prim, nodes );
 		const double cost = nodes * bvh[c].c_trav + prim * bvh[c].c_int;
 		tinybvh::BVH_GPU tree;
+		tree.settings = bvh[c].settings;
 		tree.ConvertFrom( bvh[c], true );
 		const double ns = WideTime( tree, score, w.timingRuns );
 		// nodes plus the ordered triangles, which this layout allocates and owns.
@@ -4730,6 +4744,7 @@ int main( int argc, char** argv )
 				bvh.primIdx[node.leftFirst + i], node.aabbMin, node.aabbMax, wide.noSplits );
 	}
 	tinybvh::BVH_Verbose verbose;
+	verbose.settings = bvh.settings; // as for the candidates: ConvertFrom copies neither
 	verbose.ConvertFrom( bvh );
 	verbose.c_trav = bvh.c_trav, verbose.c_int = bvh.c_int, verbose.lQuads = bvh.lQuads;
 	// Without a target the tree stays binary, so the gate is the binary walk, measured with a
