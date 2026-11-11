@@ -26,6 +26,6 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\bvhopt.cpp" />
+    <ClCompile Include="..\tools\bvhopt.cpp" />
   </ItemGroup>
 </Project>
