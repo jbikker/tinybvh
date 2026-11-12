@@ -981,6 +981,9 @@ public:
 	bool isIndexed() const { return vertIdx != 0; }
 	bool hasCustomGeom() const { return customIntersect != 0; }
 private:
+	// Compact's depth-first walk, and the subtrees that spread work over the pool.
+	template <bool COPY, bool STOP, typename F> void CompactWalk( BVHNode* dst, Index* idx, Index node, Index& nodePtr, Index& idxPtr, const uint32_t stopDepth, F&& atStop ) const;
+	uint32_t CollectSubtreeRoots( const uint32_t target, Index* roots, uint32_t& depth ) const;
 	// Recursive build entry points, scheduled via the threading hooks; the task trampolines are friends.
 	void Build( Index nodeIdx = 0, uint32_t depth = 0 );
 	void BuildFullSweep( Index nodeIdx = 0, uint32_t depth = 0 );
@@ -1376,8 +1379,9 @@ public:
 		const uint8_t* flag, const Index* subFirst, const Index* subCount, Index* srcNode );
 	// For BVH4_CPU and BVH8_CPU: collapse bvh into leaves of at most 4 prims, and lay the result out in
 	// 64-byte blocks: blocks[n] is the size of the subtree at n, base[n] its first block.
-	void ConvertForCPULayout( const bool leavesMerged );
-	void BlockLayout( const uint32_t nodeBlocks, const uint32_t leafBlocks, uint32_t* blocks, uint32_t* base ) const;
+	void ConvertForCPULayout();
+	Index BlockLayout( const uint32_t nodeBlocks, const uint32_t leafBlocks, uint32_t* blocks, uint32_t* base, Index* order ) const;
+	Index BlockLayoutParallel( const uint32_t tasks, const uint32_t nodeBlocks, const uint32_t leafBlocks, uint32_t* blocks, uint32_t* base, Index* order ) const;
 	// BVH data
 	MBVHNode* mbvhNode = 0;			// BVH node for M-wide BVH.
 	BVH bvh;						// MBVH<M> is created from BVH and uses its data.
@@ -1698,7 +1702,7 @@ public:
 	void Refit();
 	static BVH4_CPU Load( const char* fileName );
 	Float SAHCost( const Index nodeIdx ) const;
-	void ConvertFrom( MBVH<4, Float, Index>& original, bool leavesMerged = false );
+	void ConvertFrom( MBVH<4, Float, Index>& original );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// Traversal kernels specialized for the ray octant; the platform headers provide these.
@@ -1904,7 +1908,7 @@ public:
 	void Refit();
 	static BVH8_CPU Load( const char* fileName );
 	Float SAHCost( const Index nodeIdx ) const;
-	void ConvertFrom( MBVH<8, Float, Index>& original, bool leavesMerged = false );
+	void ConvertFrom( MBVH<8, Float, Index>& original );
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	// Traversal kernels specialized for the ray octant; the platform headers provide these.
@@ -3309,7 +3313,7 @@ TEMPLATED void BVH<Float, Index>::BuildHQ()
 	AlignedFree( idxTmp );
 	aabbMin = bvhNode[0].aabbMin, aabbMax = bvhNode[0].aabbMax;
 	refittable = false; // can't refit an SBVH
-	hasHoles = false, orderedNodes = true; // there may be holes in the index list, but not in the node list
+	hasHoles = false, orderedNodes = true; // there may be holes in the index list, but not in the node list; Compact removes them
 	StopNodeCounter( false ); // BuildHQTask waited for the spawned tasks
 #ifdef ENABLE_THREADED_BUILDS
 	if (threadedBuild) nextFrag = atomicNextFrag->load(), ContextDelete( atomicNextFrag );
@@ -4873,32 +4877,90 @@ TEMPLATED void BVH<Float, Index>::Compact()
 	// don't trim primIdx either: a rebuild that fits allocatedNodes reuses it (see BVH::fragment).
 	Index* idx = (Index*)AlignedAlloc( sizeof( Index ) * tinybvh_max( idxCount, allocatedNodes / 2 ) );
 	memcpy( tmpNodes, bvhNode, 2 * sizeof( BVHNode ) );
-	newNodePtr = 2;
-	Index newIdxPtr = 0, nodeIdx = 0, stack[TINYBVH_STACK_SIZE], stackPtr = 0;
-	while (1)
+	Index nodePtr = 2, idxPtr = 0;
+	auto none = []( Index, Index&, Index& ) {};
+	const uint32_t tasks = TaskCount( PoolAvailable() && usedNodes >= (Index)MT_CONVERT_MIN_NODES, usedNodes, MT_CONVERT_TASK_NODES, MT_CONVERT_MAX_TASKS );
+	const uint32_t target = tasks * 64, cap = 2 * target; // many subtrees per task, as they differ in size
+	Index* sub = tasks > 1 ? (Index*)AlignedAlloc( (size_t)cap * 5 * sizeof( Index ) ) : 0;
+	uint32_t count = 0, depth = 0;
+	if (sub) count = CollectSubtreeRoots( target, sub, depth );
+	if (count < 2) CompactWalk<true, false>( tmpNodes, idx, 0, nodePtr, idxPtr, 0, none );
+	else
 	{
-		BVHNode& node = tmpNodes[nodeIdx];
-		if (node.isLeaf())
+		// per subtree: its root (source index), its size in nodes and primitives (a walk that writes
+		// nothing counts), then where it goes: its root's new index, its first node and primitive.
+		Index* nodes = sub + cap, * prims = nodes + cap, * firstNode = prims + cap, * firstIdx = firstNode + cap;
+		ParallelFor( true, count, [&]( uint32_t k ) { nodes[k] = prims[k] = 0, CompactWalk<false, false>( 0, 0, sub[k], nodes[k], prims[k], 0, none ); } );
+		uint32_t k = 0; // the walk meets the subtree roots in the order CollectSubtreeRoots listed them
+		CompactWalk<true, true>( tmpNodes, idx, 0, nodePtr, idxPtr, depth, [&]( Index at, Index& n, Index& i )
 		{
-			const Index leafStart = newIdxPtr;
-			for (Index i = 0; i < node.triCount; i++) idx[newIdxPtr++] = primIdx[node.leftFirst + i];
-			node.leftFirst = leafStart;
-			if (!stackPtr) break;
-			nodeIdx = stack[--stackPtr];
-		}
-		else
-		{
-			const BVHNode& left = bvhNode[node.leftFirst];
-			const BVHNode& right = bvhNode[node.leftFirst + 1];
-			tmpNodes[newNodePtr] = left, tmpNodes[newNodePtr + 1] = right;
-			const Index todo1 = newNodePtr, todo2 = newNodePtr + 1;
-			node.leftFirst = newNodePtr, newNodePtr += 2;
-			nodeIdx = todo1, stack[stackPtr++] = todo2;
-		}
+			sub[k] = at, firstNode[k] = n, firstIdx[k] = i;
+			n += nodes[k], i += prims[k++];
+		} );
+		ParallelFor( true, count, [&]( uint32_t k ) { CompactWalk<true, false>( tmpNodes, idx, sub[k], firstNode[k], firstIdx[k], 0, none ); } );
 	}
+	if (sub) AlignedFree( sub );
 	AlignedFree( bvhNode );
 	AlignedFree( primIdx );
-	usedNodes = newNodePtr, bvhNode = tmpNodes, primIdx = idx;
+	newNodePtr = usedNodes = nodePtr, bvhNode = tmpNodes, primIdx = idx;
+	idxCount = idxPtr; // the entries the leaves reference; any beyond were never written.
+	hasHoles = false; // the relocated node list is contiguous.
+}
+
+// CompactWalk: Compact's depth-first walk from 'node', appending its descendants to dst from nodePtr
+// on, and its primitives to idx from idxPtr on. With COPY, 'node' is in dst already, with its source
+// child index; without, the walk reads the source and writes nothing, which counts. With STOP, an
+// interior node at stopDepth is not entered: atStop( node, nodePtr, idxPtr ) gets it, with the two
+// counters where it goes. The counters are kept in locals: as references into arrays, every write
+// to idx could change them, for all the compiler knows.
+TEMPLATED template <bool COPY, bool STOP, typename F> void BVH<Float, Index>::CompactWalk( BVHNode* dst, Index* idx, Index node, Index& nodePtr, Index& idxPtr, const uint32_t stopDepth, F&& atStop ) const
+{
+	Index stack[TINYBVH_STACK_SIZE], stackPtr = 0, np = nodePtr, ip = idxPtr;
+	uint32_t depthStack[STOP ? TINYBVH_STACK_SIZE : 1], depth = 0;
+	while (1)
+	{
+		const BVHNode& n = COPY ? dst[node] : bvhNode[node];
+		if (n.isLeaf() || (STOP && depth == stopDepth))
+		{
+			if (!n.isLeaf()) atStop( node, np, ip );
+			else if constexpr (!COPY) ip += n.triCount;
+		else
+		{
+				const Index first = n.leftFirst;
+				dst[node].leftFirst = ip;
+				for (Index i = 0; i < n.triCount; i++) idx[ip++] = primIdx[first + i];
+	}
+			if (!stackPtr) break;
+			node = stack[--stackPtr];
+			if constexpr (STOP) depth = depthStack[stackPtr];
+			continue;
+		}
+			BVH_FATAL_ERROR_IF( stackPtr == TINYBVH_STACK_SIZE, "BVH::Compact(), stack overflow; the tree is too deep." );
+		Index left = n.leftFirst;
+		if constexpr (COPY) dst[np] = bvhNode[left], dst[np + 1] = bvhNode[left + 1], dst[node].leftFirst = left = np;
+		if constexpr (STOP) depthStack[stackPtr] = ++depth;
+		stack[stackPtr++] = left + 1, node = left, np += 2;
+		}
+	nodePtr = np, idxPtr = ip;
+}
+
+// CollectSubtreeRoots: subtrees to spread work over the pool: the interior nodes at the first depth
+// that has at least 'target' of them, in the order of Compact's walk; 'roots' must hold 2 * target
+// entries. A depth holds at most twice the interior nodes of the one above, so the search starts
+// where 'target' fits, and gives up where the tree stops widening, or at depth 24. Returns how many,
+// and their depth; fewer than 2 means the tree is too narrow to split this way.
+TEMPLATED uint32_t BVH<Float, Index>::CollectSubtreeRoots( const uint32_t target, Index* roots, uint32_t& depth ) const
+{
+	uint32_t count = 0, previous = 0;
+	for (depth = 1; (1u << depth) < target; depth++);
+	for (; depth <= 24; depth++, previous = count)
+		{
+		Index n = 0, i = 0;
+		count = 0;
+		CompactWalk<false, true>( 0, 0, 0, n, i, depth, [&]( Index node, Index&, Index& ) { if (count < 2 * target) roots[count++] = node; } );
+		if (count >= target || count <= previous) break;
+	}
+	return count;
 }
 
 // BVH_Verbose implementation
@@ -6009,19 +6071,10 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 	Index* subCount = (Index*)AlignedAlloc( (size_t)N * sizeof( Index ) );
 	uint8_t* flag = (uint8_t*)AlignedAlloc( (size_t)N );
 	memset( flag, 0, N );
-	// pass 1: mark the nodes that are actually part of the tree. A child always
-	// has a higher index than its parent, so one forward sweep suffices.
-	flag[0] = USED;
-	for (Index n = 0; n < N; n++) if (flag[n] & USED)
-	{
-		const typename BVH::BVHNode& node = original.bvhNode[n];
-		if (!node.isLeaf()) flag[node.leftFirst] |= USED, flag[node.leftFirst + 1] |= USED;
-	}
-	// pass 2: bottom-up dynamic programming; same ordering argument, reversed.
+	// the cost of node n, from those of its children: bottom-up dynamic programming.
 	const Float c_leaf = Float( 0.8 ) * c_int; // fixed cost of a leaf, on top of its primitives
-	for (int64_t n = (int64_t)N - 1; n >= 0; n--)
+	auto collapseNode = [&]( const Index n )
 	{
-		if (!(flag[n] & USED)) continue;
 		const typename BVH::BVHNode& node = original.bvhNode[n];
 		const size_t base = (size_t)n * M;
 		const Float sa = nodeProb ? nodeProb[n] : SA( node.aabbMin, node.aabbMax );
@@ -6032,7 +6085,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 			flag[n] |= CONTIG | ASLEAF;
 			const Float c = sa * (c_leaf + c_int * (Float)this->LeafPrims( node.triCount ));
 			for (int32_t i = 0; i < M; i++) cost[base + i] = c;
-			continue;
+			return;
 		}
 		const size_t L = (size_t)node.leftFirst * M, R = L + M;
 		const Index li = node.leftFirst, ri = li + 1;
@@ -6063,7 +6116,58 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 		// means 'this subtree occupies a single slot'.
 		for (int32_t i = 2; i <= M; i++) if (cost[base] < cost[base + i - 1])
 			cost[base + i - 1] = cost[base], dist[base + i - 1] = 0;
+	};
+	// the costs of all nodes of the tree, children before parents. With the pool, subtrees are done
+	// in parallel, each by a walk that visits only reachable nodes, then the levels above them; each
+	// node's cost depends on its children only, so the result is the same as the serial sweeps.
+	const uint32_t tasks = this->TaskCount( this->PoolAvailable() && N >= (Index)MT_CONVERT_MIN_NODES, N, MT_CONVERT_TASK_NODES, MT_CONVERT_MAX_TASKS );
+	uint32_t rootCount = 0, rootDepth = 0;
+	Index* roots = 0;
+	if (tasks > 1)
+	{
+		const uint32_t target = tasks * 64;
+		roots = (Index*)AlignedAlloc( (2 * (size_t)target + 2) * sizeof( Index ) );
+		rootCount = original.CollectSubtreeRoots( target, roots, rootDepth );
 	}
+	if (rootCount > 1)
+	{
+		// a children-first walk from 'start'; an interior node at 'stopDepth' is a subtree root, done already.
+		auto walk = [&]( const Index start, const uint32_t stopDepth )
+		{
+			constexpr uint32_t STACK = 2 * TINYBVH_STACK_SIZE + 4;
+			Index stack[STACK];
+			uint32_t stackDepth[STACK], stackPtr = 0;
+			stack[stackPtr] = start, stackDepth[stackPtr++] = 0;
+			while (stackPtr)
+			{
+				const Index n = stack[--stackPtr];
+				const uint32_t d = stackDepth[stackPtr] & 0x7fffffff, expanded = stackDepth[stackPtr] >> 31;
+				const typename BVH::BVHNode& node = original.bvhNode[n];
+				if (node.isLeaf() || expanded) { flag[n] |= USED, collapseNode( n ); continue; }
+				if (d == stopDepth) continue;
+				BVH_FATAL_ERROR_IF( stackPtr + 3 > STACK, "MBVH::ConvertFrom( .. ), tree too deep." );
+				stack[stackPtr] = n, stackDepth[stackPtr++] = d | 0x80000000; // back to n after its children
+				stack[stackPtr] = node.leftFirst + 1, stackDepth[stackPtr++] = d + 1;
+				stack[stackPtr] = node.leftFirst, stackDepth[stackPtr++] = d + 1;
+			}
+		};
+		this->ParallelFor( true, rootCount, [&]( uint32_t k ) { walk( roots[k], ~0u ); } );
+		walk( 0, rootDepth );
+	}
+	else
+	{
+		// pass 1: mark the nodes that are actually part of the tree. A child always
+		// has a higher index than its parent, so one forward sweep suffices.
+		flag[0] = USED;
+		for (Index n = 0; n < N; n++) if (flag[n] & USED)
+		{
+			const typename BVH::BVHNode& node = original.bvhNode[n];
+			if (!node.isLeaf()) flag[node.leftFirst] |= USED, flag[node.leftFirst + 1] |= USED;
+		}
+		// pass 2: the costs; same ordering argument, reversed.
+		for (int64_t n = (int64_t)N - 1; n >= 0; n--) if (flag[n] & USED) collapseNode( (Index)n );
+	}
+	if (roots) AlignedFree( roots );
 	AlignedFree( cost ); // pass 3 does not need it.
 	Index spaceNeeded = spaceBound;
 	if (exact)
@@ -7241,14 +7345,12 @@ TEMPLATED void BVH4_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	// propagate settings for this layout to the underlying layout
 	this->PassSettingsTo( bvh4 ), this->PassSettingsTo( bvh4.bvh );
 	bvh4.bvh.hqLeafPrims = 4;
-	bvh4.bvh.settings.keepSplitting = true; // ConvertForCPULayout ends in SplitLeafs / FitLeafs( 4 )
+	bvh4.bvh.settings.keepSplitting = true; // small leaves: the collapse in ConvertForCPULayout groups them
 	// build underlying layout
 	bvh4.bvh.Build( vertices, indices, prims );
 	if (settings.discardIntermediates && ownBVH4 && bvh4.ownBVH) AlignedFree( bvh4.bvh.fragment ), bvh4.bvh.fragment = 0;
 	// convert to BVH4_CPU layout
-	// only the SBVH path sizes its leaves for this layout (hqLeafPrims); the others split down to
-	// one prim per leaf and need the collapse in ConvertForCPULayout to group them again.
-	ConvertFrom( bvh4, settings.useSpatialSplits && settings.binnedBVH );
+	ConvertFrom( bvh4 );
 }
 
 TEMPLATED void BVH4_CPU<Float, Index>::Save( const char* fileName )
@@ -7287,14 +7389,14 @@ TEMPLATED void BVH4_CPU<Float, Index>::Optimize( const uint32_t iterations, uint
 {
 	BVH_FATAL_ERROR_IF( bvh4.mbvhNode == 0, "BVH4_CPU::Optimize( .. ), no BVH4 to optimize (discarded, or loaded from file)." );
 	bvh4.bvh.Optimize( iterations, mu ); // the conversion below does the one collapse
-	ConvertFrom( bvh4, settings.useSpatialSplits && settings.binnedBVH ); // as in Build
+	ConvertFrom( bvh4 ); // as in Build
 }
 
 TEMPLATED void BVH4_CPU<Float, Index>::Refit()
 {
 	// refit the binary tree: the conversion below collapses from it, not from the bvh4 nodes.
 	bvh4.bvh.Refit();
-	ConvertFrom( bvh4, true ); // leaves were already combined by Build
+	ConvertFrom( bvh4 );
 }
 
 TEMPLATED Float BVH4_CPU<Float, Index>::SAHCost( const Index nodeIdx ) const
@@ -7324,7 +7426,7 @@ template <class Node, int M, typename Float, typename Index> int32_t tinybvh_emi
 		newNode->zmin[cidx] = child.aabbMin.z, newNode->zmax[cidx] = child.aabbMax.z;
 		if (child.isLeaf())
 		{
-			BVH_FATAL_ERROR_IF( child.triCount > 4, "MBVH::ConvertForCPULayout( .. ), leaf holds more than 4 prims; build with settings.keepSplitting, or convert with leavesMerged = false." );
+			BVH_FATAL_ERROR_IF( child.triCount > 4, "MBVH::ConvertForCPULayout( .. ), leaf holds more than 4 prims." );
 			newNode->child[cidx] = leafBlock + leafBit;
 			BVHTri4Leaf<Float, Index>* leaf = (BVHTri4Leaf<Float, Index>*)(data + (size_t)leafBlock * 64);
 			leafBlock += LEAF_BLOCKS;
@@ -7379,18 +7481,24 @@ TEMPLATED void BVH4_CPU<Float, Index>::EmitNode( MBVH<4, Float, Index>& src, con
 
 #undef SORT
 
-// leavesMerged: the source tree's leaves are at most four prims each already, so they only need
-// splitting if that turns out not to hold - which SplitLeafs decides for itself, from leafsSplit.
-// Without it the leaves are collapsed to four here, which merges as well as splits.
-TEMPLATED_M void MBVH<M, Float, Index>::ConvertForCPULayout( const bool leavesMerged )
+// ConvertForCPULayout: leaves of more than four prims are split first; SplitLeafs knows from
+// leafsSplit whether there are any. The collapse then groups prims into leaves of up to four by its
+// cost model, rather than taking every subtree of up to four prims as a leaf, as FitLeafs would:
+// a better tree, for a little more conversion time.
+TEMPLATED_M void MBVH<M, Float, Index>::ConvertForCPULayout()
 {
-	if (leavesMerged) bvh.SplitLeafs( 4 ); else bvh.FitLeafs( 4 );
+	bvh.SplitLeafs( 4 );
 	leafPrimLimit = 4; // leaves in these layouts hold 4 prims
 	ConvertFrom( bvh, true );
 }
 
-TEMPLATED_M void MBVH<M, Float, Index>::BlockLayout( const uint32_t nodeBlocks, const uint32_t leafBlocks, uint32_t* blocks, uint32_t* base ) const
+// BlockLayout: the block offset of every interior node (base) and the blocks of its subtree (blocks),
+// for layouts that store a node, then its leaves, then its interior children's subtrees. 'order'
+// receives the interior nodes in the order of their blocks; returns how many there are.
+TEMPLATED_M Index MBVH<M, Float, Index>::BlockLayout( const uint32_t nodeBlocks, const uint32_t leafBlocks, uint32_t* blocks, uint32_t* base, Index* order ) const
 {
+	const uint32_t tasks = this->TaskCount( this->PoolAvailable() && usedNodes >= (Index)MT_CONVERT_MIN_NODES, usedNodes, MT_CONVERT_TASK_NODES, MT_CONVERT_MAX_TASKS );
+	if (tasks > 1) { const Index count = BlockLayoutParallel( tasks, nodeBlocks, leafBlocks, blocks, base, order ); if (count) return count; }
 	// sweep 1, backward: a child always has a higher index than its parent. Leaves get no blocks
 	// of their own; they are emitted with their parent.
 	for (int64_t n = (int64_t)usedNodes - 1; n >= 0; n--)
@@ -7401,20 +7509,133 @@ TEMPLATED_M void MBVH<M, Float, Index>::BlockLayout( const uint32_t nodeBlocks, 
 		for (int32_t i = 0; i < M; i++) if (orig.child[i]) total += mbvhNode[orig.child[i]].isLeaf() ? leafBlocks : blocks[orig.child[i]];
 		blocks[n] = total;
 	}
-	// sweep 2, forward: each node's leaves follow it, then its interior children.
-	base[0] = 0;
-	for (Index n = 0; n < usedNodes; n++)
+	// sweep 2, depth-first: each node's leaves follow it, then its interior children, each with its
+	// subtree. Visiting the nodes in this order, rather than by index, lists them in block order, so
+	// they can be written front to back.
+	Index* stack = (Index*)AlignedAlloc( (size_t)usedNodes * sizeof( Index ) ), stackPtr = 0, count = 0;
+	base[0] = 0, stack[stackPtr++] = 0;
+	while (stackPtr)
 	{
+		const Index n = stack[--stackPtr];
 		const MBVHNode& orig = mbvhNode[n];
-		if (orig.isLeaf()) continue;
+		order[count++] = n;
 		uint32_t cursor = base[n] + nodeBlocks;
 		for (int32_t i = 0; i < M; i++) if (orig.child[i] && mbvhNode[orig.child[i]].isLeaf()) cursor += leafBlocks;
 		for (int32_t i = 0; i < M; i++) if (orig.child[i] && !mbvhNode[orig.child[i]].isLeaf())
 			base[orig.child[i]] = cursor, cursor += blocks[orig.child[i]];
+		for (int32_t i = M - 1; i >= 0; i--) if (orig.child[i] && !mbvhNode[orig.child[i]].isLeaf())
+			stack[stackPtr++] = orig.child[i]; // the first child is visited first
 	}
+	AlignedFree( stack );
+	return count;
 }
 
-TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& original, bool leavesMerged )
+// BlockLayoutParallel: BlockLayout with the pool, with the same result. The tree is cut into the
+// subtrees of the first level that has enough interior nodes for the tasks. Sweep 1 runs over the
+// subtrees in parallel, each by a children-first walk that also counts its interior nodes, then over
+// the levels above them. Sweep 2 runs over the levels above first, which gives each subtree its first
+// block and its stretch of 'order', then over the subtrees in parallel. Returns 0 for a tree too
+// narrow to split this way, which leaves the work to the serial sweeps.
+TEMPLATED_M Index MBVH<M, Float, Index>::BlockLayoutParallel( const uint32_t tasks, const uint32_t nodeBlocks, const uint32_t leafBlocks, uint32_t* blocks, uint32_t* base, Index* order ) const
+{
+	const uint32_t target = tasks * 16; // fewer than for the binary tree: wide trees have fewer nodes, and the levels above stay serial
+	constexpr uint32_t maxDepth = 16, STACK = M * TINYBVH_STACK_SIZE + M + 1; // a walk keeps up to M entries per level
+	auto interior = [&]( const Index c ) { return c != 0 && !mbvhNode[c].isLeaf(); };
+	// the subtrees: the interior nodes of the first level that has enough of them, in block order.
+	const uint32_t levelCap = M * target + M;
+	Index* levelMem = (Index*)AlignedAlloc( 2 * (size_t)levelCap * sizeof( Index ) ), * level = levelMem, * next = levelMem + levelCap;
+	uint32_t levelSize = 1, interiorCount = 1, depth = 0;
+	level[0] = 0;
+	while (interiorCount < target && depth < maxDepth)
+	{
+		uint32_t m = 0;
+		for (uint32_t i = 0; i < levelSize; i++) for (int32_t j = 0; j < M; j++) if (interior( mbvhNode[level[i]].child[j] )) next[m++] = mbvhNode[level[i]].child[j];
+		Index* t = level;
+		level = next, next = t, levelSize = interiorCount = m, depth++;
+		if (m == 0 || (size_t)m * M > levelCap) break;
+	}
+	AlignedFree( levelMem );
+	if (interiorCount < 2) return 0;
+	Index* mem = (Index*)AlignedAlloc( (size_t)interiorCount * 3 * sizeof( Index ) );
+	Index* root = mem, * inner = mem + interiorCount, * rank = mem + 2 * (size_t)interiorCount;
+	uint32_t count = 0;
+	{
+		// depth-first, children in slot order: the order of their blocks.
+		Index stack[2 * STACK];
+		uint32_t stackDepth[2 * STACK], stackPtr = 0;
+		stack[stackPtr] = 0, stackDepth[stackPtr++] = 0;
+		while (stackPtr)
+		{
+			--stackPtr;
+			const Index n = stack[stackPtr];
+			const uint32_t d = stackDepth[stackPtr];
+			if (d == depth) { root[count++] = n; continue; }
+			for (int32_t j = M - 1; j >= 0; j--) if (interior( mbvhNode[n].child[j] ))
+				stack[stackPtr] = mbvhNode[n].child[j], stackDepth[stackPtr++] = d + 1;
+		}
+	}
+	// sweep 1: a children-first walk from 'start' sets blocks[], and returns the interior nodes it
+	// visited; an interior node at 'stopDepth' is a subtree root, done already, which counts as 'skip'.
+	auto sweep1 = [&]( const Index start, const uint32_t stopDepth, const Index* skip )
+	{
+		Index stack[STACK], visited = 0;
+		uint32_t stackDepth[STACK], stackPtr = 0, k = 0;
+		stack[stackPtr] = start, stackDepth[stackPtr++] = 0;
+		while (stackPtr)
+		{
+			const Index n = stack[--stackPtr];
+			const uint32_t d = stackDepth[stackPtr] & 0x7fffffff, expanded = stackDepth[stackPtr] >> 31;
+			const MBVHNode& orig = mbvhNode[n];
+			if (expanded)
+			{
+				uint32_t total = nodeBlocks;
+				for (int32_t i = 0; i < M; i++) if (orig.child[i]) total += mbvhNode[orig.child[i]].isLeaf() ? leafBlocks : blocks[orig.child[i]];
+				blocks[n] = total, visited++;
+				continue;
+			}
+			if (d == stopDepth) { visited += skip[k++]; continue; } // in block order, as the roots
+			BVH_FATAL_ERROR_IF( stackPtr + M + 1 > STACK, "MBVH::BlockLayout(), tree too deep." );
+			stack[stackPtr] = n, stackDepth[stackPtr++] = d | 0x80000000; // back to n after its children
+			for (int32_t i = M - 1; i >= 0; i--) if (orig.child[i])
+			{
+				if (mbvhNode[orig.child[i]].isLeaf()) blocks[orig.child[i]] = 0;
+				else stack[stackPtr] = orig.child[i], stackDepth[stackPtr++] = d + 1;
+			}
+		}
+		return visited;
+	};
+	this->ParallelFor( true, count, [&]( uint32_t k ) { inner[k] = sweep1( root[k], ~0u, 0 ); } );
+	const Index total = sweep1( 0, depth, inner );
+	// sweep 2: a depth-first walk from 'start' assigns base[] to its children and lists the interior
+	// nodes in order[] from 'first' on; a subtree root at 'stopDepth' gets its stretch of order[] instead.
+	auto sweep2 = [&]( const Index start, const uint32_t stopDepth, Index first )
+	{
+		Index stack[STACK];
+		uint32_t stackDepth[STACK], stackPtr = 0, k = 0;
+		stack[stackPtr] = start, stackDepth[stackPtr++] = 0;
+		while (stackPtr)
+		{
+			--stackPtr;
+			const Index n = stack[stackPtr];
+			const uint32_t d = stackDepth[stackPtr];
+			if (d == stopDepth) { rank[k] = first, first += inner[k], k++; continue; }
+			const MBVHNode& orig = mbvhNode[n];
+			order[first++] = n;
+			uint32_t cursor = base[n] + nodeBlocks;
+			for (int32_t i = 0; i < M; i++) if (orig.child[i] && mbvhNode[orig.child[i]].isLeaf()) cursor += leafBlocks;
+			for (int32_t i = 0; i < M; i++) if (interior( orig.child[i] )) base[orig.child[i]] = cursor, cursor += blocks[orig.child[i]];
+			BVH_FATAL_ERROR_IF( stackPtr + M > STACK, "MBVH::BlockLayout(), tree too deep." );
+			for (int32_t i = M - 1; i >= 0; i--) if (interior( orig.child[i] )) stack[stackPtr] = orig.child[i], stackDepth[stackPtr++] = d + 1;
+		}
+	};
+	base[0] = 0;
+	sweep2( 0, depth, 0 );
+	this->ParallelFor( true, count, [&]( uint32_t k ) { sweep2( root[k], ~0u, rank[k] ); } );
+	AlignedFree( mem );
+	return total;
+}
+
+TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& original )
 {
 	// get a copy of the input bvh4; as BVH8_CPU, with fewer lanes and without the null leaf.
 	if (&original != &bvh4) ownBVH4 = false; // bvh isn't ours; don't delete in destructor.
@@ -7422,7 +7643,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& origi
 	bvh4.ReferenceFrom( original );
 	const bool discard = settings.discardIntermediates && ownBVH4;
 	bvh4.lQuads = lQuads, bvh4.c_int = c_int, bvh4.c_trav = c_trav;
-	bvh4.ConvertForCPULayout( leavesMerged );
+	bvh4.ConvertForCPULayout();
 	if (&original != &bvh4) original = bvh4; // avoid caller holding freed pointer.
 	// from here on only bvh4.bvh.primIdx is read; the binary nodes can go.
 	if (discard && bvh4.ownBVH) AlignedFree( bvh4.bvh.bvhNode ), bvh4.bvh.bvhNode = 0;
@@ -7444,16 +7665,18 @@ TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& origi
 	constexpr uint32_t NODE_BLOCKS = sizeof( BVHNode ) / 64, LEAF_BLOCKS = sizeof( BVHTri4Leaf ) / 64;
 	uint32_t* blocks = (uint32_t*)AlignedAlloc( (size_t)nodeCount * sizeof( uint32_t ) );
 	uint32_t* base = (uint32_t*)AlignedAlloc( (size_t)nodeCount * sizeof( uint32_t ) );
-	bvh4.BlockLayout( NODE_BLOCKS, LEAF_BLOCKS, blocks, base );
-	// sweep 3: every node's address and its children's addresses are now known, so
-	// the nodes no longer depend on each other and can be written in any order.
+	Index* order = (Index*)AlignedAlloc( (size_t)nodeCount * sizeof( Index ) );
+	const Index interior = bvh4.BlockLayout( NODE_BLOCKS, LEAF_BLOCKS, blocks, base, order );
+	// sweep 3: every node's address and its children's addresses are now known, so the nodes no
+	// longer depend on each other. They are written in block order, so each task writes one
+	// contiguous stretch of the output, front to back.
 	const uint32_t tasks = TaskCount( PoolAvailable() && nodeCount >= (Index)MT_CONVERT_MIN_NODES, nodeCount, MT_CONVERT_TASK_NODES, MT_CONVERT_MAX_TASKS );
 	ParallelFor( true, tasks, [&]( uint32_t task )
 	{
-		for (Index n = SliceStart( nodeCount, task, tasks ), last = SliceStart( nodeCount, task + 1, tasks ); n < last; n++) EmitNode( bvh4, base, n );
+		for (Index j = SliceStart( interior, task, tasks ), last = SliceStart( interior, task + 1, tasks ); j < last; j++) EmitNode( bvh4, base, order[j] );
 	} );
 	usedBlocks = blocks[0];
-	AlignedFree( blocks ), AlignedFree( base );
+	AlignedFree( blocks ), AlignedFree( base ), AlignedFree( order );
 	// the layout is self-contained: release the MBVH and the rest of the BVH2, leaving bvh4 empty, as Load() leaves it.
 	if (discard) bvh4 = MBVH<4, Float, Index>( context );
 }
@@ -7500,13 +7723,13 @@ TEMPLATED void BVH8_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	this->PassSettingsTo( bvh8 ), this->PassSettingsTo( bvh8.bvh );
 	// as for BVH4_CPU: leaves hold 4 prims, so the SBVH builder stops at that size.
 	bvh8.bvh.hqLeafPrims = 4;
-	bvh8.bvh.settings.keepSplitting = true; // ConvertForCPULayout ends in SplitLeafs / FitLeafs( 4 )
+	bvh8.bvh.settings.keepSplitting = true; // small leaves: the collapse in ConvertForCPULayout groups them
 	// build underlying layout
 	bvh8.bvh.Build( vertices, indices, prims );
 	if (settings.discardIntermediates && ownBVH8 && bvh8.ownBVH) AlignedFree( bvh8.bvh.fragment ), bvh8.bvh.fragment = 0;
 	// convert to BVH8_CPU layout
 	// as for BVH4_CPU: only the SBVH path sizes its leaves here; the others need the collapse.
-	ConvertFrom( bvh8, settings.useSpatialSplits && settings.binnedBVH );
+	ConvertFrom( bvh8 );
 }
 
 TEMPLATED void BVH8_CPU<Float, Index>::Save( const char* fileName )
@@ -7545,14 +7768,14 @@ TEMPLATED void BVH8_CPU<Float, Index>::Optimize( const uint32_t iterations, uint
 {
 	BVH_FATAL_ERROR_IF( bvh8.mbvhNode == 0, "BVH8_CPU::Optimize( .. ), no BVH8 to optimize (discarded, or loaded from file)." );
 	bvh8.bvh.Optimize( iterations, mu ); // the conversion below does the one collapse
-	ConvertFrom( bvh8, settings.useSpatialSplits && settings.binnedBVH ); // as in Build
+	ConvertFrom( bvh8 ); // as in Build
 }
 
 TEMPLATED void BVH8_CPU<Float, Index>::Refit()
 {
 	// refit the binary tree: the conversion below collapses from it, not from the bvh8 nodes.
 	bvh8.bvh.Refit();
-	ConvertFrom( bvh8, true ); // leaves were already combined by Build
+	ConvertFrom( bvh8 );
 }
 
 TEMPLATED Float BVH8_CPU<Float, Index>::SAHCost( const Index nodeIdx ) const
@@ -7581,7 +7804,7 @@ TEMPLATED void BVH8_CPU<Float, Index>::EmitNode( MBVH<8, Float, Index>& src, con
 	}
 }
 
-TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& original, bool leavesMerged )
+TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& original )
 {
 	// get a copy of the input bvh8
 	if (&original != &bvh8) ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
@@ -7589,7 +7812,7 @@ TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& origi
 	bvh8.ReferenceFrom( original );
 	const bool discard = settings.discardIntermediates && ownBVH8;
 	bvh8.lQuads = lQuads, bvh8.c_int = c_int, bvh8.c_trav = c_trav;
-	bvh8.ConvertForCPULayout( leavesMerged );
+	bvh8.ConvertForCPULayout();
 	if (&original != &bvh8) original = bvh8; // avoid caller from holding freed pointer.
 	if (discard && bvh8.ownBVH) AlignedFree( bvh8.bvh.bvhNode ), bvh8.bvh.bvhNode = 0;
 	// allocate if needed - leaves are stored only as leaf blocks: they get no node record.
@@ -7613,17 +7836,19 @@ TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& origi
 	constexpr uint32_t NODE_BLOCKS = sizeof( BVHNode ) / 64, LEAF_BLOCKS = sizeof( BVHTri4Leaf ) / 64;
 	uint32_t* blocks = (uint32_t*)AlignedAlloc( (size_t)nodeCount * sizeof( uint32_t ) );
 	uint32_t* base = (uint32_t*)AlignedAlloc( (size_t)nodeCount * sizeof( uint32_t ) );
-	bvh8.BlockLayout( NODE_BLOCKS, LEAF_BLOCKS, blocks, base );
-	// sweep 3: every node's address and its children's addresses are now known, so
-	// the nodes no longer depend on each other and can be written in any order.
+	Index* order = (Index*)AlignedAlloc( (size_t)nodeCount * sizeof( Index ) );
+	const Index interior = bvh8.BlockLayout( NODE_BLOCKS, LEAF_BLOCKS, blocks, base, order );
+	// sweep 3: every node's address and its children's addresses are now known, so the nodes no
+	// longer depend on each other. They are written in block order, so each task writes one
+	// contiguous stretch of the output, front to back.
 	const uint32_t tasks = TaskCount( PoolAvailable() && nodeCount >= (Index)MT_CONVERT_MIN_NODES, nodeCount, MT_CONVERT_TASK_NODES, MT_CONVERT_MAX_TASKS );
 	ParallelFor( true, tasks, [&]( uint32_t task )
 	{
-		for (Index n = SliceStart( nodeCount, task, tasks ), last = SliceStart( nodeCount, task + 1, tasks ); n < last; n++) EmitNode( bvh8, base, nullLeafBlock, n );
+		for (Index j = SliceStart( interior, task, tasks ), last = SliceStart( interior, task + 1, tasks ); j < last; j++) EmitNode( bvh8, base, nullLeafBlock, order[j] );
 	} );
 	BVH_FATAL_ERROR_IF( blocks[0] > nullLeafBlock, "BVH8_CPU::ConvertFrom, block count underestimated." );
 	usedBlocks = nullLeafBlock + sizeof( BVHTri4Leaf ) / 64;
-	AlignedFree( blocks ), AlignedFree( base );
+	AlignedFree( blocks ), AlignedFree( base ), AlignedFree( order );
 	// the layout is self-contained: release the MBVH and the rest of the BVH2, leaving bvh8 empty, as Load() leaves it.
 	if (discard) bvh8 = MBVH<8, Float, Index>( context );
 }
@@ -7672,7 +7897,10 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::Build( const Slice& vertices, const Ind
 	this->PassSettingsTo( bvh8 ), this->PassSettingsTo( bvh8.bvh );
 	// build underlying layout
 	bvh8.bvh.Build( vertices, indices, prims );
-	bvh8.bvh.FitLeafs( 3 ); // merge subtrees that fit in one leaf slot, cap the rest at that size
+	// split leaves larger than a leaf slot; the collapse decides which small subtrees become leaves,
+	// rather than FitLeafs taking each one that fits. Not keepSplitting, unlike BVH4_CPU: leaves
+	// here are priced per prim, and from one-prim leaves the collapse makes leaves too small to pay.
+	bvh8.bvh.SplitLeafs( 3 );
 	// convert to BVH8_CWBVH layout
 	bvh8.leafPrimLimit = 3; // a cwbvh leaf slot holds at most 3 prims
 	bvh8.ConvertFrom( bvh8.bvh, true );
@@ -10233,7 +10461,7 @@ TEMPLATED BVH8_CWBVH<Float, Index> BVH8_CWBVH<Float, Index>::Load( const char* f
 	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh8 );
 	result.bvh8.bvh = tinybvh_move( src );
-	result.bvh8.bvh.FitLeafs( 3 ); // a cwbvh leaf slot holds at most 3 prims
+	result.bvh8.bvh.SplitLeafs( 3 ); // a cwbvh leaf slot holds at most 3 prims; as in Build
 	result.bvh8.leafPrimLimit = 3;
 	result.bvh8.ConvertFrom( result.bvh8.bvh, true );
 	result.ConvertFrom( result.bvh8, true );
