@@ -4125,12 +4125,13 @@ TEMPLATED void BVH<Float, Index>::SplitLeafs( const Index maxPrims )
 			continue;
 		}
 		if (node.triCount <= maxPrims) continue;
-		// Split off 'maxPrims' primitives into a left child.
+		// Split in two halves of whole groups of 'maxPrims'.
+		const Index groups = (node.triCount + maxPrims - 1) / maxPrims, leftCount = groups / 2 * maxPrims;
 		BVHNode& left = bvhNode[newNodePtr], & right = bvhNode[newNodePtr + 1];
 		left = node, right = node;
-		right.leftFirst = node.leftFirst + maxPrims;
-		right.triCount = node.triCount - maxPrims;
-		left.triCount = maxPrims, node.leftFirst = newNodePtr, node.triCount = 0, newNodePtr += 2;
+		right.leftFirst = node.leftFirst + leftCount;
+		right.triCount = node.triCount - leftCount;
+		left.triCount = leftCount, node.leftFirst = newNodePtr, node.triCount = 0, newNodePtr += 2;
 	}
 	AlignedFree( reachable );
 	usedNodes = newNodePtr, leafsSplit = maxPrims;
@@ -9764,8 +9765,9 @@ TEMPLATED void BVH<Float, Index>::BuildBonsaiHQ( const Slice& vertices, const In
 	BonsaiHQState st;
 	st.idxTmp = (Index*)AlignedAlloc( cap * sizeof( Index ) );
 	st.mask[0] = (uint8_t*)AlignedAlloc( 2 * (size_t)cap ), st.mask[1] = st.mask[0] + cap;
-	// Section 3.2: mini trees of 512 fragments below 100k primitives, 8192 above 4M, linear in between.
-	st.threshold = 512 + (Index)(7680 * tinybvh_clamp( ((Float)N - 100000) / 3900000, Float( 0 ), Float( 1 ) ));
+	// Section 3.2: mini trees of 512 fragments below 100k primitives, 8192 above 4M, linear in between;
+	// here at least 1024, as small partitions cost more in clipping than their splits gain.
+	st.threshold = tinybvh_max( (Index)1024, 512 + (Index)(7680 * tinybvh_clamp( ((Float)N - 100000) / 3900000, Float( 0 ), Float( 1 ) )) );
 	nextFrag = N;
 #ifdef ENABLE_THREADED_BUILDS
 	if (threadedBuild) atomicNextFrag = this->template ContextNew<std::atomic<Index>>( N );
