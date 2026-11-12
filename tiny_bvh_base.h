@@ -6071,6 +6071,9 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 	Index* subCount = (Index*)AlignedAlloc( (size_t)N * sizeof( Index ) );
 	uint8_t* flag = (uint8_t*)AlignedAlloc( (size_t)N );
 	memset( flag, 0, N );
+	// for the exact node count: per node and slot count, the output nodes that choice produces,
+	// tallied with the costs, children first. The total is 1 + outNodes[M - 1] of the root.
+	Index* outNodes = exact ? (Index*)AlignedAlloc( (size_t)N * M * sizeof( Index ) ) : 0;
 	// the cost of node n, from those of its children: bottom-up dynamic programming.
 	const Float c_leaf = Float( 0.8 ) * c_int; // fixed cost of a leaf, on top of its primitives
 	auto collapseNode = [&]( const Index n )
@@ -6085,6 +6088,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 			flag[n] |= CONTIG | ASLEAF;
 			const Float c = sa * (c_leaf + c_int * (Float)this->LeafPrims( node.triCount ));
 			for (int32_t i = 0; i < M; i++) cost[base + i] = c;
+			if (outNodes) for (int32_t i = 0; i < M; i++) outNodes[base + i] = 1; // a leaf takes one slot, as one node
 			return;
 		}
 		const size_t L = (size_t)node.leftFirst * M, R = L + M;
@@ -6105,6 +6109,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 				if (c < best) best = c, bestK = (uint8_t)k;
 			}
 			cost[base + i - 1] = best, dist[base + i - 1] = bestK;
+			if (outNodes) outNodes[base + i - 1] = outNodes[L + bestK - 1] + outNodes[R + (i - bestK) - 1];
 		}
 		// cost in a single slot: a new wide node, or the whole subtree as one leaf.
 		const Float cNode = sa * c_trav + cost[base + M - 1];
@@ -6112,10 +6117,15 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 		if ((flag[n] & CONTIG) && subCount[n] <= leafPrimLimit)
 			cLeaf = sa * (c_leaf + c_int * (Float)this->LeafPrims( subCount[n] ));
 		if (cLeaf < cNode) cost[base] = cLeaf, flag[n] |= ASLEAF; else cost[base] = cNode;
+		// in one slot: a leaf, or a new wide node over its split into M.
+		if (outNodes) outNodes[base] = (flag[n] & ASLEAF) ? 1 : 1 + outNodes[base + M - 1];
 		// a subtree may always use fewer slots than it is offered; dist == 0 then
 		// means 'this subtree occupies a single slot'.
 		for (int32_t i = 2; i <= M; i++) if (cost[base] < cost[base + i - 1])
+		{
 			cost[base + i - 1] = cost[base], dist[base + i - 1] = 0;
+			if (outNodes) outNodes[base + i - 1] = outNodes[base];
+		}
 		// a wide node must split: only a subtree that becomes a leaf may stay in one slot when
 		// offered M. Otherwise it would decode into itself, and the decode would not end.
 		BVH_FATAL_ERROR_IF( !(flag[n] & ASLEAF) && dist[base + M - 1] == 0, "MBVH::ConvertFrom( .. ), a node would decode into itself; are its costs negative?" );
@@ -6172,23 +6182,9 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 	}
 	if (roots) AlignedFree( roots );
 	AlignedFree( cost ); // pass 3 does not need it.
-	Index spaceNeeded = spaceBound;
-	if (exact)
-	{
-		// count the output nodes, using the same walks as pass 3.
-		Index stack[MBVH_WALK_STACK], stackPtr = 0, term[M];
-		stack[stackPtr++] = 0, spaceNeeded = 1;
-		while (stackPtr)
-		{
-			const uint32_t n = DecodeWalk( original, stack[--stackPtr], dist, term );
-			spaceNeeded += n;
-			for (uint32_t j = 0; j < n; j++) if (!(flag[term[j]] & ASLEAF))
-			{
-				BVH_FATAL_ERROR_IF( stackPtr == MBVH_WALK_STACK, "MBVH::ConvertFrom( .. ), tree too deep." );
-				stack[stackPtr++] = term[j];
-			}
-		}
-	}
+	// the exact node count: the root, and what its split into M slots produces.
+	const Index spaceNeeded = exact ? 1 + outNodes[M - 1] : spaceBound;
+	if (outNodes) AlignedFree( outNodes );
 	if (allocatedNodes < spaceNeeded)
 	{
 		AlignedFree( mbvhNode );
