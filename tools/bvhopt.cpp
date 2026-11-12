@@ -2479,7 +2479,7 @@ static const tinybvh::MBVH<4>* WideBuild( tinybvh::BVH4_CPU& o, tinybvh::MBVH<4>
 {
 	o.settings = o.bvh4.settings = m.bvh.settings;
 	o.bvh4.bvh.ReferenceFrom( m.bvh ), o.bvh4.ownBVH = false, o.bvh4.nodeProb = m.nodeProb;
-	o.ConvertFrom( o.bvh4, true );	// leaves were merged by the optimizer's collapse
+	o.ConvertFrom( o.bvh4 );	// splits leaves over four prims only; the collapse groups the rest
 	return &o.bvh4;
 }
 
@@ -2487,7 +2487,7 @@ static const tinybvh::MBVH<8>* WideBuild( tinybvh::BVH8_CPU& o, tinybvh::MBVH<8>
 {
 	o.settings = o.bvh8.settings = m.bvh.settings;
 	o.bvh8.bvh.ReferenceFrom( m.bvh ), o.bvh8.ownBVH = false, o.bvh8.nodeProb = m.nodeProb;
-	o.ConvertFrom( o.bvh8, true );
+	o.ConvertFrom( o.bvh8 );
 	return &o.bvh8;
 }
 
@@ -2569,7 +2569,7 @@ struct TargetInfo
 	const char* name;
 	uint32_t leafPrims;		// primitives per leaf this layout is built for; 0: no cap, SAH decides
 	uint32_t collapseLimit;	// leafPrimLimit for the collapse; 0 means it may not merge leaves
-	bool fitLeaves;			// FitLeafs rather than SplitLeafs, as the layout's own Load does
+	bool fitLeaves;			// FitLeafs rather than SplitLeafs; as the layout's own Build and Load do
 	bool quadLeaves;		// leaf of four tested as one unit, so a partial leaf costs a full quad
 };
 
@@ -2580,7 +2580,7 @@ static const TargetInfo g_target[TGT_COUNT] =
 	{ "bvh4cpu",     4, 4, false, true  },
 	{ "bvh8cpu",     4, 4, false, true  },
 	{ "bvh4gpu",     4, 0, false, true  },
-	{ "bvh8cwbvh",   3, 3, true,  false },
+	{ "bvh8cwbvh",   3, 3, false, false },	// SplitLeafs( 3 ), as BVH8_CWBVH::Build and Load
 	{ "bvh4amdhw",   1, 0, false, false },
 	{ "cwbvh8amdhw", 2, 2, false, false }
 };
@@ -3381,7 +3381,10 @@ struct Replacement
 };
 
 // Copy a replacement's subtree into the new node list, clipping every box to the box of the node
-// it replaces, which only shrinks them and keeps the root box exactly equal to the original's.
+// it replaces, which only shrinks them and keeps the root box exactly equal to the original's. A
+// rebuilt node can lie wholly outside that box on some axis, and a ray that reaches it through its
+// ancestors cannot hit anything there; its clip is empty, and becomes a point in the box, of zero
+// area, as ClippedArea counts it. Left inverted, its area would be negative.
 static void EmitReplacement( const Replacement& r, const uint32_t src, const uint32_t dst,
 	const bvhvec3& lo, const bvhvec3& hi, std::vector<tinybvh::BVH::BVHNode>& node, std::vector<uint32_t>& prim )
 {
@@ -3394,6 +3397,8 @@ static void EmitReplacement( const Replacement& r, const uint32_t src, const uin
 		const tinybvh::BVH::BVHNode& in = r.tree.bvhNode[s];
 		tinybvh::BVH::BVHNode& out = node[d];
 		out.aabbMin = tinybvh_max( in.aabbMin, lo ), out.aabbMax = tinybvh_min( in.aabbMax, hi );
+		const bvhvec3 e = out.aabbMax - out.aabbMin;
+		if (e.x < 0 || e.y < 0 || e.z < 0) out.aabbMax = out.aabbMin = tinybvh_min( out.aabbMin, hi );
 		if (in.isLeaf())
 		{
 			out.leftFirst = (uint32_t)prim.size(), out.triCount = in.triCount;

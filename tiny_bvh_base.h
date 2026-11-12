@@ -6077,7 +6077,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 	{
 		const typename BVH::BVHNode& node = original.bvhNode[n];
 		const size_t base = (size_t)n * M;
-		const Float sa = nodeProb ? nodeProb[n] : SA( node.aabbMin, node.aabbMax );
+		const Float sa = nodeProb ? nodeProb[n] : tinybvh_max( Float( 0 ), SA( node.aabbMin, node.aabbMax ) );
 		if (node.isLeaf())
 		{
 			// a leaf takes a single slot, no matter how many it is offered.
@@ -6116,6 +6116,9 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 		// means 'this subtree occupies a single slot'.
 		for (int32_t i = 2; i <= M; i++) if (cost[base] < cost[base + i - 1])
 			cost[base + i - 1] = cost[base], dist[base + i - 1] = 0;
+		// a wide node must split: only a subtree that becomes a leaf may stay in one slot when
+		// offered M. Otherwise it would decode into itself, and the decode would not end.
+		BVH_FATAL_ERROR_IF( !(flag[n] & ASLEAF) && dist[base + M - 1] == 0, "MBVH::ConvertFrom( .. ), a node would decode into itself; are its costs negative?" );
 	};
 	// the costs of all nodes of the tree, children before parents. With the pool, subtrees are done
 	// in parallel, each by a walk that visits only reachable nodes, then the levels above them; each
