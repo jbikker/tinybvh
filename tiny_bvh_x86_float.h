@@ -962,6 +962,26 @@ TINYBVH_FORCEINLINE __m256 halfArea8( const __m256& b0, const __m256& b1, const 
 	const __m256 z = _mm256_shuffle_ps( t1, t3, _MM_SHUFFLE( 1, 0, 1, 0 ) );
 	return _mm256_add_ps( _mm256_add_ps( _mm256_mul_ps( x, y ), _mm256_mul_ps( y, z ) ), _mm256_mul_ps( z, x ) );
 }
+
+// Best SAH split of a node of 3 or 4 fragments, packed boxes in box[0, n). Every partition into two non-empty sets is evaluated.
+static float tinybvh_split_tiny( const __m256* box, const uint32_t n, uint32_t& leftMask, __m256& lbox, __m256& rbox )
+{
+	const uint32_t full = (1u << n) - 1;
+	ALIGNED( 32 ) __m256 u[16];
+	ALIGNED( 32 ) float area[16];
+	u[0] = bvhc_max8();
+	for (uint32_t m = 1; m <= full; m++) u[m] = _mm256_max_ps( u[m & (m - 1)], box[tinybvh_ctz( m )] );
+	for (uint32_t m = 0; m <= full; m += 8) _mm256_store_ps( area + m, halfArea8( u[m], u[m + 1], u[m + 2], u[m + 3], u[m + 4], u[m + 5], u[m + 6], u[m + 7] ) );
+	float best = BVH_FAR;
+	for (uint32_t m = 1; m <= full >> 1; m++)
+	{
+		const float cost = area[m] * (float)tinybvh_popc( m ) + area[full ^ m] * (float)tinybvh_popc( full ^ m );
+		if (cost < best) best = cost, leftMask = m;
+	}
+	lbox = u[leftMask], rbox = u[full ^ leftMask];
+	return best;
+}
+
 // 8 counts as floats; lane k holds count k.
 TINYBVH_FORCEINLINE __m256 sweepLanes( const __m128i lo /* counts 0..3 */, const __m128i hi /* counts 4..7 */ )
 {
@@ -1145,6 +1165,26 @@ template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx,
 				bvhNode[n + 1].leftFirst = first + 1, bvhNode[n + 1].triCount = 1;
 				node.leftFirst = n, node.triCount = 0;
 				break;
+			}
+			if (node.triCount <= 4)
+			{
+				// three or four primitives: every partition scored, which is cheaper than binning, and optimal.
+				const uint32_t first = node.leftFirst, cnt = node.triCount;
+				__m256 box[4], lbox, rbox;
+				uint32_t frag[4], mask = 0;
+				for (uint32_t k = 0; k < cnt; k++) box[k] = _mm256_and_ps( _mm256_xor_ps( tinybvh_load8( fragment + (frag[k] = primIdx[first + k]) ), bvhc_signFlip8() ), bvhc_xyz8() );
+				const float cost = tinybvh_split_tiny( box, cnt, mask, lbox, rbox );
+				if ((c_trav + c_int * cost / SAV >= (float)cnt * c_int && !settings.keepSplitting) || taskCount == BVH_NUM_ELEMS( task )) break; // not splitting is better.
+				uint32_t left = 0, right = cnt;
+				for (uint32_t k = 0; k < cnt; k++) if (mask & (1u << k)) primIdx[first + left++] = frag[k]; else primIdx[first + --right] = frag[k];
+				const uint32_t n = AllocNodePair();
+				tinybvh_store8( &bvhNode[n], _mm256_xor_ps( lbox, bvhc_signFlip8() ) );
+				bvhNode[n].leftFirst = first, bvhNode[n].triCount = left;
+				tinybvh_store8( &bvhNode[n + 1], _mm256_xor_ps( rbox, bvhc_signFlip8() ) );
+				bvhNode[n + 1].leftFirst = first + left, bvhNode[n + 1].triCount = cnt - left;
+				node.leftFirst = n, node.triCount = 0;
+				task[taskCount] = n + 1, taskDepth[taskCount++] = depth + 1, nodeIdx = n, depth++;
+				continue;
 			}
 			// lane 3 holds leftFirst / triCount: clear it, as above, to keep denormals out.
 			const __m128 nodeMin4 = _mm_and_ps( tinybvh_load4( &bvhNode[nodeIdx].aabbMin ), bvhc_mask3() );
