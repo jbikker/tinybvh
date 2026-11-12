@@ -9453,7 +9453,9 @@ TEMPLATED void BVH<Float, Index>::BuildBonsaiTrees( const Index C )
 	// 5. Top tree over the R promoted nodes, built in a separate BVH by the same SIMD builder, with
 	// threading as for the full build. c_trav = 0: never stop splitting on SAH grounds.
 	BVH top( context );
-	top.settings = settings, top.settings.usePresplitting = false;
+	// each top tree leaf must hold one promoted node: keepSplitting splits every node of two or more,
+	// halving its range where the bins separate nothing, as when centroids coincide.
+	top.settings = settings, top.settings.usePresplitting = false, top.settings.keepSplitting = true;
 	top.c_trav = 0, top.c_int = 1;
 	top.triCount = top.idxCount = R, top.allocatedNodes = 2 * R;
 	top.fragment = (Fragment*)top.AlignedAlloc( R * sizeof( Fragment ) );
@@ -9472,27 +9474,6 @@ TEMPLATED void BVH<Float, Index>::BuildBonsaiTrees( const Index C )
 	top.BuildSIMDSubtree( 0, 0 );
 	top.BuildSIMDFinalize();
 	if (top.scratchPad) top.AlignedFree( top.scratchPad ), top.scratchPad = 0;
-	// Leaves that still hold several mini trees (the binned split could not separate them, e.g.
-	// coinciding centroids) are split by halving their index range; appended pairs are visited too.
-	for (Index t = 2; t < top.newNodePtr; t++)
-	{
-		BVHNode& leaf = top.bvhNode[t];
-		if (leaf.triCount < 2) continue;
-		const Index n = top.newNodePtr, half = leaf.triCount / 2;
-		top.newNodePtr += 2;
-		for (Index k = 0; k < 2; k++)
-		{
-			BVHNode& child = top.bvhNode[n + k];
-			child.leftFirst = leaf.leftFirst + k * half, child.triCount = k ? leaf.triCount - half : half;
-			child.aabbMin = Vec3( bvh_far<Float> ), child.aabbMax = Vec3( -bvh_far<Float> );
-			for (Index i = child.leftFirst; i < child.leftFirst + child.triCount; i++)
-			{
-				const Fragment& f = top.fragment[top.primIdx[i]];
-				child.aabbMin = tinybvh_min( child.aabbMin, f.bmin ), child.aabbMax = tinybvh_max( child.aabbMax, f.bmax );
-			}
-		}
-		leaf.leftFirst = n, leaf.triCount = 0;
-	}
 	// 6. Copy the top tree into place: its pair q goes to [2, 2C) for q < C - 1, or else to a
 	// freed pair; its leaves become the promoted nodes. Everything read here is a copy, so
 	// overwriting freed pairs and the old root slots is safe.
@@ -9501,6 +9482,7 @@ TEMPLATED void BVH<Float, Index>::BuildBonsaiTrees( const Index C )
 	{
 		const BVHNode& src = top.bvhNode[t];
 		BVHNode& dst = bvhNode[t == 0 ? 0 : (pairSlot( t ) + (t & 1))];
+		BVH_FATAL_ERROR_IF( src.triCount > 1, "BVH::BuildBonsai(), a top tree leaf holds several mini trees; the top tree is too deep." );
 		if (src.isLeaf()) dst = promoted[top.primIdx[src.leftFirst]];
 		else dst = src, dst.leftFirst = pairSlot( src.leftFirst );
 	}
