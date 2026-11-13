@@ -1700,6 +1700,14 @@ static const Rewrite kRewrites[] = {
 	// builders left out: asking for one is a fatal error, as for the optimizer
 	{ "-fullsweep", "if (settings.useFullSweep) PrepareBuild( vertices, indices, prims ), BuildFullSweep();",
 		"if (settings.useFullSweep) { BVH_FATAL_ERROR( \"BVH::Build( .. ), settings.useFullSweep: the full-sweep builder is not part of this build of TinyBVH.\" ); }", false },
+	// Bonsai's top tree builders: one line each, which goes with its builder. Asking for a builder that
+	// is left out is a fatal error, as for the others; BONSAI_TOP_CHEAPEST tries the ones there are.
+	{ "-fullsweep", "if (settings.bonsaiTopTree == BONSAI_TOP_FULLSWEEP) top.BuildFullSweep( 0, 0 ), built = true;",
+		"BVH_FATAL_ERROR_IF( settings.bonsaiTopTree == BONSAI_TOP_FULLSWEEP, \"BVH::Build( .. ), settings.bonsaiTopTree: the full-sweep builder is not part of this build of TinyBVH.\" );", false },
+	{ "-fullsweep", "{ BVH t( context ); prepareTop( t ); t.BuildFullSweep( 0, 0 ); if (t.InteriorArea() < top.InteriorArea()) top = tinybvh_move( t ); }", 0, false },
+	{ "-hploc", "if (settings.bonsaiTopTree == BONSAI_TOP_HPLOC) top.BuildHPLOC(), built = true;",
+		"BVH_FATAL_ERROR_IF( settings.bonsaiTopTree == BONSAI_TOP_HPLOC, \"BVH::Build( .. ), settings.bonsaiTopTree: the H-PLOC builder is not part of this build of TinyBVH.\" );", false },
+	{ "-hploc", "{ BVH t( context ); prepareTop( t ); t.BuildHPLOC(); if (t.InteriorArea() < top.InteriorArea()) top = tinybvh_move( t ); }", 0, false },
 	{ "-hploc", "else if (settings.useHPLOC) PrepareBuild( vertices, indices, prims ), BuildHPLOC();",
 		"else if (settings.useHPLOC) { BVH_FATAL_ERROR( \"BVH::Build( .. ), settings.useHPLOC: the H-PLOC builder is not part of this build of TinyBVH.\" ); }", false },
 	{ "-presplitting", "// special builders: full-sweep, H-PLOC.",
