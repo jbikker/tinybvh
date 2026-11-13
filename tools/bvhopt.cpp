@@ -3074,6 +3074,7 @@ template <typename T, int M> static CostFit FitWideCostModel( const std::vector<
 	uint32_t buckets = 0;
 	{
 		tinybvh::BVH ref;
+		ref.settings.bonsaiTopTree = tinybvh::BONSAI_TOP_CHEAPEST; // as for every Bonsai this tool builds
 		ref.Build( tris.data(), (uint32_t)tris.size() / 3 );
 		buckets = SplitRaysByWork( ref, rays, bucket, CAL_BUCKETS, CAL_MIN_RAYS );
 	}
@@ -3134,6 +3135,7 @@ static CostFit FitBinaryCostModel( const std::vector<bvhvec4>& tris, const bool 
 	uint32_t buckets = 0;
 	{
 		tinybvh::BVH ref;
+		ref.settings.bonsaiTopTree = tinybvh::BONSAI_TOP_CHEAPEST; // as for every Bonsai this tool builds
 		ref.Build( tris.data(), (uint32_t)tris.size() / 3 );
 		buckets = SplitRaysByWork( ref, rays, bucket, CAL_BUCKETS, CAL_MIN_RAYS );
 	}
@@ -3809,6 +3811,10 @@ static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tri
 	bvh.settings.binnedBVH = cand.binned;		// SBVH with, Bonsai HQ without
 	bvh.hqbvhbins = cand.bins, bvh.hqbvhoddeven = cand.oddEven;
 	bvh.settings.bonsaiPruneFactor = cand.prune;
+	// for a Bonsai candidate: the best of three top trees, which the library leaves off by default for
+	// its build time. Under -metric raycost the gate picks it, below; otherwise the library does, by
+	// SAH. The baseline below stays a stock build, as every improvement is quoted against it.
+	bvh.settings.bonsaiTopTree = tinybvh::BONSAI_TOP_CHEAPEST;
 	bvh.hqLeafPrims = capped ? info.leafPrims : 0, bvh.lQuads = info.quadLeaves;
 	bvh.c_trav = cTrav, bvh.c_int = cInt;
 	// One candidate per thread means the work inside one has to stay on its own thread: the
@@ -3821,19 +3827,48 @@ static void PrepareCandidate( tinybvh::BVH& bvh, const std::vector<bvhvec4>& tri
 	// they recover them exactly. Which is only worth doing if the optimizer is going to take the
 	// leaves apart anyway; with -noexplode it works with the ones the builder produced.
 	bvh.settings.keepSplitting = set.explodeLeaves;
-	if (filter.active())
+	auto build = [&]()
 	{
-		// Build over the kept triangles only, as an indexed mesh. The tree stays indexed for the
-		// whole of the optimizer: its primitive indices are then positions in the kept list, which
-		// is what the builder's own fragment array is sized for, and triangle lookups go through
-		// vertIdx and land on the right vertices. Unindexing happens at the end, once nothing is
-		// reading those arrays any more - see the bottom of this function.
-		bvh.Build( tinybvh::bvhvec4slice( tris.data(), (uint32_t)tris.size(), sizeof( bvhvec4 ) ),
-			filter.vertIdx.data(), (uint32_t)filter.keep.size() );
+		if (filter.active())
+		{
+			// Build over the kept triangles only, as an indexed mesh. The tree stays indexed for the
+			// whole of the optimizer: its primitive indices are then positions in the kept list, which
+			// is what the builder's own fragment array is sized for, and triangle lookups go through
+			// vertIdx and land on the right vertices. Unindexing happens at the end, once nothing is
+			// reading those arrays any more - see the bottom of this function.
+			bvh.Build( tinybvh::bvhvec4slice( tris.data(), (uint32_t)tris.size(), sizeof( bvhvec4 ) ),
+				filter.vertIdx.data(), (uint32_t)filter.keep.size() );
+		}
+		else bvh.Build( tris.data(), (uint32_t)tris.size() / 3 );
+		// Before anything else touches the tree: see RebuildSubtrees.
+		if (pre.on) RebuildSubtrees( bvh, pre );
+	};
+	if (!cand.binned && metric == METRIC_RAYCOST && gate)
+	{
+		// A Bonsai's top tree, by ray cost: the tree from each top builder, as built, is scored by the
+		// gate, and the cheapest is the one the optimizer starts from. SAH, the library's own pick,
+		// misjudged it on some scenes. Rebuilding the winner gives the same tree again.
+		static const uint32_t topTree[3] = { tinybvh::BONSAI_TOP_BINNED, tinybvh::BONSAI_TOP_FULLSWEEP, tinybvh::BONSAI_TOP_HPLOC };
+		static const char* topName[3] = { "binned", "full sweep", "H-PLOC" };
+		double bestCost = BVH_FAR, cost[3];
+		uint32_t pick = 0;
+		for (uint32_t k = 0; k < 3; k++)
+		{
+			bvh.settings.bonsaiTopTree = topTree[k];
+			build();
+			tinybvh::BVH_Verbose verbose;
+			verbose.settings = bvh.settings;
+			verbose.ConvertFrom( bvh );
+			verbose.c_trav = bvh.c_trav, verbose.c_int = bvh.c_int, verbose.lQuads = bvh.lQuads;
+			cost[k] = gate->Score( verbose );
+			if (cost[k] < bestCost) bestCost = cost[k], pick = k;
+		}
+		if (set.verbose) printf( "  %-10s top tree by ray cost: binned %.4f, full sweep %.4f, H-PLOC %.4f: %s\n",
+			CandidateName( candidate ), cost[0], cost[1], cost[2], topName[pick] );
+		bvh.settings.bonsaiTopTree = topTree[pick];
+		if (pick != 2) build(); // the last one built is still in place
 	}
-	else bvh.Build( tris.data(), (uint32_t)tris.size() / 3 );
-	// Before anything else touches the tree: see RebuildSubtrees.
-	if (pre.on) RebuildSubtrees( bvh, pre );
+	else build();
 	st.seconds = MilliSec( t0, Clock::now() ) / 1000.0;
 	st.sahPre = bvh.SAHCost(), st.epoPre = bvh.EPOCost();
 	const Clock::time_point t1 = Clock::now();
@@ -4251,6 +4286,7 @@ static int RunWideTargets( const std::string& meshPath, const Optimizer::Setting
 		// throwaway tree instead: the distribution is a property of where the geometry is and
 		// what it occludes, not of how it happens to be organized, so the sets are the same.
 		tinybvh::BVH seed;
+		seed.settings.bonsaiTopTree = tinybvh::BONSAI_TOP_CHEAPEST; // as for every Bonsai this tool builds
 		seed.Build( tris.data(), (uint32_t)tris.size() / 3 );
 		GenerateRays( seed, w.rays, set.seed ^ 0x9E3779B9u, fit );
 		GenerateRays( seed, w.rays, set.seed ^ 0x85EBCA6Bu, score );
