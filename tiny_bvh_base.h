@@ -640,6 +640,15 @@ template <typename F> inline void tinybvh_parallel_for( const BVHContext& ctx, u
 	else for (uint32_t i = 0; i < n; i++) body( i );
 }
 
+// Bonsai's top tree builders, for BVHBuildSettings::bonsaiTopTree.
+enum BonsaiTopTree : uint32_t
+{
+	BONSAI_TOP_BINNED = 0,	// the binned SIMD builder: fast, and the default
+	BONSAI_TOP_FULLSWEEP,	// a full sweep: in tests usually the better top tree
+	BONSAI_TOP_HPLOC,		// H-PLOC: sometimes the better one, and then by a margin
+	BONSAI_TOP_CHEAPEST		// all three, keeping the lowest SAH: better trees, slower builds
+};
+
 struct BVHBuildSettings
 {
 	bool usePresplitting = false;	// pre-split triangles before building the BVH.
@@ -655,6 +664,7 @@ struct BVHBuildSettings
 	bool binnedBVH = false;			// use the binned SAH builders instead: the SIMD builder, or SBVH with useSpatialSplits.
 	uint32_t bonsaiGridPrims = 256;	// Bonsai: grid resolution target, in primitives per grid cell (empty cells included).
 	float bonsaiPruneFactor = 0.1f;	// Bonsai, Bonsai HQ: prune mini trees larger than this fraction of the average mini tree; 0 disables.
+	uint32_t bonsaiTopTree = BONSAI_TOP_BINNED; // Bonsai, Bonsai HQ: how the top tree is built; see BonsaiTopTree.
 	bool useHPLOC = false;			// H-PLOC builder; builds trees identical to NexusBVH CUDA code, for comparisons.
 	bool keepSplitting = false;		// subdivide regardless of what SAH prefers; see SplitLeafs.
 	bool postOptimize = false;		// optimize generated BVH by parallel reinsertion; see BVH_Verbose::Optimize.
@@ -984,6 +994,7 @@ private:
 	// Compact's depth-first walk, and the subtrees that spread work over the pool.
 	template <bool COPY, bool STOP, typename F> void CompactWalk( BVHNode* dst, Index* idx, Index node, Index& nodePtr, Index& idxPtr, const uint32_t stopDepth, F&& atStop ) const;
 	uint32_t CollectSubtreeRoots( const uint32_t target, Index* roots, uint32_t& depth ) const;
+	Float InteriorArea() const;
 	// Recursive build entry points, scheduled via the threading hooks; the task trampolines are friends.
 	void Build( Index nodeIdx = 0, uint32_t depth = 0 );
 	void BuildFullSweep( Index nodeIdx = 0, uint32_t depth = 0 );
@@ -9388,12 +9399,17 @@ TEMPLATED void BVH<Float, Index>::BuildBonsai()
 	if (C == 1) BuildSIMDSubtree( 0, 0 ); else BuildBonsaiTrees( C );
 }
 
+// InteriorArea: the summed surface area of the interior nodes, for a tree without holes. A tree's
+// SAH cost, apart from its leaves.
+TEMPLATED Float BVH<Float, Index>::InteriorArea() const
+{
+	Float area = 0;
+	for (Index n = 0; n < newNodePtr; n++) if (n != 1 && !bvhNode[n].isLeaf()) area += SA( bvhNode[n].aabbMin, bvhNode[n].aabbMax );
+	return area;
+}
+
 // Bonsai stages shared by BuildBonsai and BuildBonsaiHQ: mini trees over C > 1 partitions,
 // given as leftFirst / triCount in nodes [2, 2 + C), then pruning and the top tree.
-// Node layout: 0: root, 1: unused, [2, 2C): top tree pairs (temporarily: the C mini tree
-// roots), [2C, ..): mini tree pairs, allocated through the regular node counter. The top tree
-// needs R-1 pairs for R roots; pruning frees R-C pairs, the C-1 others are [2, 2C). The node
-// list is therefore contiguous.
 TEMPLATED void BVH<Float, Index>::BuildBonsaiTrees( const Index C )
 {
 	const BVHNode& root = bvhNode[0];
@@ -9452,28 +9468,45 @@ TEMPLATED void BVH<Float, Index>::BuildBonsaiTrees( const Index C )
 	AlignedFree( order );
 	// 5. Top tree over the R promoted nodes, built in a separate BVH by the same SIMD builder, with
 	// threading as for the full build. c_trav = 0: never stop splitting on SAH grounds.
-	BVH top( context );
-	// each top tree leaf must hold one promoted node: keepSplitting splits every node of two or more,
-	// halving its range where the bins separate nothing, as when centroids coincide.
-	top.settings = settings, top.settings.usePresplitting = false, top.settings.keepSplitting = true;
-	top.c_trav = 0, top.c_int = 1;
-	top.triCount = top.idxCount = R, top.allocatedNodes = 2 * R;
-	top.fragment = (Fragment*)top.AlignedAlloc( R * sizeof( Fragment ) );
-	top.primIdx = (Index*)top.AlignedAlloc( R * sizeof( Index ) );
-	top.bvhNode = (BVHNode*)top.AlignedAlloc( 2 * R * sizeof( BVHNode ) );
+	auto prepareTop = [&]( BVH& t )
+	{
+		// each top tree leaf must hold one promoted node: keepSplitting splits every node of two or
+		// more, halving its range where the bins separate nothing, as when centroids coincide.
+		t.settings = settings, t.settings.usePresplitting = false, t.settings.keepSplitting = true;
+		t.c_trav = 0, t.c_int = 1;
+		t.triCount = t.idxCount = R, t.allocatedNodes = 2 * R;
+		t.fragment = (Fragment*)t.AlignedAlloc( R * sizeof( Fragment ) );
+		t.primIdx = (Index*)t.AlignedAlloc( R * sizeof( Index ) );
+		t.bvhNode = (BVHNode*)t.AlignedAlloc( 2 * R * sizeof( BVHNode ) );
 	for (Index r = 0; r < R; r++)
 	{
-		Fragment& f = top.fragment[r];
-		f.bmin = promoted[r].aabbMin, f.bmax = promoted[r].aabbMax, f.primIdx = r, f.clipped = 0, top.primIdx[r] = r;
+			Fragment& f = t.fragment[r];
+			f.bmin = promoted[r].aabbMin, f.bmax = promoted[r].aabbMax, f.primIdx = r, f.clipped = 0, t.primIdx[r] = r;
 	}
-	top.bvhNode[0] = root, top.bvhNode[0].leftFirst = 0, top.bvhNode[0].triCount = R;
-	memset( &top.bvhNode[1], 0, sizeof( BVHNode ) );
-	top.newNodePtr = 2, top.threadedBuild = threadedBuild;
+		t.bvhNode[0] = root, t.bvhNode[0].leftFirst = 0, t.bvhNode[0].triCount = R;
+		memset( &t.bvhNode[1], 0, sizeof( BVHNode ) );
+		t.newNodePtr = 2, t.threadedBuild = threadedBuild;
+	};
+	BVH top( context );
+	prepareTop( top );
+	// the builder settings.bonsaiTopTree asks for, or the binned one, which every build of the library has.
+	bool built = false;
+	if (settings.bonsaiTopTree == BONSAI_TOP_FULLSWEEP) top.BuildFullSweep( 0, 0 ), built = true;
+	if (settings.bonsaiTopTree == BONSAI_TOP_HPLOC) top.BuildHPLOC(), built = true;
+	if (!built)
+	{
 	top.StartNodeCounter();
 	if (threadedBuild) top.scratchPad = (Index*)top.AlignedAlloc( R * sizeof( Index ) );
 	top.BuildSIMDSubtree( 0, 0 );
 	top.BuildSIMDFinalize();
 	if (top.scratchPad) top.AlignedFree( top.scratchPad ), top.scratchPad = 0;
+	}
+	if (settings.bonsaiTopTree == BONSAI_TOP_CHEAPEST)
+	{
+		// more top trees, as no one builder wins on every scene.
+		{ BVH t( context ); prepareTop( t ); t.BuildFullSweep( 0, 0 ); if (t.InteriorArea() < top.InteriorArea()) top = tinybvh_move( t ); }
+		{ BVH t( context ); prepareTop( t ); t.BuildHPLOC(); if (t.InteriorArea() < top.InteriorArea()) top = tinybvh_move( t ); }
+	}
 	// 6. Copy the top tree into place: its pair q goes to [2, 2C) for q < C - 1, or else to a
 	// freed pair; its leaves become the promoted nodes. Everything read here is a copy, so
 	// overwriting freed pairs and the old root slots is safe.
