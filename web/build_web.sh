@@ -5,8 +5,10 @@
 # generator's rules match the headers' exact text.
 #
 #   sh build_web.sh [path to tinybvh_custom.cpp] [folder with the six headers]
+#
+# The defaults suit a staging folder in the repository root, such as the workflow's _site.
 set -e
-SRC=${1:-../tinybvh_custom.cpp}
+SRC=${1:-../tools/tinybvh_custom.cpp}
 HEADERS=${2:-..}
 
 # -fwasm-exceptions: the generator reports malformed headers with an exception; WebAssembly's own

@@ -23,7 +23,7 @@ not part of the repository.
 ## Publishing
 
 `.github/workflows/web.yml` builds and publishes the page on every push to `main` that changes the
-headers, `tinybvh_custom.cpp` or this folder, and can also be run by hand from the Actions tab. It
+headers, `tools/tinybvh_custom.cpp` or this folder, and can also be run by hand from the Actions tab. It
 installs Emscripten, builds the page in `_site/`, checks it with `check_web.cjs` against the native
 generator, and deploys it only if every check passes.
 
@@ -39,7 +39,7 @@ From the repository root, with Emscripten (emsdk) on the path, the same steps as
     mkdir -p _site
     cp web/index.html web/worker.js web/generator.js _site/
     cd _site
-    sh ../web/build_web.sh ../tinybvh_custom.cpp ..
+    sh ../web/build_web.sh ../tools/tinybvh_custom.cpp ..
     python -m http.server
 
 Then open `http://localhost:8000/`. Opened straight from disk instead, browsers refuse to load the

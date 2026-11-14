@@ -8,7 +8,7 @@ on:
     branches: [ main ]
     paths:
       - 'tiny_bvh*.h'
-      - 'tinybvh_custom.cpp'
+      - 'tools/tinybvh_custom.cpp'
       - 'web/**'
       - '.github/workflows/web.yml'
   workflow_dispatch:
@@ -25,7 +25,7 @@ concurrency:
 
 env:
   EMSDK_VERSION: 6.0.13          # the Emscripten release to build with
-  GENERATOR: tinybvh_custom.cpp  # the generator's source
+  GENERATOR: tools/tinybvh_custom.cpp  # the generator's source
   HEADERS: .                     # the folder with the six TinyBVH headers
   SITE_SOURCES: web              # index.html, worker.js, generator.js, build_web.sh, check_web.cjs
 

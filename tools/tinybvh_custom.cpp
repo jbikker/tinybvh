@@ -1140,12 +1140,36 @@ struct Options
 	Options() { for (bool& b : on) b = true; on[T_MBVH] = on[T_BVH_VERBOSE] = false; }
 };
 
-// Which intermediate layouts the other choices require.
-static bool RequiresMBVH( const Options& o )
+// Which intermediate layouts the other choices require: MBVH for the layouts converted through it,
+// BVH_Verbose for the parts that work on it. Resolve, the Windows window and --describe read these.
+static const Toggle kNeedsMBVH[] = { T_BVH4_GPU, T_BVH4_CPU, T_BVH8_CPU, T_BVH8_CWBVH, T_BVH4_AMD_HW, T_CWBVH8_AMD_HW, T_BVH_DOBB };
+static const Toggle kNeedsVerbose[] = { T_OPTIMIZER, T_MERGELEAFS };
+template <size_t N> static bool AnyOn( const Options& o, const Toggle( &list )[N] )
 {
-	return o.on[T_BVH4_GPU] || o.on[T_BVH4_CPU] || o.on[T_BVH8_CPU] || o.on[T_BVH8_CWBVH] || o.on[T_BVH4_AMD_HW] || o.on[T_CWBVH8_AMD_HW] || o.on[T_BVH_DOBB];
+	for (const Toggle t : list) if (o.on[t]) return true;
+	return false;
 }
-static bool RequiresVerbose( const Options& o ) { return o.on[T_OPTIMIZER] || o.on[T_MERGELEAFS]; }
+static bool RequiresMBVH( const Options& o ) { return AnyOn( o, kNeedsMBVH ); }
+static bool RequiresVerbose( const Options& o ) { return AnyOn( o, kNeedsVerbose ); }
+
+// Where each toggle goes, in the Windows window and on the web page: group (0: layouts, 1: builders,
+// 2: code), column, row. The two intermediate layouts show as '<class>, when needed'.
+struct Place { int t, group, col, row; };
+static const Place kPlace[] = {
+	{ T_BVH_GPU, 0, 0, 0 }, { T_BVH4_GPU, 0, 0, 1 }, { T_BVH8_CWBVH, 0, 0, 2 }, { T_BVH4_AMD_HW, 0, 0, 3 }, { T_CWBVH8_AMD_HW, 0, 0, 4 },
+	{ T_BVH_DOBB, 0, 0, 5 },
+	{ T_BVH4_CPU, 0, 1, 0 }, { T_BVH8_CPU, 0, 1, 1 }, { T_VOXELSET, 0, 1, 2 }, { T_MBVH, 0, 1, 3 }, { T_BVH_VERBOSE, 0, 1, 4 },
+	{ T_PRESPLITTING, 1, 0, 0 }, { T_FULLSWEEP, 1, 0, 1 }, { T_HPLOC, 1, 0, 2 },
+	{ T_OPTIMIZER, 1, 1, 0 }, { T_MERGELEAFS, 1, 1, 1 },
+	{ T_THREADING, 2, 0, 0 }, { T_TEMPLATES, 2, 0, 1 },
+	{ T_X86, 2, 1, 0 }, { T_ARM, 2, 1, 1 },
+};
+static const char* kGroupTitle[3] = { "Layouts (BVH is always included)", "Builders and optimization", "Code" };
+static const int kRows[3] = { 6, 3, 2 };	// rows per group
+static std::string DisplayLabel( const int t )
+{
+	return (t == T_MBVH || t == T_BVH_VERBOSE) ? std::string( kToggles[t].cls ) + ", when needed" : kToggles[t].label;
+}
 
 static Options Resolve( Options o )
 {
@@ -2453,6 +2477,14 @@ static bool LoadSources( const std::string& dir, SourceSet& src, std::string& lo
 	return ok;
 }
 
+// Does 'dir' hold tiny_bvh.h? For the default folder: the tool may sit in a tools folder of the
+// repository, one level below the headers.
+static bool HasHeadersIn( const std::string& dir )
+{
+	std::error_code ec;
+	return std::filesystem::exists( std::filesystem::u8path( JoinPath( dir, "tiny_bvh.h" ) ), ec );
+}
+
 // Would writing 'file' overwrite one of the six headers in 'dir'?
 static bool IsSourceFile( const std::string& dir, const std::string& file )
 {
@@ -2473,10 +2505,43 @@ static bool IsSourceFile( const std::string& dir, const std::string& file )
 static void PrintUsage( FILE* f )
 {
 	fprintf( f, "usage: tinybvh_custom [--in <folder with the six headers>] [--out <header>] [options]\n"
+		"  without --in, the headers are read from the current folder, or from the one above it.\n"
 		"  --no-<id> leaves a part out, --with-<id> puts it in; everything is in by default,\n"
 		"  except mbvh and bvh_verbose, which are in only when something needs them.\n"
-		"  --no-all-layouts leaves out every layout except BVH. Ids:\n" );
+		"  --no-all-layouts leaves out every layout except BVH; --describe prints the ids, labels\n"
+		"  and dependencies as JSON, for other front ends. Ids:\n" );
 	for (int i = 0; i < gen::T_COUNT; i++) fprintf( f, "    %-14s %s\n", gen::kToggles[i].id, gen::kToggles[i].label );
+}
+
+// --describe: the toggles as JSON, for other front ends such as the web page. Per toggle: its id,
+// the label to show, the class it leaves out (or null), where it goes, whether it is in by default,
+// and which toggles need it (the two intermediate layouts only).
+static std::string JsonString( const std::string& s )
+{
+	std::string r = "\"";
+	for (const char c : s) { if (c == '"' || c == '\\') r += '\\'; r += c; }
+	return r + "\"";
+}
+static void PrintDescription( FILE* f )
+{
+	using namespace gen;
+	const Options defaults;
+	fprintf( f, "{\n  \"groups\": [\n" );
+	for (int g = 0; g < 3; g++) fprintf( f, "    { \"title\": %s, \"rows\": %d }%s\n", JsonString( kGroupTitle[g] ).c_str(), kRows[g], g < 2 ? "," : "" );
+	fprintf( f, "  ],\n  \"toggles\": [\n" );
+	int n = 0;
+	for (const Place& p : kPlace)
+	{
+		std::string needed;
+		auto list = [&]( const Toggle* b, const Toggle* e ) { for (; b != e; b++) needed += (needed.empty() ? "" : ", ") + JsonString( kToggles[*b].id ); };
+		if (p.t == T_MBVH) list( std::begin( kNeedsMBVH ), std::end( kNeedsMBVH ) );
+		if (p.t == T_BVH_VERBOSE) list( std::begin( kNeedsVerbose ), std::end( kNeedsVerbose ) );
+		const ToggleInfo& t = kToggles[p.t];
+		fprintf( f, "    { \"id\": %s, \"label\": %s, \"class\": %s, \"group\": %d, \"col\": %d, \"row\": %d, \"default\": %s, \"neededBy\": [%s] }%s\n",
+			JsonString( t.id ).c_str(), JsonString( DisplayLabel( p.t ) ).c_str(), t.cls ? JsonString( t.cls ).c_str() : "null", p.group, p.col, p.row,
+			defaults.on[p.t] ? "true" : "false", needed.c_str(), ++n < (int)(sizeof( kPlace ) / sizeof( kPlace[0] )) ? "," : "" );
+	}
+	fprintf( f, "  ]\n}\n" );
 }
 
 // Returns the process exit code.
@@ -2484,13 +2549,15 @@ static int RunCommandLine( const std::vector<std::string>& args, FILE* out, FILE
 {
 	using namespace gen;
 	std::string in = ".", file = "tiny_bvh_custom.h";
+	bool inGiven = false;
 	Options o;
 	for (size_t i = 0; i < args.size(); i++)
 	{
 		const std::string& a = args[i];
-		if (a == "--in" && i + 1 < args.size()) in = args[++i];
+		if (a == "--in" && i + 1 < args.size()) in = args[++i], inGiven = true;
 		else if (a == "--out" && i + 1 < args.size()) file = args[++i];
 		else if (a == "--help" || a == "-h" || a == "/?") { PrintUsage( out ); return 0; }
+		else if (a == "--describe") { PrintDescription( out ); return 0; }
 		else if (StartsWith( a, "--no-" ) || StartsWith( a, "--with-" ))
 		{
 			const bool on = StartsWith( a, "--with-" );
@@ -2501,6 +2568,12 @@ static int RunCommandLine( const std::vector<std::string>& args, FILE* out, FILE
 			if (!found) { fprintf( err, "unknown option %s\n", a.c_str() ); PrintUsage( err ); return 2; }
 		}
 		else { fprintf( err, "unknown argument %s\n", a.c_str() ); PrintUsage( err ); return 2; }
+	}
+	// Without --in: the current folder, or the one above it when the tool runs from a tools folder.
+	if (!inGiven && !HasHeadersIn( in ) && HasHeadersIn( ".." ))
+	{
+		in = "..";
+		fprintf( out, "reading the headers from ..\n" );
 	}
 	SourceSet src;
 	std::string log;
@@ -2513,6 +2586,26 @@ static int RunCommandLine( const std::vector<std::string>& args, FILE* out, FILE
 	fprintf( out, "wrote %s\n", file.c_str() );
 	return 0;
 }
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+// The web page's entry: the command line's arguments, one per line. The page puts the six headers
+// into the module's file system first, and reads the result from it afterwards.
+extern "C" EMSCRIPTEN_KEEPALIVE int tinybvh_custom_run( const char* argLines )
+{
+	std::vector<std::string> args;
+	std::string a;
+	for (const char* c = argLines;; c++)
+	{
+		if (*c && *c != '\n') { a += *c; continue; }
+		if (!a.empty()) args.push_back( a ), a.clear();
+		if (!*c) break;
+	}
+	const int code = RunCommandLine( args, stdout, stderr );
+	fflush( stdout ), fflush( stderr );
+	return code;
+}
+#endif
 
 #ifndef _WIN32
 
@@ -2673,19 +2766,6 @@ static HWND Make( const wchar_t* cls, const wchar_t* text, DWORD style, int x, i
 	return c;
 }
 
-// Where each checkbox goes: group (0: layouts, 1: builders, 2: code), column, row.
-struct Place { int t, group, col, row; };
-static const Place kPlace[] = {
-	{ gen::T_BVH_GPU, 0, 0, 0 }, { gen::T_BVH4_GPU, 0, 0, 1 }, { gen::T_BVH8_CWBVH, 0, 0, 2 }, { gen::T_BVH4_AMD_HW, 0, 0, 3 }, { gen::T_CWBVH8_AMD_HW, 0, 0, 4 },
-	{ gen::T_BVH_DOBB, 0, 0, 5 },
-	{ gen::T_BVH4_CPU, 0, 1, 0 }, { gen::T_BVH8_CPU, 0, 1, 1 }, { gen::T_VOXELSET, 0, 1, 2 }, { gen::T_MBVH, 0, 1, 3 }, { gen::T_BVH_VERBOSE, 0, 1, 4 },
-	{ gen::T_PRESPLITTING, 1, 0, 0 }, { gen::T_FULLSWEEP, 1, 0, 1 }, { gen::T_HPLOC, 1, 0, 2 },
-	{ gen::T_OPTIMIZER, 1, 1, 0 }, { gen::T_MERGELEAFS, 1, 1, 1 },
-	{ gen::T_THREADING, 2, 0, 0 }, { gen::T_TEMPLATES, 2, 0, 1 },
-	{ gen::T_X86, 2, 1, 0 }, { gen::T_ARM, 2, 1, 1 },
-};
-static const wchar_t* kGroupTitle[3] = { L"Layouts (BVH is always included)", L"Builders and optimization", L"Code" };
-static const int kRows[3] = { 6, 3, 2 };	// rows per group
 static const int kMinW = 560, kMinH = 600; // smallest client area, in 96 dpi units
 
 // Places the controls for the current client size: the fields and the log stretch, the
@@ -2705,13 +2785,13 @@ static void LayoutControls()
 	int groupY[3];
 	for (int g = 0; g < 3; g++)
 	{
-		const int h = 22 + kRows[g] * rowH + 8;
+		const int h = 22 + gen::kRows[g] * rowH + 8;
 		groupY[g] = y;
 		put( g_group[g], m, y, W - 2 * m, h );
 		y += h + 8;
 	}
 	const int colW = (W - 2 * m) / 2;
-	for (const Place& p : kPlace) put( g_check[p.t], m + 12 + p.col * colW, groupY[p.group] + 22 + p.row * rowH, colW - 20, 20 );
+	for (const gen::Place& p : gen::kPlace) put( g_check[p.t], m + 12 + p.col * colW, groupY[p.group] + 22 + p.row * rowH, colW - 20, 20 );
 	put( g_outLabel, m, y + 4, W - 2 * m, 18 );
 	put( g_out, m, y + 24, W - 2 * m - bw - 12, 23 );
 	put( g_outBrowse, W - m - bw, y + 23, bw, 25 );
@@ -2728,11 +2808,10 @@ static void CreateControls()
 	g_srcLabel = Make( L"STATIC", L"Folder with tiny_bvh.h and its five platform headers:", 0, 0, 0, 10, 10, -1 );
 	g_src = Make( L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 10, 10, IDC_SRC, WS_EX_CLIENTEDGE );
 	g_srcBrowse = Make( L"BUTTON", L"Browse...", WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 10, 10, IDC_SRC_BROWSE );
-	for (int g = 0; g < 3; g++) g_group[g] = Make( L"BUTTON", kGroupTitle[g], BS_GROUPBOX, 0, 0, 10, 10, -1 );
-	for (const Place& p : kPlace)
+	for (int g = 0; g < 3; g++) g_group[g] = Make( L"BUTTON", Wide( gen::kGroupTitle[g] ).c_str(), BS_GROUPBOX, 0, 0, 10, 10, -1 );
+	for (const gen::Place& p : gen::kPlace)
 	{
-		std::wstring label = Wide( gen::kToggles[p.t].label );
-		if (p.t == gen::T_MBVH || p.t == gen::T_BVH_VERBOSE) label = Wide( gen::kToggles[p.t].cls ) + L", when needed";
+		const std::wstring label = Wide( gen::DisplayLabel( p.t ) );
 		g_check[p.t] = Make( L"BUTTON", label.c_str(), WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 10, 10, IDC_TOGGLE + p.t );
 		SetCheck( p.t, p.t != gen::T_MBVH && p.t != gen::T_BVH_VERBOSE );
 	}
@@ -2744,14 +2823,14 @@ static void CreateControls()
 	g_log = Make( L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL | WS_VSCROLL | WS_HSCROLL, 0, 0, 10, 10, IDC_LOG, WS_EX_CLIENTEDGE );
 	SendMessageW( g_log, WM_SETFONT, (WPARAM)g_mono, TRUE );
 	LayoutControls();
-	// the sources: next to the tool, or in the current folder
+	// the sources: next to the tool, in the current folder, or one level up from either, as when
+	// the tool sits in a tools folder of the repository
+	wchar_t cwd[MAX_PATH];
+	GetCurrentDirectoryW( MAX_PATH, cwd );
+	auto parent = []( const std::wstring& d ) { const size_t s = d.find_last_of( L"\\/" ); return s == std::wstring::npos ? d : d.substr( 0, s ); };
 	std::wstring dir = ExeFolder();
-	if (!HasHeaders( dir ))
-	{
-		wchar_t cwd[MAX_PATH];
-		GetCurrentDirectoryW( MAX_PATH, cwd );
-		if (HasHeaders( cwd )) dir = cwd;
-	}
+	for (const std::wstring& d : { ExeFolder(), std::wstring( cwd ), parent( ExeFolder() ), parent( cwd ) })
+		if (HasHeaders( d )) { dir = d; break; }
 	SetWindowTextW( g_src, dir.c_str() );
 	UpdateDependencies();
 	Log( "Untick what you do not need and press Generate. With everything ticked, the result holds\n"
