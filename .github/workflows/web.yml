@@ -1,0 +1,76 @@
+# TinyBVH custom header page: builds the tinybvh_custom generator as WebAssembly, checks it
+# against the native generator, and publishes the page with GitHub Pages. One-time setup: in the
+# repository's Settings, Pages, set "Source" under "Build and deployment" to "GitHub Actions".
+name: TinyBVH custom header page
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'tiny_bvh*.h'
+      - 'tinybvh_custom.cpp'
+      - 'web/**'
+      - '.github/workflows/web.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push waits rather than cancelling one in progress.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  EMSDK_VERSION: 6.0.13          # the Emscripten release to build with
+  GENERATOR: tinybvh_custom.cpp  # the generator's source
+  HEADERS: .                     # the folder with the six TinyBVH headers
+  SITE_SOURCES: web              # index.html, worker.js, generator.js, build_web.sh, check_web.cjs
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Emscripten ${{ env.EMSDK_VERSION }}
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          "$RUNNER_TEMP/emsdk/emsdk" install "$EMSDK_VERSION"
+          "$RUNNER_TEMP/emsdk/emsdk" activate "$EMSDK_VERSION"
+
+      # The site is assembled in _site: the page's own files, plus what build_web.sh produces
+      # there (tinybvh_custom.js, and a copy of the headers in headers/). Nothing is committed.
+      - name: Build the page
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          mkdir -p _site
+          cp "$SITE_SOURCES/index.html" "$SITE_SOURCES/worker.js" "$SITE_SOURCES/generator.js" _site/
+          cd _site
+          sh "../$SITE_SOURCES/build_web.sh" "../$GENERATOR" "../$HEADERS"
+
+      # Nothing is published unless the WebAssembly generator produces exactly what the native
+      # generator produces from the same headers.
+      - name: Check the page against the native generator
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          g++ -std=c++17 -O2 -o "$RUNNER_TEMP/tinybvh_custom" "$GENERATOR"
+          node "$SITE_SOURCES/check_web.cjs" _site "$RUNNER_TEMP/tinybvh_custom"
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
