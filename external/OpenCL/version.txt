@@ -1,6 +1,6 @@
 In this directory:
 - Header files obtained from https://github.com/KhronosGroup/OpenCL-Headers
-  May 30, 2026
+  Oct 30, 2026
 - Library file, freshly compiled as static lib for x64 and obtained from:
   https://github.com/KhronosGroup/OpenCL-ICD-Loader
-  Also on May 30, 2026.
+  May 30, 2026 (last change to repo was on May 29).

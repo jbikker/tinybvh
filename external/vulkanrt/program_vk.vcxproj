@@ -118,14 +118,13 @@
     <ClInclude Include="..\..\tiny_bvh_x86_double.h" />
     <ClInclude Include="..\..\tiny_bvh_arm_float.h" />
     <ClInclude Include="..\..\tiny_bvh_arm_double.h" />
+    <ClInclude Include="..\..\tiny_ocl.h" />
   </ItemGroup>
   <ItemGroup>
     <!-- included by the shaders below, not compiled on its own -->
     <None Include="shaders\common.glsl" />
-    <None Include="compile_shaders.bat" />
-    <None Include="build.bat" />
-    <None Include="README_vulkan.md" />
     <None Include="shaders\traverse.cl" />
+    <None Include="shaders\traverse_amd.cl" />
   </ItemGroup>
   <ItemGroup>
     <!--

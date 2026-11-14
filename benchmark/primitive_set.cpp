@@ -33,9 +33,9 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	{
 		// load 30 million triangles for San Miguel
 		AddMesh( "./testdata/sanmiguel.bin" );
-		camPos[0] = bvhvec3( 24.53f, 7.66f, -1.15f ), camDir[0] = tinybvh_normalize( bvhvec3( -0.93f, -0.09f, -0.35f ) );
-		camPos[1] = bvhvec3( 21.93f, 1.49f, 11.84f ), camDir[1] = tinybvh_normalize( bvhvec3( -0.56f, 0.10f, -0.82f ) );
-		camPos[2] = bvhvec3( 25.33f, 9.69f, -0.10f ), camDir[2] = tinybvh_normalize( bvhvec3( -0.33f, -0.46f, 0.83f ) );
+		camPos[0] = bvhvec3( 20.89f, 1.25f, 7.13f ), camDir[0] = tinybvh_normalize( bvhvec3( -1, 0, -0.07f ) );
+		camPos[1] = bvhvec3( 9.73f, 2.05f, -1.04f ), camDir[1] = tinybvh_normalize( bvhvec3( -0.69f, -0.67f, -0.28f ) );
+		camPos[2] = bvhvec3( 18.83f, 8.02f, -2.84f ), camDir[2] = tinybvh_normalize( bvhvec3( -0.26f, -0.18f, 0.95f ) );
 	}
 	else if (scene == CONFERENCE_ROOM)
 	{
@@ -60,6 +60,30 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 		camPos[0] = bvhvec3( -4.3f, 3.2f, -5.8f ), camDir[0] = tinybvh_normalize( bvhvec3( -0.39f, 2.09f, -2.48f ) - camPos[0] );
 		camPos[1] = bvhvec3( -4.8f, 2.1f, -7.2f ), camDir[1] = tinybvh_normalize( bvhvec3( -0.53f, 0.80f, -1.88f ) - camPos[1] );
 		camPos[2] = bvhvec3( -0.7f, 4.9f, 0.4f ), camDir[2] = tinybvh_normalize( bvhvec3( 0.13f, 3.28f, -1.36f ) - camPos[2] );
+	}
+	else if (scene == LEGO_PORSCHE)
+	{
+		// load the Lego Porsche model
+		AddMesh( "./testdata/legoporsche.bin" );
+		camPos[0] = bvhvec3( 0.33f, -2.31f, 0.30f ), camDir[0] = tinybvh_normalize( bvhvec3( -0.11f, 0.72f, 0.69f ) );
+		camPos[1] = bvhvec3( 0.29f, 0.55f, -2.02f ), camDir[1] = tinybvh_normalize( bvhvec3( -0.24f, -0.28f, 0.93f ) );
+		camPos[2] = bvhvec3( 3.98f, 1.67f, 4.28f ), camDir[2] = tinybvh_normalize( bvhvec3( -0.70f, -0.48f, -0.53f ) );
+	}
+	else if (scene == VICTORIAN_HOUSE)
+	{
+		// load the Victorian House
+		AddMesh( "./testdata/victorianhouse.bin" );
+		camPos[0] = bvhvec3( 0.16f, -0.68f, 1.23f ), camDir[0] = tinybvh_normalize( bvhvec3( -0.20f, 0.12f, -0.97f ) );
+		camPos[1] = bvhvec3( -2.33f, 1.36f, -0.39f ), camDir[1] = tinybvh_normalize( bvhvec3( 0.72f, -0.66f, 0.21f ) );
+		camPos[2] = bvhvec3( -0.82f, -0.66f, 2.33f ), camDir[2] = tinybvh_normalize( bvhvec3( 0.35f, 0.16f, -0.92f ) );
+	}
+	else if (scene == HAIRBALL)
+	{
+		// load the Victorian House
+		AddMesh( "./testdata/hairball.bin" );
+		camPos[0] = bvhvec3( -1.04f, -6.64f, -1.79f ), camDir[0] = tinybvh_normalize( bvhvec3( 0.12f, 0.95f, 0.28f ) );
+		camPos[1] = bvhvec3( -3.05f, -1.61f, 0.60f ), camDir[1] = tinybvh_normalize( bvhvec3( 0.96f, 0.24f, 0.13f ) );
+		camPos[2] = bvhvec3( -4.61f, -2.00f, 0.38f ), camDir[2] = tinybvh_normalize( bvhvec3( 0.41f, 0.89f, 0.21f ) );
 	}
 	else
 	{
@@ -105,6 +129,24 @@ PrimitiveSet::PrimitiveSet( uint32_t scene )
 	{
 		strncpy( desc, "Stanford Dragon", 128 ); 
 		strncpy( shrt, "dragon", 64 ); 
+		break;
+	}
+	case Scene::VICTORIAN_HOUSE: 
+	{
+		strncpy( desc, "Victorian House", 128 ); 
+		strncpy( shrt, "house", 64 ); 
+		break;
+	}
+	case Scene::HAIRBALL: 
+	{
+		strncpy( desc, "Hairball", 128 ); 
+		strncpy( shrt, "hairball", 64 ); 
+		break;
+	}
+	case Scene::LEGO_PORSCHE: 
+	{
+		strncpy( desc, "Lego Porsche", 128 ); 
+		strncpy( shrt, "porsche", 64 ); 
 		break;
 	}
 	default: 

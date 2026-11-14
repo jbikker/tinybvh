@@ -61,7 +61,7 @@ RayDistribution::RayDistribution( RaySet r, PrimitiveSet* p )
 		bvh.settings.useSIMDifavailable = true; // fast build is preferred here.
 		bvh.Build( p->verts, p->primCount );
 		// fire rays from the first camera; use a diffuse bounce at the first hit
-		UpdateViewPyramid( p->GetCameraPos( raySet ), p->GetCameraDir( raySet ) );
+		UpdateViewPyramid( p->GetCameraPos( 0 ), p->GetCameraDir( 0 ) );
 		const bvhvec3 sceneExtent = bvh.aabbMax - bvh.aabbMin;
 		const float epsilon = sceneExtent[tinybvh_maxdim( sceneExtent )] * 1e-6f;
 		int i = 0;
@@ -94,7 +94,7 @@ RayDistribution::RayDistribution( RaySet r, PrimitiveSet* p )
 		bvh.settings.useSIMDifavailable = true; // fast build is preferred here.
 		bvh.Build( p->verts, p->primCount );
 		// fire rays from the first camera; use a diffuse bounce at the first hit
-		UpdateViewPyramid( p->GetCameraPos( raySet ), p->GetCameraDir( raySet ) );
+		UpdateViewPyramid( p->GetCameraPos( 1 ), p->GetCameraDir( 1 ) );
 		const bvhvec3 sceneExtent = bvh.aabbMax - bvh.aabbMin;
 		const float sceneSize = sceneExtent[tinybvh_maxdim( sceneExtent )];
 		const float epsilon = sceneSize * 1e-6f;

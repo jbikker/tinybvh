@@ -6,10 +6,15 @@ namespace tinybvh
 enum Scene : uint32_t { 
 	CRYTEK_SPONZA, 
 	BISTRO_EXTERIOR,
-	SAN_MIGUEL, // not included in GitHub repo due to size, request if needed.
+	SAN_MIGUEL, // *
 	CONFERENCE_ROOM,
 	BUNNY_10K,
-	STANFORD_DRAGON
+	STANFORD_DRAGON,
+	LEGO_PORSCHE, // *
+	VICTORIAN_HOUSE, // **
+	HAIRBALL, // **
+	// *: not included in GitHub repo due to size, request if needed.
+	// **: included in the repo but archived - unzip to use.
 };
 
 class PrimitiveSet

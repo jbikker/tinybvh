@@ -52,7 +52,8 @@ const size_t npos = std::string::npos;
 
 const char* const defaultFiles[] = {
 	"tiny_bvh.h", "tiny_bvh_base.h", "tiny_bvh_x86_float.h",
-	"tiny_bvh_x86_double.h", "tiny_bvh_arm_float.h", "tiny_bvh_arm_double.h"
+	"tiny_bvh_x86_double.h", "tiny_bvh_arm_float.h", "tiny_bvh_arm_double.h",
+	"tiny_ocl.h", "tiny_scene.h"
 };
 const char* const ctrlWords[] = { "if", "for", "while", "switch", "catch", 0 };
 const char* const noPadWords[] = { "alignas", "alignof", "decltype", "noexcept", "__attribute__", "__declspec",

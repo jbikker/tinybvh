@@ -1,5 +1,5 @@
-#define SCRWIDTH 800
-#define SCRHEIGHT 600
+#define SCRWIDTH 1600
+#define SCRHEIGHT 800
 #include "external/fenster.h"
 #include "tiny_bvh.h"
 #include <fstream>
@@ -39,12 +39,12 @@ void Init()
 {
 	// Load a scene from a GLTF file using tinyscene.
 	// scene.SetBVHDefault( BVH_RIGID );
-	bvhmat4 Tdrone, Ttree;
-	Tdrone[0] = Tdrone[5] = Tdrone[10] = 0.03f;
-	Ttree[0] = Ttree[5] = Ttree[10] = 2.0f, Ttree[3] = 5.0f, Ttree[7] = -2.9f;
-	scene.AddScene( "./testdata/drone/scene.gltf", Tdrone );
-	scene.AddScene( "./testdata/mangotree/scene.gltf", Ttree );
-	scene.SetSkyDome( new SkyDome( "./testdata/sky_15.hdr" ) );
+	ts_mat4 T;
+	float a = PI;
+	T.cell[0] = cosf( a ), T.cell[2] = sinf( a ); 
+	T.cell[8] = -sinf( a ), T.cell[10] = cosf( a );
+	scene.AddScene( "./testdata/dragon.obj", T );
+	scene.SetSkyDome( new SkyDome( "./testdata/fairytale.jpeg", 1.2f ) );
 	// Load camera position / direction from file.
 	std::fstream t = std::fstream{ "camera.bin", t.binary | t.in };
 	if (!t.is_open()) return;
@@ -94,47 +94,50 @@ void GetShadingData( const Ray& ray, bvhvec3& albedo, float& alpha, bvhvec3& N, 
 	const uint32_t meshIdx = instance.blasIdx;
 	const FatTri& triangle = scene.meshPool[meshIdx]->triangles[primIdx];
 	const uint32_t matIdx = triangle.material;
-	const Material* material = Scene::materials[matIdx];
-	// albedo at hit point - ignoring detail textures and MIP-maps for now.
-	const float u = ray.hit.u, v = ray.hit.v, w = 1 - u - v; // barycentrics
-	float tu = u * triangle.u1 + v * triangle.u2 + w * triangle.u0;
-	float tv = u * triangle.v1 + v * triangle.v2 + w * triangle.v0;
-	tu -= floorf( tu ), tv -= floorf( tv );
-	alpha = 1;
-	if (material->color.textureID == -1) albedo = material->color.value; else
-	{
-		Texture* tex = Scene::textures[material->color.textureID];
-		const int iu = (int)(tu * tex->width);
-		const int iv = (int)(tv * tex->height);
-		if (tex->fdata) /* HDR */ albedo = tex->fdata[iu + iv * tex->width]; else
-		{
-			const ts_uchar4 pixel = tex->idata[iu + iv * tex->width];
-			albedo = bvhvec3( (float)pixel.x, (float)pixel.y, (float)pixel.z ) * (1.0f / 256.0f);
-			alpha = (pixel.x + pixel.y + pixel.z > 5) ? 1.0f : 0.0f;
-		}
-	}
+	const Material* material = matIdx < Scene::materials.size() ? Scene::materials[matIdx] : 0;
 	// geometric normal, transformed to world space
 	N = bvhvec3( triangle.Nx, triangle.Ny, triangle.Nz );
 	N = tinybvh_normalize( tinybvh_transform_vector( N, instance.transform ) );
 	if (tinybvh_dot( N, ray.D ) > 0) N *= -1;
 	// interpolated normal, modified by normal map, transformed to world space
+	const float u = ray.hit.u, v = ray.hit.v, w = 1 - u - v; // barycentrics
 	iN = u * triangle.vN1 + v * triangle.vN2 + (1 - u - v) * triangle.vN0;
-	if (material->normals.textureID != -1)
+	// albedo at hit point - ignoring detail textures and MIP-maps for now.
+	alpha = 1;
+	if (!material) albedo = bvhvec3( 1 ); else
 	{
-		Texture* tex = Scene::textures[material->normals.textureID];
-		const int iu = (int)(tu * tex->width);
-		const int iv = (int)(tv * tex->height);
-		const ts_uchar4 pixel = tex->idata[iu + iv * tex->width];
-		bvhvec3 mN( (float)pixel.x, (float)pixel.y, (float)pixel.z );
-		mN *= 1.0f / 128.0f, mN += -1.0f;
-		iN = mN.x * triangle.T + mN.y * triangle.B + mN.z * iN;
+		float tu = u * triangle.u1 + v * triangle.u2 + w * triangle.u0;
+		float tv = u * triangle.v1 + v * triangle.v2 + w * triangle.v0;
+		tu -= floorf( tu ), tv -= floorf( tv );
+		if (material->color.textureID == -1) albedo = material->color.value; else
+		{
+			Texture* tex = Scene::textures[material->color.textureID];
+			const int iu = (int)(tu * tex->width);
+			const int iv = (int)(tv * tex->height);
+			if (tex->fdata) /* HDR */ albedo = tex->fdata[iu + iv * tex->width]; else
+			{
+				const ts_uchar4 pixel = tex->idata[iu + iv * tex->width];
+				albedo = bvhvec3( (float)pixel.x, (float)pixel.y, (float)pixel.z ) * (1.0f / 256.0f);
+				alpha = (pixel.x + pixel.y + pixel.z > 5) ? 1.0f : 0.0f;
+			}
+		}
+		if (material->normals.textureID != -1)
+		{
+			Texture* tex = Scene::textures[material->normals.textureID];
+			const int iu = (int)(tu * tex->width);
+			const int iv = (int)(tv * tex->height);
+			const ts_uchar4 pixel = tex->idata[iu + iv * tex->width];
+			bvhvec3 mN( (float)pixel.x, (float)pixel.y, (float)pixel.z );
+			mN *= 1.0f / 128.0f, mN += -1.0f;
+			iN = mN.x * triangle.T + mN.y * triangle.B + mN.z * iN;
+		}
 	}
 	iN = tinybvh_normalize( tinybvh_transform_vector( iN, instance.transform ) );
 	if (tinybvh_dot( iN, N ) < 0) iN *= -1;
 }
 
 // Main ray tracing function: Calculates the (floating point) color for a pixel.
-bvhvec3 Trace( Ray& ray, const int depth = 0 )
+bvhvec3 Trace( Ray& ray )
 {
 	bvhvec3 albedo, N, iN, I;
 	for (int i = 0; i < 8; i++)
@@ -151,7 +154,8 @@ bvhvec3 Trace( Ray& ray, const int depth = 0 )
 	static bvhvec3 L = tinybvh_normalize( bvhvec3( 2, 4, 5 ) );
 	const bvhvec3 R = ray.D - 2 * tinybvh_dot( iN, ray.D ) * iN;
 	bvhvec3 indirect = SampleSky( R );
-	return albedo * (0.5f * indirect + tinybvh_max( 0.2f, tinybvh_dot( iN, L ) ));
+	// albedo = bvhvec3( 1, 0.7f, 0.7f );
+	return albedo * (0.8f * indirect + tinybvh_max( 0.0f, 0.2f * tinybvh_dot( iN, L ) ));
 	// return (iN + 1) * 0.5f;
 }
 
@@ -167,9 +171,17 @@ tileloop:
 	{
 		const int pixelx = tx * 20 + x, pixely = ty * 20 + y;
 		const float u = (float)pixelx / SCRWIDTH, v = (float)pixely / SCRHEIGHT;
-		const bvhvec3 D = tinybvh_normalize( p1 + u * (p2 - p1) + v * (p3 - p1) - eye );
-		Ray ray( eye, D );
-		const bvhvec3 E = tinybvh_min( Trace( ray ), bvhvec3( 1 ) ) * 255.0f;
+		const bvhvec3 D1 = tinybvh_normalize( p1 + u * (p2 - p1) + v * (p3 - p1) - eye );
+		const bvhvec3 D2 = tinybvh_normalize( p1 + (u + 0.5f / SCRWIDTH) * (p2 - p1) + v * (p3 - p1) - eye );
+		const bvhvec3 D3 = tinybvh_normalize( p1 + u * (p2 - p1) + (v + 0.5f / SCRHEIGHT) * (p3 - p1) - eye );
+		const bvhvec3 D4 = tinybvh_normalize( p1 + (u + 0.5f / SCRWIDTH) * (p2 - p1) + (v + 0.5f / SCRHEIGHT) * (p3 - p1) - eye );
+		Ray ray1( eye, D1 );
+		Ray ray2( eye, D2 );
+		Ray ray3( eye, D3 );
+		Ray ray4( eye, D4 );
+		bvhvec3 E = tinybvh_min( (Trace( ray1 ) + Trace( ray2 ) + Trace( ray3 ) + Trace( ray4 )) * 0.25f, bvhvec3( 1 ) );
+		E.x = sqrtf( E.x ), E.y = sqrtf( E.y ), E.z = sqrtf( E.z );
+		E *= 255.0f;
 		buf[pixelx + pixely * SCRWIDTH] = (int)E.x + ((int)E.y << 8) + ((int)E.z << 16);
 	}
 	goto tileloop;

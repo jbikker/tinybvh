@@ -67,8 +67,8 @@ THE SOFTWARE.
 // #define HQBVHBINS 32     - the number of bins to use in SBVH construction. Default is 8; at most MAXHQBINS (128).
 // #define INST_IDX_BITS 10 - the number of bits to use for the instance index. Default is 32,
 //                            which stores the bits in a separate field in tinybvh::Intersection.
-// #define C_INT 1          - the estimated cost of a primitive intersection test. Default is 1.
-// #define C_TRAV 1         - the estimated cost of a traversal step. Default is 1.
+// #define C_INT 1          - the estimated cost of a primitive intersection test. Default is 0.9f.
+// #define C_TRAV 1         - the estimated cost of a traversal step. Default is 1.0f.
 
 // A manual for TinyBVH can be found here:
 // https://jacco.ompf2.com/2025/01/24/tinybvh-manual-basic-use
@@ -100,10 +100,10 @@ THE SOFTWARE.
 // Library version:
 #define TINY_BVH_VERSION_MAJOR	1
 #define TINY_BVH_VERSION_MINOR	9
-#define TINY_BVH_VERSION_SUB	1
+#define TINY_BVH_VERSION_SUB	2
 
 // Cached BVH file version - increases only when file layout changes.
-#define TINY_BVH_CACHE_VERSION	19100
+#define TINY_BVH_CACHE_VERSION	19200
 
 // Features
 #ifndef NO_DOUBLE_PRECISION_SUPPORT
@@ -160,7 +160,7 @@ THE SOFTWARE.
 #endif
 
 // SAH BVH building: Heuristic parameters
-// CPU traversal: C_INT = 1, C_TRAV = 1 seems optimal.
+// CPU traversal: C_INT = 1, C_TRAV = 1 is (near-)optimal for BVH2.
 // These are defaults, which initialize the public members c_int and c_trav in
 // BVHBase (and thus each BVH instance).
 #ifndef C_INT
@@ -235,11 +235,15 @@ THE SOFTWARE.
 #ifndef MT_CONVERT_MAX_TASKS
 #define MT_CONVERT_MAX_TASKS 32
 #endif
+// FitLeafs: nodes a slice may leave for the serial pass; depth-bounded, with a fallback if exceeded.
+#ifndef MT_FIT_PENDING
+#define MT_FIT_PENDING 128
+#endif
 
 // Experimental / WIP features
 
 // CWBVH triangle format - doesn't seem to help on GPU?
-#define CWBVH_COMPRESSED_TRIS
+// #define CWBVH_COMPRESSED_TRIS
 // BVH4 triangle format
 // #define BVH4_GPU_COMPRESSED_TRIS
 // Optimization statistics for CWBVH construction
@@ -400,9 +404,11 @@ template class impl::MBVH<4, float, uint32_t>;
 template class impl::MBVH<8, float, uint32_t>;
 template class impl::BVH4_GPU<float, uint32_t>;
 template class impl::BVH4_AMD_HW<float, uint32_t>;
+template class impl::CWBVH8_AMD_HW<float, uint32_t>;
 template class impl::BVH4_CPU<float, uint32_t>;
 template class impl::BVH8_CWBVH<float, uint32_t>;
 template class impl::BVH8_CPU<float, uint32_t>;
+template class impl::BVH_DOBB<float, uint32_t>;
 template class impl::BLASInstance<float, uint32_t>;
 #ifdef DOUBLE_PRECISION_SUPPORT
 template class impl::BVHBase<double, uint64_t>;

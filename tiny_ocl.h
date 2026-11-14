@@ -1,4 +1,4 @@
-﻿/*
+/*
 The MIT License (MIT)
 
 Copyright (c) 2024-2026, Jacco Bikker / Breda University of Applied Sciences.
@@ -158,7 +158,7 @@ public:
 class Buffer
 {
 public:
-	enum { DEFAULT = 0, TEXTURE = 8, TARGET = 16, READONLY = 1, WRITEONLY = 2 };
+	enum { DEFAULT = 0, TEXTURE = 8, TARGET = 16, READONLY = 1, WRITEONLY = 2, DEVICEONLY = 4 };
 	// constructor / destructor
 	Buffer() = default;
 	Buffer( unsigned int N, void* ptr = 0, unsigned int t = DEFAULT );
@@ -191,7 +191,7 @@ class Kernel
 	friend class Buffer;
 public:
 	// constructor / destructor
-	Kernel( const char* file, const char* entryPoint );
+	Kernel( const char* file, const char* entryPoint, const char* defines = 0 );
 	Kernel( cl_program& existingProgram, char* entryPoint );
 	~Kernel();
 	Kernel( const Kernel& ) = delete;
@@ -388,6 +388,7 @@ public:
 private:
 	// data members
 	char* sourceFile = 0;
+	char* sourceDefines = 0;	// user defines prepended to the source
 	Buffer* acqBuffer = 0;
 	cl_kernel kernel = 0;
 	cl_program program = 0;
@@ -612,15 +613,28 @@ Buffer::Buffer( unsigned int N, void* ptr, unsigned int t )
 	if (!Kernel::clStarted) Kernel::InitCL();
 	type = t;
 	ownData = false;
-	int rwFlags = CL_MEM_READ_WRITE;
-	if (t & READONLY) rwFlags = CL_MEM_READ_ONLY;
-	if (t & WRITEONLY) rwFlags = CL_MEM_WRITE_ONLY;
+	int rwFlags = 0;
+	if (t & DEVICEONLY) rwFlags |= CL_MEM_HOST_NO_ACCESS;
+	if (t & READONLY) rwFlags |= CL_MEM_READ_ONLY;
+	else if (t & WRITEONLY) rwFlags |= CL_MEM_WRITE_ONLY;
+	else rwFlags |= CL_MEM_READ_WRITE;
 	if ((t & (TEXTURE | TARGET)) == 0)
 	{
 		size = N;
 		textureID = 0; // not representing a texture
-		if (N > 0) deviceBuffer = clCreateBuffer( Kernel::GetContext(), rwFlags, size, 0, 0 );
-		hostBuffer = (unsigned*)ptr;
+		if (N > 0)
+		{
+			if (t & DEVICEONLY)
+			{
+				deviceBuffer = clCreateBuffer( Kernel::GetContext(), rwFlags | (ptr ? CL_MEM_COPY_HOST_PTR : 0), size, ptr, 0 );
+				hostBuffer = 0; // this buffer only resides on the device.
+			}
+			else
+			{
+				deviceBuffer = clCreateBuffer( Kernel::GetContext(), rwFlags, size, 0, 0 );
+				hostBuffer = (unsigned*)ptr;
+			}
+		}
 	}
 	else
 	{
@@ -641,15 +655,15 @@ Buffer::Buffer( unsigned int N, void* ptr, unsigned int t )
 // ----------------------------------------------------------------------------
 Buffer::~Buffer()
 {
-		if (ownData)
-		{
-			OpenCL::GetInstance()->AlignedFree( hostBuffer );
-			hostBuffer = 0;
-		}
+	if (ownData)
+	{
+		OpenCL::GetInstance()->AlignedFree( hostBuffer );
+		hostBuffer = 0;
+	}
 	if (deviceBuffer)
 	{
-		clReleaseMemObject( deviceBuffer );
-		deviceBuffer = 0;
+	clReleaseMemObject( deviceBuffer );
+	deviceBuffer = 0;
 	}
 }
 
@@ -670,7 +684,7 @@ unsigned int* Buffer::GetHostPtr()
 // ----------------------------------------------------------------------------
 void Buffer::CopyToDevice( const bool blocking )
 {
-	if (size == 0) return;
+	if (size == 0 || (type & DEVICEONLY)) return;
 	cl_int error;
 	if (!hostBuffer)
 	{
@@ -681,7 +695,7 @@ void Buffer::CopyToDevice( const bool blocking )
 }
 void Buffer::CopyToDevice( const int offset, const int byteCount, const bool blocking )
 {
-	if (size == 0) return;
+	if (size == 0 || (type & DEVICEONLY)) return;
 	cl_int error;
 	if (!hostBuffer)
 	{
@@ -695,7 +709,7 @@ void Buffer::CopyToDevice( const int offset, const int byteCount, const bool blo
 // ----------------------------------------------------------------------------
 void Buffer::CopyToDevice2( const bool blocking, cl_event* eventToSet, const size_t s )
 {
-	if (size == 0) return;
+	if (size == 0 || (type & DEVICEONLY)) return;
 	cl_int error;
 	if (!hostBuffer)
 	{
@@ -709,7 +723,7 @@ void Buffer::CopyToDevice2( const bool blocking, cl_event* eventToSet, const siz
 // ----------------------------------------------------------------------------
 void Buffer::CopyFromDevice( const bool blocking )
 {
-	if (size == 0) return;
+	if (size == 0 || (type & DEVICEONLY)) return;
 	cl_int error;
 	if (!hostBuffer)
 	{
@@ -720,7 +734,7 @@ void Buffer::CopyFromDevice( const bool blocking )
 }
 void Buffer::CopyFromDevice( const int offset, const int byteCount, const bool blocking )
 {
-	if (size == 0) return;
+	if (size == 0 || (type & DEVICEONLY)) return;
 	cl_int error;
 	if (!hostBuffer)
 	{
@@ -734,7 +748,11 @@ void Buffer::CopyFromDevice( const int offset, const int byteCount, const bool b
 // ----------------------------------------------------------------------------
 void Buffer::CopyTo( Buffer* buffer )
 {
-	if (size > 0) clEnqueueCopyBuffer( Kernel::GetQueue(), deviceBuffer, buffer->deviceBuffer, 0, 0, size, 0, 0, 0 );
+	if (size > 0)
+	{
+		cl_int error;
+		CHECKCL( error = clEnqueueCopyBuffer( Kernel::GetQueue(), deviceBuffer, buffer->deviceBuffer, 0, 0, size, 0, 0, 0 ) );
+	}
 }
 
 // Clear
@@ -749,17 +767,21 @@ void Buffer::Clear()
 
 // Kernel constructor
 // ----------------------------------------------------------------------------
-Kernel::Kernel( const char* file, const char* entryPoint )
+Kernel::Kernel( const char* file, const char* entryPoint, const char* defines )
 {
 	if (!clStarted) InitCL();
 	// see if we have seen this source file before
 	for (int s = (int)loadedKernels.size(), i = 0; i < s; i++)
 	{
+		// the program is identified by its source file *and* the defines it
+		// was compiled with; the same file with other defines is another program.
+		const char* theirDefines = loadedKernels[i]->sourceDefines;
+		if (strcmp( defines ? defines : "", theirDefines ? theirDefines : "" )) continue;
 	#ifdef _MSC_VER
 		if (!_stricmp( file, loadedKernels[i]->sourceFile ))
-		#else
+	#else
 		if (!strcasecmp( file, loadedKernels[i]->sourceFile ))
-		#endif
+	#endif
 		{
 			cl_int error;
 			program = loadedKernels[i]->program;
@@ -795,8 +817,19 @@ Kernel::Kernel( const char* file, const char* entryPoint )
 	string csText = ReadTextFile( fileName );
 	delete[] dir; // note: fileName points into dir; neither is valid past here
 	if (csText.size() == 0) FatalError( "File %s not found", file );
-	// add vendor defines
+	// add user defines; these end up directly above the source text, below the
+	// vendor defines, so they can be written in terms of ISNVIDIA and friends.
 	vendorLines = 0;
+	if (defines && *defines)
+	{
+		sourceDefines = new char[strlen( defines ) + 1];
+		strcpy( sourceDefines, defines );
+		string userText = defines;
+		if (userText.back() != '\n') userText += "\n";
+		vendorLines += LineCount( userText );
+		csText = userText + csText;
+	}
+	// add vendor defines
 	if (isNVidia) csText = "#define ISNVIDIA\n" + csText, vendorLines++;
 	if (isAMD) csText = "#define ISAMD\n" + csText, vendorLines++;
 	if (isIntel) csText = "#define ISINTEL\n" + csText, vendorLines++;
@@ -1010,6 +1043,8 @@ Kernel::~Kernel()
 	kernel = 0;
 	delete[] sourceFile;
 	sourceFile = 0;
+	delete[] sourceDefines;
+	sourceDefines = 0;
 }
 
 // InitCL method

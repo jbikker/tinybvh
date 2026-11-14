@@ -2,8 +2,8 @@
 // and exists purely to speedup compilation.
 
 #define FENSTER_APP_IMPLEMENTATION
-#define SCRWIDTH 800
-#define SCRHEIGHT 600
+#define SCRWIDTH 1600
+#define SCRHEIGHT 800
 #include "external/fenster.h" // https://github.com/zserge/fenster
 
 #define TINYBVH_IMPLEMENTATION

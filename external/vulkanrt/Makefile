@@ -24,7 +24,7 @@ ifneq (,$(filter $(ARCH),x86_64 amd64))
 endif
 
 CXXFLAGS ?= -std=c++20 -O2 -Wall -pthread $(ARCHFLAGS)
-LDLIBS   := -lvulkan -lxcb
+LDLIBS   := -lvulkan -lxcb -lOpenCL
 
 SHADERS := trace.rgen trace.rmiss trace.rchit tiny.comp tiny4.comp tiny8.comp tinyrq.comp
 SPV     := $(addprefix shaders/,$(addsuffix .spv,$(SHADERS)))
@@ -36,8 +36,8 @@ all: $(SPV) $(TARGET)
 # error, rather than make refusing with "No rule to make target".
 TINYBVH := $(wildcard ../../tiny_bvh*.h)
 
-$(TARGET): program_vk.cpp $(TINYBVH)
-	$(CXX) $(CXXFLAGS) -o $@ program_vk.cpp $(LDLIBS)
+$(TARGET): program_vk.cpp tiny_ocl_impl.cpp ../../tiny_ocl.h $(TINYBVH)
+	$(CXX) $(CXXFLAGS) -o $@ program_vk.cpp tiny_ocl_impl.cpp $(LDLIBS)
 
 # vulkan1.2 is required rather than cosmetic: ray tracing and ray query need
 # SPIR-V 1.4, which the vulkan1.0/1.1 targets cannot emit.

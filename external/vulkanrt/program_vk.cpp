@@ -1,9 +1,13 @@
-﻿// Vulkan port of the D3D12 tinybvh GPU ray tracing benchmark (program.cpp).
+// Vulkan port of the D3D12 tinybvh GPU ray tracing benchmark (program.cpp).
 
 #if defined(_WIN32)
 #define VK_USE_PLATFORM_WIN32_KHR
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #else
 #define VK_USE_PLATFORM_XCB_KHR
@@ -20,14 +24,30 @@
 #include <fstream>
 #include <vector>
 
+// GPU selection.
+#define USE_INTEGRATED_GPU	false	// run the experiment on the iGPU instead of the dGPU
+
 #if defined(_WIN32)
-extern "C" { __declspec( dllexport ) DWORD NvOptimusEnablement = 1; }
-extern "C" { __declspec( dllexport ) int AmdPowerXpressRequestHighPerformance = 1; }
+extern "C" { __declspec( dllexport ) DWORD NvOptimusEnablement = USE_INTEGRATED_GPU ? 0 : 1; }
+extern "C" { __declspec( dllexport ) int AmdPowerXpressRequestHighPerformance = USE_INTEGRATED_GPU ? 0 : 1; }
 #endif
 #if defined(_MSC_VER)
 #pragma comment(lib, "user32")
 #pragma comment(lib, "vulkan-1")
 #endif
+
+#include <chrono>
+struct Timer
+{
+	Timer() { reset(); }
+	float elapsed() const
+	{
+		auto t2 = std::chrono::high_resolution_clock::now();
+		return (float)std::chrono::duration_cast<std::chrono::duration<double>>(t2 - start).count();
+	}
+	void reset() { start = std::chrono::high_resolution_clock::now(); }
+	std::chrono::high_resolution_clock::time_point start;
+};
 
 // ----------------------------------------------------------------------------
 // platform primitives
@@ -58,7 +78,7 @@ static void QuitProcess() { exit( 1 ); }
 // settings
 constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 #define ENABLE_HWRT			true	// display info on hardware RT pipeline performance
-#define ENABLE_BVH2			true	// display info on BVH_GPU performance
+#define ENABLE_BVH2			false	// display info on BVH_GPU performance
 #define ENABLE_BVH4			false	// display info on BVH4_GPU performance
 #define ENABLE_CWBVH		false	// display info on BVH8_CWBVH performance
 #define ENABLE_RAY_QUERIES	false	// display info on inline ray query performance
@@ -67,26 +87,40 @@ constexpr uint32_t rtWidth = 1024, rtHeight = 1024;
 #define ALLOW_SYNTHETIC_RAYS false
 
 // OpenCL interleaving. The OpenCL backends trace the same rays through the same
-// tinybvh data as the compute shaders, using the traversal code from
-// kernels/traverse.cl, so the two APIs can be compared one frame apart.
+// scene as the compute shaders: BVH_GPU with shaders/traverse.cl, the AMD layouts
+// with shaders/traverse_amd.cl, so the two APIs can be compared one frame apart.
 #define ENABLE_OPENCL		true	// init OpenCL and put its backends in the rotation
-#define ENABLE_OCL_BVH2		true	// display info on OpenCL BVH_GPU performance
-#define OCL_PRESENT_RESULT	false	// show what OpenCL traced; costs a 4MB readback + upload per frame
+#define ENABLE_OCL_BVH2		false	// display info on OpenCL BVH_GPU performance
+#define ENABLE_OCL_AMD_BVH8	true	// display info on AMD BVH8 hardware traversal (RDNA4)
+#define OCL_PRESENT_RESULT	true	// show what OpenCL traced; costs a 4MB readback + upload per frame
+#define OCL_DEVICE_INDEX	-1		// -1: use the GPU Vulkan runs on; else an index from the list printed at startup
+
+#if 0
+
+const char* triMesh = "../../testdata/cryteksponza.bin";
+const char* raySetPath = "../../testdata/view3rays.bin";
+
+#else
+
+const char* triMesh = "../../testdata/conference.bin";
+const char* raySetPath = "../../testdata/view1rays_cnf.bin";
+
+#endif
 
 constexpr uint32_t NUM_INSTANCES = 1, FRAME_COUNT = 2;
-constexpr uint32_t NUM_DISPATCHES = 1;
+constexpr uint32_t NUM_DISPATCHES = 10;
 constexpr uint32_t NUM_SHADER_GROUPS = 3; // raygen, miss, hit group
 
 // The ray tracing backends that are cycled through, one per frame. Everything from
 // BACKEND_OCL_* onwards runs outside Vulkan, on the OpenCL queue.
 enum Backend {
 	BACKEND_HWRT = 0, BACKEND_BVH_GPU, BACKEND_BVH4_GPU, BACKEND_BVH8_CWBVH, BACKEND_RAYQUERY,
-	BACKEND_OCL_BVH_GPU, BACKEND_COUNT
+	BACKEND_OCL_BVH_GPU, BACKEND_OCL_AMD_BVH8, BACKEND_COUNT
 };
 static const char* backendName[BACKEND_COUNT] = { "HWRT", "BVH_GPU", "BVH4_GPU", "CWBVH", "RayQuery",
-	"CL/BVH_GPU" };
+	"CL/BVH_GPU", "CL/AMD_BVH8" };
 static const bool backendPrint[BACKEND_COUNT] = { ENABLE_HWRT, ENABLE_BVH2, ENABLE_BVH4, ENABLE_CWBVH,
-	ENABLE_RAY_QUERIES, ENABLE_OCL_BVH2 };
+	ENABLE_RAY_QUERIES, ENABLE_OCL_BVH2,ENABLE_OCL_AMD_BVH8 };
 static bool BackendIsOpenCL( const int b ) { return b >= BACKEND_OCL_BVH_GPU; }
 static bool rayQuerySupported = false;
 // Backends that can actually run on this machine, in rotation order; built by
@@ -101,10 +135,6 @@ using namespace tinybvh;
 // it does a global 'using namespace tinyocl', which would collide with the Buffer
 // struct below.
 #include "../../tiny_ocl.h"
-
-#ifndef CWBVH_COMPRESSED_TRIS
-#error "tiny8.comp assumes CWBVH_COMPRESSED_TRIS; enable it, or set TRI_STRIDE 3 in tiny8.comp and recompile"
-#endif
 
 // tinybvh BVH_GPU node.
 struct GPUBVHNode
@@ -135,6 +165,10 @@ static VkPhysicalDeviceMemoryProperties memProps{};
 static VkPhysicalDeviceProperties deviceProps{};
 static VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps{};
 static VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtProps{};
+// PCI address of the Vulkan device, where VK_EXT_pci_bus_info is available: the one
+// thing that identifies the same GPU on the OpenCL side without comparing names.
+static bool vkPCIValid = false;
+static uint32_t vkPCIDomain = 0, vkPCIBus = 0, vkPCIDevice = 0;
 static uint64_t timestampMask = ~0ull;
 
 static VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -497,6 +531,18 @@ static bool HasExtension( const std::vector<VkExtensionProperties>& list, const 
 	return false;
 }
 
+static const char* DeviceTypeName( const VkPhysicalDeviceType type )
+{
+	switch (type)
+	{
+	case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return "discrete";
+	case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "integrated";
+	case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return "virtual";
+	case VK_PHYSICAL_DEVICE_TYPE_CPU: return "cpu";
+	default: return "other";
+	}
+}
+
 static void InitDevice()
 {
 	// instance
@@ -516,43 +562,68 @@ static void InitDevice()
 		ici.enabledLayerCount = 0;
 		VK_CHECK( vkCreateInstance( &ici, nullptr, &instance ) );
 	}
-	// physical device: prefer a discrete GPU that can do ray tracing pipelines
+	// Physical device: a GPU of the type USE_INTEGRATED_GPU asks for that can do ray
+	// tracing pipelines. The other type stays a candidate one rank down, so the
+	// benchmark still runs when the requested type is absent or cannot ray trace; it
+	// says which of the two happened rather than switching silently.
 	uint32_t count = 0;
 	VK_CHECK( vkEnumeratePhysicalDevices( instance, &count, nullptr ) );
 	if (count == 0) Fatal( "no Vulkan devices found" );
 	std::vector<VkPhysicalDevice> devices( count );
 	VK_CHECK( vkEnumeratePhysicalDevices( instance, &count, devices.data() ) );
+	const VkPhysicalDeviceType wantedType = USE_INTEGRATED_GPU ?
+		VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU : VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+	const VkPhysicalDeviceType otherType = USE_INTEGRATED_GPU ?
+		VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU : VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
 	int bestScore = -1;
+	bool wantedTypeSeen = false; // of any capability: tells 'not there' from 'cannot ray trace'
 	std::vector<VkExtensionProperties> bestExt;
 	for (VkPhysicalDevice pd : devices)
 	{
+		VkPhysicalDeviceProperties p;
+		vkGetPhysicalDeviceProperties( pd, &p );
+		if (p.deviceType == wantedType) wantedTypeSeen = true;
 		uint32_t n = 0;
 		vkEnumerateDeviceExtensionProperties( pd, nullptr, &n, nullptr );
 		std::vector<VkExtensionProperties> ext( n );
 		vkEnumerateDeviceExtensionProperties( pd, nullptr, &n, ext.data() );
 		if (!HasExtension( ext, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME )) continue;
 		if (!HasExtension( ext, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME )) continue;
-		VkPhysicalDeviceProperties p;
-		vkGetPhysicalDeviceProperties( pd, &p );
 		if (p.apiVersion < VK_API_VERSION_1_2) continue;
-		int score = (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) ? 2 : 1;
+		const int score = (p.deviceType == wantedType) ? 3 : (p.deviceType == otherType ? 2 : 1);
 		if (score > bestScore) bestScore = score, physicalDevice = pd, bestExt = ext, deviceProps = p;
 	}
 	if (physicalDevice == VK_NULL_HANDLE)
 		Fatal( "no device with VK_KHR_acceleration_structure + VK_KHR_ray_tracing_pipeline" );
+	if (deviceProps.deviceType != wantedType)
+	{
+		const char* wanted = DeviceTypeName( wantedType );
+		if (wantedTypeSeen)
+			printf( "warning: the %s GPU does not expose VK_KHR_acceleration_structure +\n"
+				"         VK_KHR_ray_tracing_pipeline; using '%s' instead.\n", wanted, deviceProps.deviceName );
+		else
+			printf( "warning: no %s GPU found; using '%s' instead.\n", wanted, deviceProps.deviceName );
+	}
 	rayQuerySupported = HasExtension( bestExt, VK_KHR_RAY_QUERY_EXTENSION_NAME );
 	if (!rayQuerySupported)
 		printf( "VK_KHR_ray_query not available; the %s backend is disabled.\n", backendName[BACKEND_RAYQUERY] );
-	printf( "device: %s\n", deviceProps.deviceName );
+	printf( "device: %s (%s)\n", deviceProps.deviceName, DeviceTypeName( deviceProps.deviceType ) );
 	vkGetPhysicalDeviceMemoryProperties( physicalDevice, &memProps );
 	// ray tracing / acceleration structure limits
 	asProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
 	rtProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
 	asProps.pNext = &rtProps;
+	VkPhysicalDevicePCIBusInfoPropertiesEXT pciProps{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT };
+	const bool pciInfoSupported = HasExtension( bestExt, VK_EXT_PCI_BUS_INFO_EXTENSION_NAME );
+	if (pciInfoSupported) rtProps.pNext = &pciProps;
 	VkPhysicalDeviceProperties2 props2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
 	props2.pNext = &asProps;
 	vkGetPhysicalDeviceProperties2( physicalDevice, &props2 );
 	deviceProps = props2.properties;
+	rtProps.pNext = nullptr; // pciProps is a local; do not leave rtProps pointing at it
+	if (pciInfoSupported)
+		vkPCIValid = true, vkPCIDomain = pciProps.pciDomain,
+		vkPCIBus = pciProps.pciBus, vkPCIDevice = pciProps.pciDevice;
 	if (deviceProps.limits.timestampPeriod == 0.0f) Fatal( "device does not support timestamp queries" );
 	// queue: one graphics+compute family, which is also the present family on Windows
 	uint32_t qCount = 0;
@@ -574,6 +645,7 @@ static void InitDevice()
 		VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
 		VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME };
 	if (rayQuerySupported) devExt.push_back( VK_KHR_RAY_QUERY_EXTENSION_NAME );
+	if (pciInfoSupported) devExt.push_back( VK_EXT_PCI_BUS_INFO_EXTENSION_NAME );
 	VkPhysicalDeviceRayQueryFeaturesKHR fRQ{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
 	fRQ.rayQuery = VK_TRUE;
 	VkPhysicalDeviceRayTracingPipelineFeaturesKHR fRT{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR };
@@ -766,19 +838,30 @@ static void InitSurfaces()
 
 static void InitMeshes()
 {
-	AddMesh( "../../testdata/cryteksponza.bin" );
+	AddMesh( triMesh );
 	meshVB = MakeDeviceBuffer( verts, (VkDeviceSize)triCount * 3 * sizeof( bvhvec4 ),
 		(VkDeviceSize)triCount * 3 * sizeof( bvhvec4 ),
 		VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
 		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, "meshVB" );
 	// One spatial-split build, converted to both GPU layouts.
-	bvh2.BuildHQ( verts, triCount );
-	bvh2.Optimize();
-	bvh.ConvertFrom( bvh2, true );    // Aila & Laine 64-byte nodes + primIdx + separate tris
+	bvh2.settings.useSpatialSplits = true; // triggers a high-quality BonsaiS build
+	// bvh2.settings.postOptimize = true; // triggers post-optimization
+	Timer t;
+	printf("building base BVH... ");
+	bvh2.Build( verts, triCount );
+	printf("done (%.2fs).\nconverting to MBVH<4>...", t.elapsed() );
+	t.reset();
+	bvh.ConvertFrom(bvh2, true);    // Aila & Laine 64-byte nodes + primIdx + separate tris
 	mbvh4.ConvertFrom( bvh2, true );  // collapse the BVH2 into a 4-wide BVH
-	bvh4.ConvertFrom( mbvh4, true );  // quantize into the single-blob BVH4_GPU layout
-	cwbvh.BuildHQ( verts, triCount ); // separate SBVH build: see the note at 'cwbvh'.
-	cwbvh.Optimize();
+	printf("done (%.2fs).\nconverting to bvh4...", t.elapsed() );
+	t.reset();
+	bvh4.ConvertFrom(mbvh4, true);  // quantize into the single-blob BVH4_GPU layout
+	printf("done (%.2fs).\nconverting to cwbvh...", t.elapsed() );
+	t.reset();
+	cwbvh.settings.useSpatialSplits = true; // triggers a high-quality BonsaiS build
+	cwbvh.settings.postOptimize = true; // triggers post-optimization
+	cwbvh.Build( verts, triCount ); // separate SBVH build: see the note at 'cwbvh'.
+	printf("done (%.2fs).\n", t.elapsed() );
 }
 
 static void InitBVHBuffers()
@@ -798,7 +881,7 @@ static void InitBVHBuffers()
 #endif
 	const VkBufferUsageFlags use = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 	bvhNodeBuffer = MakeDeviceBuffer( bvh.bvhNode, nodeBytes, nodeBytes, use, "bvhNodeBuffer" );
-	bvhIdxBuffer = MakeDeviceBuffer( bvh.bvh.primIdx, idxBytes, idxBytes, use, "bvhIdxBuffer" );
+	bvhIdxBuffer = MakeDeviceBuffer( bvh2.primIdx, idxBytes, idxBytes, use, "bvhIdxBuffer" );
 	bvhVertBuffer = MakeDeviceBuffer( (bvhvec4*)bvh.orderedVerts.data, vertBytes, vertBytes, use, "bvhVertBuffer" );
 	bvh4DataBuffer = MakeDeviceBuffer( bvh4.bvh4Data, bvh4Bytes, bvh4Bytes, use, "bvh4DataBuffer" );
 	cwbvhNodeBuffer = MakeDeviceBuffer( cwbvh.bvh8Data, cwbvhNodeBytes, cwbvhNodeBytes, use, "cwbvhNodeBuffer" );
@@ -813,7 +896,6 @@ static void UpdateRayBuffer()
 	// 64-byte layout, and both APIs must trace exactly the same set.
 	hostRays.assign( (size_t)rayCount * 8, 0.0f );
 	float* data = hostRays.data();
-	const char* raySetPath = "../../view3rays.bin";
 	FILE* f = fopen( raySetPath, "rb" );
 	if (f)
 	{
@@ -849,10 +931,11 @@ static void UpdateRayBuffer()
 // OpenCL
 // ----------------------------------------------------------------------------
 
-// The OpenCL backends trace the ray set from UpdateRayBuffer() through the very
-// same tinybvh blobs the compute shaders use, with the traversal code from
-// kernels/traverse.cl; kernels/bench.cl only adds entry points that match what the
-// GLSL does (tmax is always 1e30, the output is one RGBA8 pixel per ray).
+// The OpenCL backends trace the ray set from UpdateRayBuffer(). CL/BVH_GPU uses the
+// very same tinybvh blobs as the compute shaders, with shaders/traverse.cl. The AMD
+// backends convert the same BVH2 to the hardware layouts and use shaders/traverse_amd.cl,
+// a copy of the traversal in kernels/traverse_amd_hw*.cl. All entry points match what
+// the GLSL does (tmax is always 1e30, the output is one RGBA8 pixel per ray).
 //
 // There is no interop: Vulkan and OpenCL get their own context, their own copy of
 // the data and their own GPU timer (timestamp queries vs. events). What makes the
@@ -875,21 +958,304 @@ static void UpdateRayBuffer()
 // silent slowdown.
 constexpr int OCL_GROUP_X = 8, OCL_GROUP_Y = 8;
 
-static tinyocl::Kernel* oclKernel = 0;
+static tinyocl::Kernel* oclKernel[BACKEND_COUNT] = {}; // null: backend not available
 static tinyocl::Buffer* oclBVH2Nodes = 0, * oclBVH2Verts = 0, * oclBVH4Data = 0;
 static tinyocl::Buffer* oclCWBVHNodes = 0, * oclCWBVHTris = 0;
+static tinyocl::Buffer* oclAMD8Data = 0;
 static tinyocl::Buffer* oclRays = 0, * oclPixels = 0;
 static bool openclReady = false;
+
+// AMD hardware layouts, converted from the shared bvh2 so that every software
+// backend traverses the same tree. This mirrors BVH4_AMD_HW::Build and
+// CWBVH8_AMD_HW::Build, minus the build: split leaves to what the hardware
+// accepts (1 triangle for BVH4, 2 for BVH8), collapse, convert. SplitLeafs works
+// in place, so each layout gets its own copy of bvh2.
+static BVH bvh2AMD4, bvh2AMD8;
+static MBVH<4> mbvh4AMD;
+static MBVH<8> mbvh8AMD;
+static CWBVH8_AMD_HW bvh8AMD;
+
+static void CopyBVH2( BVH& copy )
+{
+	// Through BVH_Verbose, without compaction: that keeps the 3 x triCount node
+	// capacity SplitLeafs appends into (it does not check bounds itself).
+	BVH_Verbose verbose;
+	verbose.ConvertFrom( bvh2 );
+	copy.ConvertFrom( verbose, false );
+}
+
+static void InitAMDBVH8()
+{
+	printf("converting to AMD8... ");
+	CopyBVH2( bvh2AMD8 );
+	bvh2AMD8.SplitLeafs( 2 );
+	mbvh8AMD.leafPrimLimit = 2;
+	mbvh8AMD.ConvertFrom( bvh2AMD8, true );
+	bvh8AMD.ConvertFrom( mbvh8AMD );
+	printf("done.\n");
+}
+
+static void RunOpenCL( const int backend, cl_event* event = 0 )
+{
+	oclKernel[backend]->Run2D( tinyocl::oclint2( rtWidth, rtHeight ),
+		tinyocl::oclint2( OCL_GROUP_X, OCL_GROUP_Y ), 0, event );
+}
+
+// ----------------------------------------------------------------------------
+// OpenCL device selection
+// ----------------------------------------------------------------------------
+
+// tinyocl chooses a device by itself: InitCL() takes the first platform that has a
+// GPU, NVIDIA first and AMD second, and it does that inside tiny_ocl_impl.cpp, out
+// of reach of USE_INTEGRATED_GPU - which is how the OpenCL backends end up on the
+// discrete card while Vulkan traces on the iGPU. So the device is chosen here and
+// handed to tinyocl before any Kernel or Buffer exists; both only call InitCL()
+// while clStarted is false. InitOpenCL() then checks that the device tinyocl ends
+// up with is the one installed here, and drops the OpenCL backends if it is not:
+// timing two different GPUs against each other is worse than not timing at all.
+
+// From cl_khr_pci_bus_info and cl_nv_device_attribute_query, spelled out because
+// only cl.h is included here and older cl_ext.h headers predate the KHR version.
+#ifndef CL_DEVICE_PCI_BUS_INFO_KHR
+#define CL_DEVICE_PCI_BUS_INFO_KHR	0x410F
+typedef struct _cl_device_pci_bus_info_khr
+{
+	cl_uint pci_domain, pci_bus, pci_device, pci_function;
+}
+cl_device_pci_bus_info_khr;
+#endif
+#ifndef CL_DEVICE_PCI_BUS_ID_NV
+#define CL_DEVICE_PCI_BUS_ID_NV		0x4008
+#endif
+#ifndef CL_DEVICE_PCI_SLOT_ID_NV
+#define CL_DEVICE_PCI_SLOT_ID_NV	0x4009
+#endif
+#ifndef CL_DEVICE_PCI_DOMAIN_ID_NV
+#define CL_DEVICE_PCI_DOMAIN_ID_NV	0x400A
+#endif
+
+struct OCLDevice
+{
+	cl_platform_id platform = nullptr;
+	cl_device_id id = nullptr;
+	char name[256] = {};
+	cl_uint vendorID = 0;
+	cl_bool unified = CL_FALSE;
+	bool hasPCI = false;
+	cl_uint pciDomain = 0, pciBus = 0, pciDevice = 0;
+};
+
+static cl_device_id oclSelectedDevice = nullptr; // what SelectOpenCLDevice() installed
+
+// The PCI function is left out on purpose: NVIDIA reports a slot id instead of a
+// device + function pair, and a GPU sits on function 0 anyway.
+static bool OCLPCIAddress( cl_device_id id, cl_uint& domain, cl_uint& bus, cl_uint& dev )
+{
+	cl_device_pci_bus_info_khr khr{};
+	if (clGetDeviceInfo( id, CL_DEVICE_PCI_BUS_INFO_KHR, sizeof( khr ), &khr, 0 ) == CL_SUCCESS)
+	{
+		domain = khr.pci_domain, bus = khr.pci_bus, dev = khr.pci_device;
+		return true;
+	}
+	cl_uint nvBus = 0, nvSlot = 0, nvDomain = 0;
+	if (clGetDeviceInfo( id, CL_DEVICE_PCI_BUS_ID_NV, sizeof( nvBus ), &nvBus, 0 ) == CL_SUCCESS &&
+		clGetDeviceInfo( id, CL_DEVICE_PCI_SLOT_ID_NV, sizeof( nvSlot ), &nvSlot, 0 ) == CL_SUCCESS)
+	{
+		if (clGetDeviceInfo( id, CL_DEVICE_PCI_DOMAIN_ID_NV, sizeof( nvDomain ), &nvDomain, 0 ) != CL_SUCCESS)
+			nvDomain = 0;
+		domain = nvDomain, bus = nvBus, dev = nvSlot;
+		return true;
+	}
+	return false;
+}
+
+// How much this OpenCL device looks like the GPU Vulkan picked. 0 means 'not it':
+// the vendor on its own cannot tell two GPUs of the same make apart, and a name on
+// its own is not always there.
+static int ScoreOpenCLDevice( const OCLDevice& d )
+{
+	int score = 0;
+	// Same bus address is the same piece of silicon, whatever the two APIs call it.
+	// It is a bonus rather than a verdict because the NVIDIA slot id and the KHR
+	// device number need not agree, and a mismatch there should not veto a device
+	// the name and vendor do agree on.
+	if (d.hasPCI && vkPCIValid && d.pciDomain == vkPCIDomain && d.pciBus == vkPCIBus && d.pciDevice == vkPCIDevice)
+		score += 100;
+	if (d.name[0] && (strstr( d.name, deviceProps.deviceName ) || strstr( deviceProps.deviceName, d.name ))) score += 4;
+	if (d.vendorID == deviceProps.vendorID) score += 2;
+	// CL_DEVICE_HOST_UNIFIED_MEMORY is deprecated, but it is still the only hint
+	// OpenCL gives that a device is integrated, and it is what separates an iGPU
+	// from a dGPU of the same make - the AMD case, where OpenCL reports the GFX
+	// target and Vulkan the marketing name, so the names never match.
+	if ((d.unified == CL_TRUE) == (deviceProps.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)) score += 1;
+	return score >= 3 ? score : 0;
+}
+
+// Vendor detection, cut down from the one in tiny_ocl's InitCL(), which no longer
+// runs. Only what this benchmark reads is set: the IS* defines the .cl sources are
+// compiled with, and the RDNA flags that gate the AMD hardware traversal backends.
+static void SetTinyOCLVendorFlags( const char* clDeviceName )
+{
+	char d[256] = {};
+	for (int i = 0; i < 255 && clDeviceName[i]; i++)
+		d[i] = (clDeviceName[i] >= 'A' && clDeviceName[i] <= 'Z') ? (char)(clDeviceName[i] + 32) : clDeviceName[i];
+	using tinyocl::Kernel;
+	if (strstr( d, "nvidia" ))
+	{
+		Kernel::isNVidia = true;
+		if (strstr( d, "5050" ) || strstr( d, "5060" ) || strstr( d, "5070" ) ||
+			strstr( d, "5080" ) || strstr( d, "5090" )) Kernel::isBlackwell = Kernel::isAda = true;
+		else if (strstr( d, "4050" ) || strstr( d, "4060" ) || strstr( d, "4070" ) ||
+			strstr( d, "4080" ) || strstr( d, "4090" )) Kernel::isAda = true;
+		else if (strstr( d, "3050" ) || strstr( d, "3060" ) || strstr( d, "3070" ) ||
+			strstr( d, "3080" ) || strstr( d, "3090" ) || strstr( d, "a2000" ) || strstr( d, "a3000" ) ||
+			strstr( d, "a4000" ) || strstr( d, "a5000" ) || strstr( d, "a6000" )) Kernel::isAmpere = true;
+		else if (strstr( d, "2060" ) || strstr( d, "2070" ) || strstr( d, "2080" ) ||
+			strstr( d, "titan rtx" ) || strstr( d, "1650" ) || strstr( d, "1660" )) Kernel::isTuring = true;
+		else if (strstr( d, "1010" ) || strstr( d, "1030" ) || strstr( d, "1050" ) || strstr( d, "1060" ) ||
+			strstr( d, "1070" ) || strstr( d, "1080" ) || strstr( d, "titan x" ) || strstr( d, "p1000" ) ||
+			strstr( d, "p2000" ) || strstr( d, "p5000" )) Kernel::isPascal = true;
+	}
+	else if (strstr( d, "intel" )) Kernel::isIntel = true;
+	else if (strstr( d, "amd" ) || strstr( d, "radeon" ) || strstr( d, "gfx" ))
+	{
+		Kernel::isAMD = true;
+		// A GFX target where the driver reports one, the marketing name otherwise.
+		Kernel::isRDNA2 = strstr( d, "gfx103" ) || strstr( d, "680m" ) || strstr( d, "660m" ) || strstr( d, "610m" );
+		Kernel::isRDNA3 = strstr( d, "gfx110" ) || strstr( d, "780m" ) || strstr( d, "760m" ) || strstr( d, "740m" );
+		Kernel::isRDNA35 = strstr( d, "gfx115" ) || strstr( d, "890m" ) || strstr( d, "880m" ) ||
+			strstr( d, "860m" ) || strstr( d, "840m" ) || strstr( d, "820m" );
+		Kernel::isRDNA4 = strstr( d, "gfx1200" ) || strstr( d, "gfx1201" );
+	}
+	else Kernel::isOther = true;
+}
+
+// Picks the OpenCL device and installs it in tinyocl. Must run before the first
+// Kernel or Buffer is constructed. False means no usable device, in which case the
+// OpenCL backends stay out of the rotation.
+static bool SelectOpenCLDevice()
+{
+	std::vector<OCLDevice> devs;
+	cl_uint platformCount = 0;
+	if (clGetPlatformIDs( 0, nullptr, &platformCount ) == CL_SUCCESS && platformCount > 0)
+	{
+		std::vector<cl_platform_id> platforms( platformCount );
+		if (clGetPlatformIDs( platformCount, platforms.data(), nullptr ) == CL_SUCCESS)
+			for (cl_platform_id plat : platforms)
+			{
+				cl_uint devCount = 0;
+				if (clGetDeviceIDs( plat, CL_DEVICE_TYPE_GPU, 0, nullptr, &devCount ) != CL_SUCCESS) continue;
+				if (devCount == 0) continue;
+				std::vector<cl_device_id> ids( devCount );
+				if (clGetDeviceIDs( plat, CL_DEVICE_TYPE_GPU, devCount, ids.data(), nullptr ) != CL_SUCCESS) continue;
+				for (cl_device_id id : ids)
+				{
+					OCLDevice d;
+					d.platform = plat, d.id = id;
+					clGetDeviceInfo( id, CL_DEVICE_NAME, sizeof( d.name ), d.name, 0 );
+					clGetDeviceInfo( id, CL_DEVICE_VENDOR_ID, sizeof( d.vendorID ), &d.vendorID, 0 );
+					clGetDeviceInfo( id, CL_DEVICE_HOST_UNIFIED_MEMORY, sizeof( d.unified ), &d.unified, 0 );
+					d.hasPCI = OCLPCIAddress( id, d.pciDomain, d.pciBus, d.pciDevice );
+					devs.push_back( d );
+				}
+			}
+	}
+	if (devs.empty())
+	{
+		printf( "OpenCL: no GPU device found; the OpenCL backends are disabled.\n" );
+		return false;
+	}
+	// The whole list is printed: it shows which GPUs OpenCL can see at all, and it
+	// is what OCL_DEVICE_INDEX indexes into.
+	printf( "OpenCL GPUs:\n" );
+	int best = -1, bestScore = 0;
+	for (int i = 0; i < (int)devs.size(); i++)
+	{
+		const OCLDevice& d = devs[i];
+		const int score = ScoreOpenCLDevice( d );
+		if (score > bestScore) bestScore = score, best = i;
+		char pci[32] = "no PCI info";
+		if (d.hasPCI) snprintf( pci, sizeof( pci ), "%04x:%02x:%02x",
+			(unsigned)d.pciDomain, (unsigned)d.pciBus, (unsigned)d.pciDevice );
+		printf( "  #%i: %s [vendor %04x, %s, %s]%s\n", i, d.name[0] ? d.name : "<unnamed>",
+			(unsigned)d.vendorID, d.unified ? "integrated" : "discrete", pci, score > 0 ? " <- matches Vulkan" : "" );
+	}
+	if (OCL_DEVICE_INDEX >= 0)
+	{
+		if (OCL_DEVICE_INDEX >= (int)devs.size())
+		{
+			printf( "OpenCL: OCL_DEVICE_INDEX %i does not exist; the OpenCL backends are disabled.\n",
+				OCL_DEVICE_INDEX );
+			return false;
+		}
+		best = OCL_DEVICE_INDEX; // deliberate: no match check, the choice was made by hand
+	}
+	else if (best < 0)
+	{
+		// Nothing here is the GPU Vulkan is on - usually an iGPU whose vendor ships
+		// no OpenCL runtime. Tracing on one of the others would compare two different
+		// GPUs, which is exactly what this benchmark must not do, so OpenCL sits out.
+		printf( "OpenCL: no device is the GPU Vulkan runs on ('%s');\n"
+			"        the OpenCL backends are disabled. Set OCL_DEVICE_INDEX to pick one by hand.\n",
+			deviceProps.deviceName );
+		return false;
+	}
+	const OCLDevice& sel = devs[best];
+	cl_device_id id = sel.id;
+	cl_int err = CL_SUCCESS;
+	cl_context_properties props[] = { CL_CONTEXT_PLATFORM, (cl_context_properties)sel.platform, 0 };
+	cl_context ctx = clCreateContext( props, 1, &id, nullptr, nullptr, &err );
+	if (err != CL_SUCCESS || !ctx)
+	{
+		printf( "OpenCL: clCreateContext failed (%i); the OpenCL backends are disabled.\n", (int)err );
+		return false;
+	}
+	// Profiling queues: TraceOpenCL() times the kernels with event profiling info.
+	const cl_queue_properties qProps[] = { CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE, 0 };
+	cl_command_queue q1 = clCreateCommandQueueWithProperties( ctx, id, qProps, &err );
+	cl_command_queue q2 = err == CL_SUCCESS ? clCreateCommandQueueWithProperties( ctx, id, qProps, &err ) : nullptr;
+	if (err != CL_SUCCESS || !q1 || !q2)
+	{
+		if (q2) clReleaseCommandQueue( q2 );
+		if (q1) clReleaseCommandQueue( q1 );
+		clReleaseContext( ctx );
+		printf( "OpenCL: could not create a profiling queue (%i); the OpenCL backends are disabled.\n", (int)err );
+		return false;
+	}
+	// Hand it over. The accessors return the tinyocl statics by reference, and
+	// clStarted keeps Kernel and Buffer from running InitCL(); KillCL() releases the
+	// queues and the context, so ownership goes with them.
+	if (!tinyocl::OpenCL::GetInstance()) tinyocl::OpenCL::CreateInstance( {} ); // Buffer's host-side allocator
+	tinyocl::Kernel::GetContext() = ctx;
+	tinyocl::Kernel::GetDevice() = id;
+	tinyocl::Kernel::GetQueue() = q1;
+	tinyocl::Kernel::GetQueue2() = q2;
+	SetTinyOCLVendorFlags( sel.name );
+	tinyocl::Kernel::clStarted = true;
+	oclSelectedDevice = id;
+	printf( "OpenCL: using #%i for the OpenCL backends.\n", best );
+	return true;
+}
 
 static void InitOpenCL()
 {
 	const uint32_t rayCount = rtWidth * rtHeight;
-	oclKernel = new tinyocl::Kernel( "shaders/traverse.cl", "bench_bvh2" );
+	oclKernel[BACKEND_OCL_BVH_GPU] = new tinyocl::Kernel( "shaders/traverse.cl", "bench_bvh2" );
 	char clDeviceName[256] = {};
 	clGetDeviceInfo( tinyocl::Kernel::GetDevice(), CL_DEVICE_NAME, sizeof( clDeviceName ), clDeviceName, 0 );
-	printf( "OpenCL device: %s\n", clDeviceName );
-	if (!strstr( clDeviceName, deviceProps.deviceName ) && !strstr( deviceProps.deviceName, clDeviceName ))
-		printf( "warning: OpenCL picked a different GPU than Vulkan did; the comparison is meaningless.\n" );
+	printf( "OpenCL device: %s\n", clDeviceName[0] ? clDeviceName : "<unnamed>" );
+	// Device identity, not device names. The name test this replaces could not tell
+	// 'gfx1103' from 'AMD Radeon 780M Graphics', and it went quiet altogether when the
+	// name came back empty, because every string contains the empty string - so a
+	// backend running on the wrong GPU could pass it without a word.
+	if (tinyocl::Kernel::GetDevice() != oclSelectedDevice)
+	{
+		printf( "warning: tinyocl initialized itself on a device of its own choosing;\n"
+			"         the OpenCL backends are disabled rather than timed against another GPU.\n" );
+		delete oclKernel[BACKEND_OCL_BVH_GPU], oclKernel[BACKEND_OCL_BVH_GPU] = 0;
+		tinyocl::Kernel::KillCL();
+		return; // openclReady stays false, so BuildSchedule() leaves them out
+	}
 	// Exactly the bytes the Vulkan side uploads in InitBVHBuffers().
 	const unsigned nodeBytes = (unsigned)(bvh.allocatedNodes * sizeof( GPUBVHNode ));
 	const unsigned vertBytes = (unsigned)(bvh.bvh.idxCount * 3 * sizeof( bvhvec4 ));
@@ -900,36 +1266,44 @@ static void InitOpenCL()
 #else
 	const unsigned cwTriBytes = (unsigned)(cwbvh.idxCount * 3 * sizeof( bvhvec4 ));
 #endif
-	oclBVH2Nodes = new tinyocl::Buffer( nodeBytes, bvh.bvhNode, tinyocl::Buffer::READONLY );
-	oclBVH2Verts = new tinyocl::Buffer( vertBytes, (bvhvec4*)bvh.orderedVerts.data, tinyocl::Buffer::READONLY );
-	oclBVH4Data = new tinyocl::Buffer( bvh4Bytes, bvh4.bvh4Data, tinyocl::Buffer::READONLY );
-	oclCWBVHNodes = new tinyocl::Buffer( cwNodeBytes, cwbvh.bvh8Data, tinyocl::Buffer::READONLY );
-	oclCWBVHTris = new tinyocl::Buffer( cwTriBytes, cwbvh.bvh8Tris, tinyocl::Buffer::READONLY );
+	oclBVH2Nodes = new tinyocl::Buffer( nodeBytes, bvh.bvhNode, tinyocl::Buffer::DEVICEONLY);
+	oclBVH2Verts = new tinyocl::Buffer( vertBytes, (bvhvec4*)bvh.orderedVerts.data, tinyocl::Buffer::DEVICEONLY);
+	oclBVH4Data = new tinyocl::Buffer( bvh4Bytes, bvh4.bvh4Data, tinyocl::Buffer::DEVICEONLY);
+	oclCWBVHNodes = new tinyocl::Buffer( cwNodeBytes, cwbvh.bvh8Data, tinyocl::Buffer::DEVICEONLY);
+	oclCWBVHTris = new tinyocl::Buffer( cwTriBytes, cwbvh.bvh8Tris, tinyocl::Buffer::DEVICEONLY);
 	// 32 bytes per ray, host side and all: hostRays is the array the Vulkan ray
 	// buffer was filled from, so there is nothing to convert and nothing that can
 	// drift between the two. Buffer does not take ownership of it.
-	oclRays = new tinyocl::Buffer( rayCount * 32, hostRays.data(), tinyocl::Buffer::READONLY );
-	oclPixels = new tinyocl::Buffer( rayCount * 4, 0, tinyocl::Buffer::WRITEONLY );
-	oclBVH2Nodes->CopyToDevice();
-	oclBVH2Verts->CopyToDevice();
-	oclBVH4Data->CopyToDevice();
-	oclCWBVHNodes->CopyToDevice();
-	oclCWBVHTris->CopyToDevice();
-	oclRays->CopyToDevice();
-	oclKernel->SetArguments( oclBVH2Nodes, oclBVH2Verts, oclRays, oclPixels );
+	oclRays = new tinyocl::Buffer( rayCount * 32, hostRays.data(), tinyocl::Buffer::DEVICEONLY);
+	oclPixels = new tinyocl::Buffer( rayCount * 4, 0, tinyocl::Buffer::WRITEONLY);
+	oclKernel[BACKEND_OCL_BVH_GPU]->SetArguments( oclBVH2Nodes, oclBVH2Verts, oclRays, oclPixels );
+	// AMD hardware traversal: the intrinsics exist on RDNA3 (BVH4) and RDNA4 (BVH4 + BVH8).
+	if (tinyocl::Kernel::isAMD && tinyocl::Kernel::isRDNA4)
+	{
+		InitAMDBVH8();
+		oclAMD8Data = new tinyocl::Buffer( (unsigned)(bvh8AMD.usedBlocks * sizeof( bvhvec4 )),
+			bvh8AMD.bvh8Data, tinyocl::Buffer::DEVICEONLY);
+		oclKernel[BACKEND_OCL_AMD_BVH8] = new tinyocl::Kernel( "shaders/traverse_amd.cl", "bench_amd_bvh8" );
+		oclKernel[BACKEND_OCL_AMD_BVH8]->SetArguments( oclAMD8Data, oclRays, oclPixels );
+	}
+	else printf( "%s disabled: requires AMD RDNA4.\n", backendName[BACKEND_OCL_AMD_BVH8] );
 	if (OCL_PRESENT_RESULT)
 		oclPresentStaging = CreateBuffer( rayCount * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, true );
 	// One warm pass, which doubles as a sanity check: this traces the same scene the
 	// compute shaders do, so coverage and average depth should match what they show.
-	oclKernel->Run2D( tinyocl::oclint2( rtWidth, rtHeight ), tinyocl::oclint2( OCL_GROUP_X, OCL_GROUP_Y ) );
-	oclPixels->CopyFromDevice(); // blocking, so this also drains the queue
-	const uint32_t* px = oclPixels->GetHostPtr();
-	uint32_t hits = 0;
-	double sum = 0;
-	for (uint32_t i = 0; i < rayCount; i++) if (px[i] & 255) hits++, sum += (double)(px[i] & 255);
-	printf( "%s: %.2f%% of rays hit, mean depth %.1f\n", backendName[BACKEND_OCL_BVH_GPU],
-		100.0 * hits / rayCount, hits ? sum / hits : 0.0 );
+	int be[] = { BACKEND_OCL_BVH_GPU , BACKEND_OCL_AMD_BVH8 };
+	for (int i = 0; i < 2; i++)
+	{
+		RunOpenCL(be[i]);
+		oclPixels->CopyFromDevice(); // blocking, so this also drains the queue
+		const uint32_t* px = oclPixels->GetHostPtr();
+		uint32_t hits = 0;
+		double sum = 0;
+		for (uint32_t i = 0; i < rayCount; i++) if (px[i] & 255) hits++, sum += (double)(px[i] & 255);
+		printf("%s: %.2f%% of rays hit, mean depth %.1f\n", backendName[be[i]],
+			100.0 * hits / rayCount, hits ? sum / hits : 0.0);
+	}
 	openclReady = true;
 }
 
@@ -939,9 +1313,7 @@ static void InitOpenCL()
 static double TraceOpenCL( const int backend )
 {
 	cl_event event[NUM_DISPATCHES] = {};
-	for (uint32_t i = 0; i < NUM_DISPATCHES; i++)
-		oclKernel->Run2D( tinyocl::oclint2( rtWidth, rtHeight ),
-			tinyocl::oclint2( OCL_GROUP_X, OCL_GROUP_Y ), 0, &event[i] );
+	for (uint32_t i = 0; i < NUM_DISPATCHES; i++) RunOpenCL( backend, &event[i] );
 	clWaitForEvents( 1, &event[NUM_DISPATCHES - 1] );
 	cl_ulong start = 0, end = 0;
 	clGetEventProfilingInfo( event[0], CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &start, 0 );
@@ -957,11 +1329,17 @@ static double TraceOpenCL( const int backend )
 
 static void ShutdownOpenCL()
 {
-	if (!openclReady) return;
+	if (!openclReady)
+	{
+		// the context can exist without the backends: SelectOpenCLDevice() creates it
+		if (tinyocl::Kernel::clStarted) tinyocl::Kernel::KillCL();
+		return;
+	}
 	delete oclBVH2Nodes, delete oclBVH2Verts, delete oclBVH4Data;
 	delete oclCWBVHNodes, delete oclCWBVHTris;
+	delete oclAMD8Data;
 	delete oclRays, delete oclPixels;
-	delete oclKernel;
+	for (int b = 0; b < BACKEND_COUNT; b++) delete oclKernel[b], oclKernel[b] = 0;
 	tinyocl::Kernel::KillCL();
 	openclReady = false;
 }
@@ -972,7 +1350,7 @@ static void BuildSchedule()
 	for (int b = 0; b < BACKEND_COUNT; b++)
 	{
 		if (b == BACKEND_RAYQUERY && !rayQuerySupported) continue;
-		if (BackendIsOpenCL( b ) && !openclReady) continue;
+		if (BackendIsOpenCL( b ) && (!openclReady || !oclKernel[b])) continue;
 		schedule[scheduleLen++] = b;
 	}
 }
@@ -1570,6 +1948,10 @@ static void Resize()
 static void Init()
 {
 	InitDevice();
+	// Before anything can construct a tinyocl object: the device has to go in while
+	// Kernel::clStarted is still false, or tinyocl will have chosen one by itself.
+	bool openclDevice = false;
+	if (ENABLE_OPENCL) openclDevice = SelectOpenCLDevice();
 	InitCommand();
 	InitQueryPool();
 	InitSurfaces();
@@ -1583,7 +1965,7 @@ static void Init()
 	InitPipeline();
 	InitComputePipeline();
 	InitShaderTables();
-	if (ENABLE_OPENCL) InitOpenCL();
+	if (openclDevice) InitOpenCL();
 	BuildSchedule();
 }
 

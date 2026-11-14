@@ -21,7 +21,7 @@
 ** This header is generated from the Khronos OpenCL XML API Registry.
 */
 
-#include <cl.h>
+#include <CL/cl.h>
 
 /* CL_NO_PROTOTYPES implies CL_NO_EXTENSION_PROTOTYPES: */
 #if defined(CL_NO_PROTOTYPES) && !defined(CL_NO_EXTENSION_PROTOTYPES)
@@ -45,16 +45,14 @@ extern "C" {
 #endif
 
 /***************************************************************
-* cl_khr_command_buffer (beta)
+* cl_khr_command_buffer
 ***************************************************************/
-#if defined(CL_ENABLE_BETA_EXTENSIONS)
-
 #define cl_khr_command_buffer 1
 #define CL_KHR_COMMAND_BUFFER_EXTENSION_NAME \
     "cl_khr_command_buffer"
 
 
-#define CL_KHR_COMMAND_BUFFER_EXTENSION_VERSION CL_MAKE_VERSION(0, 9, 8)
+#define CL_KHR_COMMAND_BUFFER_EXTENSION_VERSION CL_MAKE_VERSION(1, 0, 0)
 
 typedef cl_bitfield         cl_device_command_buffer_capabilities_khr;
 typedef struct _cl_command_buffer_khr* cl_command_buffer_khr;
@@ -551,8 +549,6 @@ clCommandSVMMemFillKHR(
     cl_mutable_command_khr* mutable_handle) CL_API_SUFFIX__VERSION_2_0;
 
 #endif /* !defined(CL_NO_NON_ICD_DISPATCH_EXTENSION_PROTOTYPES) */
-
-#endif /* defined(CL_ENABLE_BETA_EXTENSIONS) */
 
 /***************************************************************
 * cl_khr_command_buffer_multi_device (beta)
@@ -4690,7 +4686,7 @@ typedef struct _cl_kernel_allocation_info_intel {
     cl_int arg_index;
 } cl_kernel_allocation_info_intel;
 
-/* cl_kernel_workgroup_info */
+/* cl_kernel_work_group_info */
 #define CL_KERNEL_ALLOCATIONS_INFO_INTEL                    0x425A
 
 /***************************************************************

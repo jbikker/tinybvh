@@ -1,2 +1,2 @@
 Obtained from https://github.com/KhronosGroup/OpenCL-Headers
-May 30, 2026.
+Oct 30, 2026.

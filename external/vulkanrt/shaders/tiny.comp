@@ -83,8 +83,8 @@ vec4 traverse_ailalaine( in vec3 O, in vec3 D, in vec3 rD,
 		{
 			const bool leftFirst = tmina <= tminb;
 			node = leftFirst ? left : right;
-			const uint far = leftFirst ? right : left;
-			if (stackPtr < uint( STACK_SIZE )) STACK_AT( stackPtr++ ) = far;
+			const uint farNode = leftFirst ? right : left;
+			if (stackPtr < uint( STACK_SIZE )) STACK_AT( stackPtr++ ) = farNode;
 		}
 		else if (hitL) node = left;
 		else if (hitR) node = right;

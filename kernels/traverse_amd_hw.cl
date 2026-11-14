@@ -12,6 +12,9 @@ struct Ray
 // compiler compatability
 #if defined( ISAMD ) && ( defined( ISRDNA3 ) || defined( ISRDNA4 ) )
 #include "traverse_amd_hw_bvh4.cl"
+#if defined( ISRDNA4 )
+#include "traverse_amd_hw_bvh8.cl"
+#endif
 #else
 #error \
 	"TinyBVH AMD hardware ray tracing requires RDNA3/RDNA4 and compiler support "

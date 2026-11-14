@@ -14,9 +14,10 @@ enum BuildFlags : int {
 	PRESPLIT = 64,
 	SPATIALSPLITS = 128,
 	OPTIMIZE = 256,
-	LOW = 512, // low, medium, high: For Embree and Madmann91.
-	MEDIUM = 1024,
-	HIGH = 2048 
+	BAKED = 512,
+	LOW = 1024, // low, medium, high: For Embree and Madmann91.
+	MEDIUM = 2048,
+	HIGH = 4096 
 };
 
 enum BVHLayout
@@ -30,7 +31,8 @@ enum BVHLayout
 	CWBVH,		// 'Compressed Wide BVH'
 	AMD_HWRT,	// Native AMD format
 	MADMANN91,	// for reference: latest madmann91 BVH lib
-	EMBREE		// for reference: latest Embree lib.
+	EMBREE,		// for reference: latest Embree lib.
+	AMD_HWRT8,	// Native AMD 8-wide format
 };
 
 class PrimitiveSet;
@@ -41,6 +43,7 @@ public:
 	char* GetDescription() { return desc; }
 	void PrepareBuild();
 	BVHBase* Build( PrimitiveSet* primSet );
+	BVHBase* LoadBVH( const char* bakedBVH );
 	void PostBuild();
 	BVHBase* GetBVH() { return bvh; }
 	float SAHCost();

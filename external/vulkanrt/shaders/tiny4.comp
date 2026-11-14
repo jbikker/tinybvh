@@ -36,7 +36,7 @@ void IntersectTri4( in uint vertIdx, in vec3 O, in vec3 D, inout vec4 hit )
 	const float transS = T2.x * O.x + T2.y * O.y + T2.z * O.z + T2.w;
 	const float transD = T2.x * D.x + T2.y * D.y + T2.z * D.z;
 	const float d = -transS / transD;
-	if (d <= 0.0f || d >= hit.x) return;
+	if (!(d > 0.0f && d < hit.x)) return;
 	const vec4 T0 = bvh4Data[vertIdx + 0u], T1 = bvh4Data[vertIdx + 1u];
 	const vec3 I = O + d * D;
 	const float u = T0.x * I.x + T0.y * I.y + T0.z * I.z + T0.w;
