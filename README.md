@@ -44,7 +44,7 @@ See [`tiny_bvh_minimal.cpp`](https://github.com/jbikker/tinybvh/blob/main/exampl
 
 # Builders
 
-`Build` forwards to a specialized builder, selected via `bvh.settings` (a `BVHBuildSettings`):
+`Build` forwards to a specialized builder, selected via `bvh.settings`:
 
 | setting | builder |
 | --- | --- |
@@ -56,13 +56,7 @@ See [`tiny_bvh_minimal.cpp`](https://github.com/jbikker/tinybvh/blob/main/exampl
 | `useFullSweep` | Full-sweep SAH builder, for experiments (with support from [BoyBaykiller](https://github.com/BoyBaykiller)). |
 | `useHPLOC` | H-PLOC; builds trees identical to the NexusBVH CUDA code, for comparisons. |
 
-Further settings:
-* **Bonsai:** `bonsaiGridPrims` (grid resolution, in primitives per cell) and `bonsaiPruneFactor`.
-* **SBVH:** `minSpatialOverlap` and `spatialSkipSmallestAxis`; `hqbvhbins`, `hqbvhoddeven` and `hqLeafPrims` are members of the BVH itself. Presplitting: `presplitFactor`, `presplitPostPass`.
-* **General:** `keepSplitting` subdivides down to the leaf size whatever SAH prefers (`BVH4_CPU` and `BVH8_CPU` use it, leaving leaf formation to the collapse); `postOptimize` and `optimizeIterations`; `enableThreading`; `discardIntermediates`; `minimizeMemUse`.
-* **Cost model:** `c_int` and `c_trav`, per BVH, defaulting to `C_INT` and `C_TRAV`.
-
-Settings are per-BVH and are passed on to the layouts a BVH is built from:
+Additional settings can be found in struct `BVHBuildSettings`. All settings are per-BVH and are passed on to the layouts a BVH is built from:
 
 ```cpp
 tinybvh::BVH4_CPU bvh;
@@ -70,11 +64,11 @@ bvh.settings.useSpatialSplits = true;   // Bonsai HQ
 bvh.Build( (tinybvh::bvhvec4*)myTriData, triangleCount );
 ```
 
-`BuildHQ` builds with spatial splits for that one build, `BuildSIMD` invokes the SIMD builder directly, and `BuildQuick` is a single-function midpoint-split builder for reference and debugging.
+For backwards compatibility with older versions of the library, `BuildHQ` builds with spatial splits for that one build, and `BuildSIMD` invokes the SIMD builder directly.
 
 # Layouts
 
-Instantiate the layout you need; it builds the intermediate representations it requires internally.
+TinyBVH offers a broad range of BVH layouts, specialized for various use cases.
 
 | layout | description |
 | --- | --- |
@@ -88,7 +82,7 @@ Instantiate the layout you need; it builds the intermediate representations it r
 | `BVH8_CWBVH` | 80-byte compressed 8-wide nodes for state-of-the-art GPU traversal ([Ylitie et al., 2017](https://research.nvidia.com/publication/2017-07_efficient-incoherent-ray-traversal-gpus-through-compressed-wide-bvhs); [code by AlanIWBFT](https://github.com/AlanIWBFT/CWBVH)). `CWBVH_COMPRESSED_TRIS` is off by default. |
 | `BVH4_AMD_HW` | AMD hardware BVH4 format (BOX32 and triangle nodes), RDNA3 and up. By Alessandro Salo. |
 | `CWBVH8_AMD_HW` | AMD RDNA4 hardware BVH8 format: BOX32 nodes, and primitive nodes holding up to eight triangle pairs. By Alessandro Salo. |
-| `BVH_DOBB` | _Experimental._ 8-wide compressed nodes whose child boxes are stored in one of 104 discrete rotated frames ([Kern et al., 2025](https://arxiv.org/abs/2506.22849)). Bonsai only; no spatial splits yet. By [mmmuscus](https://github.com/mmmuscus). |
+| `BVH_DOBB` | _Experimental._ 8-wide compressed nodes whose child boxes are stored in one of 104 discrete rotated frames ([Kern et al., 2025](https://arxiv.org/abs/2506.22849)). By [mmmuscus](https://github.com/mmmuscus). |
 | `VoxelSet` | 256³ brick-based voxel object with DDA traversal, usable as a BLAS. |
 | `BVH_Double`, `BVH4_Double` | Double-precision `BVH` and `BVH4_CPU` (AVX2 and NEON kernels), with 64-bit indices. |
 
