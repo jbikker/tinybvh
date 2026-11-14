@@ -796,7 +796,7 @@ public:
 	uint32_t opmapN = 0;			// opacity micro map subdivision: 0 = no maps.
 	uint32_t* opmap = 0;			// opacity micro maps; opmapN^2 bits per triangle.
 	bool hasOpacityMicroMaps() const { return opmapN > 0; }
-	void SetOpacityMicroMaps( uint32_t* mapData, uint32_t N ) { opmap = mapData, opmapN = N; }
+	void SetOpacityMicroMaps( uint32_t* mapData, uint32_t N ) { opmap = N ? mapData : nullptr, opmapN = N; } // N = 0: no maps
 	// First word of a BVH cache file: version, scalar and index width, and layout.
 	uint32_t CacheHeader() const { return uint32_t( TINY_BVH_CACHE_VERSION + (sizeof( Float ) << 16) + (sizeof( Index ) << 20) + (layout << 24) ); }
 protected:
@@ -941,12 +941,12 @@ public:
 	void ReleaseOwnership();
 	// reset to a pristine empty object, freeing nothing, with 'ctx' installed
 	void DropReference( BVHContext ctx = {} );
-	void Save( const char* fileName, const bool includeGeometry = true );
+	bool Save( const char* fileName, const bool includeGeometry = true );
 	bool Load( const char* fileName, const Vertex* vertices, const Index primCount );
 	bool Load( const char* fileName, const Vertex* vertices, const Index* indices, const Index primCount );
 	bool Load( const char* fileName, const Slice& vertices, const Index* indices = 0, const Index primCount = 0 );
 	// Load: build a BVH straight from a file saved with its geometry; see Save.
-	static BVH Load( const char* fileName );
+	static BVH Load( const char* fileName, BVHContext ctx = {} );
 	void FreeGeometry();
 	void BuildQuick( const Vertex* vertices, const Index primCount );
 	void BuildQuick( const Slice& vertices );
@@ -1217,7 +1217,7 @@ public:
 	void BuildHQ( const bvhvec4* vertices, const Index* indices, const Index primCount );
 	void BuildHQ( const Slice& vertices, const Index* indices, const Index primCount );
 	void Optimize( const uint32_t iterations = 25, uint32_t mu = 8 );
-	static BVH_GPU Load( const char* fileName );
+	static BVH_GPU Load( const char* fileName, BVHContext ctx = {} );
 	Float SAHCost( const Index nodeIdx = 0 ) { return bvh.SAHCost( nodeIdx ); }
 	void ConvertFrom( const BVH& original, bool compact = true );
 	int32_t Intersect( Ray& ray ) const;
@@ -1377,7 +1377,7 @@ public:
 	void Optimize( const uint32_t iterations = 25, uint32_t mu = 8 );
 	void Refit( const Index nodeIdx = 0 );
 	Index LeafCount( const Index nodeIdx = 0 ) const;
-	static MBVH Load( const char* fileName );
+	static MBVH Load( const char* fileName, BVHContext ctx = {} );
 	Float SAHCost( const Index nodeIdx = 0 ) const;
 	void ConvertFrom( BVH& original, bool compact = true );
 	// pass 3 of ConvertFrom, split so each output level can be decoded in parallel.
@@ -1463,9 +1463,9 @@ public:
 	void BuildHQ( const Slice& vertices );
 	void BuildHQ( const bvhvec4* vertices, const Index* indices, const Index primCount );
 	void BuildHQ( const Slice& vertices, const Index* indices, const Index primCount );
-	void Save( const char* fileName );
+	bool Save( const char* fileName );
 	bool Load( const char* fileName, const Index expectedTris );
-	static BVH4_GPU Load( const char* fileName );
+	static BVH4_GPU Load( const char* fileName, BVHContext ctx = {} );
 	void Optimize( const uint32_t iterations = 25, uint32_t mu = 8 );
 	void ConvertFrom( const MBVH<4, Float, Index>& original, bool compact = true );
 	Float SAHCost( const Index nodeIdx = 0 ) const { return bvh4.SAHCost( nodeIdx ); }
@@ -1540,9 +1540,9 @@ public:
 	void BuildHQ( const Slice& vertices );
 	void BuildHQ( const bvhvec4* vertices, const Index* indices, const Index primCount );
 	void BuildHQ( const Slice& vertices, const Index* indices, const Index primCount );
-	void Save( const char* fileName );
+	bool Save( const char* fileName );
 	bool Load( const char* fileName, const Index expectedTris );
-	static BVH4_AMD_HW Load( const char* fileName );
+	static BVH4_AMD_HW Load( const char* fileName, BVHContext ctx = {} );
 	void Optimize( const uint32_t iterations = 25, uint32_t mu = 8 );
 	void ConvertFrom( const MBVH<4, Float, Index>& original );
 	Float SAHCost( const Index nodeIdx = 0 ) const { return bvh4.SAHCost( nodeIdx ); }
@@ -1618,9 +1618,9 @@ public:
 	void BuildHQ( const bvhvec4* vertices, const uint32_t* indices, const Index primCount );
 	void BuildHQ( const Slice& vertices, const uint32_t* indices, const Index primCount );
 	void Optimize( const uint32_t iterations = 25, uint32_t mu = 8 );
-	void Save( const char* fileName );
+	bool Save( const char* fileName );
 	bool Load( const char* fileName, const Index expectedTris );
-	static CWBVH8_AMD_HW Load( const char* fileName );
+	static CWBVH8_AMD_HW Load( const char* fileName, BVHContext ctx = {} );
 	void ConvertFrom( const MBVH<8, Float, Index>& original, bool compact = true );
 	Float SAHCost( const Index nodeIdx = 0 ) const { return bvh8.SAHCost( nodeIdx ); }
 	// GPU traversal only; the underlying bvh8.bvh remains available for CPU queries.
@@ -1699,7 +1699,7 @@ public:
 	BVH4_CPU( BVH4_CPU&& ) noexcept;
 	BVH4_CPU& operator=( BVH4_CPU&& ) noexcept;
 	~BVH4_CPU();
-	void Save( const char* fileName );
+	bool Save( const char* fileName );
 	bool Load( const char* fileName, const Index expectedTris );
 	void Build( const Vertex* vertices, const Index primCount );
 	void Build( const Slice& vertices );
@@ -1711,7 +1711,7 @@ public:
 	void BuildHQ( const Slice& vertices, const Index* indices, Index prims );
 	void Optimize( const uint32_t iterations, uint32_t mu );
 	void Refit();
-	static BVH4_CPU Load( const char* fileName );
+	static BVH4_CPU Load( const char* fileName, BVHContext ctx = {} );
 	Float SAHCost( const Index nodeIdx ) const;
 	void ConvertFrom( MBVH<4, Float, Index>& original );
 	int32_t Intersect( Ray& ray ) const;
@@ -1759,7 +1759,7 @@ public:
 	BVH8_CWBVH( BVH8_CWBVH&& ) noexcept;
 	BVH8_CWBVH& operator=( BVH8_CWBVH&& ) noexcept;
 	~BVH8_CWBVH();
-	void Save( const char* fileName );
+	bool Save( const char* fileName );
 	bool Load( const char* fileName, const Index expectedTris );
 	void Build( const bvhvec4* vertices, const Index primCount );
 	void Build( const Slice& vertices );
@@ -1769,7 +1769,7 @@ public:
 	void BuildHQ( const Slice& vertices );
 	void BuildHQ( const bvhvec4* vertices, const Index* indices, const Index primCount );
 	void BuildHQ( const Slice& vertices, const Index* indices, const Index primCount );
-	static BVH8_CWBVH Load( const char* fileName );
+	static BVH8_CWBVH Load( const char* fileName, BVHContext ctx = {} );
 	void Optimize( const uint32_t iterations = 25, uint32_t mu = 8 );
 	void ConvertFrom( const MBVH<8, Float, Index>& original, bool compact = true );
 	// Greedy octant assignment for the children of one node, used by ConvertFrom.
@@ -1905,7 +1905,7 @@ public:
 	BVH8_CPU( BVH8_CPU&& ) noexcept;
 	BVH8_CPU& operator=( BVH8_CPU&& ) noexcept;
 	~BVH8_CPU();
-	void Save( const char* fileName );
+	bool Save( const char* fileName );
 	bool Load( const char* fileName, const Index expectedTris );
 	void Build( const Vertex* vertices, const Index primCount );
 	void Build( const Slice& vertices );
@@ -1917,7 +1917,7 @@ public:
 	void BuildHQ( const Slice& vertices, const Index* indices, Index prims );
 	void Optimize( const uint32_t iterations, uint32_t mu );
 	void Refit();
-	static BVH8_CPU Load( const char* fileName );
+	static BVH8_CPU Load( const char* fileName, BVHContext ctx = {} );
 	Float SAHCost( const Index nodeIdx ) const;
 	void ConvertFrom( MBVH<8, Float, Index>& original );
 	int32_t Intersect( Ray& ray ) const;
@@ -2281,6 +2281,17 @@ void tinybvh_fatal_error( const char* file, const int line, const char* message 
 	exit( 1 );
 }
 
+// ScopedFlag: sets a flag for the lifetime of the object and restores it afterwards.
+struct ScopedFlag
+{
+	ScopedFlag( bool& f, const bool value ) : flag( f ), saved( f ) { flag = value; }
+	~ScopedFlag() { flag = saved; }
+	ScopedFlag( const ScopedFlag& ) = delete;
+	ScopedFlag& operator=( const ScopedFlag& ) = delete;
+	bool& flag;
+	const bool saved;
+};
+
 // Bit helpers; x != 0. tinybvh_bfind: highest set bit, tinybvh_ctz: lowest set bit, tinybvh_popc: set bits.
 TINYBVH_FORCEINLINE uint32_t tinybvh_bfind( uint32_t x ) // https://github.com/mackron/refcode/blob/master/lzcnt.c
 {
@@ -2422,7 +2433,11 @@ namespace impl {
 
 TEMPLATED void* BVHBase<Float, Index>::AlignedAlloc( size_t size ) const
 {
-	return context.malloc ? context.malloc( size, context.userdata ) : nullptr;
+	if (size == 0) return nullptr;
+	BVH_FATAL_ERROR_IF( !context.malloc, "BVHBase::AlignedAlloc( .. ), context has no malloc." );
+	void* ptr = context.malloc( size, context.userdata );
+	BVH_FATAL_ERROR_IF( !ptr, "BVHBase::AlignedAlloc( .. ), out of memory." );
+	return ptr;
 }
 
 TEMPLATED void BVHBase<Float, Index>::AlignedFree( void* ptr ) const
@@ -2444,7 +2459,11 @@ TEMPLATED void BVHBase<Float, Index>::CopyBasePropertiesFrom( const BVHBase& ori
 	this->triCount = original.triCount;
 	this->idxCount = original.idxCount;
 	this->aabbMin = original.aabbMin, this->aabbMax = original.aabbMax;
-	this->opmap = original.opmap, this->opmapN = original.opmapN;
+	// opacity maps: a target without maps takes the source's. A target with maps keeps them, as in
+	// the internal conversions of Build and Refit, whose source has none; different maps conflict.
+	if (!this->opmap) this->opmap = original.opmap, this->opmapN = original.opmapN;
+	else BVH_FATAL_ERROR_IF( original.opmap && (original.opmap != this->opmap || original.opmapN != this->opmapN),
+		"CopyBasePropertiesFrom( .. ), source and target have different opacity micromaps." );
 }
 
 // BVH implementation
@@ -2498,10 +2517,11 @@ TEMPLATED BVH<Float, Index>::~BVH()
 	fragment = 0;
 }
 
-TEMPLATED void BVH<Float, Index>::Save( const char* fileName, const bool includeGeometry )
+TEMPLATED bool BVH<Float, Index>::Save( const char* fileName, const bool includeGeometry )
 {
 	// saving is easy, it's the loading that will be complex.
 	std::fstream s{ fileName, s.binary | s.out };
+	if (!s) return false;
 	const uint32_t header = this->CacheHeader();
 	s.write( (char*)&header, sizeof( uint32_t ) );
 	s.write( (char*)&triCount, sizeof( Index ) );
@@ -2519,6 +2539,9 @@ TEMPLATED void BVH<Float, Index>::Save( const char* fileName, const bool include
 		s.write( (char*)&v, sizeof( Vertex ) );
 	}
 	if (idxEntries) s.write( (char*)vertIdx, idxEntries * sizeof( Index ) );
+	// write errors may only surface when the stream is flushed
+	s.close();
+	return !s.fail();
 }
 
 TEMPLATED bool BVH<Float, Index>::Load( const char* f, const Vertex* v, const Index p ) { return Load( f, Slice( v, p * 3, sizeof( Vertex ) ) ); }
@@ -2704,6 +2727,7 @@ TEMPLATED void BVH<Float, Index>::SetInput( const Slice& vertices, const Index* 
 {
 	verts = vertices, vertIdx = (Index*)indices;
 	instList = 0, blasList = 0, blasCount = 0;
+	if (vertices) customIntersect = 0, customIsOccluded = 0, customUserdata = 0;
 }
 
 // TLAS over BLASses of the same layout. BVH derives from BVHBase without offset, which makes the cast of the array safe.
@@ -3272,7 +3296,7 @@ TEMPLATED void BVH<Float, Index>::BuildFullSweep( Index nodeIdx, uint32_t depth 
 TEMPLATED void BVH<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
 TEMPLATED void BVH<Float, Index>::BuildHQ( const Vertex* v, const Index* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 TEMPLATED void BVH<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
-TEMPLATED void BVH<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED void BVH<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { ScopedFlag hq( settings.useSpatialSplits, true ); Build( v, i, p ); }
 // Parallel fragment setup for the SBVH builder.
 // Bounds of one slice of a threaded pass, a cache line each so that slices share none.
 template <typename V> struct ALIGNED( 64 ) BVHSliceBounds { V bmin, bmax; };
@@ -4547,6 +4571,9 @@ TEMPLATED bool BVH<Float, Index>::IntersectSphere( const Vec3& pos, const Float 
 TEMPLATED int32_t BVH<Float, Index>::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
+#ifdef PARANOID
+	BVH_FATAL_ERROR_IF( !isTLAS() && !verts && !customIntersect, "BVH::Intersect( .. ), no triangles and no customIntersect callback." );
+#endif
 	if (isTLAS()) OCTANT_DISPATCH( IntersectTLASOctant, ray )
 	else OCTANT_DISPATCH( IntersectOctant, ray )
 }
@@ -4716,6 +4743,9 @@ TEMPLATED PER_OCTANT int32_t BVH<Float, Index>::IntersectTLASOctant( Ray& ray ) 
 TEMPLATED bool BVH<Float, Index>::IsOccluded( const Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
+#ifdef PARANOID
+	BVH_FATAL_ERROR_IF( !isTLAS() && !verts && !customIsOccluded, "BVH::IsOccluded( .. ), no triangles and no customIsOccluded callback." );
+#endif
 	if (isTLAS()) OCTANT_DISPATCH( IsOccludedTLASOctant, ray )
 	else OCTANT_DISPATCH( IsOccludedOctant, ray )
 }
@@ -5603,8 +5633,8 @@ TEMPLATED void BVH_GPU<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 )
 TEMPLATED void BVH_GPU<Float, Index>::Build( const bvhvec4* v, const Index* i, const Index p ) { Build( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
 TEMPLATED void BVH_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
 TEMPLATED void BVH_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const Index* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
-TEMPLATED void BVH_GPU<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
-TEMPLATED void BVH_GPU<Float, Index>::BuildHQ( const Slice& v ) { settings.useSpatialSplits = true; Build( v ); }
+TEMPLATED void BVH_GPU<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { ScopedFlag hq( settings.useSpatialSplits, true ); Build( v, i, p ); }
+TEMPLATED void BVH_GPU<Float, Index>::BuildHQ( const Slice& v ) { ScopedFlag hq( settings.useSpatialSplits, true ); Build( v ); }
 
 TEMPLATED void BVH_GPU<Float, Index>::Build( const Slice& vertices, const Index* indices, Index prims )
 {
@@ -5829,7 +5859,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::Build( const Slice& v ) { Build( v, 0, 0
 TEMPLATED_M void MBVH<M, Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
 TEMPLATED_M void MBVH<M, Float, Index>::BuildHQ( const Vertex* v, const Index* indices, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), indices, p ); }
 TEMPLATED_M void MBVH<M, Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
-TEMPLATED_M void MBVH<M, Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED_M void MBVH<M, Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { ScopedFlag hq( settings.useSpatialSplits, true ); Build( v, i, p ); }
 
 TEMPLATED_M void MBVH<M, Float, Index>::Build( const Slice& vertices, const Index* indices, Index prims )
 {
@@ -6276,7 +6306,7 @@ TEMPLATED void BVH4_GPU<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 
 TEMPLATED void BVH4_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
 TEMPLATED void BVH4_GPU<Float, Index>::BuildHQ( const bvhvec4* v, const Index* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
 TEMPLATED void BVH4_GPU<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
-TEMPLATED void BVH4_GPU<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED void BVH4_GPU<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { ScopedFlag hq( settings.useSpatialSplits, true ); Build( v, i, p ); }
 
 TEMPLATED void BVH4_GPU<Float, Index>::Build( const Slice& vertices, const Index* indices, Index prims )
 {
@@ -6296,14 +6326,18 @@ TEMPLATED void BVH4_GPU<Float, Index>::Optimize( const uint32_t iterations, uint
 	ConvertFrom( bvh4, true );
 }
 
-TEMPLATED void BVH4_GPU<Float, Index>::Save( const char* fileName )
+TEMPLATED bool BVH4_GPU<Float, Index>::Save( const char* fileName )
 {
 	std::fstream s{ fileName, s.binary | s.out };
+	if (!s) return false;
 	const uint32_t header = this->CacheHeader();
 	s.write( (char*)&header, sizeof( uint32_t ) );
 	s.write( (char*)&triCount, sizeof( Index ) );
 	s.write( (char*)this, sizeof( BVH4_GPU ) );
 	s.write( (char*)bvh4Data, (size_t)usedBlocks * 16 );
+	// write errors may only surface when the stream is flushed
+	s.close();
+	return !s.fail();
 }
 
 TEMPLATED bool BVH4_GPU<Float, Index>::Load( const char* fileName, const Index expectedTris )
@@ -6318,9 +6352,12 @@ TEMPLATED bool BVH4_GPU<Float, Index>::Load( const char* fileName, const Index e
 	if (header != this->CacheHeader()) return false;
 	s.read( (char*)&fileTriCount, sizeof( Index ) );
 	if (fileTriCount != expectedTris) return false;
-	// all checks passed; safe to overwrite *this
+	// all checks passed: release what *this holds, then overwrite it with the file's image.
+	uint32_t* opmapKeep = this->opmap, opmapNKeep = this->opmapN; // opacity maps are caller-owned; keep what was set.
+	*this = BVH4_GPU( tmp );
 	s.read( (char*)this, sizeof( BVH4_GPU ) );
 	context = tmp; // can't load context; function pointers will differ.
+	this->opmap = opmapKeep, this->opmapN = opmapNKeep;
 	bvh4Data = (bvhvec4*)AlignedAlloc( (size_t)usedBlocks * 16 );
 	allocatedBlocks = usedBlocks;
 	s.read( (char*)bvh4Data, (size_t)usedBlocks * 16 );
@@ -6585,7 +6622,7 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::Build( const Slice& v ) { Build( v, 0,
 TEMPLATED void BVH4_AMD_HW<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
 TEMPLATED void BVH4_AMD_HW<Float, Index>::BuildHQ( const bvhvec4* v, const Index* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
 TEMPLATED void BVH4_AMD_HW<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
-TEMPLATED void BVH4_AMD_HW<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED void BVH4_AMD_HW<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { ScopedFlag hq( settings.useSpatialSplits, true ); Build( v, i, p ); }
 
 TEMPLATED void BVH4_AMD_HW<Float, Index>::Build( const Slice& vertices, const Index* indices, Index prims )
 {
@@ -6613,14 +6650,18 @@ TEMPLATED void BVH4_AMD_HW<Float, Index>::Optimize( const uint32_t iterations, u
 	ConvertFrom( bvh4 );
 }
 
-TEMPLATED void BVH4_AMD_HW<Float, Index>::Save( const char* fileName )
+TEMPLATED bool BVH4_AMD_HW<Float, Index>::Save( const char* fileName )
 {
 	std::fstream s{ fileName, s.binary | s.out };
+	if (!s) return false;
 	const uint32_t header = this->CacheHeader();
 	s.write( (char*)&header, sizeof( uint32_t ) );
 	s.write( (char*)&triCount, sizeof( Index ) );
 	s.write( (char*)this, sizeof( BVH4_AMD_HW ) );
 	s.write( (char*)bvh4Data, (size_t)usedBlocks * 16 );
+	// write errors may only surface when the stream is flushed
+	s.close();
+	return !s.fail();
 }
 
 TEMPLATED bool BVH4_AMD_HW<Float, Index>::Load( const char* fileName, const Index expectedTris )
@@ -6635,9 +6676,12 @@ TEMPLATED bool BVH4_AMD_HW<Float, Index>::Load( const char* fileName, const Inde
 	if (header != this->CacheHeader()) return false;
 	s.read( (char*)&fileTriCount, sizeof( Index ) );
 	if (fileTriCount != expectedTris) return false;
-	// all checks passed; safe to overwrite *this
+	// all checks passed: release what *this holds, then overwrite it with the file's image.
+	uint32_t* opmapKeep = this->opmap, opmapNKeep = this->opmapN; // opacity maps are caller-owned; keep what was set.
+	*this = BVH4_AMD_HW( tmp );
 	s.read( (char*)this, sizeof( BVH4_AMD_HW ) );
 	context = tmp; // can't load context; function pointers will differ.
+	this->opmap = opmapKeep, this->opmapN = opmapNKeep;
 	bvh4Data = (bvhvec4*)AlignedAlloc( (size_t)usedBlocks * 16 );
 	allocatedBlocks = usedBlocks;
 	s.read( (char*)bvh4Data, (size_t)usedBlocks * 16 );
@@ -6785,7 +6829,7 @@ TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Build( const Slice& v ) { Build( v, 
 TEMPLATED void CWBVH8_AMD_HW<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
 TEMPLATED void CWBVH8_AMD_HW<Float, Index>::BuildHQ( const bvhvec4* v, const uint32_t* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
 TEMPLATED void CWBVH8_AMD_HW<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
-TEMPLATED void CWBVH8_AMD_HW<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED void CWBVH8_AMD_HW<Float, Index>::BuildHQ( const Slice& v, const uint32_t* i, Index p ) { ScopedFlag hq( settings.useSpatialSplits, true ); Build( v, i, p ); }
 
 TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Build( const Slice& vertices, const uint32_t* indices, Index prims )
 {
@@ -7104,14 +7148,18 @@ TEMPLATED uint32_t CWBVH8_AMD_HW<Float, Index>::EncodeLeaves( uint32_t& nodeData
 	return recordCount;
 }
 
-TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Save( const char* fileName )
+TEMPLATED bool CWBVH8_AMD_HW<Float, Index>::Save( const char* fileName )
 {
 	std::fstream s{ fileName, s.binary | s.out };
+	if (!s) return false;
 	const uint32_t header = this->CacheHeader();
 	s.write( (char*)&header, sizeof( uint32_t ) );
 	s.write( (char*)&triCount, sizeof( Index ) );
 	s.write( (char*)this, sizeof( CWBVH8_AMD_HW ) );
 	s.write( (char*)bvh8Data, (size_t)usedBlocks * 16 );
+	// write errors may only surface when the stream is flushed
+	s.close();
+	return !s.fail();
 }
 
 TEMPLATED bool CWBVH8_AMD_HW<Float, Index>::Load( const char* fileName, const Index expectedTris )
@@ -7126,9 +7174,12 @@ TEMPLATED bool CWBVH8_AMD_HW<Float, Index>::Load( const char* fileName, const In
 	if (header != this->CacheHeader()) return false;
 	s.read( (char*)&fileTriCount, sizeof( Index ) );
 	if (fileTriCount != expectedTris) return false;
-	// all checks passed; safe to overwrite *this
+	// all checks passed: release what *this holds, then overwrite it with the file's image.
+	uint32_t* opmapKeep = this->opmap, opmapNKeep = this->opmapN; // opacity maps are caller-owned; keep what was set.
+	*this = CWBVH8_AMD_HW( tmp );
 	s.read( (char*)this, sizeof( CWBVH8_AMD_HW ) );
 	context = tmp; // can't load context; function pointers will differ.
+	this->opmap = opmapKeep, this->opmapN = opmapNKeep;
 	bvh8Data = (bvhvec4*)AlignedAlloc( (size_t)usedBlocks * 16 );
 	allocatedBlocks = usedBlocks;
 	s.read( (char*)bvh8Data, (size_t)usedBlocks * 16 );
@@ -7347,7 +7398,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::Build( const Slice& v ) { Build( v, 0, 0 
 TEMPLATED void BVH4_CPU<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
 TEMPLATED void BVH4_CPU<Float, Index>::BuildHQ( const Vertex* v, const Index* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
 TEMPLATED void BVH4_CPU<Float, Index>::BuildHQ( const Slice& v ) { BuildHQ( v, 0, 0 ); }
-TEMPLATED void BVH4_CPU<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED void BVH4_CPU<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { ScopedFlag hq( settings.useSpatialSplits, true ); Build( v, i, p ); }
 
 TEMPLATED void BVH4_CPU<Float, Index>::Build( const Slice& vertices, const Index* indices, Index prims )
 {
@@ -7364,14 +7415,18 @@ TEMPLATED void BVH4_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	ConvertFrom( bvh4 );
 }
 
-TEMPLATED void BVH4_CPU<Float, Index>::Save( const char* fileName )
+TEMPLATED bool BVH4_CPU<Float, Index>::Save( const char* fileName )
 {
 	std::fstream s{ fileName, s.binary | s.out };
+	if (!s) return false;
 	const uint32_t header = this->CacheHeader();
 	s.write( (char*)&header, sizeof( uint32_t ) );
 	s.write( (char*)&triCount, sizeof( Index ) );
 	s.write( (char*)this, sizeof( BVH4_CPU ) );
 	s.write( (char*)bvh4Data, (size_t)usedBlocks * 64 );
+	// write errors may only surface when the stream is flushed
+	s.close();
+	return !s.fail();
 }
 
 TEMPLATED bool BVH4_CPU<Float, Index>::Load( const char* fileName, const Index expectedTris )
@@ -7386,9 +7441,12 @@ TEMPLATED bool BVH4_CPU<Float, Index>::Load( const char* fileName, const Index e
 	if (header != this->CacheHeader()) return false;
 	s.read( (char*)&fileTriCount, sizeof( Index ) );
 	if (fileTriCount != expectedTris) return false;
-	// all checks passed; safe to overwrite *this
+	// all checks passed: release what *this holds, then overwrite it with the file's image.
+	uint32_t* opmapKeep = this->opmap, opmapNKeep = this->opmapN; // opacity maps are caller-owned; keep what was set.
+	*this = BVH4_CPU( tmp );
 	s.read( (char*)this, sizeof( BVH4_CPU ) );
 	context = tmp; // can't load context; function pointers will differ.
+	this->opmap = opmapKeep, this->opmapN = opmapNKeep;
 	bvh4Data = (CacheLine*)AlignedAlloc( (size_t)usedBlocks * 64 );
 	allocatedBlocks = usedBlocks;
 	s.read( (char*)bvh4Data, (size_t)usedBlocks * 64 );
@@ -7724,7 +7782,7 @@ TEMPLATED void BVH8_CPU<Float, Index>::Build( const Vertex* v, const Index* i, c
 TEMPLATED void BVH8_CPU<Float, Index>::BuildHQ( const Vertex* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ) ); }
 TEMPLATED void BVH8_CPU<Float, Index>::BuildHQ( const Slice& vertices ) { BuildHQ( vertices, 0, 0 ); }
 TEMPLATED void BVH8_CPU<Float, Index>::BuildHQ( const Vertex* v, const Index* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( Vertex ) ), i, p ); }
-TEMPLATED void BVH8_CPU<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED void BVH8_CPU<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { ScopedFlag hq( settings.useSpatialSplits, true ); Build( v, i, p ); }
 
 TEMPLATED void BVH8_CPU<Float, Index>::Build( const Slice& vertices, const Index* indices, Index prims )
 {
@@ -7743,14 +7801,18 @@ TEMPLATED void BVH8_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	ConvertFrom( bvh8 );
 }
 
-TEMPLATED void BVH8_CPU<Float, Index>::Save( const char* fileName )
+TEMPLATED bool BVH8_CPU<Float, Index>::Save( const char* fileName )
 {
 	std::fstream s{ fileName, s.binary | s.out };
+	if (!s) return false;
 	const uint32_t header = this->CacheHeader();
 	s.write( (char*)&header, sizeof( uint32_t ) );
 	s.write( (char*)&triCount, sizeof( Index ) );
 	s.write( (char*)this, sizeof( BVH8_CPU ) );
 	s.write( (char*)bvh8Data, (size_t)usedBlocks * 64 );
+	// write errors may only surface when the stream is flushed
+	s.close();
+	return !s.fail();
 }
 
 TEMPLATED bool BVH8_CPU<Float, Index>::Load( const char* fileName, const Index expectedTris )
@@ -7765,9 +7827,12 @@ TEMPLATED bool BVH8_CPU<Float, Index>::Load( const char* fileName, const Index e
 	if (header != this->CacheHeader()) return false;
 	s.read( (char*)&fileTriCount, sizeof( Index ) );
 	if (fileTriCount != expectedTris) return false;
-	// all checks passed; safe to overwrite *this
+	// all checks passed: release what *this holds, then overwrite it with the file's image.
+	uint32_t* opmapKeep = this->opmap, opmapNKeep = this->opmapN; // opacity maps are caller-owned; keep what was set.
+	*this = BVH8_CPU( tmp );
 	s.read( (char*)this, sizeof( BVH8_CPU ) );
 	context = tmp; // can't load context; function pointers will differ.
+	this->opmap = opmapKeep, this->opmapN = opmapNKeep;
 	bvh8Data = (CacheLine*)AlignedAlloc( (size_t)usedBlocks * 64 );
 	allocatedBlocks = usedBlocks;
 	s.read( (char*)bvh8Data, (size_t)usedBlocks * 64 );
@@ -7898,7 +7963,7 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::Build( const bvhvec4* v, const Index* i
 TEMPLATED void BVH8_CWBVH<Float, Index>::BuildHQ( const bvhvec4* v, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ) ); }
 TEMPLATED void BVH8_CWBVH<Float, Index>::BuildHQ( const Slice& vertices ) { BuildHQ( vertices, 0, 0 ); }
 TEMPLATED void BVH8_CWBVH<Float, Index>::BuildHQ( const bvhvec4* v, const Index* i, const Index p ) { BuildHQ( Slice( v, p * 3, sizeof( bvhvec4 ) ), i, p ); }
-TEMPLATED void BVH8_CWBVH<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { settings.useSpatialSplits = true; Build( v, i, p ); }
+TEMPLATED void BVH8_CWBVH<Float, Index>::BuildHQ( const Slice& v, const Index* i, Index p ) { ScopedFlag hq( settings.useSpatialSplits, true ); Build( v, i, p ); }
 
 TEMPLATED void BVH8_CWBVH<Float, Index>::Build( const Slice& vertices, const Index* indices, Index prims )
 {
@@ -7929,15 +7994,19 @@ TEMPLATED Float BVH8_CWBVH<Float, Index>::SAHCost( const Index nodeIdx ) const
 	return bvh8.SAHCost( nodeIdx );
 }
 
-TEMPLATED void BVH8_CWBVH<Float, Index>::Save( const char* fileName )
+TEMPLATED bool BVH8_CWBVH<Float, Index>::Save( const char* fileName )
 {
 	std::fstream s{ fileName, s.binary | s.out };
+	if (!s) return false;
 	const uint32_t header = this->CacheHeader();
 	s.write( (char*)&header, sizeof( uint32_t ) );
 	s.write( (char*)&triCount, sizeof( Index ) );
 	s.write( (char*)this, sizeof( BVH8_CWBVH ) );
 	s.write( (char*)bvh8Data, (size_t)usedBlocks * 16 );
 	s.write( (char*)bvh8Tris, (size_t)usedTriBlocks * 16 );
+	// write errors may only surface when the stream is flushed
+	s.close();
+	return !s.fail();
 }
 
 TEMPLATED bool BVH8_CWBVH<Float, Index>::Load( const char* fileName, const Index expectedTris )
@@ -7952,9 +8021,12 @@ TEMPLATED bool BVH8_CWBVH<Float, Index>::Load( const char* fileName, const Index
 	if (header != this->CacheHeader()) return false;
 	s.read( (char*)&fileTriCount, sizeof( Index ) );
 	if (fileTriCount != expectedTris) return false;
-	// all checks passed; safe to overwrite *this
+	// all checks passed: release what *this holds, then overwrite it with the file's image.
+	uint32_t* opmapKeep = this->opmap, opmapNKeep = this->opmapN; // opacity maps are caller-owned; keep what was set.
+	*this = BVH8_CWBVH( tmp );
 	s.read( (char*)this, sizeof( BVH8_CWBVH ) );
 	context = tmp; // can't load context; function pointers will differ.
+	this->opmap = opmapKeep, this->opmapN = opmapNKeep;
 	bvh8Data = (bvhvec4*)AlignedAlloc( (size_t)usedBlocks * 16 );
 	bvh8Tris = (bvhvec4*)AlignedAlloc( (size_t)usedTriBlocks * 16 );
 	allocatedBlocks = usedBlocks, allocatedTris = usedTriBlocks;
@@ -10356,17 +10428,17 @@ template <typename Index> inline bool tinybvh_peek_cache( const char* fileName, 
 	return !!s;
 }
 
-TEMPLATED BVH<Float, Index> BVH<Float, Index>::Load( const char* fileName )
+TEMPLATED BVH<Float, Index> BVH<Float, Index>::Load( const char* fileName, BVHContext ctx )
 {
-	BVH result;
+	BVH result( ctx );
 	result.Load( fileName, Slice( nullptr, 0, 0 ), 0, 0 );
 	return result;
 }
 
-TEMPLATED BVH_GPU<Float, Index> BVH_GPU<Float, Index>::Load( const char* fileName )
+TEMPLATED BVH_GPU<Float, Index> BVH_GPU<Float, Index>::Load( const char* fileName, BVHContext ctx )
 {
-	BVH_GPU result;
-	BVH src = BVH::Load( fileName );
+	BVH_GPU result( ctx );
+	BVH src = BVH::Load( fileName, ctx );
 	if (src.usedNodes == 0) return result;
 	result.settings = src.settings; // as saved
 	result.bvh = tinybvh_move( src );
@@ -10375,10 +10447,10 @@ TEMPLATED BVH_GPU<Float, Index> BVH_GPU<Float, Index>::Load( const char* fileNam
 	return result;
 }
 
-TEMPLATED_M MBVH<M, Float, Index> MBVH<M, Float, Index>::Load( const char* fileName )
+TEMPLATED_M MBVH<M, Float, Index> MBVH<M, Float, Index>::Load( const char* fileName, BVHContext ctx )
 {
-	MBVH result;
-	BVH src = BVH::Load( fileName );
+	MBVH result( ctx );
+	BVH src = BVH::Load( fileName, ctx );
 	if (src.usedNodes == 0) return result;
 	result.settings = src.settings; // as saved
 	result.bvh = tinybvh_move( src );
@@ -10389,14 +10461,14 @@ TEMPLATED_M MBVH<M, Float, Index> MBVH<M, Float, Index>::Load( const char* fileN
 	return result;
 }
 
-TEMPLATED BVH4_GPU<Float, Index> BVH4_GPU<Float, Index>::Load( const char* fileName )
+TEMPLATED BVH4_GPU<Float, Index> BVH4_GPU<Float, Index>::Load( const char* fileName, BVHContext ctx )
 {
-	BVH4_GPU result;
+	BVH4_GPU result( ctx );
 	uint32_t header = 0;
 	Index tris = 0;
 	if (!tinybvh_peek_cache( fileName, header, tris )) return result;
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
-	BVH src = BVH::Load( fileName );
+	BVH src = BVH::Load( fileName, ctx );
 	if (src.usedNodes == 0) return result;
 	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh4 );
@@ -10407,14 +10479,14 @@ TEMPLATED BVH4_GPU<Float, Index> BVH4_GPU<Float, Index>::Load( const char* fileN
 	return result;
 }
 
-TEMPLATED BVH4_AMD_HW<Float, Index> BVH4_AMD_HW<Float, Index>::Load( const char* fileName )
+TEMPLATED BVH4_AMD_HW<Float, Index> BVH4_AMD_HW<Float, Index>::Load( const char* fileName, BVHContext ctx )
 {
-	BVH4_AMD_HW result;
+	BVH4_AMD_HW result( ctx );
 	uint32_t header = 0;
 	Index tris = 0;
 	if (!tinybvh_peek_cache( fileName, header, tris )) return result;
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
-	BVH src = BVH::Load( fileName );
+	BVH src = BVH::Load( fileName, ctx );
 	if (src.usedNodes == 0) return result;
 	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh4 );
@@ -10427,14 +10499,14 @@ TEMPLATED BVH4_AMD_HW<Float, Index> BVH4_AMD_HW<Float, Index>::Load( const char*
 	return result;
 }
 
-TEMPLATED CWBVH8_AMD_HW<Float, Index> CWBVH8_AMD_HW<Float, Index>::Load( const char* fileName )
+TEMPLATED CWBVH8_AMD_HW<Float, Index> CWBVH8_AMD_HW<Float, Index>::Load( const char* fileName, BVHContext ctx )
 {
-	CWBVH8_AMD_HW result;
+	CWBVH8_AMD_HW result( ctx );
 	uint32_t header = 0;
 	Index tris = 0;
 	if (!tinybvh_peek_cache( fileName, header, tris )) return result;
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
-	BVH src = BVH::Load( fileName );
+	BVH src = BVH::Load( fileName, ctx );
 	if (src.usedNodes == 0) return result;
 	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh8 );
@@ -10447,14 +10519,14 @@ TEMPLATED CWBVH8_AMD_HW<Float, Index> CWBVH8_AMD_HW<Float, Index>::Load( const c
 	return result;
 }
 
-TEMPLATED BVH4_CPU<Float, Index> BVH4_CPU<Float, Index>::Load( const char* fileName )
+TEMPLATED BVH4_CPU<Float, Index> BVH4_CPU<Float, Index>::Load( const char* fileName, BVHContext ctx )
 {
-	BVH4_CPU result;
+	BVH4_CPU result( ctx );
 	uint32_t header = 0;
 	Index tris = 0;
 	if (!tinybvh_peek_cache( fileName, header, tris )) return result;
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
-	BVH src = BVH::Load( fileName );
+	BVH src = BVH::Load( fileName, ctx );
 	if (src.usedNodes == 0) return result;
 	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh4 );
@@ -10465,14 +10537,14 @@ TEMPLATED BVH4_CPU<Float, Index> BVH4_CPU<Float, Index>::Load( const char* fileN
 	return result;
 }
 
-TEMPLATED BVH8_CWBVH<Float, Index> BVH8_CWBVH<Float, Index>::Load( const char* fileName )
+TEMPLATED BVH8_CWBVH<Float, Index> BVH8_CWBVH<Float, Index>::Load( const char* fileName, BVHContext ctx )
 {
-	BVH8_CWBVH result;
+	BVH8_CWBVH result( ctx );
 	uint32_t header = 0;
 	Index tris = 0;
 	if (!tinybvh_peek_cache( fileName, header, tris )) return result;
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
-	BVH src = BVH::Load( fileName );
+	BVH src = BVH::Load( fileName, ctx );
 	if (src.usedNodes == 0) return result;
 	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh8 );
@@ -10485,14 +10557,14 @@ TEMPLATED BVH8_CWBVH<Float, Index> BVH8_CWBVH<Float, Index>::Load( const char* f
 	return result;
 }
 
-TEMPLATED BVH8_CPU<Float, Index> BVH8_CPU<Float, Index>::Load( const char* fileName )
+TEMPLATED BVH8_CPU<Float, Index> BVH8_CPU<Float, Index>::Load( const char* fileName, BVHContext ctx )
 {
-	BVH8_CPU result;
+	BVH8_CPU result( ctx );
 	uint32_t header = 0;
 	Index tris = 0;
 	if (!tinybvh_peek_cache( fileName, header, tris )) return result;
 	if (header == result.CacheHeader()) { result.Load( fileName, tris ); return result; }
-	BVH src = BVH::Load( fileName );
+	BVH src = BVH::Load( fileName, ctx );
 	if (src.usedNodes == 0) return result;
 	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh8 );
