@@ -22,9 +22,11 @@ On the GPU, (multicore) CPU performance is dwarfed: TinyBVH traces up to _5 bill
 
 # Getting started
 
-The library is ```tiny_bvh.h``` plus five headers next to it: ```tiny_bvh_base.h``` (platform-neutral code) and the SIMD kernels for x86 (```tiny_bvh_x86_float.h```, ```tiny_bvh_x86_double.h```) and ARM (```tiny_bvh_arm_float.h```, ```tiny_bvh_arm_double.h```). Keep them together, include only ```tiny_bvh.h```, and define `TINYBVH_IMPLEMENTATION` in exactly one translation unit. 
+The library is `tiny_bvh.h` plus five headers next to it: `tiny_bvh_base.h` (platform-neutral code) and the SIMD kernels for x86 (`tiny_bvh_x86_float.h`, `tiny_bvh_x86_double.h`) and ARM (`tiny_bvh_arm_float.h`, `tiny_bvh_arm_double.h`). Keep them together, include only `tiny_bvh.h`, and define `TINYBVH_IMPLEMENTATION` in exactly one translation unit. 
 
 For a single header with only the parts you use, see the [online customizer](https://jbikker.github.io/tinybvh/).
+
+Basic use of the library:
 
 ```cpp
 #define TINYBVH_IMPLEMENTATION
@@ -36,7 +38,7 @@ tinybvh::Ray ray( tinybvh::bvhvec3( 0, 0, 0 ), tinybvh::bvhvec3( 0, 0, 1 ) );
 bvh.Intersect( ray );   // hit if ray.hit.t < BVH_FAR; see ray.hit.prim, ray.hit.u, ray.hit.v
 ```
 
-`myTriData` holds three vertices per triangle, each four floats: x, y, z and a dummy value that exists purely for a more efficient memory layout. Shadow rays use `bvh.IsOccluded( ray )`. Since 1.9, `Ray` does not normalize its direction: call `ray.Normalize()` where needed, or define `NORMALIZE_RAY_DIR` for the old behaviour.
+Here, `myTriData` holds three vertices per triangle, each four floats: x, y, z and a dummy value that exists purely for a more efficient memory layout. `bvh.Intersect( ray )` finds the nearest intersection along the ray. Shadow rays use `bvh.IsOccluded( ray )`.
 
 See [`tiny_bvh_minimal.cpp`](https://github.com/jbikker/tinybvh/blob/main/examples/tiny_bvh_minimal.cpp) for a (really) small example, and the [Basic Use](https://jacco.ompf2.com/2025/01/24/tinybvh-manual-basic-use) and [Advanced Topics](https://jacco.ompf2.com/2025/01/25/tinybvh-manual-advanced) manuals for more. New to BVHs? Start with [this series of articles](https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics).
 
