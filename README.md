@@ -1,6 +1,6 @@
 # TinyBVH
 
-Header-only BVH construction and traversal library, written in C++14 / "Sane C++" (or "C with classes"), with C++17 for threading and a C API on top. **This library has no dependencies.**
+High-performance header-only BVH construction and traversal library, written in C++14 / "Sane C++" (or "C with classes"), with C++17 for threading. A C API is also provided. **This library has no dependencies.**
 
 Current version: **1.9.2**.
 
@@ -8,11 +8,11 @@ TinyBVH is _fast_. Here is, in a nutshell, how it compares to [Intel's Embree](h
 
 ![Performance](images/perfgraphs.png)
 
-TinyBVH builds a SAH BVH faster than Embree and Madmann91, and traces individual primary and 'any hit' rays faster than those libraries. These results come from `tiny_bvh_benchmark.cpp` and are cautiously presented as 'preliminary'; single-ray traversal is only a small part of Embree. If you suspect an imperfection in the experiment setup, please [let me know](mailto:bikker.j@protonmail.com).
+TinyBVH builds a SAH BVH faster than Embree and Madmann91, and traces individual primary and occlusion rays faster than those libraries. These results come from `tiny_bvh_benchmark.cpp` and are cautiously presented as 'preliminary'; single-ray traversal is only a small part of Embree. If you suspect an imperfection in the experiment setup, please [let me know](mailto:bikker.j@protonmail.com).
 
 ![Performance](images/cpu_vs_gpu.png)
 
-On the GPU, (multicore) CPU performance is dwarfed: on an RTX 5080 laptop GPU, TinyBVH traces up to _5 billion rays_ per second in Crytek's Sponza using the basic binary BVH format, regardless of graphics API and without ray tracing hardware. That is 5 rays per pixel at 4k@120Hz.
+On the GPU, (multicore) CPU performance is dwarfed: TinyBVH traces up to _5 billion rays_ per second on a RTX5080 laptop GPU in Crytek's Sponza using the basic binary BVH format, regardless of graphics API and without relying on ray tracing hardware. That is 5 rays per pixel at 4k@120Hz.
 
 ---
 
