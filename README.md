@@ -99,7 +99,7 @@ bool occluded = bvh.IsOccluded( ray );                  // any hit, for shadow r
 bool hit = bvh.IntersectSphere( pos, r );               // sphere/BVH collision detection
 ```
 
-Geometry is referenced, not copied. The exception: `BVH::Save` embeds the triangles by default, so a BVH loaded from such a file owns its geometry (`FreeGeometry` releases it).
+Geometry passed to `Build` is referenced, not copied. The exception: `BVH::Save` embeds the triangles by default, so a BVH loaded from such a file owns its geometry (`FreeGeometry` releases it).
 
 * **Hit record.** `t`, barycentrics `u` and `v`, `prim`, and the instance index: a separate field, or the top bits of `prim` when `INST_IDX_BITS` is below 32. Plus 64 bytes of user data (a `void*` and a 56-byte union).
 * **Ray masks.** 16-bit masks on rays and `BLASInstance`s; instances are skipped when they do not overlap, as in OptiX (by [Romain Augier](https://github.com/romainaugier)).
@@ -153,8 +153,7 @@ Stand-alone utilities in `tools/`, each a single source file with build instruct
 | tool | purpose |
 | --- | --- |
 | `bvhopt.cpp` | Offline BVH optimizer, see above. |
-| `tinybvh_custom.cpp` | Generates a single header with only the layouts, features and ISAs you need, optionally without templates. Also available [online](https://jbikker.github.io/tinybvh/), compiled to WebAssembly and running entirely in the browser. |
-| `microbvh.cpp` | Condenses the headers into `microbvh.h`: a heavily compacted drop-in `tiny_bvh.h` for one target ISA. |
+| `tinybvh_custom.cpp` | Generates a single header with only the layouts, features and ISAs you need, optionally without templates. Also available [online](https://jbikker.github.io/tinybvh/). |
 | `bvhcrop.cpp` | Crops or decimates a `.bin` mesh, to reproduce build problems on a smaller scene. |
 | `obj2bin.cpp` | Converts `.obj` to `.bin`, with a colour estimated from the materials in `w`. |
 | `tinyfmt.cpp` | Applies the TinyBVH coding standard to the headers. |
