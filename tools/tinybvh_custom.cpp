@@ -2439,9 +2439,9 @@ static bool ReadFile( const std::string& path, std::string& out )
 	FILE* f = OpenPath( path, "rb" );
 	if (!f) return false;
 	std::string s;
-	char buf[65536];
+	std::vector<char> buf( 65536 ); // on the heap: 64KB is all of Emscripten's default stack
 	size_t n;
-	while ((n = fread( buf, 1, sizeof( buf ), f )) > 0) s.append( buf, n );
+	while ((n = fread( buf.data(), 1, buf.size(), f )) > 0) s.append( buf.data(), n );
 	fclose( f );
 	out.swap( s );
 	return true;
