@@ -192,7 +192,7 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant
 			}
 		}
 		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
-		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
+		const BVHTriLeaf* leaf = (BVHTriLeaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
 		const float64x2_t e1xa = vld1q_f64( leaf->e1x ), e1ya = vld1q_f64( leaf->e1y ), e1za = vld1q_f64( leaf->e1z );
 		const float64x2_t e1xb = vld1q_f64( leaf->e1x + 2 ), e1yb = vld1q_f64( leaf->e1y + 2 ), e1zb = vld1q_f64( leaf->e1z + 2 );
 		const float64x2_t e2xa = vld1q_f64( leaf->e2x ), e2ya = vld1q_f64( leaf->e2y ), e2za = vld1q_f64( leaf->e2z );
@@ -316,7 +316,7 @@ template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( 
 			}
 		}
 		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
-		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
+		const BVHTriLeaf* leaf = (BVHTriLeaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
 		const float64x2_t e1xa = vld1q_f64( leaf->e1x ), e1ya = vld1q_f64( leaf->e1y ), e1za = vld1q_f64( leaf->e1z );
 		const float64x2_t e1xb = vld1q_f64( leaf->e1x + 2 ), e1yb = vld1q_f64( leaf->e1y + 2 ), e1zb = vld1q_f64( leaf->e1z + 2 );
 		const float64x2_t e2xa = vld1q_f64( leaf->e2x ), e2ya = vld1q_f64( leaf->e2y ), e2za = vld1q_f64( leaf->e2z );

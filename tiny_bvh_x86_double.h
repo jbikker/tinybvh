@@ -156,7 +156,7 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<double, uint64_t>::IntersectOctant
 			}
 		}
 		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
-		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
+		const BVHTriLeaf* leaf = (BVHTriLeaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
 		const __m256d hx4 = _mm256_fmsub_pd( dy4, _mm256_load_pd( leaf->e2z ), _mm256_mul_pd( dz4, _mm256_load_pd( leaf->e2y ) ) );
 		const __m256d hy4 = _mm256_fmsub_pd( dz4, _mm256_load_pd( leaf->e2x ), _mm256_mul_pd( dx4, _mm256_load_pd( leaf->e2z ) ) );
 		const __m256d hz4 = _mm256_fmsub_pd( dx4, _mm256_load_pd( leaf->e2y ), _mm256_mul_pd( dy4, _mm256_load_pd( leaf->e2x ) ) );
@@ -266,7 +266,7 @@ template <> PER_OCTANT bool impl::BVH4_CPU<double, uint64_t>::IsOccludedOctant( 
 			}
 		}
 		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
-		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
+		const BVHTriLeaf* leaf = (BVHTriLeaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
 		const __m256d hx4 = _mm256_fmsub_pd( dy4, _mm256_load_pd( leaf->e2z ), _mm256_mul_pd( dz4, _mm256_load_pd( leaf->e2y ) ) );
 		const __m256d hy4 = _mm256_fmsub_pd( dz4, _mm256_load_pd( leaf->e2x ), _mm256_mul_pd( dx4, _mm256_load_pd( leaf->e2z ) ) );
 		const __m256d hz4 = _mm256_fmsub_pd( dx4, _mm256_load_pd( leaf->e2y ), _mm256_mul_pd( dy4, _mm256_load_pd( leaf->e2x ) ) );
