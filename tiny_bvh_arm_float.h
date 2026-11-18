@@ -515,6 +515,97 @@ TINYBVH_FORCEINLINE uint32_t neon_movemask_popc( const uint32x4_t mask )
 	return vaddvq_u32( vandq_u32( mask, neon_laneBits ) );
 }
 
+// ----------------------------------------------------------------------------
+//        L E A F   T E S T S
+// ----------------------------------------------------------------------------
+// A leaf holds BVHTriLeaf::PRIMS triangles as columns. NEON is four lanes wide, so the leaf is
+// tested in batches of four; the closest-hit batch tightens ray.hit.t, so a later batch starts
+// from a nearer horizon. A leaf with fewer triangles repeats its last, which costs a lane but
+// no branch.
+
+// Ray terms every leaf test needs, broadcast once per ray.
+struct tinybvh_leafray
+{
+	float32x4_t ox, oy, oz, dx, dy, dz;
+	tinybvh_leafray( const Ray& ray ) :
+		ox( vdupq_n_f32( ray.O.x ) ), oy( vdupq_n_f32( ray.O.y ) ), oz( vdupq_n_f32( ray.O.z ) ),
+		dx( vdupq_n_f32( ray.D.x ) ), dy( vdupq_n_f32( ray.D.y ) ), dz( vdupq_n_f32( ray.D.z ) ) {}
+};
+
+// The four edge tests of one batch; 'first' is its first triangle. Yields u4, v4, ta4 and the
+// hit mask 'combined'.
+#define TINYBVH_LEAF_MT4( LEAF, FIRST, R, TFAR ) \
+	const float32x4_t e1x4 = vld1q_f32( (LEAF)->e1x + (FIRST) ), e1y4 = vld1q_f32( (LEAF)->e1y + (FIRST) ), e1z4 = vld1q_f32( (LEAF)->e1z + (FIRST) ); \
+	const float32x4_t e2x4 = vld1q_f32( (LEAF)->e2x + (FIRST) ), e2y4 = vld1q_f32( (LEAF)->e2y + (FIRST) ), e2z4 = vld1q_f32( (LEAF)->e2z + (FIRST) ); \
+	const float32x4_t hx4 = vfmsq_f32( vmulq_f32( (R).dy, e2z4 ), (R).dz, e2y4 ); \
+	const float32x4_t hy4 = vfmsq_f32( vmulq_f32( (R).dz, e2x4 ), (R).dx, e2z4 ); \
+	const float32x4_t hz4 = vfmsq_f32( vmulq_f32( (R).dx, e2y4 ), (R).dy, e2x4 ); \
+	const float32x4_t sx4 = vsubq_f32( (R).ox, vld1q_f32( (LEAF)->v0x + (FIRST) ) ); \
+	const float32x4_t sy4 = vsubq_f32( (R).oy, vld1q_f32( (LEAF)->v0y + (FIRST) ) ); \
+	const float32x4_t sz4 = vsubq_f32( (R).oz, vld1q_f32( (LEAF)->v0z + (FIRST) ) ); \
+	const float32x4_t det4 = vfmaq_f32( vfmaq_f32( vmulq_f32( e1y4, hy4 ), e1x4, hx4 ), e1z4, hz4 ); \
+	const float32x4_t qz4 = vfmsq_f32( vmulq_f32( sx4, e1y4 ), sy4, e1x4 ); \
+	const float32x4_t qx4 = vfmsq_f32( vmulq_f32( sy4, e1z4 ), sz4, e1y4 ); \
+	const float32x4_t qy4 = vfmsq_f32( vmulq_f32( sz4, e1x4 ), sx4, e1z4 ); \
+	const float32x4_t zero4 = vdupq_n_f32( 0.0f ), one4 = vdupq_n_f32( 1.0f ); \
+	const float32x4_t invDet4 = vdivq_f32( one4, det4 ); \
+	const float32x4_t u4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( sy4, hy4 ), sx4, hx4 ), sz4, hz4 ), invDet4 ); \
+	const float32x4_t v4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( (R).dy, qy4 ), (R).dx, qx4 ), (R).dz, qz4 ), invDet4 ); \
+	const float32x4_t ta4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( e2y4, qy4 ), e2x4, qx4 ), e2z4, qz4 ), invDet4 ); \
+	const uint32x4_t mask1 = vandq_u32( vcgeq_f32( u4, zero4 ), vcgeq_f32( v4, zero4 ) ); \
+	const uint32x4_t mask2 = vcleq_f32( vaddq_f32( u4, v4 ), one4 ); \
+	const uint32x4_t mask3 = vandq_u32( vcltq_f32( ta4, vdupq_n_f32( TFAR ) ), vcgtq_f32( ta4, zero4 ) ); \
+	uint32x4_t combined = vandq_u32( vandq_u32( mask1, mask2 ), mask3 );
+
+// Closest hit in one leaf. Updates the ray and returns true if it did.
+static TINYBVH_FORCEINLINE bool tinybvh_leaf_closest( const BVHTriLeaf* leaf, const tinybvh_leafray& r,
+	Ray& ray, const uint32_t* opmap, const uint32_t opmapN )
+{
+	bool hit = false;
+	for (uint32_t first = 0; first < BVHTriLeaf::PRIMS; first += 4)
+	{
+		TINYBVH_LEAF_MT4( leaf, first, r, ray.hit.t )
+		uint32_t imask = neon_movemask_popc( combined ) & 15;
+		// evaluate opacity map, if present (NEON version).
+		if (opmap) if (imask)
+		{
+			uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
+			tinybvh_opmap_idx4( u4, v4, opmapN, idx );
+			// gather the opacity bits with scalar loads
+			for (uint32_t i = 0; i < 4; i++) if ((imask & (1u << i)) && impl::tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[first + i], idx[i] )) omask[i] = 0xffffffff;
+			combined = vandq_u32( combined, vld1q_u32( omask ) );
+			imask = neon_movemask_popc( combined ) & 15;
+		}
+		if (!imask) continue;
+		const float32x4_t dist4 = vbslq_f32( combined, ta4, vdupq_n_f32( 1e34f ) );
+		const float t = vminvq_f32( dist4 );
+		const uint32_t lane = tinybvh_bfind( neon_movemask_popc( vceqq_f32( dist4, vdupq_n_f32( t ) ) ) & 15 );
+		ray.hit.t = t, ray.hit.u = tinybvh_getlane_f( &u4, lane ), ray.hit.v = tinybvh_getlane_f( &v4, lane );
+		ray.SetHitPrim( leaf->primIdx[first + lane] );
+		hit = true;
+	}
+	return hit;
+}
+
+// Any hit in one leaf.
+static TINYBVH_FORCEINLINE bool tinybvh_leaf_occluded( const BVHTriLeaf* leaf, const tinybvh_leafray& r,
+	const Ray& ray, const uint32_t* opmap, const uint32_t opmapN )
+{
+	for (uint32_t first = 0; first < BVHTriLeaf::PRIMS; first += 4)
+	{
+		TINYBVH_LEAF_MT4( leaf, first, r, ray.hit.t )
+		const uint32_t imask = neon_movemask_popc( combined ) & 15;
+		if (!imask) continue;
+		if (!opmap) return true;
+		// evaluate opacity map, NEON version.
+		uint32_t idx[4];
+		tinybvh_opmap_idx4( u4, v4, opmapN, idx );
+		// gather the opacity bits with scalar loads
+		for (uint32_t i = 0; i < 4; i++) if ((imask & (1u << i)) && impl::tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[first + i], idx[i] )) return true;
+	}
+	return false;
+}
+
 #define NEON_HIT( s ) ((m64 >> (16 * s)) & 1)
 #define NEON_PUSH( c, s ) { nodeStack[stackPtr] = c; vst1q_lane_f32( distStack + stackPtr, tminSorted, s ); stackPtr++; }
 
@@ -522,7 +613,7 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant(
 {
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	ALIGNED( 64 ) float distStack[TINYBVH_STACK_SIZE * 2];
-	const float32x4_t zero4 = vdupq_n_f32( 0 ), one4 = vdupq_n_f32( 1 ), inf4 = vdupq_n_f32( 1e34f );
+	const float32x4_t zero4 = vdupq_n_f32( 0 );
 	float32x4_t t4 = vdupq_n_f32( ray.hit.t );
 	int32_t stackPtr = 0;
 	uint32_t nodeIdx = 0;
@@ -532,8 +623,7 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant(
 	const float32x4_t rx4 = vdupq_n_f32( -ray.O.x * ray.rD.x ), rdx4 = vdupq_n_f32( ray.rD.x );
 	const float32x4_t ry4 = vdupq_n_f32( -ray.O.y * ray.rD.y ), rdy4 = vdupq_n_f32( ray.rD.y );
 	const float32x4_t rz4 = vdupq_n_f32( -ray.O.z * ray.rD.z ), rdz4 = vdupq_n_f32( ray.rD.z );
-	const float32x4_t ox4 = vdupq_n_f32( ray.O.x ), oy4 = vdupq_n_f32( ray.O.y ), oz4 = vdupq_n_f32( ray.O.z );
-	const float32x4_t dx4 = vdupq_n_f32( ray.D.x ), dy4 = vdupq_n_f32( ray.D.y ), dz4 = vdupq_n_f32( ray.D.z );
+	const tinybvh_leafray leafRay( ray );
 	// constants that turn the 2-bit lane indices in perm4 into a byte shuffle
 	const uint32x4_t mul4 = vdupq_n_u32( 0x04040404 ), add4 = vdupq_n_u32( 0x03020100 );
 #ifdef _DEBUG
@@ -594,50 +684,9 @@ template <> PER_OCTANT int32_t impl::BVH4_CPU<float, uint32_t>::IntersectOctant(
 				do { if (!stackPtr) goto the_end; nodeIdx = nodeStack[--stackPtr]; } while (distStack[stackPtr] > tcur);
 			}
 		}
-		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
-		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
-		const float32x4_t hx4 = vfmsq_f32( vmulq_f32( dy4, vld1q_f32( leaf->e2z ) ), dz4, vld1q_f32( leaf->e2y ) );
-		const float32x4_t hy4 = vfmsq_f32( vmulq_f32( dz4, vld1q_f32( leaf->e2x ) ), dx4, vld1q_f32( leaf->e2z ) );
-		const float32x4_t hz4 = vfmsq_f32( vmulq_f32( dx4, vld1q_f32( leaf->e2y ) ), dy4, vld1q_f32( leaf->e2x ) );
-		const float32x4_t sx4 = vsubq_f32( ox4, vld1q_f32( leaf->v0x ) ), sy4 = vsubq_f32( oy4, vld1q_f32( leaf->v0y ) ), sz4 = vsubq_f32( oz4, vld1q_f32( leaf->v0z ) );
-		const float32x4_t det4 = vfmaq_f32( vfmaq_f32( vmulq_f32( vld1q_f32( leaf->e1y ), hy4 ), vld1q_f32( leaf->e1x ), hx4 ), vld1q_f32( leaf->e1z ), hz4 );
-		const float32x4_t qz4 = vfmsq_f32( vmulq_f32( sx4, vld1q_f32( leaf->e1y ) ), sy4, vld1q_f32( leaf->e1x ) );
-		const float32x4_t qx4 = vfmsq_f32( vmulq_f32( sy4, vld1q_f32( leaf->e1z ) ), sz4, vld1q_f32( leaf->e1y ) );
-		const float32x4_t qy4 = vfmsq_f32( vmulq_f32( sz4, vld1q_f32( leaf->e1x ) ), sx4, vld1q_f32( leaf->e1z ) );
-		const float32x4_t invDet4 = vdivq_f32( one4, det4 );
-		const float32x4_t u4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( sy4, hy4 ), sx4, hx4 ), sz4, hz4 ), invDet4 );
-		const float32x4_t v4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( dy4, qy4 ), dx4, qx4 ), dz4, qz4 ), invDet4 );
-		const float32x4_t ta4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( vld1q_f32( leaf->e2y ), qy4 ), vld1q_f32( leaf->e2x ), qx4 ), vld1q_f32( leaf->e2z ), qz4 ), invDet4 );
-		const uint32x4_t mask1 = vandq_u32( vcgeq_f32( u4, zero4 ), vcgeq_f32( v4, zero4 ) );
-		const uint32x4_t mask2 = vcleq_f32( vaddq_f32( u4, v4 ), one4 );
-		const uint32x4_t mask3 = vandq_u32( vcltq_f32( ta4, t4 ), vcgtq_f32( ta4, zero4 ) );
-		uint32x4_t combined = vandq_u32( vandq_u32( mask1, mask2 ), mask3 );
-		uint32_t imask = neon_movemask_popc( combined ) & 15;
-		// evaluate opacity map, if present (NEON version).
-		if (opmap) if (imask)
-		{
-			uint32_t idx[4], omask[4] = { 0, 0, 0, 0 };
-			tinybvh_opmap_idx4( u4, v4, opmapN, idx );
-			// gather the opacity bits with scalar loads
-			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) omask[i] = 0xffffffff;
-			// combine
-			combined = vandq_u32( combined, vld1q_u32( omask ) );
-			imask = neon_movemask_popc( combined ) & 15;
-		}
-		if (imask)
-		{
-			const float32x4_t dist4 = vbslq_f32( combined, ta4, inf4 );
-			const float t = vminvq_f32( dist4 );
-			const uint32_t lane = tinybvh_bfind( neon_movemask_popc( vceqq_f32( dist4, vdupq_n_f32( t ) ) ) & 15 );
-			// update hit record
-			ray.hit.t = t, ray.hit.u = tinybvh_getlane_f( &u4, lane ), ray.hit.v = tinybvh_getlane_f( &v4, lane );
-		#if INST_IDX_BITS == 32
-			ray.hit.prim = leaf->primIdx[lane], ray.hit.inst = ray.instIdx;
-		#else
-			ray.hit.prim = leaf->primIdx[lane] + ray.instIdx;
-		#endif
-			t4 = vdupq_n_f32( t ), tcur = t;
-		}
+		// Moeller-Trumbore ray/triangle intersection for the triangles of the leaf
+		const BVHTriLeaf* leaf = (BVHTriLeaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
+		if (tinybvh_leaf_closest( leaf, leafRay, ray, opmap, opmapN )) t4 = vdupq_n_f32( ray.hit.t ), tcur = ray.hit.t;
 		// skip entries behind the current hit
 		do { if (!stackPtr) goto the_end; nodeIdx = nodeStack[--stackPtr]; } while (distStack[stackPtr] > tcur);
 	}
@@ -658,12 +707,11 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 	ALIGNED( 64 ) uint32_t nodeStack[TINYBVH_STACK_SIZE * 2 /* wide trees push more nodes per step */];
 	int32_t stackPtr = 0;
 	uint32_t nodeIdx = 0;
-	const float32x4_t zero4 = vdupq_n_f32( 0 ), one4 = vdupq_n_f32( 1 ), t4 = vdupq_n_f32( ray.hit.t );
+	const float32x4_t zero4 = vdupq_n_f32( 0 ), t4 = vdupq_n_f32( ray.hit.t );
 	const float32x4_t rx4 = vdupq_n_f32( -ray.O.x * ray.rD.x ), rdx4 = vdupq_n_f32( ray.rD.x );
 	const float32x4_t ry4 = vdupq_n_f32( -ray.O.y * ray.rD.y ), rdy4 = vdupq_n_f32( ray.rD.y );
 	const float32x4_t rz4 = vdupq_n_f32( -ray.O.z * ray.rD.z ), rdz4 = vdupq_n_f32( ray.rD.z );
-	const float32x4_t ox4 = vdupq_n_f32( ray.O.x ), oy4 = vdupq_n_f32( ray.O.y ), oz4 = vdupq_n_f32( ray.O.z );
-	const float32x4_t dx4 = vdupq_n_f32( ray.D.x ), dy4 = vdupq_n_f32( ray.D.y ), dz4 = vdupq_n_f32( ray.D.z );
+	const tinybvh_leafray leafRay( ray );
 	while (1)
 	{
 		while (!(nodeIdx & LEAF_BIT))
@@ -707,34 +755,9 @@ template <> PER_OCTANT bool impl::BVH4_CPU<float, uint32_t>::IsOccludedOctant( c
 				nodeIdx = nodeStack[--stackPtr];
 			}
 		}
-		// Moeller-Trumbore ray/triangle intersection algorithm for four triangles
-		const BVHTri4Leaf* leaf = (BVHTri4Leaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
-		const float32x4_t hx4 = vfmsq_f32( vmulq_f32( dy4, vld1q_f32( leaf->e2z ) ), dz4, vld1q_f32( leaf->e2y ) );
-		const float32x4_t hy4 = vfmsq_f32( vmulq_f32( dz4, vld1q_f32( leaf->e2x ) ), dx4, vld1q_f32( leaf->e2z ) );
-		const float32x4_t hz4 = vfmsq_f32( vmulq_f32( dx4, vld1q_f32( leaf->e2y ) ), dy4, vld1q_f32( leaf->e2x ) );
-		const float32x4_t sx4 = vsubq_f32( ox4, vld1q_f32( leaf->v0x ) ), sy4 = vsubq_f32( oy4, vld1q_f32( leaf->v0y ) ), sz4 = vsubq_f32( oz4, vld1q_f32( leaf->v0z ) );
-		const float32x4_t det4 = vfmaq_f32( vfmaq_f32( vmulq_f32( vld1q_f32( leaf->e1y ), hy4 ), vld1q_f32( leaf->e1x ), hx4 ), vld1q_f32( leaf->e1z ), hz4 );
-		const float32x4_t qz4 = vfmsq_f32( vmulq_f32( sx4, vld1q_f32( leaf->e1y ) ), sy4, vld1q_f32( leaf->e1x ) );
-		const float32x4_t qx4 = vfmsq_f32( vmulq_f32( sy4, vld1q_f32( leaf->e1z ) ), sz4, vld1q_f32( leaf->e1y ) );
-		const float32x4_t qy4 = vfmsq_f32( vmulq_f32( sz4, vld1q_f32( leaf->e1x ) ), sx4, vld1q_f32( leaf->e1z ) );
-		const float32x4_t invDet4 = vdivq_f32( one4, det4 );
-		const float32x4_t u4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( sy4, hy4 ), sx4, hx4 ), sz4, hz4 ), invDet4 );
-		const float32x4_t v4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( dy4, qy4 ), dx4, qx4 ), dz4, qz4 ), invDet4 );
-		const float32x4_t ta4 = vmulq_f32( vfmaq_f32( vfmaq_f32( vmulq_f32( vld1q_f32( leaf->e2y ), qy4 ), vld1q_f32( leaf->e2x ), qx4 ), vld1q_f32( leaf->e2z ), qz4 ), invDet4 );
-		const uint32x4_t mask1 = vandq_u32( vcgeq_f32( u4, zero4 ), vcgeq_f32( v4, zero4 ) );
-		const uint32x4_t mask2 = vcleq_f32( vaddq_f32( u4, v4 ), one4 );
-		const uint32x4_t mask3 = vandq_u32( vcltq_f32( ta4, t4 ), vcgtq_f32( ta4, zero4 ) );
-		const uint32x4_t combined = vandq_u32( vandq_u32( mask1, mask2 ), mask3 );
-		const uint32_t imask = neon_movemask_popc( combined ) & 15;
-		if (imask)
-		{
-			if (!opmap) return true;
-			// evaluate opacity map, NEON version.
-			uint32_t idx[4];
-			tinybvh_opmap_idx4( u4, v4, opmapN, idx );
-			// gather the opacity bits with scalar loads
-			for (int i = 0; i < 4; i++) if ((imask & (1 << i)) && tinybvh_opmap_opaque( opmap, opmapN, leaf->primIdx[i], idx[i] )) return true;
-		}
+		// Moeller-Trumbore ray/triangle intersection for the triangles of the leaf
+		const BVHTriLeaf* leaf = (BVHTriLeaf*)(bvh4Data + (nodeIdx & 0x1fffffff));
+		if (tinybvh_leaf_occluded( leaf, leafRay, ray, opmap, opmapN )) return true;
 		// we continue.
 		if (!stackPtr) return false;
 		nodeIdx = nodeStack[--stackPtr];

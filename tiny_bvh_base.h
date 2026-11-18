@@ -454,6 +454,7 @@ template <> struct bvh_traits<float>
 	using slice = bvhvec4slice;
 	using mat4 = bvhmat4;
 	static constexpr bool wide_layouts = true;	// BVH4_CPU and BVH8_CPU can be attached to a TLAS.
+	static constexpr uint32_t leafPrims = 8;
 };
 #ifdef DOUBLE_PRECISION_SUPPORT
 template <> struct bvh_traits<double>
@@ -463,6 +464,7 @@ template <> struct bvh_traits<double>
 	using slice = bvhdbl3slice;
 	using mat4 = bvhdblmat4;
 	static constexpr bool wide_layouts = true;
+	static constexpr uint32_t leafPrims = 4;
 };
 #endif
 
@@ -714,7 +716,7 @@ TEMPLATED class BVH8_CWBVH;
 TEMPLATED class BVH8_CPU;
 TEMPLATED class BVH_DOBB;
 TEMPLATED class BLASInstance;
-TEMPLATED struct BVHTri4Leaf;
+TEMPLATED struct BVHTriLeaf;
 
 // Task trampolines of the SIMD builders in the platform headers; friends of BVH.
 void BVHBuildAVXSubtree( void* payload );
@@ -744,7 +746,7 @@ public:
 	using BVH = impl::BVH<Float, Index>;
 	using BVH_Verbose = impl::BVH_Verbose<Float, Index>;
 	using BLASInstance = impl::BLASInstance<Float, Index>;
-	using BVHTri4Leaf = impl::BVHTri4Leaf<Float, Index>;
+	using BVHTriLeaf = impl::BVHTriLeaf<Float, Index>;
 	struct ALIGNED( 32 ) Fragment
 	{
 		// A fragment stores the bounds of an input primitive. The name 'Fragment' is from
@@ -785,7 +787,8 @@ public:
 	Index usedNodes = 0;			// number of nodes used for the BVH.
 	Index triCount = 0;				// number of primitives in the BVH.
 	Index idxCount = 0;				// number of primitive indices; can exceed triCount for SBVH.
-	bool lQuads = false;			// some layouts have 4 prims in each leaf; adjust SAH cost for this.
+	bool lQuads = false;			// some layouts test a whole leaf at once; adjust SAH cost for this.
+	uint32_t leafGran = bvh_traits<Float>::leafPrims;	// prims per SIMD batch in such a leaf.
 	uint32_t hqbvhbins = HQBVHBINS;	// number of bins to use in SBVH construction.
 	bool hqbvhoddeven = false;		// if true, odd levels will use one extra bin during construction.
 	// SBVH builder: nodes of at most this many prims become leaves without being split.
@@ -813,8 +816,9 @@ protected:
 	{
 		if (obj) obj->~T(), AlignedFree( obj ), obj = 0;
 	}
-	// SAH cost of a leaf counts its primitives in groups of 4 for layouts with 4 prims per leaf.
-	Index LeafPrims( const Index n ) const { return lQuads ? ((n + 3) >> 2) * 4 : n; }
+	// SAH cost of a leaf counts its primitives in whole SIMD batches for the layouts that test a
+	// leaf as one: a leaf of five costs the same as a leaf of eight when the batch is eight wide.
+	Index LeafPrims( const Index n ) const { return lQuads ? (Index)(((uint32_t)n + leafGran - 1) / leafGran) * leafGran : n; }
 	// Threading helpers. ParallelFor runs body( i ) for i in [0, n), on the pool only if 'threads';
 	// enableThreading = false must keep a build on the calling thread.
 	template <typename F> void ParallelFor( const bool threads, const uint32_t n, const F& body ) const
@@ -1662,7 +1666,7 @@ public:
 	using typename Base::Vertex;
 	using typename Base::Slice;
 	using typename Base::Ray;
-	using typename Base::BVHTri4Leaf;
+	using typename Base::BVHTriLeaf;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -1806,13 +1810,14 @@ TINYBVH_FORCEINLINE bool tinybvh_opmap_opaque( const uint32_t* opmap, const uint
 	return (om[idx >> 5] >> (idx & 31)) & 1;
 }
 
-TEMPLATED struct ALIGNED( 64 ) BVHTri4Leaf
+TEMPLATED struct ALIGNED( 64 ) BVHTriLeaf
 {
 	using Vec3 = typename bvh_traits<Float>::vec3;
-	Float v0x[4], v0y[4], v0z[4];
-	Float e1x[4], e1y[4], e1z[4];
-	Float e2x[4], e2y[4], e2z[4];
-	Index primIdx[4]; // total: 160 bytes for float (padded to 192), 320 bytes for double.
+	static constexpr uint32_t PRIMS = bvh_traits<Float>::leafPrims;
+	Float v0x[PRIMS], v0y[PRIMS], v0z[PRIMS];
+	Float e1x[PRIMS], e1y[PRIMS], e1z[PRIMS];
+	Float e2x[PRIMS], e2y[PRIMS], e2z[PRIMS];
+	Index primIdx[PRIMS]; // total: 320 bytes for float (8 prims) and for double (4 prims).
 	inline void SetData( const Vec3 & v0, const Vec3 & e1, const Vec3 & e2, const Index pidx, const uint32_t slot )
 	{
 		v0x[slot] = v0.x, v0y[slot] = v0.y, v0z[slot] = v0.z;
@@ -1860,7 +1865,7 @@ public:
 	using typename Base::Vertex;
 	using typename Base::Slice;
 	using typename Base::Ray;
-	using typename Base::BVHTri4Leaf;
+	using typename Base::BVHTriLeaf;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -2138,7 +2143,7 @@ using BVH8_CWBVH = impl::BVH8_CWBVH<float, uint32_t>;
 using BVH8_CPU = impl::BVH8_CPU<float, uint32_t>;
 using BVH_DOBB = impl::BVH_DOBB<float, uint32_t>;
 using DOBB_LUT = impl::DOBB_LUT;
-using BVHTri4Leaf = impl::BVHTri4Leaf<float, uint32_t>;
+using BVHTriLeaf = impl::BVHTriLeaf<float, uint32_t>;
 using BLASInstance = impl::BLASInstance<float, uint32_t>;
 #ifdef DOUBLE_PRECISION_SUPPORT
 // Double precision, 64-bit indices.
@@ -7406,7 +7411,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	if (!ownBVH4) bvh4.DropReference( context ), ownBVH4 = true;
 	// propagate settings for this layout to the underlying layout
 	this->PassSettingsTo( bvh4 ), this->PassSettingsTo( bvh4.bvh );
-	bvh4.bvh.hqLeafPrims = 4;
+	bvh4.bvh.hqLeafPrims = (Index)BVHTriLeaf::PRIMS; // the SBVH builder stops at the leaf's size
 	bvh4.bvh.settings.keepSplitting = true; // small leaves: the collapse in ConvertForCPULayout groups them
 	// build underlying layout
 	bvh4.bvh.Build( vertices, indices, prims );
@@ -7480,12 +7485,13 @@ TEMPLATED Float BVH4_CPU<Float, Index>::SAHCost( const Index nodeIdx ) const
 // Everything this touches is either read-only input or memory owned exclusively by
 // this node, so the nodes may be written in any order and from any thread.
 // Shared by the BVH4_CPU and BVH8_CPU EmitNode: the children of MBVH node 'orig' in slots 0.., with
-// their bounds; interior children by address, leaves as 4-triangle blocks written directly behind
+// their bounds; interior children by address, leaves as triangle blocks written directly behind
 // the node, in child order, as BlockLayout accounted for them. Returns the number of slots used.
 template <class Node, int M, typename Float, typename Index> int32_t tinybvh_emit_children( Node* newNode, const MBVH<M, Float, Index>& src,
 	const typename MBVH<M, Float, Index>::MBVHNode& orig, const uint32_t* base, uint32_t leafBlock, char* data, const uint32_t leafBit )
 {
-	constexpr uint32_t LEAF_BLOCKS = sizeof( BVHTri4Leaf<Float, Index> ) / 64;
+	constexpr uint32_t LEAF_BLOCKS = sizeof( BVHTriLeaf<Float, Index> ) / 64;
+	constexpr uint32_t LEAF_PRIMS = BVHTriLeaf<Float, Index>::PRIMS;
 	int32_t cidx = 0;
 	for (int32_t i = 0; i < M; i++) if (orig.child[i])
 	{
@@ -7495,11 +7501,11 @@ template <class Node, int M, typename Float, typename Index> int32_t tinybvh_emi
 		newNode->zmin[cidx] = child.aabbMin.z, newNode->zmax[cidx] = child.aabbMax.z;
 		if (child.isLeaf())
 		{
-			BVH_FATAL_ERROR_IF( child.triCount > 4, "MBVH::ConvertForCPULayout( .. ), leaf holds more than 4 prims." );
+			BVH_FATAL_ERROR_IF( child.triCount > (Index)LEAF_PRIMS, "MBVH::ConvertForCPULayout( .. ), leaf holds more prims than the layout's leaf." );
 			newNode->child[cidx] = leafBlock + leafBit;
-			BVHTri4Leaf<Float, Index>* leaf = (BVHTri4Leaf<Float, Index>*)(data + (size_t)leafBlock * 64);
+			BVHTriLeaf<Float, Index>* leaf = (BVHTriLeaf<Float, Index>*)(data + (size_t)leafBlock * 64);
 			leafBlock += LEAF_BLOCKS;
-			for (uint32_t l = 0; l < 4; l++)
+			for (uint32_t l = 0; l < LEAF_PRIMS; l++)
 			{
 				const Index primIdx = src.bvh.primIdx[child.firstTri + tinybvh_min( (Index)l, child.triCount - 1 )];
 				Index i0, i1, i2;
@@ -7550,14 +7556,15 @@ TEMPLATED void BVH4_CPU<Float, Index>::EmitNode( MBVH<4, Float, Index>& src, con
 
 #undef SORT
 
-// ConvertForCPULayout: leaves of more than four prims are split first; SplitLeafs knows from
-// leafsSplit whether there are any. The collapse then groups prims into leaves of up to four by its
-// cost model, rather than taking every subtree of up to four prims as a leaf, as FitLeafs would:
-// a better tree, for a little more conversion time.
+// ConvertForCPULayout: leaves too large for the layout's leaf are split first; SplitLeafs knows
+// from leafsSplit whether there are any. The collapse then groups prims into leaves of up to that
+// size by its cost model, rather than taking every small enough subtree as a leaf, as FitLeafs
+// would: a better tree, for a little more conversion time.
 TEMPLATED_M void MBVH<M, Float, Index>::ConvertForCPULayout()
 {
-	bvh.SplitLeafs( 4 );
-	leafPrimLimit = 4; // leaves in these layouts hold 4 prims
+	constexpr Index LEAF_PRIMS = (Index)BVHTriLeaf<Float, Index>::PRIMS;
+	bvh.SplitLeafs( LEAF_PRIMS );
+	leafPrimLimit = LEAF_PRIMS; // one leaf of these layouts holds this many prims
 	ConvertFrom( bvh, true );
 }
 
@@ -7719,7 +7726,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& origi
 	// allocate if needed
 	// leaves are stored only as leaf blocks: they get no node record.
 	const Index leavesNeeded = bvh4.LeafCount(), nodesNeeded = bvh4.usedNodes - leavesNeeded;
-	const Index blocksNeeded = nodesNeeded * (sizeof( BVHNode ) / 64) + leavesNeeded * (sizeof( BVHTri4Leaf ) / 64); // here, block = cacheline.
+	const Index blocksNeeded = nodesNeeded * (sizeof( BVHNode ) / 64) + leavesNeeded * (sizeof( BVHTriLeaf ) / 64); // here, block = cacheline.
 	// Child slots store the block index in 29 bits; refuse to build beyond that.
 	BVH_FATAL_ERROR_IF( blocksNeeded > 0x1fffffff, "BVH4_CPU::ConvertFrom, BVH does not fit in 29-bit block indices." );
 	if (allocatedBlocks < blocksNeeded)
@@ -7731,7 +7738,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& origi
 	CopyBasePropertiesFrom( bvh4 );
 	// start conversion.
 	const Index nodeCount = bvh4.usedNodes;
-	constexpr uint32_t NODE_BLOCKS = sizeof( BVHNode ) / 64, LEAF_BLOCKS = sizeof( BVHTri4Leaf ) / 64;
+	constexpr uint32_t NODE_BLOCKS = sizeof( BVHNode ) / 64, LEAF_BLOCKS = sizeof( BVHTriLeaf ) / 64;
 	uint32_t* blocks = (uint32_t*)AlignedAlloc( (size_t)nodeCount * sizeof( uint32_t ) );
 	uint32_t* base = (uint32_t*)AlignedAlloc( (size_t)nodeCount * sizeof( uint32_t ) );
 	Index* order = (Index*)AlignedAlloc( (size_t)nodeCount * sizeof( Index ) );
@@ -7790,8 +7797,8 @@ TEMPLATED void BVH8_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	if (!ownBVH8) bvh8.DropReference( context ), ownBVH8 = true;
 	// propagate settings for this layout to the underlying layout
 	this->PassSettingsTo( bvh8 ), this->PassSettingsTo( bvh8.bvh );
-	// as for BVH4_CPU: leaves hold 4 prims, so the SBVH builder stops at that size.
-	bvh8.bvh.hqLeafPrims = 4;
+	// as for BVH4_CPU: the SBVH builder stops at the size of one leaf.
+	bvh8.bvh.hqLeafPrims = (Index)BVHTriLeaf::PRIMS;
 	bvh8.bvh.settings.keepSplitting = true; // small leaves: the collapse in ConvertForCPULayout groups them
 	// build underlying layout
 	bvh8.bvh.Build( vertices, indices, prims );
@@ -7893,10 +7900,10 @@ TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& origi
 	if (discard && bvh8.ownBVH) AlignedFree( bvh8.bvh.bvhNode ), bvh8.bvh.bvhNode = 0;
 	// allocate if needed - leaves are stored only as leaf blocks: they get no node record.
 	const Index leavesNeeded = bvh8.LeafCount(), nodesNeeded = bvh8.usedNodes - leavesNeeded;
-	Index blocksNeeded = nodesNeeded * (sizeof( BVHNode ) / 64) + leavesNeeded * (sizeof( BVHTri4Leaf ) / 64); // here, block = cacheline.
+	Index blocksNeeded = nodesNeeded * (sizeof( BVHNode ) / 64) + leavesNeeded * (sizeof( BVHTriLeaf ) / 64); // here, block = cacheline.
 	// reserve one extra leaf at the end; a degenerate 'null leaf' that unused child slots point to.
 	const uint32_t nullLeafBlock = (uint32_t)blocksNeeded;
-	blocksNeeded += sizeof( BVHTri4Leaf ) / 64;
+	blocksNeeded += sizeof( BVHTriLeaf ) / 64;
 	// Child slots store the block index in 29 bits; refuse to build beyond that.
 	BVH_FATAL_ERROR_IF( blocksNeeded > 0x1fffffff, "BVH8_CPU::ConvertFrom, BVH does not fit in 29-bit block indices." );
 	if (allocatedBlocks < blocksNeeded)
@@ -7906,10 +7913,10 @@ TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& origi
 		allocatedBlocks = (uint32_t)blocksNeeded;
 	}
 	CopyBasePropertiesFrom( bvh8 );
-	memset( bvh8Data + nullLeafBlock, 0, sizeof( BVHTri4Leaf ) );
+	memset( bvh8Data + nullLeafBlock, 0, sizeof( BVHTriLeaf ) );
 	// start conversion.
 	const Index nodeCount = bvh8.usedNodes;
-	constexpr uint32_t NODE_BLOCKS = sizeof( BVHNode ) / 64, LEAF_BLOCKS = sizeof( BVHTri4Leaf ) / 64;
+	constexpr uint32_t NODE_BLOCKS = sizeof( BVHNode ) / 64, LEAF_BLOCKS = sizeof( BVHTriLeaf ) / 64;
 	uint32_t* blocks = (uint32_t*)AlignedAlloc( (size_t)nodeCount * sizeof( uint32_t ) );
 	uint32_t* base = (uint32_t*)AlignedAlloc( (size_t)nodeCount * sizeof( uint32_t ) );
 	Index* order = (Index*)AlignedAlloc( (size_t)nodeCount * sizeof( Index ) );
@@ -7923,7 +7930,7 @@ TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& origi
 		for (Index j = SliceStart( interior, task, tasks ), last = SliceStart( interior, task + 1, tasks ); j < last; j++) EmitNode( bvh8, base, nullLeafBlock, order[j] );
 	} );
 	BVH_FATAL_ERROR_IF( blocks[0] > nullLeafBlock, "BVH8_CPU::ConvertFrom, block count underestimated." );
-	usedBlocks = nullLeafBlock + sizeof( BVHTri4Leaf ) / 64;
+	usedBlocks = nullLeafBlock + sizeof( BVHTriLeaf ) / 64;
 	AlignedFree( blocks ), AlignedFree( base ), AlignedFree( order );
 	// the layout is self-contained: release the MBVH and the rest of the BVH2, leaving bvh8 empty, as Load() leaves it.
 	if (discard) bvh8 = MBVH<8, Float, Index>( context );
@@ -10042,7 +10049,7 @@ template <typename Layout, int W, bool posX, bool posY, bool posZ, typename Floa
 int32_t tinybvh_wide_intersect( const typename Layout::CacheLine* data, Ray<Float, Index>& ray, const uint32_t* opmap, const uint32_t opmapN )
 {
 	using Node = typename Layout::BVHNode;
-	using Leaf = typename Layout::BVHTri4Leaf;
+	using Leaf = typename Layout::BVHTriLeaf;
 	static_assert( sizeof( Node::child ) == W * sizeof( uint32_t ), "node width mismatch" );
 	uint32_t nodeStack[TINYBVH_STACK_SIZE * (W / 2) + W /* wide trees push more nodes per step */];
 	Float distStack[TINYBVH_STACK_SIZE * (W / 2) + W];
@@ -10097,7 +10104,7 @@ int32_t tinybvh_wide_intersect( const typename Layout::CacheLine* data, Ray<Floa
 			do { if (!stackPtr) return (int32_t)steps; nodeIdx = nodeStack[--stackPtr]; } while (distStack[stackPtr] > tcur);
 		}
 		const Leaf* leaf = (const Leaf*)(data + (nodeIdx & 0x1fffffff));
-		for (uint32_t i = 0; i < 4; i++)
+		for (uint32_t i = 0; i < Leaf::PRIMS; i++)
 		{
 			Float t, u, v;
 			if (!leaf->Intersect( i, ray, tcur, t, u, v, opmap, opmapN )) continue;
@@ -10112,7 +10119,7 @@ template <typename Layout, int W, bool posX, bool posY, bool posZ, typename Floa
 bool tinybvh_wide_occluded( const typename Layout::CacheLine* data, const Ray<Float, Index>& ray, const uint32_t* opmap, const uint32_t opmapN )
 {
 	using Node = typename Layout::BVHNode;
-	using Leaf = typename Layout::BVHTri4Leaf;
+	using Leaf = typename Layout::BVHTriLeaf;
 	uint32_t nodeStack[TINYBVH_STACK_SIZE * (W / 2) + W /* wide trees push more nodes per step */];
 	int32_t stackPtr = 0;
 	uint32_t nodeIdx = 0;
@@ -10136,7 +10143,7 @@ bool tinybvh_wide_occluded( const typename Layout::CacheLine* data, const Ray<Fl
 			nodeIdx = nodeStack[--stackPtr];
 		}
 		const Leaf* leaf = (const Leaf*)(data + (nodeIdx & 0x1fffffff));
-		for (uint32_t i = 0; i < 4; i++)
+		for (uint32_t i = 0; i < Leaf::PRIMS; i++)
 		{
 			Float t, u, v;
 			if (leaf->Intersect( i, ray, ray.hit.t, t, u, v, opmap, opmapN )) return true;
