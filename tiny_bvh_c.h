@@ -193,7 +193,7 @@ typedef struct tbvh_hit
 	float t, u, v;				/* distance along the ray, barycentrics */
 	uint32_t prim;				/* primitive index */
 	void* auxData;				/* free for application use; starts the ray's second cache line */
-	union { uint8_t u8[56]; float f32[14]; uint32_t u32[14]; double f64[7]; uint64_t u64[7]; } user;
+	union { uint8_t u8[52]; float f32[13]; uint32_t u32[13]; double f64[6]; uint64_t u64[6]; } user;
 } tbvh_hit;
 
 typedef struct tbvh_hitd
@@ -202,7 +202,7 @@ typedef struct tbvh_hitd
 	double t, u, v;
 	uint64_t prim;
 	void* auxData;
-	union { uint8_t u8[56]; float f32[14]; uint32_t u32[14]; double f64[7]; uint64_t u64[7]; } user;
+	union { uint8_t u8[52]; float f32[13]; uint32_t u32[13]; double f64[6]; uint64_t u64[6]; } user;
 } tbvh_hitd;
 #pragma pack(pop)
 
@@ -216,6 +216,7 @@ typedef struct tbvh_ray
 	uint32_t instIdx;			/* used internally during TLAS traversal */
 	float rD[3];
 	tbvh_hit hit;				/* closest hit so far; hit.t is the ray extent on input */
+	float time;					/* motion blur: time in the shutter interval, [0, 1] */
 } tbvh_ray;
 
 typedef struct tbvh_rayd
@@ -226,6 +227,7 @@ typedef struct tbvh_rayd
 	uint64_t instIdx;
 	double rD[3];
 	tbvh_hitd hit;
+	float time;					/* single precision, as in tbvh_ray */
 } tbvh_rayd;
 
 TBVH_INLINE float tbvh_safe_rcp( const float x )
@@ -254,7 +256,7 @@ TBVH_INLINE void tbvh_ray_init( tbvh_ray* ray, const float ox, const float oy, c
 {
 	ray->O[0] = ox, ray->O[1] = oy, ray->O[2] = oz;
 	tbvh_ray_set_dir( ray, dx, dy, dz );
-	ray->mask = TBVH_MASK_ALL, ray->instIdx = 0;
+	ray->mask = TBVH_MASK_ALL, ray->instIdx = 0, ray->time = 0;
 	ray->hit.t = tmax, ray->hit.u = ray->hit.v = 0, ray->hit.prim = 0, ray->hit.inst = 0;
 }
 TBVH_INLINE void tbvh_rayd_init( tbvh_rayd* ray, const double ox, const double oy, const double oz,
@@ -262,7 +264,7 @@ TBVH_INLINE void tbvh_rayd_init( tbvh_rayd* ray, const double ox, const double o
 {
 	ray->O[0] = ox, ray->O[1] = oy, ray->O[2] = oz;
 	tbvh_rayd_set_dir( ray, dx, dy, dz );
-	ray->mask = TBVH_MASK_ALL, ray->instIdx = 0;
+	ray->mask = TBVH_MASK_ALL, ray->instIdx = 0, ray->time = 0;
 	ray->hit.t = tmax, ray->hit.u = ray->hit.v = 0, ray->hit.prim = 0, ray->hit.inst = 0;
 }
 
@@ -271,7 +273,10 @@ TBVH_INLINE void tbvh_rayd_init( tbvh_rayd* ray, const double ox, const double o
 /* ------------------------------------------------------------------------- */
 
 /* transform is row-major, with the translation in elements 3, 7 and 11.
-   invTransform, aabbMin and aabbMax are written by tbvh_build_tlas. */
+   invTransform, aabbMin and aabbMax are written by tbvh_build_tlas.
+   transform1: motion blur, the transform at the end of the shutter interval (16 values,
+   caller-owned), or NULL for an instance that does not move. Rays see the instance through
+   the transform interpolated at tbvh_ray.time. */
 typedef struct tbvh_instance
 {
 	TBVH_ALIGN(64) float transform[16];
@@ -280,6 +285,7 @@ typedef struct tbvh_instance
 	uint32_t blasIdx;			/* index into the BLAS array passed to tbvh_build_tlas */
 	float aabbMax[3];
 	uint32_t mask;				/* tested against tbvh_ray.mask */
+	const float* transform1;
 } tbvh_instance;
 
 typedef struct tbvh_instanced
@@ -290,6 +296,7 @@ typedef struct tbvh_instanced
 	uint64_t blasIdx;
 	double aabbMax[3];
 	uint32_t mask;
+	const double* transform1;
 } tbvh_instanced;
 
 TBVH_INLINE void tbvh_instance_init( tbvh_instance* inst, const uint32_t blasIdx )
@@ -297,14 +304,14 @@ TBVH_INLINE void tbvh_instance_init( tbvh_instance* inst, const uint32_t blasIdx
 	int i;
 	for (i = 0; i < 16; i++) inst->transform[i] = inst->invTransform[i] = (i % 5 == 0) ? 1.0f : 0.0f;
 	for (i = 0; i < 3; i++) inst->aabbMin[i] = TBVH_FAR, inst->aabbMax[i] = -TBVH_FAR;
-	inst->blasIdx = blasIdx, inst->mask = TBVH_MASK_ALL;
+	inst->blasIdx = blasIdx, inst->mask = TBVH_MASK_ALL, inst->transform1 = NULL;
 }
 TBVH_INLINE void tbvh_instanced_init( tbvh_instanced* inst, const uint64_t blasIdx )
 {
 	int i;
 	for (i = 0; i < 16; i++) inst->transform[i] = inst->invTransform[i] = (i % 5 == 0) ? 1.0 : 0.0;
 	for (i = 0; i < 3; i++) inst->aabbMin[i] = TBVH_DBL_FAR, inst->aabbMax[i] = -TBVH_DBL_FAR;
-	inst->blasIdx = blasIdx, inst->mask = TBVH_MASK_ALL;
+	inst->blasIdx = blasIdx, inst->mask = TBVH_MASK_ALL, inst->transform1 = NULL;
 }
 
 /* ------------------------------------------------------------------------- */
