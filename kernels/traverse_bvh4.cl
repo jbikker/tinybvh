@@ -281,7 +281,8 @@ void kernel batch_gpu4way( const global float4* alt4Node, global struct Ray* ray
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	float4 hit = traverse_gpu4way( alt4Node, O, D, rD, 1e30f );
+	const float tmax = rayData[threadId].hit.x;
+	float4 hit = traverse_gpu4way( alt4Node, O, D, rD, tmax );
 	rayData[threadId].hit = hit;
 }
 
@@ -292,7 +293,7 @@ void kernel batch_gpu4way_any( const global float4* alt4Node, global struct Ray*
 	const float3 O = rayData[threadId].O.xyz;
 	const float3 D = rayData[threadId].D.xyz;
 	const float3 rD = rayData[threadId].rD.xyz;
-	const float tmax = 1e30f; // TODO: get this from the ray.
+	const float tmax = rayData[threadId].hit.x;
 	float4 hit = 0;
 	if (isoccluded_gpu4way( alt4Node, O, D, rD, tmax )) hit.w = as_float( 1 );
 	rayData[threadId].hit = hit;
