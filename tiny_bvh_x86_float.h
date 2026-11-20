@@ -2360,7 +2360,11 @@ template <> int32_t impl::BVH4_CPU<float, uint32_t>::IntersectBundle( Ray* rays 
 template <> int32_t impl::BVH<float, uint32_t>::IntersectBundle( Ray* rays ) const
 {
 	BVH_FATAL_ERROR_IF( !isTLAS(), "BVH::IntersectBundle, not a TLAS." );
-	return tinybvh_intersect_bundle( this, rays );
+	if (!hasMotion) return tinybvh_intersect_bundle( this, rays );
+	// the bundle kernels have no ray time: rays that may see motion go one by one.
+	int32_t cost = 0;
+	for (uint32_t i = 0; i < TINYBVH_BUNDLE_RAYS; i++) cost += Intersect( rays[i] );
+	return cost;
 }
 
 // Bundle traversal for occlusion rays.

@@ -348,6 +348,10 @@ inline bvhvec3 tinybvh_transform_vector( const bvhvec3& v, const bvhmat4& T )
 	return bvhvec3( Tcell[0] * v.x + Tcell[1] * v.y + Tcell[2] * v.z, Tcell[4] * v.x +
 		Tcell[5] * v.y + Tcell[6] * v.z, Tcell[8] * v.x + Tcell[9] * v.y + Tcell[10] * v.z );
 }
+template <typename T, typename F> TINYBVH_FORCEINLINE T tinybvh_motion_lerp( const T& a, const T& b, const F t0, const F t1 )
+{
+	return a * t0 + b * t1;
+}
 
 #ifdef DOUBLE_PRECISION_SUPPORT
 
@@ -455,6 +459,7 @@ template <> struct bvh_traits<float>
 	using mat4 = bvhmat4;
 	static constexpr bool wide_layouts = true;	// BVH4_CPU and BVH8_CPU can be attached to a TLAS.
 	static constexpr uint32_t leafPrims = 8;
+	static constexpr float leafCostScale = 0.25f;
 };
 #ifdef DOUBLE_PRECISION_SUPPORT
 template <> struct bvh_traits<double>
@@ -465,6 +470,7 @@ template <> struct bvh_traits<double>
 	using mat4 = bvhdblmat4;
 	static constexpr bool wide_layouts = true;
 	static constexpr uint32_t leafPrims = 4;
+	static constexpr float leafCostScale = 0.25f;
 };
 #endif
 
@@ -515,16 +521,16 @@ TEMPLATED struct Intersection : IntersectionInst<Index>
 	// as normal, texture color etc.) can be reconstructed.
 	Float t, u, v;	// distance along ray & barycentric coordinates of the intersection
 	Index prim;		// primitive index
-	// 64 byte of custom data - For the typical case, where Intersection is
-	// a member of a cache-aligned Ray, this starts at a cache line boundary.
+	// 60 bytes of custom data - For the typical case, where Intersection is a member of a
+	// cache-aligned Ray, this starts at a cache line boundary; Ray::time takes the last 4 bytes.
 	void* auxData;
 	union
 	{
-		unsigned char userChar[56];
-		float userFloat[14];
-		uint32_t userInt32[14];
-		double userDouble[7];
-		uint64_t userInt64[7];
+		unsigned char userChar[52];
+		float userFloat[13];
+		uint32_t userInt32[13];
+		double userDouble[6];
+		uint64_t userInt64[6];
 	};
 };
 #if defined _MSC_VER || defined __GNUC__
@@ -541,7 +547,7 @@ TEMPLATED struct ALIGNED( 64 ) Ray
 	// properly initialized. For tlas/blas traversal this is typically updated for each blas.
 	using Vec3 = typename bvh_traits<Float>::vec3;
 	Ray() = default;
-	Ray( Vec3 origin, Vec3 direction, Float t = bvh_far<Float>, uint32_t rayMask = RAY_MASK_INTERSECT_ALL )
+	Ray( Vec3 origin, Vec3 direction, Float t = bvh_far<Float>, uint32_t rayMask = RAY_MASK_INTERSECT_ALL, float rayTime = 0 )
 	{
 		O = origin;
 	#ifdef NORMALIZE_RAY_DIR
@@ -553,6 +559,7 @@ TEMPLATED struct ALIGNED( 64 ) Ray
 		hit.t = t, hit.u = hit.v = 0, hit.prim = 0;
 		if constexpr (!bvh_packed_inst<Index>) hit.inst = 0;
 		mask = rayMask & RAY_MASK_INTERSECT_ALL;
+		time = rayTime;
 	}
 	void Normalize()
 	{
@@ -569,8 +576,10 @@ TEMPLATED struct ALIGNED( 64 ) Ray
 	ALIGNED( 16 ) Vec3 O; uint32_t mask = RAY_MASK_INTERSECT_ALL;
 	ALIGNED( 16 ) Vec3 D; Index instIdx = 0;
 	ALIGNED( 16 ) Vec3 rD;
-	// a packed 16-byte hit record starts on a 16-byte boundary
+	// A packed 16-byte hit record starts on a 16-byte boundary.
 	alignas(bvh_packed_inst<Index> ? 16 : alignof(Intersection<Float, Index>)) Intersection<Float, Index> hit;
+	// Motion blur: the ray's time in the shutter interval, in [0, 1]. Type is always float.
+	float time = 0;
 };
 
 } // namespace impl
@@ -698,7 +707,8 @@ enum BVHType : uint32_t
 	LAYOUT_VOXELSET,
 	LAYOUT_BVH4_AMD_HW,
 	LAYOUT_CWBVH8_AMD_HW,
-	LAYOUT_DOBB
+	LAYOUT_DOBB,
+	LAYOUT_BVH_MOTION
 };
 
 namespace impl {
@@ -715,6 +725,7 @@ TEMPLATED class CWBVH8_AMD_HW;
 TEMPLATED class BVH8_CWBVH;
 TEMPLATED class BVH8_CPU;
 TEMPLATED class BVH_DOBB;
+TEMPLATED class BVH_Motion;
 TEMPLATED class BLASInstance;
 TEMPLATED struct BVHTriLeaf;
 
@@ -857,6 +868,10 @@ protected:
 	TINYBVH_FORCEINLINE bool TriHit( const Ray& ray, const Slice& verts, const Index i0, const Index i1, const Index i2, Float& tHit, Float& uHit, Float& vHit ) const;
 	TINYBVH_FORCEINLINE void IntersectTri( Ray& ray, const Index idx, const Slice& verts, const Index i0, const Index i1, const Index i2 ) const;
 	TINYBVH_FORCEINLINE bool TriOccludes( const Ray& ray, const Slice& verts, const Index triIdx, const Index i0, const Index i1, const Index i2 ) const;
+	// The same three tests on given vertices (Vertex or Vec3); BVH_Motion interpolates them first.
+	template <typename V> TINYBVH_FORCEINLINE bool TriHit( const Ray& ray, const V& v0, const V& v1, const V& v2, Float& tHit, Float& uHit, Float& vHit ) const;
+	template <typename V> TINYBVH_FORCEINLINE void IntersectTri( Ray& ray, const Index triIdx, const V& v0, const V& v1, const V& v2 ) const;
+	template <typename V> TINYBVH_FORCEINLINE bool TriOccludes( const Ray& ray, const Index triIdx, const V& v0, const V& v1, const V& v2 ) const;
 	static void PrecomputeTriangle( const Slice& vert, const Index i0, const Index i1, const Index i2, void* dst );
 	static Float SA( const Vec3& aabbMin, const Vec3& aabbMax );
 };
@@ -869,6 +884,7 @@ public:
 	using typename Base::BinBox;
 	using typename Base::Vertex;
 	using typename Base::Slice;
+	using typename Base::Mat4;
 	using typename Base::Fragment;
 	using typename Base::Ray;
 	using typename Base::BVH_Verbose;
@@ -918,6 +934,7 @@ public:
 	template <typename, typename> friend class BVH8_CPU;
 	template <typename, typename> friend class BVH8_CWBVH;
 	template <typename, typename> friend class BVH_DOBB;
+	template <typename, typename> friend class BVH_Motion;
 	template <int, typename, typename> friend class MBVH;
 	struct SubdivTask { Index node, sliceStart, sliceEnd; uint32_t depth; };
 	struct BVHNode
@@ -1104,6 +1121,7 @@ public:
 	Slice verts = {};				// pointer to input primitive array: 3 vertices per tri.
 	Index* vertIdx = 0;			// vertex indices, only used in case the BVH is built over indexed prims.
 	bool ownsGeometry = false;	// set by Load when the geometry came out of the file rather than the caller.
+	bool hasMotion = false;		// TLAS: an instance or a BLAS moves; set by the TLAS build.
 	Index* primIdx = 0;				// primitive index array; capacity >= allocatedNodes / 2, see below.
 	BLASInstance* instList = 0;		// instance array, for top-level acceleration structure.
 	BVHBase<Float, Index>** blasList = 0; // blas array, for TLAS traversal.
@@ -1392,8 +1410,8 @@ public:
 		const uint8_t* flag, const Index* subFirst, const Index* subCount, const Index* first, Index* srcNode );
 	void DecodeEmit( const BVH& original, const Index i, const Index* term, const uint32_t n, const Index firstChild,
 		const uint8_t* flag, const Index* subFirst, const Index* subCount, Index* srcNode );
-	// For BVH4_CPU and BVH8_CPU: collapse bvh into leaves of at most 4 prims, and lay the result out in
-	// 64-byte blocks: blocks[n] is the size of the subtree at n, base[n] its first block.
+	// For BVH4_CPU and BVH8_CPU: collapse bvh into leaves of at most one leaf's worth of prims, and lay
+	// the result out in 64-byte blocks: blocks[n] is the size of the subtree at n, base[n] its first block.
 	void ConvertForCPULayout();
 	Index BlockLayout( const uint32_t nodeBlocks, const uint32_t leafBlocks, uint32_t* blocks, uint32_t* base, Index* order ) const;
 	Index BlockLayoutParallel( const uint32_t tasks, const uint32_t nodeBlocks, const uint32_t leafBlocks, uint32_t* blocks, uint32_t* base, Index* order ) const;
@@ -1403,6 +1421,7 @@ public:
 	bool ownBVH = true;				// False when ConvertFrom receives an external bvh.
 	// collapse settings, consumed by ConvertFrom
 	Index leafPrimLimit = 0;		// max prims the collapse may merge into one leaf; 0 disables merging
+	Float leafCostScale = 1;		// a leaf's price in the collapse, as a fraction of c_int; see bvh_traits
 	// Visit probability per node, replacing SAH in the collapse cost model. SAH is used if 0.
 	const Float* nodeProb = 0;
 private:
@@ -1727,7 +1746,7 @@ public:
 	int32_t IntersectBundle( Ray* rays ) const;
 	int32_t IsOccludedBundle( Ray* rays, bool* occluded ) const;
 	// BVH4 data
-	CacheLine* bvh4Data = 0;		// Interleaved interior (128b) and leaf (192b) data.
+	CacheLine* bvh4Data = 0;		// Interleaved interior (128b) and leaf (320b) data.
 	MBVH<4, Float, Index> bvh4;		// BVH4_CPU is created from BVH4 and uses its data.
 	bool ownBVH4 = true;			// false when ConvertFrom receives an external bvh4.
 	uint32_t allocatedBlocks = 0;	// node data and triangles are stored in 64-byte blocks.
@@ -1817,7 +1836,7 @@ TEMPLATED struct ALIGNED( 64 ) BVHTriLeaf
 	Float v0x[PRIMS], v0y[PRIMS], v0z[PRIMS];
 	Float e1x[PRIMS], e1y[PRIMS], e1z[PRIMS];
 	Float e2x[PRIMS], e2y[PRIMS], e2z[PRIMS];
-	Index primIdx[PRIMS]; // total: 320 bytes for float (8 prims) and for double (4 prims).
+	Index primIdx[PRIMS]; // total: 320 bytes for float, 640 for double (8 prims, 64-bit indices).
 	inline void SetData( const Vec3 & v0, const Vec3 & e1, const Vec3 & e2, const Index pidx, const uint32_t slot )
 	{
 		v0x[slot] = v0.x, v0y[slot] = v0.y, v0z[slot] = v0.z;
@@ -1931,7 +1950,7 @@ public:
 	PER_OCTANT int32_t IntersectOctant( Ray& ray ) const;
 	PER_OCTANT bool IsOccludedOctant( const Ray& ray ) const;
 	// BVH8 data
-	CacheLine* bvh8Data = 0;		// Interleaved interior (256b) and leaf (192b) data.
+	CacheLine* bvh8Data = 0;		// Interleaved interior (256b) and leaf (320b) data.
 	MBVH<8, Float, Index> bvh8;		// BVH8_CPU is created from BVH8 and uses its data.
 	bool ownBVH8 = true;			// false when ConvertFrom receives an external bvh8.
 	uint32_t allocatedBlocks = 0;	// node data and triangles are stored in 64-byte blocks.
@@ -2105,6 +2124,87 @@ private:
 	static void CalcBasisVectorsFromTri( const bvhvec3* triVerts, bvhvec3& a0, bvhvec3& a1, bvhvec3& a2 );
 };
 
+// BVH_Motion: the basic BVH layout with motion blur. 
+// Triangles are given at the start (t = 0) and the end (t = 1) of the shutter interval. Each node stores a box 
+// for both ends, which traversal interpolates at Ray::time. The topology is built over the geometry at t=0.5.
+TEMPLATED class BVH_Motion : public BVHBase<Float, Index>
+{
+public:
+	using Base = BVHBase<Float, Index>;
+	using typename Base::Vec3;
+	using typename Base::Vertex;
+	using typename Base::Slice;
+	using typename Base::Ray;
+	using typename Base::BVH;
+	using Base::settings;
+	using Base::c_trav;
+	using Base::c_int;
+	using Base::context;
+	using Base::layout;
+	using Base::allocatedNodes;
+	using Base::usedNodes;
+	using Base::triCount;
+	using Base::idxCount;
+	using Base::aabbMin;
+	using Base::aabbMax;
+	using Base::opmap;
+	using Base::opmapN;
+protected:
+	using Base::refittable;
+	using Base::hasHoles;
+	using Base::orderedNodes;
+	using Base::bvhOverIndices;
+	using Base::AlignedAlloc;
+	using Base::AlignedFree;
+	using Base::IntersectTri;
+	using Base::TriOccludes;
+	using Base::SA;
+public:
+	struct BVHNode
+	{
+		// 64-byte node (128 in double precision): the bounds at t = 0 and at t = 1. With node 1
+		// unused, as in BVH, the two children of a node occupy two adjacent cache lines.
+		Vec3 aabbMin0; Index leftFirst;	// bounds at t = 0
+		Vec3 aabbMax0; Index triCount;
+		Vec3 aabbMin1; Float tStart;	// bounds at t = 1. tStart and tEnd: the time range of the
+		Vec3 aabbMax1; Float tEnd;		// node, reserved for temporal splits; [0, 1] for now.
+		bool isLeaf() const { return triCount > 0; }
+	};
+	BVH_Motion( BVHContext ctx = {} ) { layout = LAYOUT_BVH_MOTION; context = ctx; }
+	BVH_Motion( const BVH_Motion& ) = delete; // owns its allocations, so it cannot be copied
+	BVH_Motion( BVH_Motion&& ) noexcept;
+	BVH_Motion& operator=( BVH_Motion&& ) noexcept;
+	~BVH_Motion();
+	// Build over triangles at t = 0 (vertices0) and t = 1 (vertices1): three vertices per triangle,
+	// or indexed, in which case both keys share the indices. The vertex data is not copied.
+	void Build( const Vertex* vertices0, const Vertex* vertices1, const Index primCount );
+	void Build( const Slice& vertices0, const Slice& vertices1 );
+	void Build( const Vertex* vertices0, const Vertex* vertices1, const Index* indices, const Index primCount );
+	void Build( const Slice& vertices0, const Slice& vertices1, const Index* indices, const Index primCount );
+	// Refit to new vertex positions in the same buffers: both boxes of every node are recomputed.
+	void Refit();
+	int32_t Intersect( Ray& ray ) const;
+	bool IsOccluded( const Ray& ray ) const;
+	// SAH cost for rays whose times are spread uniformly over the shutter interval.
+	Float SAHCost( const Index nodeIdx = 0 ) const;
+	// BVH data
+	BVHNode* bvhNode = 0;			// motion nodes; root in node 0, node 1 unused.
+	Index* primIdx = 0;				// primitive indices, contiguous per leaf.
+	Slice verts0 = {}, verts1 = {};	// the vertices at t = 0 and at t = 1.
+	Index* vertIdx = 0;				// vertex indices, shared by both keys; 0 if not indexed.
+	BVH bvh;						// the mid-shutter build the topology is taken from; kept so the
+									// next Build reuses its allocations. It holds no geometry.
+private:
+	PER_OCTANT int32_t IntersectOctant( Ray& ray ) const;
+	PER_OCTANT bool IsOccludedOctant( const Ray& ray ) const;
+	void CopyTopology( const BVH& topology );
+	static Float MotionSA( const BVHNode& node );
+	TINYBVH_FORCEINLINE void TriIndices( const Index prim, Index& i0, Index& i1, Index& i2 ) const;
+	TINYBVH_FORCEINLINE void TriVerts( const Index prim, const Float t0, const Float t1, Vec3& v0, Vec3& v1, Vec3& v2 ) const;
+	Index allocatedPrims = 0;		// capacity of primIdx.
+	BVH_Motion& operator=( const BVH_Motion& ) = default;
+};
+
 // BLASInstance: A TLAS is built over BLAS instances, where a single BLAS can be
 // used with multiple transforms, and multiple BLASses can be combined in a complex
 // scene. The TLAS is built over the world-space AABBs of the BLAS root nodes.
@@ -2121,8 +2221,12 @@ public:
 	Index blasIdx = 0;
 	Vec3 aabbMax = Vec3( -bvh_far<Float> );
 	uint32_t mask = (uint32_t)RAY_MASK_INTERSECT_ALL; // set to intersect with all rays by default
+	const Mat4* transform1 = 0; // The transform at t=1, or 0 for an instance that does not move.
 	void Update( BVHBase<Float, Index>*blas );
 	void InvertTransform();
+	Mat4 InvTransformAt( const float time ) const;
+private:
+	static void Invert( const Mat4& T, Mat4& iT );
 };
 
 } // namespace impl
@@ -2142,6 +2246,7 @@ using BVH4_CPU = impl::BVH4_CPU<float, uint32_t>;
 using BVH8_CWBVH = impl::BVH8_CWBVH<float, uint32_t>;
 using BVH8_CPU = impl::BVH8_CPU<float, uint32_t>;
 using BVH_DOBB = impl::BVH_DOBB<float, uint32_t>;
+using BVH_Motion = impl::BVH_Motion<float, uint32_t>;
 using DOBB_LUT = impl::DOBB_LUT;
 using BVHTriLeaf = impl::BVHTriLeaf<float, uint32_t>;
 using BLASInstance = impl::BLASInstance<float, uint32_t>;
@@ -2152,6 +2257,7 @@ using RayEx = impl::Ray<double, uint64_t>;
 using BVHBaseEx = impl::BVHBase<double, uint64_t>;
 using BVH_Double = impl::BVH<double, uint64_t>;
 using BVH4_Double = impl::BVH4_CPU<double, uint64_t>;
+using BVH_Motion_Double = impl::BVH_Motion<double, uint64_t>;
 using BLASInstanceEx = impl::BLASInstance<double, uint64_t>;
 #endif
 
@@ -2378,7 +2484,7 @@ loop: R = bvhvec3( tinybvh_rndfloat( s ) - 0.5f, tinybvh_rndfloat( s ) - 0.5f, t
 
 // ray validation: throw an error if the input ray contains nans.
 #define VALIDATE_RAY(r) { const auto test = (r).D.x + (r).D.y + (r).D.z + (r).hit.t + (r).O.x \
-	+ (r).O.y + (r).O.z; BVH_FATAL_ERROR_IF( tinybvh_isnan( test ), "Input ray contains NaNs." ); }
+	+ (r).O.y + (r).O.z + (r).time; BVH_FATAL_ERROR_IF( tinybvh_isnan( test ), "Input ray contains NaNs." ); }
 
 #ifndef TINYBVH_USE_CUSTOM_VECTOR_TYPES
 
@@ -2579,7 +2685,7 @@ TEMPLATED bool BVH<Float, Index>::Load( const char* fileName, const Slice& verti
 	const bool fileIsTLAS = (blasList != nullptr || instList != nullptr);
 	bvhNode = 0, primIdx = 0, fragment = 0, ownsGeometry = false;
 	verts = Slice( nullptr, 0, 0 ), vertIdx = 0;
-	instList = 0, blasList = 0, blasCount = 0;
+	instList = 0, blasList = 0, blasCount = 0, hasMotion = false;
 	customIntersect = 0, customIsOccluded = 0, customUserdata = 0;
 #ifdef ENABLE_THREADED_BUILDS
 	atomicNewNodePtr = 0, atomicNextFrag = 0;
@@ -2689,9 +2795,14 @@ TEMPLATED void BVH<Float, Index>::Build( BLASInstance* instances, const Index in
 	instList = instances, blasList = blasses, blasCount = bCount;
 	BuildFromBounds( instCount, [&]( const Index i, Vec3& bmin, Vec3& bmax )
 	{
+		BLASInstance& inst = instList[i];
 		// if a null pointer is passed, we'll assume the BLASInstances have been updated elsewhere.
-		if (blasList) instList[i].Update( (BVH*)blasList[instList[i].blasIdx] );
-		bmin = instList[i].aabbMin, bmax = instList[i].aabbMax;
+		BVHBase<Float, Index>* blas = blasList ? blasList[inst.blasIdx] : 0;
+		if (blas) inst.Update( blas );
+		bmin = inst.aabbMin, bmax = inst.aabbMax;
+		// motion: a moving instance, a motion blur BLAS, or a TLAS with either of these below it.
+		if (inst.transform1) hasMotion = true;
+		if (blas && (blas->layout == LAYOUT_BVH_MOTION || (blas->layout == LAYOUT_BVH && ((const BVH*)blas)->hasMotion))) hasMotion = true;
 	} );
 }
 
@@ -2731,7 +2842,7 @@ TEMPLATED void BVH<Float, Index>::ReserveNodes( const Index nodes )
 TEMPLATED void BVH<Float, Index>::SetInput( const Slice& vertices, const Index* indices )
 {
 	verts = vertices, vertIdx = (Index*)indices;
-	instList = 0, blasList = 0, blasCount = 0;
+	instList = 0, blasList = 0, blasCount = 0, hasMotion = false;
 	if (vertices) customIntersect = 0, customIsOccluded = 0, customUserdata = 0;
 }
 
@@ -4541,25 +4652,27 @@ TEMPLATED bool BVH<Float, Index>::IntersectSphere( const Vec3& pos, const Float 
 	return false;
 }
 
-#define SLAB_TEST_TWO_NODES \
-	Float tx1a = tinybvh_fma( posX ? child1->aabbMin.x : child1->aabbMax.x, ray.rD.x, -rox ); \
-	Float ty1a = tinybvh_fma( posY ? child1->aabbMin.y : child1->aabbMax.y, ray.rD.y, -roy ); \
-	Float tz1a = tinybvh_fma( posZ ? child1->aabbMin.z : child1->aabbMax.z, ray.rD.z, -roz ); \
-	Float tx1b = tinybvh_fma( posX ? child2->aabbMin.x : child2->aabbMax.x, ray.rD.x, -rox ); \
-	Float ty1b = tinybvh_fma( posY ? child2->aabbMin.y : child2->aabbMax.y, ray.rD.y, -roy ); \
-	Float tz1b = tinybvh_fma( posZ ? child2->aabbMin.z : child2->aabbMax.z, ray.rD.z, -roz ); \
-	Float tx2a = tinybvh_fma( posX ? child1->aabbMax.x : child1->aabbMin.x, ray.rD.x, -rox ); \
-	Float ty2a = tinybvh_fma( posY ? child1->aabbMax.y : child1->aabbMin.y, ray.rD.y, -roy ); \
-	Float tz2a = tinybvh_fma( posZ ? child1->aabbMax.z : child1->aabbMin.z, ray.rD.z, -roz ); \
-	Float tx2b = tinybvh_fma( posX ? child2->aabbMax.x : child2->aabbMin.x, ray.rD.x, -rox ); \
-	Float ty2b = tinybvh_fma( posY ? child2->aabbMax.y : child2->aabbMin.y, ray.rD.y, -roy ); \
-	Float tz2b = tinybvh_fma( posZ ? child2->aabbMax.z : child2->aabbMin.z, ray.rD.z, -roz ); \
+// Slab test for the boxes of two siblings; sets dist1 / dist2 for the boxes the ray enters.
+#define SLAB_TEST_TWO_BOXES( min1, max1, min2, max2 ) \
+	Float tx1a = tinybvh_fma( posX ? (min1).x : (max1).x, ray.rD.x, -rox ); \
+	Float ty1a = tinybvh_fma( posY ? (min1).y : (max1).y, ray.rD.y, -roy ); \
+	Float tz1a = tinybvh_fma( posZ ? (min1).z : (max1).z, ray.rD.z, -roz ); \
+	Float tx1b = tinybvh_fma( posX ? (min2).x : (max2).x, ray.rD.x, -rox ); \
+	Float ty1b = tinybvh_fma( posY ? (min2).y : (max2).y, ray.rD.y, -roy ); \
+	Float tz1b = tinybvh_fma( posZ ? (min2).z : (max2).z, ray.rD.z, -roz ); \
+	Float tx2a = tinybvh_fma( posX ? (max1).x : (min1).x, ray.rD.x, -rox ); \
+	Float ty2a = tinybvh_fma( posY ? (max1).y : (min1).y, ray.rD.y, -roy ); \
+	Float tz2a = tinybvh_fma( posZ ? (max1).z : (min1).z, ray.rD.z, -roz ); \
+	Float tx2b = tinybvh_fma( posX ? (max2).x : (min2).x, ray.rD.x, -rox ); \
+	Float ty2b = tinybvh_fma( posY ? (max2).y : (min2).y, ray.rD.y, -roy ); \
+	Float tz2b = tinybvh_fma( posZ ? (max2).z : (min2).z, ray.rD.z, -roz ); \
 	Float tmina = tinybvh_max( tinybvh_max( tx1a, ty1a ), tinybvh_max( tz1a, Float( 0 ) ) ); \
 	Float tminb = tinybvh_max( tinybvh_max( tx1b, ty1b ), tinybvh_max( tz1b, Float( 0 ) ) ); \
 	Float tmaxa = tinybvh_min( tinybvh_min( tx2a, ty2a ), tinybvh_min( tz2a, ray.hit.t ) ); \
 	Float tmaxb = tinybvh_min( tinybvh_min( tx2b, ty2b ), tinybvh_min( tz2b, ray.hit.t ) ); \
 	if (tmaxa >= tmina) dist1 = tmina; \
 	if (tmaxb >= tminb) dist2 = tminb;
+#define SLAB_TEST_TWO_NODES SLAB_TEST_TWO_BOXES( child1->aabbMin, child1->aabbMax, child2->aabbMin, child2->aabbMax )
 
 #define OCTANT_DISPATCH( kernel, ray ) \
 	{ \
@@ -4649,6 +4762,7 @@ TEMPLATED PER_OCTANT int32_t BVH<Float, Index>::IntersectOctant( Ray& ray ) cons
 TEMPLATED int32_t tinybvh_blas_intersect( const BVHBase<Float, Index>* blas, Ray<Float, Index>& ray )
 {
 	if (blas->layout == LAYOUT_BVH) return ((const BVH<Float, Index>*)blas)->Intersect( ray );
+	if (blas->layout == LAYOUT_BVH_MOTION) return ((const BVH_Motion<Float, Index>*)blas)->Intersect( ray );
 #ifdef ENABLE_VOXEL_SUPPORT
 	if (blas->layout == LAYOUT_VOXELSET) return ((const VoxelSet*)blas)->Intersect( ray );
 #endif
@@ -4663,6 +4777,7 @@ TEMPLATED int32_t tinybvh_blas_intersect( const BVHBase<Float, Index>* blas, Ray
 TEMPLATED bool tinybvh_blas_occluded( const BVHBase<Float, Index>* blas, const Ray<Float, Index>& ray )
 {
 	if (blas->layout == LAYOUT_BVH) return ((const BVH<Float, Index>*)blas)->IsOccluded( ray );
+	if (blas->layout == LAYOUT_BVH_MOTION) return ((const BVH_Motion<Float, Index>*)blas)->IsOccluded( ray );
 #ifdef ENABLE_VOXEL_SUPPORT
 	if (blas->layout == LAYOUT_VOXELSET) return ((const VoxelSet*)blas)->IsOccluded( ray );
 #endif
@@ -4680,6 +4795,7 @@ TEMPLATED PER_OCTANT int32_t BVH<Float, Index>::IntersectTLASOctant( Ray& ray ) 
 	BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
 	Index stackPtr = 0;
 	Float cost = 0;
+	Mat4 invAtTime; // the inverse transform of a moving instance, at the ray's time
 	const Float rox = ray.O.x * ray.rD.x;
 	const Float roy = ray.O.y * ray.rD.y;
 	const Float roz = ray.O.z * ray.rD.z;
@@ -4697,14 +4813,15 @@ TEMPLATED PER_OCTANT int32_t BVH<Float, Index>::IntersectTLASOctant( Ray& ray ) 
 				// Check if the ray should intersect this BLAS Instance, otherwise skip it
 				if (!(inst.mask & ray.mask)) continue;
 				const BVHBase<Float, Index>* blas = blasList[inst.blasIdx];
+				const Mat4& invT = inst.transform1 ? (invAtTime = inst.InvTransformAt( ray.time )) : inst.invTransform;
 				if constexpr (bvh_traits<Float>::wide_layouts)
 				{
 					if (blas->layout == LAYOUT_BVH4_CPU || blas->layout == LAYOUT_BVH8_SIMD)
 					{
 						const Vec3 O = ray.O, D = ray.D, rD = ray.rD;
 						const Index rayInstIdx = ray.instIdx;
-						ray.O = tinybvh_transform_point( O, inst.invTransform );
-						ray.D = tinybvh_transform_vector( D, inst.invTransform );
+						ray.O = tinybvh_transform_point( O, invT );
+						ray.D = tinybvh_transform_vector( D, invT );
 						ray.rD = tinybvh_rcp( ray.D );
 						ray.instIdx = instIdx << bvh_inst_shift<Index>;
 						cost += tinybvh_blas_intersect( blas, ray );
@@ -4713,11 +4830,12 @@ TEMPLATED PER_OCTANT int32_t BVH<Float, Index>::IntersectTLASOctant( Ray& ray ) 
 					}
 				}
 				// 1. Transform ray with the inverse of the instance transform
-				tmpRay.O = tinybvh_transform_point( ray.O, inst.invTransform );
-				tmpRay.D = tinybvh_transform_vector( ray.D, inst.invTransform );
+				tmpRay.O = tinybvh_transform_point( ray.O, invT );
+				tmpRay.D = tinybvh_transform_vector( ray.D, invT );
 				tmpRay.instIdx = instIdx << bvh_inst_shift<Index>;
 				tmpRay.mask = ray.mask;
 				tmpRay.hit = ray.hit;
+				tmpRay.time = ray.time;
 				tmpRay.rD = tinybvh_rcp( tmpRay.D );
 				// 2. Traverse BLAS with the transformed ray. When all BLASses are of the same
 				// layout this reduces to nearly zero cost for a small set of predictable branches.
@@ -4818,6 +4936,7 @@ TEMPLATED PER_OCTANT bool BVH<Float, Index>::IsOccludedTLASOctant( const Ray& ra
 	BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
 	Index stackPtr = 0;
 	Ray tmpRay;
+	Mat4 invAtTime; // the inverse transform of a moving instance, at the ray's time
 	const Float rox = ray.O.x * ray.rD.x;
 	const Float roy = ray.O.y * ray.rD.y;
 	const Float roz = ray.O.z * ray.rD.z;
@@ -4833,12 +4952,14 @@ TEMPLATED PER_OCTANT bool BVH<Float, Index>::IsOccludedTLASOctant( const Ray& ra
 				// Check if the ray should intersect this BLAS Instance, otherwise skip it
 				if (!(inst.mask & ray.mask)) continue;
 				const BVHBase<Float, Index>* blas = blasList[inst.blasIdx];
+				const Mat4& invT = inst.transform1 ? (invAtTime = inst.InvTransformAt( ray.time )) : inst.invTransform;
 				// 1. Transform ray with the inverse of the instance transform
-				tmpRay.O = tinybvh_transform_point( ray.O, inst.invTransform );
-				tmpRay.D = tinybvh_transform_vector( ray.D, inst.invTransform );
+				tmpRay.O = tinybvh_transform_point( ray.O, invT );
+				tmpRay.D = tinybvh_transform_vector( ray.D, invT );
 				tmpRay.instIdx = instIdx << bvh_inst_shift<Index>;
 				tmpRay.mask = ray.mask;
 				tmpRay.hit = ray.hit;
+				tmpRay.time = ray.time;
 				tmpRay.rD = tinybvh_rcp( tmpRay.D );
 				// 2. Traverse BLAS with the transformed ray
 				if (tinybvh_blas_occluded( blas, tmpRay )) return true;
@@ -5673,6 +5794,8 @@ TEMPLATED void BVH_GPU<Float, Index>::Build( BLASInstance* instances, const Inde
 	this->PassSettingsTo( bvh );
 	// build underlying layout
 	bvh.Build( instances, instCount, blasses, blasCount );
+	// the GPU kernels see the instances through invTransform only.
+	BVH_FATAL_ERROR_IF( bvh.hasMotion, "BVH_GPU::Build( BLASInstance*, .. ), no motion blur on the GPU yet." );
 	// convert to BVH_GPU layout
 	ConvertFrom( bvh, false );
 }
@@ -6122,7 +6245,9 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 	// tallied with the costs, children first. The total is 1 + outNodes[M - 1] of the root.
 	Index* outNodes = exact ? (Index*)AlignedAlloc( (size_t)N * M * sizeof( Index ) ) : 0;
 	// the cost of node n, from those of its children: bottom-up dynamic programming.
-	const Float c_leaf = Float( 0.8 ) * c_int; // fixed cost of a leaf, on top of its primitives
+	// a leaf's prims, and the fixed cost on top of them, at the price leafCostScale sets.
+	const Float c_prim = c_int * leafCostScale;
+	const Float c_leaf = Float( 0.8 ) * c_prim; // fixed cost of a leaf, on top of its primitives
 	auto collapseNode = [&]( const Index n )
 	{
 		const typename BVH::BVHNode& node = original.bvhNode[n];
@@ -6133,7 +6258,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 			// a leaf takes a single slot, no matter how many it is offered.
 			subFirst[n] = node.leftFirst, subCount[n] = node.triCount;
 			flag[n] |= CONTIG | ASLEAF;
-			const Float c = sa * (c_leaf + c_int * (Float)this->LeafPrims( node.triCount ));
+			const Float c = sa * (c_leaf + c_prim * (Float)this->LeafPrims( node.triCount ));
 			for (int32_t i = 0; i < M; i++) cost[base + i] = c;
 			if (outNodes) for (int32_t i = 0; i < M; i++) outNodes[base + i] = 1; // a leaf takes one slot, as one node
 			return;
@@ -6162,7 +6287,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 		const Float cNode = sa * c_trav + cost[base + M - 1];
 		Float cLeaf = bvh_far<Float>;
 		if ((flag[n] & CONTIG) && subCount[n] <= leafPrimLimit)
-			cLeaf = sa * (c_leaf + c_int * (Float)this->LeafPrims( subCount[n] ));
+			cLeaf = sa * (c_leaf + c_prim * (Float)this->LeafPrims( subCount[n] ));
 		if (cLeaf < cNode) cost[base] = cLeaf, flag[n] |= ASLEAF; else cost[base] = cNode;
 		// in one slot: a leaf, or a new wide node over its split into M.
 		if (outNodes) outNodes[base] = (flag[n] & ASLEAF) ? 1 : 1 + outNodes[base + M - 1];
@@ -7564,7 +7689,8 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertForCPULayout()
 {
 	constexpr Index LEAF_PRIMS = (Index)BVHTriLeaf<Float, Index>::PRIMS;
 	bvh.SplitLeafs( LEAF_PRIMS );
-	leafPrimLimit = LEAF_PRIMS; // one leaf of these layouts holds this many prims
+	leafPrimLimit = LEAF_PRIMS; // one leaf of these layouts holds this many prims,
+	leafCostScale = (Float)bvh_traits<Float>::leafCostScale; // and costs less than that many intersections
 	ConvertFrom( bvh, true );
 }
 
@@ -10172,6 +10298,305 @@ TEMPLATED PER_OCTANT bool BVH8_CPU<Float, Index>::IsOccludedOctant( const Ray& r
 	return tinybvh_wide_occluded<BVH8_CPU, 8, posX, posY, posZ>( bvh8Data, ray, opmap, opmapN );
 }
 
+// BVH_Motion implementation
+// ----------------------------------------------------------------------------
+
+TEMPLATED BVH_Motion<Float, Index>::BVH_Motion( BVH_Motion&& other ) noexcept
+{
+	*this = other;
+	// exactly one of the two may free the buffers from here on; the embedded bvh as well.
+	other.bvh.ReleaseOwnership();
+	other.bvhNode = 0, other.primIdx = 0, other.allocatedNodes = other.usedNodes = other.allocatedPrims = 0;
+	other.verts0 = other.verts1 = Slice( nullptr, 0, 0 ), other.vertIdx = 0, other.triCount = other.idxCount = 0;
+}
+
+// move assignment: release what we hold, then take over 'other'.
+TEMPLATED BVH_Motion<Float, Index>& BVH_Motion<Float, Index>::operator=( BVH_Motion&& other ) noexcept
+{
+	if (this != &other) this->~BVH_Motion(), new (this) BVH_Motion( tinybvh_move( other ) );
+	return *this;
+}
+
+TEMPLATED BVH_Motion<Float, Index>::~BVH_Motion()
+{
+	AlignedFree( bvhNode );
+	bvhNode = 0;
+	AlignedFree( primIdx );
+	primIdx = 0;
+}
+
+// forwarders
+TEMPLATED void BVH_Motion<Float, Index>::Build( const Vertex* v0, const Vertex* v1, const Index p )
+{
+	Build( Slice( v0, p * 3, sizeof( Vertex ) ), Slice( v1, p * 3, sizeof( Vertex ) ) );
+}
+TEMPLATED void BVH_Motion<Float, Index>::Build( const Slice& v0, const Slice& v1 ) { Build( v0, v1, 0, 0 ); }
+TEMPLATED void BVH_Motion<Float, Index>::Build( const Vertex* v0, const Vertex* v1, const Index* i, const Index p )
+{
+	Build( Slice( v0, p * 3, sizeof( Vertex ) ), Slice( v1, p * 3, sizeof( Vertex ) ), i, p );
+}
+
+TEMPLATED void BVH_Motion<Float, Index>::Build( const Slice& vertices0, const Slice& vertices1, const Index* indices, const Index prims )
+{
+	const Index primCount = indices ? prims : (Index)(vertices0.count / 3);
+	BVH_FATAL_ERROR_IF( primCount == 0, "BVH_Motion::Build( .. ), primCount == 0." );
+	BVH_FATAL_ERROR_IF( vertices0.count != vertices1.count, "BVH_Motion::Build( .. ), the keys differ in vertex count." );
+	verts0 = vertices0, verts1 = vertices1, vertIdx = (Index*)indices; // not copied; don't delete.
+	triCount = primCount;
+	// BVH_Motion topology: a regular build over the triangles at mid-shutter.
+	Vertex* mid = (Vertex*)AlignedAlloc( (size_t)primCount * 3 * sizeof( Vertex ) );
+	for (Index i = 0; i < primCount; i++)
+	{
+		Vec3 a, b, c;
+		TriVerts( i, Float( 0.5 ), Float( 0.5 ), a, b, c );
+		mid[i * 3] = Vertex( a ), mid[i * 3 + 1] = Vertex( b ), mid[i * 3 + 2] = Vertex( c );
+	}
+	this->PassSettingsTo( bvh );
+	bvh.settings.useSpatialSplits = false, bvh.settings.usePresplitting = false;
+	bvh.Build( Slice( mid, primCount * 3, sizeof( Vertex ) ) );
+	CopyTopology( bvh );
+	bvh.verts = Slice( nullptr, 0, 0 ); // bvh keeps its allocations, not the mid-shutter triangles.
+	AlignedFree( mid );
+	Refit(); // the boxes at both ends of the shutter interval.
+}
+
+// Convert the intermediate BVH (used to construct the toplogy) to the BVH_Motion layout, while reordering. 
+// Actual bounds are fixed by Refit.
+TEMPLATED void BVH_Motion<Float, Index>::CopyTopology( const BVH& topology )
+{
+	// the copy needs at most the nodes and primitive indices of the source; node 1 is unused in both.
+	const Index nodes = tinybvh_max( topology.usedNodes, (Index)2 ), prims = topology.idxCount;
+	if (allocatedNodes < nodes)
+	{
+		AlignedFree( bvhNode );
+		bvhNode = (BVHNode*)AlignedAlloc( (size_t)nodes * sizeof( BVHNode ) );
+		allocatedNodes = nodes;
+	}
+	if (allocatedPrims < prims)
+	{
+		AlignedFree( primIdx );
+		primIdx = (Index*)AlignedAlloc( (size_t)prims * sizeof( Index ) );
+		allocatedPrims = prims;
+	}
+	memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // node 1 remains unused, for cache line alignment.
+	Index srcStack[TINYBVH_STACK_SIZE], dstStack[TINYBVH_STACK_SIZE], stackPtr = 0;
+	Index src = 0, dst = 0, nodePtr = 2, idxPtr = 0;
+	while (1)
+	{
+		const typename BVH::BVHNode& from = topology.bvhNode[src];
+		BVHNode& to = bvhNode[dst];
+		to.tStart = 0, to.tEnd = 1;
+		if (from.isLeaf())
+		{
+			BVH_FATAL_ERROR_IF( idxPtr + from.triCount > allocatedPrims, "BVH_Motion::Build( .. ), primitive count mismatch." );
+			to.leftFirst = idxPtr, to.triCount = from.triCount;
+			memcpy( primIdx + idxPtr, topology.primIdx + from.leftFirst, (size_t)from.triCount * sizeof( Index ) );
+			idxPtr += from.triCount;
+			if (stackPtr == 0) break;
+			src = srcStack[--stackPtr], dst = dstStack[stackPtr];
+			continue;
+		}
+		BVH_FATAL_ERROR_IF( stackPtr == TINYBVH_STACK_SIZE, "BVH_Motion::Build( .. ), tree too deep." );
+		BVH_FATAL_ERROR_IF( nodePtr + 2 > allocatedNodes, "BVH_Motion::Build( .. ), node count mismatch." );
+		to.leftFirst = nodePtr, to.triCount = 0;
+		srcStack[stackPtr] = from.leftFirst + 1, dstStack[stackPtr++] = nodePtr + 1;
+		src = from.leftFirst, dst = nodePtr, nodePtr += 2;
+	}
+	usedNodes = nodePtr, idxCount = idxPtr;
+	refittable = true, hasHoles = false, orderedNodes = true, bvhOverIndices = false;
+}
+
+// Refit: both boxes of every node, bottom-up. The leaves are padded by four ulps, as in Embree.
+TEMPLATED void BVH_Motion<Float, Index>::Refit()
+{
+	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH_Motion::Refit(), bvhNode == 0." );
+	BVH_FATAL_ERROR_IF( !verts0 || !verts1, "BVH_Motion::Refit(), no vertex data." );
+	const Float pad = Float( 4 ) * (sizeof( Float ) == 4 ? Float( 1.1920928955078125e-7 ) : Float( 2.220446049250313e-16 ));
+	auto grow = [pad]( Vec3& bmin, Vec3& bmax )
+	{
+		for (int32_t a = 0; a < 3; a++) bmin[a] -= pad * fabs( bmin[a] ), bmax[a] += pad * fabs( bmax[a] );
+	};
+	for (Index i = usedNodes; i-- > 0; ) if (i != 1)
+	{
+		BVHNode& node = bvhNode[i];
+		if (node.isLeaf())
+		{
+			Vec3 bmin0( bvh_far<Float> ), bmax0( -bvh_far<Float> ), bmin1( bvh_far<Float> ), bmax1( -bvh_far<Float> );
+			for (Index j = 0; j < node.triCount; j++)
+			{
+				Index i0, i1, i2;
+				TriIndices( primIdx[node.leftFirst + j], i0, i1, i2 );
+				const Vec3 a0 = verts0[i0], b0 = verts0[i1], c0 = verts0[i2];
+				const Vec3 a1 = verts1[i0], b1 = verts1[i1], c1 = verts1[i2];
+				bmin0 = tinybvh_min( bmin0, tinybvh_min( a0, tinybvh_min( b0, c0 ) ) );
+				bmax0 = tinybvh_max( bmax0, tinybvh_max( a0, tinybvh_max( b0, c0 ) ) );
+				bmin1 = tinybvh_min( bmin1, tinybvh_min( a1, tinybvh_min( b1, c1 ) ) );
+				bmax1 = tinybvh_max( bmax1, tinybvh_max( a1, tinybvh_max( b1, c1 ) ) );
+			}
+			grow( bmin0, bmax0 ), grow( bmin1, bmax1 );
+			node.aabbMin0 = bmin0, node.aabbMax0 = bmax0, node.aabbMin1 = bmin1, node.aabbMax1 = bmax1;
+			continue;
+		}
+		const BVHNode& left = bvhNode[node.leftFirst], & right = bvhNode[node.leftFirst + 1];
+		node.aabbMin0 = tinybvh_min( left.aabbMin0, right.aabbMin0 ), node.aabbMax0 = tinybvh_max( left.aabbMax0, right.aabbMax0 );
+		node.aabbMin1 = tinybvh_min( left.aabbMin1, right.aabbMin1 ), node.aabbMax1 = tinybvh_max( left.aabbMax1, right.aabbMax1 );
+	}
+	// the bounds over the whole shutter interval, which BLASInstance::Update uses.
+	aabbMin = tinybvh_min( bvhNode[0].aabbMin0, bvhNode[0].aabbMin1 );
+	aabbMax = tinybvh_max( bvhNode[0].aabbMax0, bvhNode[0].aabbMax1 );
+}
+
+// The expected half area of a node over the shutter interval.
+TEMPLATED Float BVH_Motion<Float, Index>::MotionSA( const BVHNode& node )
+{
+	const Vec3 midMin = (node.aabbMin0 + node.aabbMin1) * Float( 0.5 ), midMax = (node.aabbMax0 + node.aabbMax1) * Float( 0.5 );
+	// extent is linear in time and area quadratic, so Simpson's rule is exact: (A(0) + 4 A(1/2) + A(1)) / 6.
+	return (SA( node.aabbMin0, node.aabbMax0 ) + 4 * SA( midMin, midMax ) + SA( node.aabbMin1, node.aabbMax1 )) * Float( 1.0 / 6.0 );
+}
+
+// SAH cost with the expected node areas; equal to BVH::SAHCost for geometry that does not move.
+TEMPLATED Float BVH_Motion<Float, Index>::SAHCost( const Index nodeIdx ) const
+{
+	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH_Motion::SAHCost( .. ), bvhNode == 0." );
+	double cost = 0;
+	Index idx = nodeIdx, stack[TINYBVH_STACK_SIZE], stackPtr = 0;
+	while (1)
+	{
+		const BVHNode& n = bvhNode[idx];
+		if (n.isLeaf()) cost += (double)c_int * n.triCount * MotionSA( n );
+		else
+		{
+			cost += (double)c_trav * MotionSA( n );
+			BVH_FATAL_ERROR_IF( stackPtr == TINYBVH_STACK_SIZE, "BVH_Motion::SAHCost( .. ), tree too deep." );
+			stack[stackPtr++] = n.leftFirst + 1, idx = n.leftFirst;
+			continue;
+		}
+		if (stackPtr == 0) break;
+		idx = stack[--stackPtr];
+	}
+	if (nodeIdx != 0) return (Float)cost;
+	const Float rootArea = MotionSA( bvhNode[0] );
+	return rootArea > 0 ? (Float)(cost / rootArea) : 0;
+}
+
+TEMPLATED void BVH_Motion<Float, Index>::TriIndices( const Index prim, Index& i0, Index& i1, Index& i2 ) const
+{
+	if (vertIdx) i0 = vertIdx[prim * 3], i1 = vertIdx[prim * 3 + 1], i2 = vertIdx[prim * 3 + 2];
+	else i0 = prim * 3, i1 = prim * 3 + 1, i2 = prim * 3 + 2;
+}
+
+// The vertices of a triangle at time t1 = 1 - t0, interpolated like the node boxes.
+TEMPLATED void BVH_Motion<Float, Index>::TriVerts( const Index prim, const Float t0, const Float t1, Vec3& v0, Vec3& v1, Vec3& v2 ) const
+{
+	Index i0, i1, i2;
+	TriIndices( prim, i0, i1, i2 );
+	v0 = tinybvh_motion_lerp( Vec3( verts0[i0] ), Vec3( verts1[i0] ), t0, t1 );
+	v1 = tinybvh_motion_lerp( Vec3( verts0[i1] ), Vec3( verts1[i1] ), t0, t1 );
+	v2 = tinybvh_motion_lerp( Vec3( verts0[i2] ), Vec3( verts1[i2] ), t0, t1 );
+}
+
+TEMPLATED int32_t BVH_Motion<Float, Index>::Intersect( Ray& ray ) const
+{
+	VALIDATE_RAY( ray );
+	OCTANT_DISPATCH( IntersectOctant, ray )
+}
+
+// BVH traversal on the child boxes interpolated at the ray's time; the leaves interpolate their
+// vertices with the same weights. Barycentrics refer to the triangle at that time.
+TEMPLATED PER_OCTANT int32_t BVH_Motion<Float, Index>::IntersectOctant( Ray& ray ) const
+{
+	const BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
+	Index stackPtr = 0;
+	Float cost = 0;
+	const Float rox = ray.O.x * ray.rD.x;
+	const Float roy = ray.O.y * ray.rD.y;
+	const Float roz = ray.O.z * ray.rD.z;
+	const Float t1 = tinybvh_clamp( (Float)ray.time, Float( 0 ), Float( 1 ) ), t0 = 1 - t1;
+	while (1)
+	{
+		cost += c_trav;
+		if (node->isLeaf()) ISUNLIKELY
+		{
+			for (Index i = 0; i < node->triCount; i++, cost += c_int)
+			{
+				const Index pi = primIdx[node->leftFirst + i];
+				Vec3 v0, v1, v2;
+				TriVerts( pi, t0, t1, v0, v1, v2 );
+				IntersectTri( ray, pi, v0, v1, v2 );
+			}
+			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			continue;
+		}
+		const BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
+		const Vec3 min1 = tinybvh_motion_lerp( child1->aabbMin0, child1->aabbMin1, t0, t1 );
+		const Vec3 max1 = tinybvh_motion_lerp( child1->aabbMax0, child1->aabbMax1, t0, t1 );
+		const Vec3 min2 = tinybvh_motion_lerp( child2->aabbMin0, child2->aabbMin1, t0, t1 );
+		const Vec3 max2 = tinybvh_motion_lerp( child2->aabbMax0, child2->aabbMax1, t0, t1 );
+		Float dist1 = bvh_far<Float>, dist2 = bvh_far<Float>;
+		SLAB_TEST_TWO_BOXES( min1, max1, min2, max2 );
+		if (dist1 > dist2) { tinybvh_swap( dist1, dist2 ); tinybvh_swap( child1, child2 ); }
+		if (dist1 == bvh_far<Float> /* missed both child nodes */)
+		{
+			if (stackPtr == 0) break; else node = stack[--stackPtr];
+		}
+		else /* hit at least one node */
+		{
+			node = child1; /* continue with the nearest */
+			if (dist2 != bvh_far<Float>) stack[stackPtr++] = child2; /* push far child */
+		}
+	}
+	return (int32_t)cost;
+}
+
+TEMPLATED bool BVH_Motion<Float, Index>::IsOccluded( const Ray& ray ) const
+{
+	VALIDATE_RAY( ray );
+	OCTANT_DISPATCH( IsOccludedOctant, ray )
+}
+
+TEMPLATED PER_OCTANT bool BVH_Motion<Float, Index>::IsOccludedOctant( const Ray& ray ) const
+{
+	const BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
+	Index stackPtr = 0;
+	const Float rox = ray.O.x * ray.rD.x;
+	const Float roy = ray.O.y * ray.rD.y;
+	const Float roz = ray.O.z * ray.rD.z;
+	const Float t1 = tinybvh_clamp( (Float)ray.time, Float( 0 ), Float( 1 ) ), t0 = 1 - t1;
+	while (1)
+	{
+		if (node->isLeaf()) ISUNLIKELY
+		{
+			for (Index i = 0; i < node->triCount; i++)
+			{
+				const Index pi = primIdx[node->leftFirst + i];
+				Vec3 v0, v1, v2;
+				TriVerts( pi, t0, t1, v0, v1, v2 );
+				if (TriOccludes( ray, pi, v0, v1, v2 )) return true;
+			}
+			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			continue;
+		}
+		const BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
+		const Vec3 min1 = tinybvh_motion_lerp( child1->aabbMin0, child1->aabbMin1, t0, t1 );
+		const Vec3 max1 = tinybvh_motion_lerp( child1->aabbMax0, child1->aabbMax1, t0, t1 );
+		const Vec3 min2 = tinybvh_motion_lerp( child2->aabbMin0, child2->aabbMin1, t0, t1 );
+		const Vec3 max2 = tinybvh_motion_lerp( child2->aabbMax0, child2->aabbMax1, t0, t1 );
+		Float dist1 = bvh_far<Float>, dist2 = bvh_far<Float>;
+		SLAB_TEST_TWO_BOXES( min1, max1, min2, max2 );
+		if (dist1 > dist2) { tinybvh_swap( dist1, dist2 ); tinybvh_swap( child1, child2 ); }
+		if (dist1 == bvh_far<Float> /* missed both child nodes */)
+		{
+			if (stackPtr == 0) break; else node = stack[--stackPtr];
+		}
+		else /* hit at least one node */
+		{
+			node = child1; /* continue with the nearest */
+			if (dist2 != bvh_far<Float>) stack[stackPtr++] = child2; /* push far child */
+		}
+	}
+	return false;
+}
+
 // ============================================================================
 //
 //        H E L P E R S
@@ -10191,15 +10616,30 @@ TEMPLATED void BLASInstance<Float, Index>::Update( BVHBase<Float, Index>* blas )
 		const Vec3 p( j & 1 ? bmax.x : bmin.x, j & 2 ? bmax.y : bmin.y, j & 4 ? bmax.z : bmin.z );
 		const Vec3 t = tinybvh_transform_point( p, transform );
 		aabbMin = tinybvh_min( aabbMin, t ), aabbMax = tinybvh_max( aabbMax, t );
+		if (!transform1) continue; // below this line is just for motion blur.
+		const Vec3 t1 = tinybvh_transform_point( p, *transform1 );
+		aabbMin = tinybvh_min( aabbMin, t1 ), aabbMax = tinybvh_max( aabbMax, t1 );
 	}
 }
 
 // InvertTransform - calculate the inverse of the matrix stored in 'transform'
-TEMPLATED void BLASInstance<Float, Index>::InvertTransform()
+TEMPLATED void BLASInstance<Float, Index>::InvertTransform() { Invert( transform, invTransform ); }
+
+// InvTransformAt: the transform interpolated at 'time' like the vertices of a BVH_Motion, inverted.
+TEMPLATED typename BLASInstance<Float, Index>::Mat4 BLASInstance<Float, Index>::InvTransformAt( const float time ) const
+{
+	if (!transform1) return invTransform;
+	const Float t1 = tinybvh_clamp( (Float)time, Float( 0 ), Float( 1 ) ), t0 = 1 - t1;
+	Mat4 T, iT;
+	for (int32_t i = 0; i < 16; i++) T[i] = tinybvh_motion_lerp( transform[i], (*transform1)[i], t0, t1 );
+	Invert( T, iT );
+	return iT;
+}
+
+// Invert - math from MESA, via http://stackoverflow.com/questions/1148309/inverting-a-4x4-matrix
+TEMPLATED void BLASInstance<Float, Index>::Invert( const Mat4& T, Mat4& iT )
 {
 	// math from MESA, via http://stackoverflow.com/questions/1148309/inverting-a-4x4-matrix
-	const Mat4& T = this->transform; // Mat4 indexes its 16 cells directly.
-	Mat4& iT = this->invTransform;
 	iT[0] = T[5] * T[10] * T[15] - T[5] * T[11] * T[14] - T[9] * T[6] * T[15] + T[9] * T[7] * T[14] + T[13] * T[6] * T[11] - T[13] * T[7] * T[10];
 	iT[1] = -T[1] * T[10] * T[15] + T[1] * T[11] * T[14] + T[9] * T[2] * T[15] - T[9] * T[3] * T[14] - T[13] * T[2] * T[11] + T[13] * T[3] * T[10];
 	iT[2] = T[1] * T[6] * T[15] - T[1] * T[7] * T[14] - T[5] * T[2] * T[15] + T[5] * T[3] * T[14] + T[13] * T[2] * T[7] - T[13] * T[3] * T[6];
@@ -10232,6 +10672,12 @@ TEMPLATED Float BVHBase<Float, Index>::SA( const Vec3& aabbMin, const Vec3& aabb
 // TriHit: the ray/triangle test shared by IntersectTri and TriOccludes. A hit is in [0, ray.hit.t).
 TEMPLATED bool BVHBase<Float, Index>::TriHit( const Ray& ray, const Slice& verts, const Index i0, const Index i1, const Index i2, Float& tHit, Float& uHit, Float& vHit ) const
 {
+	return TriHit( ray, verts[i0], verts[i1], verts[i2], tHit, uHit, vHit );
+}
+
+// TriHit on three given vertices.
+TEMPLATED template <typename V> bool BVHBase<Float, Index>::TriHit( const Ray& ray, const V& p0, const V& p1, const V& p2, Float& tHit, Float& uHit, Float& vHit ) const
+{
 #ifdef WATERTIGHT_TRITEST
 	// Woop et al.'s Watertight intersection algorithm.
 	// PART 1 - Precalculations
@@ -10239,9 +10685,9 @@ TEMPLATED bool BVHBase<Float, Index>::TriHit( const Ray& ray, const Slice& verts
 	if (ray.D[kz] < 0) tinybvh_swap( kx, ky );
 	const Float Sz = ray.rD[kz], Sx = ray.D[kx] * Sz, Sy = ray.D[ky] * Sz;
 	// PART 2 - Intersection
-	const Vec3 C = Vec3( verts[i0] ) - ray.O;
-	const Vec3 A = Vec3( verts[i1] ) - ray.O;
-	const Vec3 B = Vec3( verts[i2] ) - ray.O;
+	const Vec3 C = Vec3( p0 ) - ray.O;
+	const Vec3 A = Vec3( p1 ) - ray.O;
+	const Vec3 B = Vec3( p2 ) - ray.O;
 	const Float Ax = A[kx] - Sx * A[kz], Ay = A[ky] - Sy * A[kz];
 	const Float Bx = B[kx] - Sx * B[kz], By = B[ky] - Sy * B[kz];
 	const Float Cx = C[kx] - Sx * C[kz], Cy = C[ky] - Sy * C[kz];
@@ -10256,8 +10702,7 @@ TEMPLATED bool BVHBase<Float, Index>::TriHit( const Ray& ray, const Slice& verts
 	tHit = t, uHit = U * invDet, vHit = V * invDet;
 #else
 	// Moeller-Trumbore ray/triangle intersection algorithm.
-	const Vertex v0_ = verts[i0];
-	const Vec3 v0 = v0_, e1 = verts[i1] - v0_, e2 = verts[i2] - v0_;
+	const Vec3 v0 = p0, e1 = p1 - p0, e2 = p2 - p0;
 	MOLLER_TRUMBORE_TEST( ray.hit.t, return false );
 	tHit = t, uHit = u, vHit = v;
 #endif
@@ -10267,8 +10712,12 @@ TEMPLATED bool BVHBase<Float, Index>::TriHit( const Ray& ray, const Slice& verts
 // IntersectTri
 TEMPLATED void BVHBase<Float, Index>::IntersectTri( Ray& ray, const Index triIdx, const Slice& verts, const Index i0, const Index i1, const Index i2 ) const
 {
+	IntersectTri( ray, triIdx, verts[i0], verts[i1], verts[i2] );
+}
+TEMPLATED template <typename V> void BVHBase<Float, Index>::IntersectTri( Ray& ray, const Index triIdx, const V& v0, const V& v1, const V& v2 ) const
+{
 	Float t, u, v;
-	if (!TriHit( ray, verts, i0, i1, i2, t, u, v )) return;
+	if (!TriHit( ray, v0, v1, v2, t, u, v )) return;
 	// evaluate opacity map, if present.
 	if (opmap && !tinybvh_opmap_opaque( opmap, opmapN, triIdx, tinybvh_opmap_index( u, v, opmapN ) )) return;
 	// register a hit: ray is shortened to t.
@@ -10279,8 +10728,12 @@ TEMPLATED void BVHBase<Float, Index>::IntersectTri( Ray& ray, const Index triIdx
 // TriOccludes
 TEMPLATED bool BVHBase<Float, Index>::TriOccludes( const Ray& ray, const Slice& verts, const Index triIdx, const Index i0, const Index i1, const Index i2 ) const
 {
+	return TriOccludes( ray, triIdx, verts[i0], verts[i1], verts[i2] );
+}
+TEMPLATED template <typename V> bool BVHBase<Float, Index>::TriOccludes( const Ray& ray, const Index triIdx, const V& v0, const V& v1, const V& v2 ) const
+{
 	Float t, u, v;
-	if (!TriHit( ray, verts, i0, i1, i2, t, u, v )) return false;
+	if (!TriHit( ray, v0, v1, v2, t, u, v )) return false;
 	// occluded, unless the opacity map says otherwise.
 	return !opmap || tinybvh_opmap_opaque( opmap, opmapN, triIdx, tinybvh_opmap_index( u, v, opmapN ) );
 }
