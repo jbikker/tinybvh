@@ -165,3 +165,10 @@ void kernel batch_any( const global struct BVHNode* bvhNode, const global float4
 	if (isoccluded( bvhNode, orderedVerts, 0, O, D, rD, tmax )) hit.w = as_float( 1 );
 	rayData[threadId].hit = hit;
 }
+
+void kernel reset_rays( global struct Ray* rayData, float d )
+{
+	const uint threadId = get_global_id( 0 );
+	if (threadId >= get_global_size( 0 )) return;
+	rayData[threadId].hit.x = d;
+}
