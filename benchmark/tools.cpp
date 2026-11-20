@@ -3,6 +3,7 @@
 #ifdef ENABLE_OPENCL
 #define TINY_OCL_IMPLEMENTATION
 #include "tiny_ocl.h"
+tinyocl::Kernel* kernel_reset = nullptr;
 tinyocl::Kernel* kernel_nearest = nullptr;
 tinyocl::Kernel* kernel_any = nullptr;
 tinyocl::Kernel* gpu4way_kernel = nullptr;
@@ -79,6 +80,7 @@ bool InitOpenCL()
 	if (clInitialized) return true;
 #ifdef ENABLE_OPENCL
 	// load and compile the OpenCL kernel code
+	kernel_reset = new tinyocl::Kernel( "kernels/traverse.cl", "reset_rays" );
 	kernel_nearest = new tinyocl::Kernel( "kernels/traverse.cl", "batch_nearest" );
 	kernel_any = new tinyocl::Kernel( "kernels/traverse.cl", "batch_any" );
 	gpu4way_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_gpu4way" );
