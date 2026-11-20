@@ -577,12 +577,14 @@ void kernel batch_cwbvh( global const float4* cwbvhNodes, global const float4* c
 	float4 O4 = rayData[threadId].O; O4.w = 1;
 	float4 D4 = rayData[threadId].D; D4.w = 0;
 	float4 rD4 = rayData[threadId].rD; rD4.w = 1;
-	float4 hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4, D4, rD4, 1e30f );
+	float tmax = rayData[threadId].hit.x;
+	float4 hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4, D4, rD4, tmax );
 #else
 	const float4 O4 = rayData[threadId].O;
 	const float4 D4 = rayData[threadId].D;
 	const float4 rD4 = rayData[threadId].rD;
-	float4 hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4.xyz, D4.xyz, rD4.xyz, 1e30f );
+	float tmax = rayData[threadId].hit.x;
+	float4 hit = traverse_cwbvh( cwbvhNodes, cwbvhTris, O4.xyz, D4.xyz, rD4.xyz, tmax );
 #endif
 	rayData[threadId].hit = hit;
 }
@@ -600,7 +602,7 @@ void kernel batch_cwbvh_any( global const float4* cwbvhNodes, global const float
 	const float4 D4 = rayData[threadId].D;
 	const float4 rD4 = rayData[threadId].rD;
 #endif
-	float tmax = 1e30f;
+	const float tmax = rayData[threadId].hit.x;
 	float4 hit = 0;
 #ifdef SIMD_AABBTEST
 	if (isoccluded_cwbvh( cwbvhNodes, cwbvhTris, O4, D4, rD4, tmax )) hit.w = 1;
