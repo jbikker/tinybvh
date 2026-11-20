@@ -181,60 +181,55 @@ BVHBase* AccStruc::LoadBVH( const char* bakedBVH )
 	{
 	case BVH2:
 	{
-		BVH* accstruc = (BVH*)bvh;
 		loadedBVH = BVH::Load( bakedBVH );
 		bvh = &loadedBVH;
 		break;
 	}
 	case BVH4_WIVE:
 	{
-		BVH4_CPU* accstruc = (BVH4_CPU*)bvh;
 		loadedBVH4 = BVH4_CPU::Load( bakedBVH );
 		bvh = &loadedBVH4;
 		break;
 	}
 	case BVH8_WIVE:
 	{
-		BVH8_CPU* accstruc = (BVH8_CPU*)bvh;
 		loadedBVH8 = BVH8_CPU::Load( bakedBVH );
 		bvh = &loadedBVH8;
 		break;
 	}
 	case GPU_BVH:
 	{
-		BVH_GPU* accstruc = (BVH_GPU*)bvh;
 		loadedBVHGPU = BVH_GPU::Load( bakedBVH );
 		bvh = &loadedBVHGPU;
 		break;
 	}
 	case GPU_BVH4:
 	{
-		BVH4_GPU* accstruc = (BVH4_GPU*)bvh;
 		loadedBVH4GPU = BVH4_GPU::Load( bakedBVH );
 		bvh = &loadedBVH4GPU;
 		break;
 	}
 	case CWBVH:
 	{
-		BVH8_CWBVH* accstruc = (BVH8_CWBVH*)bvh;
 		loadedBVH8GPU = BVH8_CWBVH::Load( bakedBVH );
 		bvh = &loadedBVH8GPU;
 		break;
 	}
 	case AMD_HWRT:
 	{
-		BVH4_AMD_HW* accstruc = (BVH4_AMD_HW*)bvh;
 		loadedAMD4 = BVH4_AMD_HW::Load( bakedBVH );
 		bvh = &loadedAMD4;
 		break;
 	}
 	case AMD_HWRT8:
 	{
-		CWBVH8_AMD_HW* accstruc = (CWBVH8_AMD_HW*)bvh;
 		loadedAMD8 = CWBVH8_AMD_HW::Load( bakedBVH );
 		bvh = &loadedAMD8;
 		break;
 	}
+	default:
+		// bad.
+		break;
 	}
 	return bvh;
 }
