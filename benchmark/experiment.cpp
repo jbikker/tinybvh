@@ -8,6 +8,7 @@
 #endif
 
 #ifdef ENABLE_OPENCL
+extern tinyocl::Kernel* kernel_reset;
 extern tinyocl::Kernel* kernel_nearest;
 extern tinyocl::Kernel* kernel_any;
 extern tinyocl::Kernel* gpu4way_kernel;
@@ -97,8 +98,8 @@ Experiment::Experiment( BVHLayout layout, const char* baked, Scene prims, RaySet
 }
 
 static bool lastWasTrav = false, firstExperiment = true;
-static constexpr uint32_t batchAmplifier = 2;
-static constexpr int ocl_runs = 200;
+static constexpr uint32_t batchAmplifier = 1;
+static constexpr int ocl_runs = 50;
 
 void Experiment::Run()
 {
@@ -465,18 +466,20 @@ void PrepareRayData( char* raySet, const int N )
 		gpuRayData = new tinyocl::Buffer( N * 64 * batchAmplifier /* size of Ray on GPU */ );
 		gpuOrigRays = new tinyocl::Buffer( N * 64 * batchAmplifier /* size of Ray on GPU */, 0, tinyocl::Buffer::DEVICEONLY );
 	}
-	for (int o = 0, j = 0; j < batchAmplifier; j++) for (int i = 0; i < N; i++, o += 64)
+	for (unsigned int o = 0, j = 0; j < batchAmplifier; j++) for (int i = 0; i < N; i++, o += 64)
 		memcpy( (unsigned char*)gpuRayData->GetHostPtr() + o, raySet + i * 64, 64 );
 }
 
-int ExperimentCore( tinyocl::Kernel* kernel, const int N, uint64_t& traceTime )
+int ExperimentCore( tinyocl::Kernel* kernel, const int N, uint64_t& traceTime, const float rayLength )
 {
 	gpuRayData->CopyToDevice();
 	gpuRayData->CopyTo( gpuOrigRays );
 	cl_event events[ocl_runs] = {};
+	gpuOrigRays->CopyTo( gpuRayData );
+	kernel_reset->SetArguments( gpuRayData, rayLength );
 	for (int pass = -20 /* warm up */; pass < ocl_runs; pass++)
 	{
-		gpuOrigRays->CopyTo( gpuRayData );
+		kernel_reset->Run( N * batchAmplifier );
 		kernel->Run( N * batchAmplifier, 64, 0, pass >= 0 ? &events[pass] : 0 );
 	}
 	clFinish( kernel->GetQueue() );
@@ -492,7 +495,7 @@ int ExperimentCore( tinyocl::Kernel* kernel, const int N, uint64_t& traceTime )
 	return ocl_runs;
 }
 
-float Experiment::RunGPU_BVH2( char* raySet, const int N, bool anyHit )
+float Experiment::RunGPU_BVH2( char* rayData, const int N, bool anyHit )
 {
 	// trace 'first hit' rays on GPU
 	BVH_GPU* bvh_gpu = (BVH_GPU*)bvh->GetBVH();
@@ -501,35 +504,35 @@ float Experiment::RunGPU_BVH2( char* raySet, const int N, bool anyHit )
 	tinyocl::Buffer triData( bvh_gpu->idxCount * sizeof( tinybvh::bvhvec4 ) * 3, (bvhvec4*)bvh_gpu->orderedVerts.data, tinyocl::Buffer::READONLY );
 	gpuNodes.CopyToDevice();
 	triData.CopyToDevice();
-	PrepareRayData( raySet, N );
+	PrepareRayData( rayData, N );
 	// start kernel on gpu
 	uint64_t traceTime = 0;
 	tinyocl::Kernel* kernel = anyHit ? kernel_any : kernel_nearest;
 	kernel->SetArguments( &gpuNodes, &triData, gpuRayData );
-	int runs = ExperimentCore( kernel, N, traceTime );
+	ExperimentCore( kernel, N, traceTime, ((Ray*)rayData)->hit.t );
 	// get results from GPU for verification
 	if (!anyHit) gpuRayData->CopyFromDevice();
 	return (float)traceTime * 1e-9f;
 }
 
-float Experiment::RunGPU_BVH4( char* raySet, const int N, bool anyHit )
+float Experiment::RunGPU_BVH4( char* rayData, const int N, bool anyHit )
 {
 	// trace 'first hit' rays on GPU using a 4-wide BVH
 	BVH4_GPU* bvh4_gpu = (BVH4_GPU*)bvh->GetBVH();
 	tinyocl::Buffer gpuNodes( bvh4_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh4_gpu->bvh4Data, tinyocl::Buffer::READONLY );
 	gpuNodes.CopyToDevice();
-	PrepareRayData( raySet, N );
+	PrepareRayData( rayData, N );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	tinyocl::Kernel* kernel = anyHit ? gpu4way_kernel_any : gpu4way_kernel;
 	kernel->SetArguments( &gpuNodes, gpuRayData );
-	int runs = ExperimentCore( kernel, N, traceTime );
+	ExperimentCore( kernel, N, traceTime, ((Ray*)rayData)->hit.t );
 	// get results from GPU for verification.
 	if (!anyHit) gpuRayData->CopyFromDevice();
 	return (float)traceTime * 1e-9f;
 }
 
-float Experiment::RunGPU_CWBVH( char* raySet, const int N, bool anyHit )
+float Experiment::RunGPU_CWBVH( char* rayData, const int N, bool anyHit )
 {
 	// trace 'first hit' rays on GPU using CWBVH
 	BVH8_CWBVH* cwbvh = (BVH8_CWBVH*)bvh->GetBVH();
@@ -541,18 +544,18 @@ float Experiment::RunGPU_CWBVH( char* raySet, const int N, bool anyHit )
 #endif
 	cwbvhNodes.CopyToDevice();
 	cwbvhTris.CopyToDevice();
-	PrepareRayData( raySet, N );
+	PrepareRayData( rayData, N );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	tinyocl::Kernel* kernel = anyHit ? cwbvh_kernel_any : cwbvh_kernel;
 	kernel->SetArguments( &cwbvhNodes, &cwbvhTris, gpuRayData );
-	int runs = ExperimentCore( kernel, N, traceTime );
+	ExperimentCore( kernel, N, traceTime, ((Ray*)rayData)->hit.t );
 	// get results from GPU for verification.
 	if (!anyHit) gpuRayData->CopyFromDevice();
 	return (float)traceTime * 1e-9f;
 }
 
-float Experiment::RunGPU_AMD4( char* raySet, const int N, bool anyHit )
+float Experiment::RunGPU_AMD4( char* rayData, const int N, bool anyHit )
 {
 	// load AMD-specific kernel
 	if (!amd4way_kernel) amd4way_kernel = new tinyocl::Kernel( "kernels/traverse_amd_hw.cl", "batch_gpu4wayHW" );
@@ -561,18 +564,18 @@ float Experiment::RunGPU_AMD4( char* raySet, const int N, bool anyHit )
 	BVH4_AMD_HW* bvh4_gpu = (BVH4_AMD_HW*)bvh->GetBVH();
 	tinyocl::Buffer gpuNodes( bvh4_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh4_gpu->bvh4Data, tinyocl::Buffer::READONLY );
 	gpuNodes.CopyToDevice();
-	PrepareRayData( raySet, N );
+	PrepareRayData( rayData, N );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	tinyocl::Kernel* kernel = anyHit ? amd4way_kernel_any : amd4way_kernel;
 	kernel->SetArguments( &gpuNodes, gpuRayData );
-	int runs = ExperimentCore( kernel, N, traceTime );
+	ExperimentCore( kernel, N, traceTime, ((Ray*)rayData)->hit.t );
 	// get results from GPU for verification.
 	if (!anyHit) gpuRayData->CopyFromDevice();
 	return (float)traceTime * 1e-9f;
 }
 
-float Experiment::RunGPU_AMD8( char* raySet, const int N, bool anyHit )
+float Experiment::RunGPU_AMD8( char* rayData, const int N, bool anyHit )
 {
 	// load AMD-specific kernel
 	if (!amd8way_kernel) amd8way_kernel = new tinyocl::Kernel( "kernels/traverse_amd_hw.cl", "batch_gpu8wayHW" );
@@ -581,12 +584,12 @@ float Experiment::RunGPU_AMD8( char* raySet, const int N, bool anyHit )
 	CWBVH8_AMD_HW* bvh8_gpu = (CWBVH8_AMD_HW*)bvh->GetBVH();
 	tinyocl::Buffer gpuNodes( bvh8_gpu->usedBlocks * sizeof( tinybvh::bvhvec4 ), bvh8_gpu->bvh8Data, tinyocl::Buffer::READONLY );
 	gpuNodes.CopyToDevice();
-	PrepareRayData( raySet, N );
+	PrepareRayData( rayData, N );
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	tinyocl::Kernel* kernel = anyHit ? amd8way_kernel_any : amd8way_kernel;
 	kernel->SetArguments( &gpuNodes, gpuRayData );
-	int runs = ExperimentCore( kernel, N, traceTime );
+	ExperimentCore( kernel, N, traceTime, ((Ray*)rayData)->hit.t );
 	// get results from GPU for verification.
 	if (!anyHit) gpuRayData->CopyFromDevice();
 	return (float)traceTime * 1e-9f;

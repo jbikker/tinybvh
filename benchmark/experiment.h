@@ -38,11 +38,11 @@ private:
 	void RunBuildExperiment();
 	void RunTraceExperiment();
 	void WriteImage( char* raySet, const char* tracedRays = 0 );
-	float RunGPU_BVH2( char* raySet, const int N, bool anyHit );
-	float RunGPU_BVH4( char* raySet, const int N, bool anyHit );
-	float RunGPU_CWBVH( char* raySet, const int N, bool anyHit );
-	float RunGPU_AMD4( char* raySet, const int N, bool anyHit );
-	float RunGPU_AMD8( char* raySet, const int N, bool anyHit );
+	float RunGPU_BVH2( char* rayData, const int N, bool anyHit );
+	float RunGPU_BVH4( char* rayData, const int N, bool anyHit );
+	float RunGPU_CWBVH( char* rayData, const int N, bool anyHit );
+	float RunGPU_AMD4( char* rayData, const int N, bool anyHit );
+	float RunGPU_AMD8( char* rayData, const int N, bool anyHit );
 	RaySet raySet = UNSPECIFIED;
 	Scene primSet = (Scene)0;
 	AccStruc* bvh = 0;
