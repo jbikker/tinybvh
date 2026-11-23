@@ -100,6 +100,7 @@ bvh.BuildAABB( aabbs, primCount );                      // BVH over AABBs
 int32_t steps = bvh.Intersect( ray );                   // closest hit; result in ray.hit
 bool occluded = bvh.IsOccluded( ray );                  // any hit, for shadow rays
 bool hit = bvh.IntersectSphere( pos, r );               // sphere/BVH collision detection
+bool hit = bvh.IntersectCapsule( p0, p1, r );           // capsule (segment p0-p1, radius r) collision
 ```
 
 Geometry passed to `Build` is referenced, not copied. The exception: `BVH::Save` embeds the triangles by default, so a BVH loaded from such a file owns its geometry (`FreeGeometry` releases it).
