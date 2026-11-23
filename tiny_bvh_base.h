@@ -2157,6 +2157,11 @@ protected:
 	using Base::IntersectTri;
 	using Base::TriOccludes;
 	using Base::SA;
+	using Base::UseThreads;
+	using Base::PoolAvailable;
+	using Base::ParallelFor;
+	using Base::TaskCount;
+	using Base::SliceStart;
 public:
 	struct BVHNode
 	{
@@ -2209,6 +2214,7 @@ private:
 		Vec3 Centroid4() const { return Vec3( b0.pad0, b0.pad1, b1.pad0 ); }
 	};
 	static void Merge( MotionBox& b, const MotionBox& o );
+	static void SetBox( BVHNode& n, const MotionBox& b ) { n.aabbMin0 = -b.b0.negMin, n.aabbMax0 = b.b0.bmax, n.aabbMin1 = -b.b1.negMin, n.aabbMax1 = b.b1.bmax; }
 	PER_OCTANT int32_t IntersectOctant( Ray& ray ) const;
 	PER_OCTANT bool IsOccludedOctant( const Ray& ray ) const;
 	static void BinPrims( const MotionBox* prims, const Index count, const Vec3& binMin, const Vec3& scale, MotionBox* bin, Index* binCount );
@@ -2220,7 +2226,19 @@ private:
 	static Float MotionSA( const BVHNode& n ) { return MotionSA( n.aabbMin0, n.aabbMax0, n.aabbMin1, n.aabbMax1 ); }
 	TINYBVH_FORCEINLINE void TriIndices( const Index prim, Index& i0, Index& i1, Index& i2 ) const;
 	TINYBVH_FORCEINLINE void TriVerts( const Index prim, const Float t0, const Float t1, Vec3& v0, Vec3& v1, Vec3& v2 ) const;
+	// construction of a subtree, on the calling thread or as a task in the pool.
+	struct SubtreeArgs { BVH_Motion* bvh; Index node; uint32_t depth; };
+	void BuildSubtree( Index nodeIdx, uint32_t depth );
+	static void BuildSubtreeTask( void* payload ) { const SubtreeArgs* a = (const SubtreeArgs*)payload; a->bvh->BuildSubtree( a->node, a->depth ); }
+	Index AllocNodePair();
+	MotionBox* buildPrims = 0;		// the primitives during Build, partitioned along with primIdx; kept for the next Build.
+	Index buildNodePtr = 0;			// during Build: the first unused node.
+	bool threadedBuild = false;
+#ifdef ENABLE_THREADED_BUILDS
+	std::atomic<Index>* atomicNodePtr = 0; // during a threaded Build: the first unused node.
+#endif
 	Index allocatedPrims = 0;		// capacity of primIdx.
+	Index allocatedBuildPrims = 0;	// capacity of buildPrims.
 	BVH_Motion& operator=( const BVH_Motion& ) = default;
 };
 
@@ -10453,6 +10471,7 @@ TEMPLATED BVH_Motion<Float, Index>::BVH_Motion( BVH_Motion&& other ) noexcept
 	*this = other;
 	// exactly one of the two may free the buffers from here on.
 	other.bvhNode = 0, other.primIdx = 0, other.allocatedNodes = other.usedNodes = other.allocatedPrims = 0;
+	other.buildPrims = 0, other.allocatedBuildPrims = 0;
 	other.verts0 = other.verts1 = Slice( nullptr, 0, 0 ), other.vertIdx = 0, other.triCount = other.idxCount = 0;
 }
 
@@ -10469,6 +10488,8 @@ TEMPLATED BVH_Motion<Float, Index>::~BVH_Motion()
 	bvhNode = 0;
 	AlignedFree( primIdx );
 	primIdx = 0;
+	AlignedFree( buildPrims );
+	buildPrims = 0;
 }
 
 // forwarders
@@ -10503,34 +10524,74 @@ TEMPLATED void BVH_Motion<Float, Index>::Build( const Slice& vertices0, const Sl
 		primIdx = (Index*)AlignedAlloc( (size_t)primCount * sizeof( Index ) );
 		allocatedPrims = primCount;
 	}
-	// the boxes of the primitives at both ends of the shutter interval, and the root bounds.
-	MotionBox* bp = (MotionBox*)AlignedAlloc( (size_t)primCount * sizeof( MotionBox ) ); // partitioned along with primIdx
-	MotionBox rootBox = MotionBox::Empty();
-	for (Index i = 0; i < primCount; i++)
+	if (allocatedBuildPrims < primCount)
+	{
+		AlignedFree( buildPrims );
+		buildPrims = (MotionBox*)AlignedAlloc( (size_t)primCount * sizeof( MotionBox ) );
+		allocatedBuildPrims = primCount;
+	}
+	// the boxes of the primitives at both ends of the shutter interval, and the root bounds, in slices.
+	const uint32_t slices = TaskCount( PoolAvailable() && primCount >= MT_BUILD_THRESHOLD, primCount, 8192, 64 );
+	MotionBox sliceBox[64];
+	ParallelFor( slices > 1, slices, [&]( const uint32_t s )
+	{
+		MotionBox sbox = MotionBox::Empty();
+		for (Index i = SliceStart( primCount, s, slices ), last = SliceStart( primCount, s + 1, slices ); i < last; i++)
 	{
 		Index i0, i1, i2;
 		TriIndices( i, i0, i1, i2 );
 		const Vec3 a0 = verts0[i0], b0 = verts0[i1], c0 = verts0[i2];
 		const Vec3 a1 = verts1[i0], b1 = verts1[i1], c1 = verts1[i2];
-		MotionBox& box = bp[i];
+			MotionBox& box = buildPrims[i];
 		box.b0.negMin = -tinybvh_min( a0, tinybvh_min( b0, c0 ) ), box.b0.bmax = tinybvh_max( a0, tinybvh_max( b0, c0 ) );
 		box.b1.negMin = -tinybvh_min( a1, tinybvh_min( b1, c1 ) ), box.b1.bmax = tinybvh_max( a1, tinybvh_max( b1, c1 ) );
 		const Vec3 c4 = box.b0.bmax - box.b0.negMin - box.b1.negMin + box.b1.bmax;
 		box.b0.pad0 = c4.x, box.b0.pad1 = c4.y, box.b1.pad0 = c4.z, box.b1.pad1 = 0;
 		primIdx[i] = i;
-		rootBox.Grow( box );
+			sbox.Grow( box );
 	}
-	auto setBox = []( BVHNode& n, const MotionBox& b ) { n.aabbMin0 = -b.b0.negMin, n.aabbMax0 = b.b0.bmax, n.aabbMin1 = -b.b1.negMin, n.aabbMax1 = b.b1.bmax; };
+		sliceBox[s] = sbox;
+	} );
+	MotionBox rootBox = sliceBox[0];
+	for (uint32_t s = 1; s < slices; s++) rootBox.Grow( sliceBox[s] );
 	memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // node 1 remains unused, for cache line alignment.
-	bvhNode[0].leftFirst = 0, bvhNode[0].triCount = primCount, setBox( bvhNode[0], rootBox );
-	Index nodePtr = 2, nodeIdx = 0, stack[TINYBVH_STACK_SIZE];
+	bvhNode[0].leftFirst = 0, bvhNode[0].triCount = primCount, SetBox( bvhNode[0], rootBox );
+	// subdivide; a large build shares a node counter with the subtree tasks it hands to the pool.
+	buildNodePtr = 2, threadedBuild = UseThreads( primCount );
+#ifdef ENABLE_THREADED_BUILDS
+	if (threadedBuild) atomicNodePtr = this->template ContextNew<std::atomic<Index>>( buildNodePtr );
+#endif
+	BuildSubtree( 0, 0 );
+#ifdef ENABLE_THREADED_BUILDS
+	if (threadedBuild) tinybvh_barrier( context ), buildNodePtr = atomicNodePtr->load(), this->ContextDelete( atomicNodePtr );
+#endif
+	threadedBuild = false;
+	usedNodes = buildNodePtr;
+	refittable = true, hasHoles = false, orderedNodes = true, bvhOverIndices = false;
+	FinishBounds(); // the leaf boxes are exact already; as Refit, without revisiting the vertices.
+}
+
+TEMPLATED Index BVH_Motion<Float, Index>::AllocNodePair()
+{
+#ifdef ENABLE_THREADED_BUILDS
+	if (threadedBuild) return atomicNodePtr->fetch_add( 2, std::memory_order_relaxed );
+#endif
+	const Index n = buildNodePtr;
+	buildNodePtr += 2;
+	return n;
+}
+
+// Binned SAH subdivision of node 'nodeIdx' and its descendants.
+TEMPLATED void BVH_Motion<Float, Index>::BuildSubtree( Index nodeIdx, uint32_t depth )
+{
+	Index stack[TINYBVH_STACK_SIZE];
 	uint32_t stackPtr = 0;
 	while (1)
 	{
 		BVHNode& node = bvhNode[nodeIdx];
 		node.tStart = 0, node.tEnd = 1;
 		const Index first = node.leftFirst, count = node.triCount;
-		MotionBox* p = bp + first;
+		MotionBox* p = buildPrims + first;
 		Index leftCount = 0; // 0: the node is a leaf.
 		MotionBox lbox = MotionBox::Empty(), rbox = MotionBox::Empty();
 		if (count > 1 && stackPtr < TINYBVH_STACK_SIZE)
@@ -10598,11 +10659,22 @@ TEMPLATED void BVH_Motion<Float, Index>::Build( const Slice& vertices0, const Sl
 		}
 		if (leftCount > 0)
 		{
-			const Index n = nodePtr;
-			nodePtr += 2;
-			bvhNode[n].leftFirst = first, bvhNode[n].triCount = leftCount, setBox( bvhNode[n], lbox );
-			bvhNode[n + 1].leftFirst = first + leftCount, bvhNode[n + 1].triCount = count - leftCount, setBox( bvhNode[n + 1], rbox );
+			const Index n = AllocNodePair(), rightCount = count - leftCount;
+			bvhNode[n].leftFirst = first, bvhNode[n].triCount = leftCount, SetBox( bvhNode[n], lbox );
+			bvhNode[n + 1].leftFirst = first + leftCount, bvhNode[n + 1].triCount = rightCount, SetBox( bvhNode[n + 1], rbox );
 			node.leftFirst = n, node.triCount = 0;
+		#ifdef ENABLE_THREADED_BUILDS
+			if (threadedBuild && depth < MT_SPAWN_DEPTH && tinybvh_max( leftCount, rightCount ) > MT_SPAWN_MIN_PRIMS)
+			{
+				// the larger subtree goes to the pool, as in BVH::Build; Build waits for all of them.
+				const SubtreeArgs a = { this, leftCount > rightCount ? n : n + 1, depth + 1 };
+				tinybvh_spawn( context, &BuildSubtreeTask, &a, sizeof( a ) );
+				nodeIdx = leftCount > rightCount ? n + 1 : n;
+				continue;
+			}
+		#else
+			(void)depth;
+		#endif
 			stack[stackPtr++] = n + 1, nodeIdx = n;
 			continue;
 		}
@@ -10610,10 +10682,6 @@ TEMPLATED void BVH_Motion<Float, Index>::Build( const Slice& vertices0, const Sl
 		if (stackPtr == 0) break;
 		nodeIdx = stack[--stackPtr];
 	}
-	AlignedFree( bp );
-	usedNodes = nodePtr;
-	refittable = true, hasHoles = false, orderedNodes = true, bvhOverIndices = false;
-	FinishBounds(); // the leaf boxes are exact already; as Refit, without revisiting the vertices.
 }
 
 TEMPLATED void BVH_Motion<Float, Index>::Merge( MotionBox& b, const MotionBox& o )
