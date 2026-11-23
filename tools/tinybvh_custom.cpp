@@ -5,9 +5,11 @@
 // On Windows this is a small window with a checkbox per part; given arguments, it runs as a
 // command-line tool instead (run it with --help). Elsewhere it is the command-line tool only.
 //
-// Parts that can be left out: each layout except BVH; VoxelSet; presplitting, the full-sweep
-// and H-PLOC builders, the optimizer and BVH::MergeLeafs; threading (the built-in thread pool,
-// and the job hooks in BVHContext); the x86 (SSE / AVX / AVX2) and ARM (NEON) code; and the
+// Parts that can be left out: each layout except BVH; VoxelSet; motion blur (BVH_Motion, moving
+// TLAS instances and Ray::time); presplitting, the full-sweep and H-PLOC builders, the optimizer
+// and BVH::MergeLeafs; the collision queries (BVH::IntersectSphere, BVH::IntersectCapsule);
+// threading (the built-in thread pool, and the job hooks in BVHContext); the x86 (SSE / AVX /
+// AVX2) and ARM (NEON) code; and the
 // templating on <Float, Index>, in which case the float / uint32_t code is emitted as plain,
 // non-templated classes. Helpers, macros and comments that only served left-out code go with
 // it. Asking a reduced build for a builder or feature it lacks is a fatal error. MBVH and
@@ -1101,9 +1103,10 @@ struct CondTracker
 enum Toggle
 {
 	T_BVH_GPU, T_BVH4_GPU, T_BVH4_CPU, T_BVH8_CPU, T_BVH8_CWBVH, T_BVH4_AMD_HW, T_CWBVH8_AMD_HW, T_BVH_DOBB,
+	T_MOTION,						// BVH_Motion, plus motion blur in the TLAS and the ray
 	T_MBVH, T_BVH_VERBOSE,			// intermediate layouts: forced on when something needs them
 	T_VOXELSET,
-	T_OPTIMIZER, T_MERGELEAFS, T_PRESPLITTING, T_FULLSWEEP, T_HPLOC, T_THREADING,
+	T_OPTIMIZER, T_MERGELEAFS, T_PRESPLITTING, T_FULLSWEEP, T_HPLOC, T_THREADING, T_PHYSICS,
 	T_X86, T_ARM, T_TEMPLATES,
 	T_COUNT
 };
@@ -1118,6 +1121,7 @@ static const ToggleInfo kToggles[T_COUNT] = {
 	{ "bvh4_amd_hw", "BVH4_AMD_HW (AMD RT hardware)", "BVH4_AMD_HW" },
 	{ "cwbvh8_amd_hw", "CWBVH8_AMD_HW (AMD RT hardware)", "CWBVH8_AMD_HW" },
 	{ "bvh_dobb", "BVH_DOBB (8-wide, oriented boxes)", "BVH_DOBB" },
+	{ "motion", "Motion blur (BVH_Motion, moving instances)", "BVH_Motion" },
 	{ "mbvh", "MBVH (intermediate)", "MBVH" },
 	{ "bvh_verbose", "BVH_Verbose (intermediate)", "BVH_Verbose" },
 	{ "voxelset", "VoxelSet (voxel grid BLAS)", "VoxelSet" },
@@ -1127,6 +1131,7 @@ static const ToggleInfo kToggles[T_COUNT] = {
 	{ "fullsweep", "Full-sweep builder (useFullSweep)", 0 },
 	{ "hploc", "H-PLOC builder (useHPLOC)", 0 },
 	{ "threading", "Threading (thread pool, job hooks)", 0 },
+	{ "physics", "Collision queries (sphere, capsule)", 0 },
 	{ "x86", "x86 SIMD code (SSE, AVX, AVX2)", 0 },
 	{ "arm", "ARM NEON code", 0 },
 	{ "templates", "Templates (float and double precision)", 0 },
@@ -1158,14 +1163,14 @@ struct Place { int t, group, col, row; };
 static const Place kPlace[] = {
 	{ T_BVH_GPU, 0, 0, 0 }, { T_BVH4_GPU, 0, 0, 1 }, { T_BVH8_CWBVH, 0, 0, 2 }, { T_BVH4_AMD_HW, 0, 0, 3 }, { T_CWBVH8_AMD_HW, 0, 0, 4 },
 	{ T_BVH_DOBB, 0, 0, 5 },
-	{ T_BVH4_CPU, 0, 1, 0 }, { T_BVH8_CPU, 0, 1, 1 }, { T_VOXELSET, 0, 1, 2 }, { T_MBVH, 0, 1, 3 }, { T_BVH_VERBOSE, 0, 1, 4 },
+	{ T_BVH4_CPU, 0, 1, 0 }, { T_BVH8_CPU, 0, 1, 1 }, { T_VOXELSET, 0, 1, 2 }, { T_MOTION, 0, 1, 3 }, { T_MBVH, 0, 1, 4 }, { T_BVH_VERBOSE, 0, 1, 5 },
 	{ T_PRESPLITTING, 1, 0, 0 }, { T_FULLSWEEP, 1, 0, 1 }, { T_HPLOC, 1, 0, 2 },
 	{ T_OPTIMIZER, 1, 1, 0 }, { T_MERGELEAFS, 1, 1, 1 },
-	{ T_THREADING, 2, 0, 0 }, { T_TEMPLATES, 2, 0, 1 },
+	{ T_THREADING, 2, 0, 0 }, { T_TEMPLATES, 2, 0, 1 }, { T_PHYSICS, 2, 0, 2 },
 	{ T_X86, 2, 1, 0 }, { T_ARM, 2, 1, 1 },
 };
 static const char* kGroupTitle[3] = { "Layouts (BVH is always included)", "Builders and optimization", "Code" };
-static const int kRows[3] = { 6, 3, 2 };	// rows per group
+static const int kRows[3] = { 6, 3, 3 };	// rows per group
 static std::string DisplayLabel( const int t )
 {
 	return (t == T_MBVH || t == T_BVH_VERBOSE) ? std::string( kToggles[t].cls ) + ", when needed" : kToggles[t].label;
@@ -1757,6 +1762,28 @@ static const Rewrite kRewrites[] = {
 	{ "-threading", "// Spawn fn(payload) asynchronously", "// Run fn(payload) now: without threading there is nothing to run it on.", true },
 	{ "-threading", "// Wait for spawned tasks to finish", "// Nothing to wait for: each task ran when it was spawned.", true },
 	{ "-presplitting", "// presplitting", 0, true },
+	// no motion blur: the ray loses its time, instances their second transform, the TLAS its flag
+	{ "-motion", "Ray( Vec3 origin, Vec3 direction, Float t = bvh_far<Float>, uint32_t rayMask = RAY_MASK_INTERSECT_ALL, float rayTime = 0 )",
+		"Ray( Vec3 origin, Vec3 direction, Float t = bvh_far<Float>, uint32_t rayMask = RAY_MASK_INTERSECT_ALL )", false },
+	{ "-motion", "time = rayTime;", 0, false },
+	{ "-motion", "// Motion blur: the ray's time in the shutter interval, in [0, 1]. Type is always float.", 0, true },
+	{ "-motion", "float time = 0;", 0, false },
+	{ "-motion", "// cache-aligned Ray, this starts at a cache line boundary; Ray::time takes the last 4 bytes.", "// cache-aligned Ray, this starts at a cache line boundary.", true },
+	{ "-motion", "+ (r).O.y + (r).O.z + (r).time; BVH_FATAL_ERROR_IF( tinybvh_isnan( test ), \"Input ray contains NaNs.\" ); }",
+		"+ (r).O.y + (r).O.z; BVH_FATAL_ERROR_IF( tinybvh_isnan( test ), \"Input ray contains NaNs.\" ); }", false },
+	{ "-motion", "instList = 0, blasList = 0, blasCount = 0, hasMotion = false;", "instList = 0, blasList = 0, blasCount = 0;", false },
+	{ "-motion", "// motion: a moving instance, a motion blur BLAS, or a TLAS with either of these below it.", 0, true },
+	{ "-motion", "if (inst.transform1) hasMotion = true;", 0, false },
+	{ "-motion", "if (blas && (blas->layout == LAYOUT_BVH_MOTION || (blas->layout == LAYOUT_BVH && ((const BVH*)blas)->hasMotion))) hasMotion = true;", 0, false },
+	{ "-motion", "Mat4 invAtTime; // the inverse transform of a moving instance, at the ray's time", 0, false },
+	{ "-motion", "const Mat4& invT = inst.transform1 ? (invAtTime = inst.InvTransformAt( ray.time )) : inst.invTransform;", "const Mat4& invT = inst.invTransform;", false },
+	{ "-motion", "tmpRay.time = ray.time;", 0, false },
+	{ "-motion", "BVH_FATAL_ERROR_IF( bvh.hasMotion, \"BVH_GPU::Build( BLASInstance*, .. ), no motion blur on the GPU yet.\" );", 0, false },
+	{ "-motion", "const Mat4* transform1 = 0; // The transform at t=1, or 0 for an instance that does not move.", 0, false },
+	{ "-motion", "if (!transform1) continue; // below this line is just for motion blur.", 0, false },
+	{ "-motion", "const Vec3 t1 = tinybvh_transform_point( p, *transform1 );", 0, false },
+	{ "-motion", "aabbMin = tinybvh_min( aabbMin, t1 ), aabbMax = tinybvh_max( aabbMax, t1 );", 0, false },
+	{ "-motion", "// #define MOTIONBVHBINS 16 - the number of bins to use in BVH_Motion construction. Default is 16.", 0, true },
 	// the SIMD detection's notes, for the platforms that are left
 	{ "-x86&-arm", "// SSE/AVX/AVX2/NEON support.", 0, true },
 	{ "-x86", "// SSE/AVX/AVX2/NEON support.", "// NEON support.", true },
@@ -1780,6 +1807,7 @@ static const Phrase kPhrases[] = {
 	{ "-threading", " via the thread pool", "" },
 	{ "-threading", ", optionally sliced over the thread pool", "" },
 	{ "-threading", ", scheduled via the threading hooks;", ";" },
+	{ "-motion", "; BVH_Motion interpolates them first.", "." },
 };
 
 // 'active': the excluded classes, plus "-<id>" for every toggle that is off. A rule that is not
@@ -2299,6 +2327,14 @@ static RemovalPlan PlanFor( const Options& o, std::string& log )
 		plan.classes.insert( "BVHBuildFullSweepSubtree" );
 	}
 	if (!o.on[T_HPLOC]) plan.members.insert( "BuildHPLOC" );
+	// without motion blur, BVH_Motion goes as a class; the TLAS and the instances lose their motion
+	// members, and the kRewrites rules take out the code that reads them
+	if (!o.on[T_MOTION])
+	{
+		plan.classMembers.insert( { "BVH", "hasMotion" } );
+		plan.classMembers.insert( { "BLASInstance", "InvTransformAt" } );
+	}
+	if (!o.on[T_PHYSICS]) for (const char* m : { "IntersectSphere", "IntersectCapsule" }) plan.members.insert( m );
 	// without threading, BVHContext loses its job hooks; the built-in pool and the threaded build
 	// paths go with ENABLE_THREADED_BUILDS
 	if (!o.on[T_THREADING]) for (const char* m : { "spawn", "barrier", "parallel_for" }) plan.classMembers.insert( { "BVHContext", m } );
@@ -2319,6 +2355,7 @@ static GenResult Generate( const SourceSet& src, Options o )
 		const std::string merged = t;
 		RewritePreamble( t, o.on[T_X86], o.on[T_ARM], o.on[T_TEMPLATES], o.on[T_VOXELSET], o.on[T_THREADING], res.log );
 		RemovalPlan plan = PlanFor( o, res.log );
+		if (!o.on[T_MOTION]) plan.classes.insert( "tinybvh_motion_lerp" ); // a free function: goes like a class, not listed
 		// the hand-written edits come first, while the code of every platform is still there: a
 		// rule that does not match then means that the source changed, not that a platform's code
 		// (the x86 ray bundles, for one) was left out
@@ -2337,6 +2374,29 @@ static GenResult Generate( const SourceSet& src, Options o )
 		for (int i = 0; i < T_COUNT; i++) if (!o.on[i]) active.insert( std::string( "-" ) + kToggles[i].id ), active.insert( "+reduced" );
 		if (!o.on[T_X86] && !o.on[T_ARM]) active.insert( "-x86&-arm" );
 		if (!o.on[T_PRESPLITTING]) FoldFalse( t, { "settings.usePresplitting", "SIMDPresplit()" }, res.log );
+		if (!o.on[T_MOTION])
+		{
+			// the TLAS bundles' per-ray fallback for moving scenes, and BVH_Motion's bin count
+			const char* blocks[][2] = {
+				{ "\tif (!hasMotion) return tinybvh_intersect_bundle( this, rays );\n"
+				  "\t// the bundle kernels have no ray time: rays that may see motion go one by one.\n"
+				  "\tint32_t cost = 0;\n"
+				  "\tfor (uint32_t i = 0; i < TINYBVH_BUNDLE_RAYS; i++) cost += Intersect( rays[i] );\n"
+				  "\treturn cost;\n", "\treturn tinybvh_intersect_bundle( this, rays );\n" },
+				{ "\tif (!hasMotion) return tinybvh_isoccluded_bundle( this, rays, occluded );\n"
+				  "\t// the bundle kernels have no ray time: rays that may see motion go one by one.\n"
+				  "\tint32_t cost = 0;\n"
+				  "\tfor (uint32_t i = 0; i < TINYBVH_BUNDLE_RAYS; i++) occluded[i] = IsOccluded( rays[i] ), cost++;\n"
+				  "\treturn cost;\n", "\treturn tinybvh_isoccluded_bundle( this, rays, occluded );\n" },
+				{ "#ifndef MOTIONBVHBINS\n#define MOTIONBVHBINS 16\n#endif\n", "" },
+			};
+			for (const auto& b : blocks)
+			{
+				const size_t p = t.find( b[0] );
+				if (p == std::string::npos) res.log += std::string( "  warning: rewrite for leaving out motion no longer matches: '" ) + Trim( std::string( b[0] ).substr( 0, std::string( b[0] ).find( '\n' ) ) ) + "'\n";
+				else t.replace( p, strlen( b[0] ), b[1] );
+			}
+		}
 		ApplyRewrites( t, active, res.log );
 		std::set<std::string> undef;
 		if (!o.on[T_X86]) undef.insert( "BVH_USESSE" ), undef.insert( "BVH_USEAVX" ), undef.insert( "BVH_USEAVX2" );
@@ -2394,6 +2454,24 @@ static GenResult Generate( const SourceSet& src, Options o )
 				}
 			}
 			if (!o.on[T_VOXELSET] && code.find( "ENABLE_VOXEL_SUPPORT" ) != std::string::npos) res.log += "error: ENABLE_VOXEL_SUPPORT is still used\n", problems++;
+			// without motion blur, nothing may read a ray's time or an instance's second transform
+			if (!o.on[T_MOTION])
+			{
+				for (const char* w : { "hasMotion", "transform1", "InvTransformAt", "invAtTime", "rayTime", "MOTIONBVHBINS", "tinybvh_motion_lerp", "tinybvh_motion_centroid4" })
+				{
+					const size_t p = FindWord( code, w );
+					if (p != std::string::npos && problems++ < 12) res.log += std::string( "error: '" ) + w + "' is still used at line " + std::to_string( LineOf( code, p ) ) + "\n";
+				}
+				for (const char* w : { ".time", "->time" })
+				{
+					for (size_t p = code.find( w ); p != std::string::npos; p = code.find( w, p + 1 ))
+					{
+						if (p + strlen( w ) < code.size() && IsIdent( code[p + strlen( w )] )) continue;
+						if (problems++ < 12) res.log += std::string( "error: '" ) + w + "' is still used at line " + std::to_string( LineOf( code, p ) ) + "\n";
+						break;
+					}
+				}
+			}
 			if (problems) throw ScanError{ std::to_string( problems ) + " problem(s); the generated header would not compile" };
 		}
 		// header comment
@@ -2766,7 +2844,7 @@ static HWND Make( const wchar_t* cls, const wchar_t* text, DWORD style, int x, i
 	return c;
 }
 
-static const int kMinW = 560, kMinH = 600; // smallest client area, in 96 dpi units
+static const int kMinW = 560, kMinH = 622; // smallest client area, in 96 dpi units
 
 // Places the controls for the current client size: the fields and the log stretch, the
 // buttons stay right, and the two checkbox columns split the width.
