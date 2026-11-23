@@ -281,6 +281,29 @@ static void TestMotion( const std::vector<bvhvec4>& v0, const float amplitude, c
 	CHECK( clampErrors == 0, "%u rays outside the shutter interval not clamped", clampErrors );
 }
 
+// A threaded build makes the tree of a single-threaded build; only the order of the nodes in memory differs.
+static void TestThreading( const std::vector<bvhvec4>& v0 )
+{
+	printf( "threaded build:\n" );
+	const std::vector<bvhvec4> v1 = Animate( v0, 0.5f );
+	const uint32_t n = (uint32_t)(v0.size() / 3);
+	BVH_Motion threaded, single;
+	single.settings.enableThreading = false;
+	threaded.Build( v0.data(), v1.data(), n );
+	single.Build( v0.data(), v1.data(), n );
+	uint32_t mismatches = 0;
+	for (uint32_t i = 0; i < 20000; i++)
+	{
+		Ray a = RandomRay( threaded.aabbMin, threaded.aabbMax, RandomFloat() ), b = a;
+		threaded.Intersect( a ), single.Intersect( b );
+		if (a.hit.t != b.hit.t || (a.hit.t < BVH_FAR && a.hit.prim != b.hit.prim)) mismatches++;
+	}
+	const float sah = threaded.SAHCost(), singleSah = single.SAHCost();
+	printf( "  %u and %u nodes, SAH cost %.3f and %.3f; %u mismatches in 20000 rays\n", threaded.usedNodes, single.usedNodes, sah, singleSah, mismatches );
+	CHECK( threaded.usedNodes == single.usedNodes && fabsf( sah - singleSah ) <= 1e-6f * sah, "threaded and single-threaded builds differ" );
+	CHECK( mismatches == 0, "threaded and single-threaded builds disagree on %u rays", mismatches );
+}
+
 // Indexed input: the same triangles through a vertex buffer without duplicates.
 static void TestIndexed( const std::vector<bvhvec4>& v0 )
 {
@@ -348,9 +371,9 @@ static void TestDegenerate()
 	for (int i = 0; i < 64; i++) for (int k = 0; k < 3; k++)
 		v0.push_back( tri[k] ), v1.push_back( tri[k] + bvhvec4( 0, 0, i < 32 ? 0.0f : 2.0f, 0 ) );
 	uint32_t mismatches = 0, badLeaves = 0;
-	for (int keepSplitting = 0; keepSplitting < 2; keepSplitting++) for (uint32_t n : { 1u, 32u, 64u })
+	BVH_Motion m; // one object for all builds: its buffers grow, and are reused at a smaller size.
+	for (int keepSplitting = 0; keepSplitting < 2; keepSplitting++) for (uint32_t n : { 1u, 64u, 32u })
 	{
-		BVH_Motion m;
 		m.settings.keepSplitting = keepSplitting == 1;
 		m.Build( v0.data(), v1.data(), n );
 		CheckBounds( m, 4 );
@@ -636,8 +659,11 @@ static void Benchmark( const std::vector<bvhvec4>& v0 )
 	const double buildStill = timed( [&]() { still.Build( v0.data(), v0.data(), n ); } );
 	const double buildMoving = timed( [&]() { moving.Build( v0.data(), v1.data(), n ); } );
 	const double buildFast = timed( [&]() { fast.Build( v0.data(), v3.data(), n ); } );
-	printf( "build (ms): BVH %.1f; BVH_Motion: static keys %.1f, amplitude 0.5 %.1f, amplitude 3.0 %.1f\n",
-		buildBVH, buildStill, buildMoving, buildFast );
+	BVH_Motion single;
+	single.settings.enableThreading = false;
+	const double buildSingle = timed( [&]() { single.Build( v0.data(), v1.data(), n ); } );
+	printf( "build (ms): BVH %.1f; BVH_Motion: static keys %.1f, amplitude 0.5 %.1f (single-threaded %.1f), amplitude 3.0 %.1f\n",
+		buildBVH, buildStill, buildMoving, buildSingle, buildFast );
 	printf( "performance (single thread, Mrays/s):         primary  incoherent\n" );
 	BVHBase* blases[1] = { &bvh };
 	BLASInstance staticInst( 0 ), movingInst( 0 );
@@ -688,6 +714,7 @@ int main( int argc, char** argv )
 	TestStatic( scene );
 	TestMotion( scene, 0.5f, 20000, 40 );
 	TestMotion( scene, 3.0f, 5000, 10 );
+	TestThreading( scene );
 	TestIndexed( scene );
 	TestRefit( scene );
 	TestDegenerate();
