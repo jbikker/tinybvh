@@ -7687,7 +7687,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::EmitNode( MBVH<4, Float, Index>& src, con
 // would: a better tree, for a little more conversion time.
 TEMPLATED_M void MBVH<M, Float, Index>::ConvertForCPULayout()
 {
-	constexpr Index LEAF_PRIMS = (Index)BVHTriLeaf<Float, Index>::PRIMS;
+	constexpr Index LEAF_PRIMS = (Index)impl::BVHTriLeaf<Float, Index>::PRIMS;
 	bvh.SplitLeafs( LEAF_PRIMS );
 	leafPrimLimit = LEAF_PRIMS; // one leaf of these layouts holds this many prims,
 	leafCostScale = (Float)bvh_traits<Float>::leafCostScale; // and costs less than that many intersections
@@ -7741,7 +7741,7 @@ TEMPLATED_M Index MBVH<M, Float, Index>::BlockLayout( const uint32_t nodeBlocks,
 TEMPLATED_M Index MBVH<M, Float, Index>::BlockLayoutParallel( const uint32_t tasks, const uint32_t nodeBlocks, const uint32_t leafBlocks, uint32_t* blocks, uint32_t* base, Index* order ) const
 {
 	const uint32_t target = tasks * 16; // fewer than for the binary tree: wide trees have fewer nodes, and the levels above stay serial
-	constexpr uint32_t maxDepth = 16, STACK = M * TINYBVH_STACK_SIZE + M + 1; // a walk keeps up to M entries per level
+	static constexpr uint32_t maxDepth = 16, STACK = M * TINYBVH_STACK_SIZE + M + 1; // a walk keeps up to M entries per level
 	auto interior = [&]( const Index c ) { return c != 0 && !mbvhNode[c].isLeaf(); };
 	// the subtrees: the interior nodes of the first level that has enough of them, in block order.
 	const uint32_t levelCap = M * target + M;

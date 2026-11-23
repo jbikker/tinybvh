@@ -2714,7 +2714,11 @@ template <> int32_t impl::BVH4_CPU<float, uint32_t>::IsOccludedBundle( Ray* rays
 template <> int32_t impl::BVH<float, uint32_t>::IsOccludedBundle( Ray* rays, bool* occluded ) const
 {
 	BVH_FATAL_ERROR_IF( !isTLAS(), "BVH::IsOccludedBundle, not a TLAS." );
-	return tinybvh_isoccluded_bundle( this, rays, occluded );
+	if (!hasMotion) return tinybvh_isoccluded_bundle( this, rays, occluded );
+	// the bundle kernels have no ray time: rays that may see motion go one by one.
+	int32_t cost = 0;
+	for (uint32_t i = 0; i < TINYBVH_BUNDLE_RAYS; i++) occluded[i] = IsOccluded( rays[i] ), cost++;
+	return cost;
 }
 
 #undef OCTANT_DISPATCH_BUNDLE
