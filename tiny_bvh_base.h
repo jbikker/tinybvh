@@ -934,7 +934,6 @@ public:
 	template <typename, typename> friend class BVH8_CPU;
 	template <typename, typename> friend class BVH8_CWBVH;
 	template <typename, typename> friend class BVH_DOBB;
-	template <typename, typename> friend class BVH_Motion;
 	template <int, typename, typename> friend class MBVH;
 	struct SubdivTask { Index node, sliceStart, sliceEnd; uint32_t depth; };
 	struct BVHNode
@@ -2124,9 +2123,7 @@ private:
 	static void CalcBasisVectorsFromTri( const bvhvec3* triVerts, bvhvec3& a0, bvhvec3& a1, bvhvec3& a2 );
 };
 
-// BVH_Motion: the basic BVH layout with motion blur. 
-// Triangles are given at the start (t = 0) and the end (t = 1) of the shutter interval. Each node stores a box 
-// for both ends, which traversal interpolates at Ray::time. The topology is built over the geometry at t=0.5.
+// BVH_Motion: the basic BVH layout with motion blur.
 TEMPLATED class BVH_Motion : public BVHBase<Float, Index>
 {
 public:
@@ -2135,7 +2132,6 @@ public:
 	using typename Base::Vertex;
 	using typename Base::Slice;
 	using typename Base::Ray;
-	using typename Base::BVH;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -2192,13 +2188,31 @@ public:
 	Index* primIdx = 0;				// primitive indices, contiguous per leaf.
 	Slice verts0 = {}, verts1 = {};	// the vertices at t = 0 and at t = 1.
 	Index* vertIdx = 0;				// vertex indices, shared by both keys; 0 if not indexed.
-	BVH bvh;						// the mid-shutter build the topology is taken from; kept so the
-									// next Build reuses its allocations. It holds no geometry.
 private:
+	// Construction: bounds over the shutter interval, as a box at t = 0 and a box at t = 1. Trivially
+	// constructible, so a set of bins costs nothing to declare.
+	struct MotionBox
+	{
+		Vec3 bmin0, bmax0, bmin1, bmax1;
+		static MotionBox Empty()
+		{
+			MotionBox b;
+			b.bmin0 = b.bmin1 = Vec3( bvh_far<Float> ), b.bmax0 = b.bmax1 = Vec3( -bvh_far<Float> );
+			return b;
+		}
+		void Grow( const MotionBox& b )
+		{
+			bmin0 = tinybvh_min( bmin0, b.bmin0 ), bmax0 = tinybvh_max( bmax0, b.bmax0 );
+			bmin1 = tinybvh_min( bmin1, b.bmin1 ), bmax1 = tinybvh_max( bmax1, b.bmax1 );
+		}
+		Vec3 Centroid4() const { return bmin0 + bmax0 + bmin1 + bmax1; } // four times the center at t = 1/2
+	};
+	struct BuildPrim { MotionBox box; Index prim; };	// a primitive during construction
 	PER_OCTANT int32_t IntersectOctant( Ray& ray ) const;
 	PER_OCTANT bool IsOccludedOctant( const Ray& ray ) const;
-	void CopyTopology( const BVH& topology );
-	static Float MotionSA( const BVHNode& node );
+	static Float MotionSA( const Vec3& bmin0, const Vec3& bmax0, const Vec3& bmin1, const Vec3& bmax1 );
+	static Float MotionSA( const MotionBox& b ) { return MotionSA( b.bmin0, b.bmax0, b.bmin1, b.bmax1 ); }
+	static Float MotionSA( const BVHNode& n ) { return MotionSA( n.aabbMin0, n.aabbMax0, n.aabbMin1, n.aabbMax1 ); }
 	TINYBVH_FORCEINLINE void TriIndices( const Index prim, Index& i0, Index& i1, Index& i2 ) const;
 	TINYBVH_FORCEINLINE void TriVerts( const Index prim, const Float t0, const Float t1, Vec3& v0, Vec3& v1, Vec3& v2 ) const;
 	Index allocatedPrims = 0;		// capacity of primIdx.
@@ -10304,8 +10318,7 @@ TEMPLATED PER_OCTANT bool BVH8_CPU<Float, Index>::IsOccludedOctant( const Ray& r
 TEMPLATED BVH_Motion<Float, Index>::BVH_Motion( BVH_Motion&& other ) noexcept
 {
 	*this = other;
-	// exactly one of the two may free the buffers from here on; the embedded bvh as well.
-	other.bvh.ReleaseOwnership();
+	// exactly one of the two may free the buffers from here on.
 	other.bvhNode = 0, other.primIdx = 0, other.allocatedNodes = other.usedNodes = other.allocatedPrims = 0;
 	other.verts0 = other.verts1 = Slice( nullptr, 0, 0 ), other.vertIdx = 0, other.triCount = other.idxCount = 0;
 }
@@ -10342,68 +10355,146 @@ TEMPLATED void BVH_Motion<Float, Index>::Build( const Slice& vertices0, const Sl
 	BVH_FATAL_ERROR_IF( primCount == 0, "BVH_Motion::Build( .. ), primCount == 0." );
 	BVH_FATAL_ERROR_IF( vertices0.count != vertices1.count, "BVH_Motion::Build( .. ), the keys differ in vertex count." );
 	verts0 = vertices0, verts1 = vertices1, vertIdx = (Index*)indices; // not copied; don't delete.
-	triCount = primCount;
-	// BVH_Motion topology: a regular build over the triangles at mid-shutter.
-	Vertex* mid = (Vertex*)AlignedAlloc( (size_t)primCount * 3 * sizeof( Vertex ) );
-	for (Index i = 0; i < primCount; i++)
-	{
-		Vec3 a, b, c;
-		TriVerts( i, Float( 0.5 ), Float( 0.5 ), a, b, c );
-		mid[i * 3] = Vertex( a ), mid[i * 3 + 1] = Vertex( b ), mid[i * 3 + 2] = Vertex( c );
-	}
-	this->PassSettingsTo( bvh );
-	bvh.settings.useSpatialSplits = false, bvh.settings.usePresplitting = false;
-	bvh.Build( Slice( mid, primCount * 3, sizeof( Vertex ) ) );
-	CopyTopology( bvh );
-	bvh.verts = Slice( nullptr, 0, 0 ); // bvh keeps its allocations, not the mid-shutter triangles.
-	AlignedFree( mid );
-	Refit(); // the boxes at both ends of the shutter interval.
-}
-
-// Convert the intermediate BVH (used to construct the toplogy) to the BVH_Motion layout, while reordering. 
-// Actual bounds are fixed by Refit.
-TEMPLATED void BVH_Motion<Float, Index>::CopyTopology( const BVH& topology )
-{
-	// the copy needs at most the nodes and primitive indices of the source; node 1 is unused in both.
-	const Index nodes = tinybvh_max( topology.usedNodes, (Index)2 ), prims = topology.idxCount;
+	triCount = idxCount = primCount;
+	// at most primCount leaves and primCount - 1 interior nodes, plus node 1, which stays unused.
+	const Index nodes = primCount * 2;
 	if (allocatedNodes < nodes)
 	{
 		AlignedFree( bvhNode );
 		bvhNode = (BVHNode*)AlignedAlloc( (size_t)nodes * sizeof( BVHNode ) );
 		allocatedNodes = nodes;
 	}
-	if (allocatedPrims < prims)
+	if (allocatedPrims < primCount)
 	{
 		AlignedFree( primIdx );
-		primIdx = (Index*)AlignedAlloc( (size_t)prims * sizeof( Index ) );
-		allocatedPrims = prims;
+		primIdx = (Index*)AlignedAlloc( (size_t)primCount * sizeof( Index ) );
+		allocatedPrims = primCount;
 	}
+	// the boxes of the primitives at both ends of the shutter interval, and the root bounds.
+	BuildPrim* bp = (BuildPrim*)AlignedAlloc( (size_t)primCount * sizeof( BuildPrim ) );
+	MotionBox rootBox = MotionBox::Empty();
+	for (Index i = 0; i < primCount; i++)
+	{
+		Index i0, i1, i2;
+		TriIndices( i, i0, i1, i2 );
+		const Vec3 a0 = verts0[i0], b0 = verts0[i1], c0 = verts0[i2];
+		const Vec3 a1 = verts1[i0], b1 = verts1[i1], c1 = verts1[i2];
+		MotionBox& box = bp[i].box;
+		box.bmin0 = tinybvh_min( a0, tinybvh_min( b0, c0 ) ), box.bmax0 = tinybvh_max( a0, tinybvh_max( b0, c0 ) );
+		box.bmin1 = tinybvh_min( a1, tinybvh_min( b1, c1 ) ), box.bmax1 = tinybvh_max( a1, tinybvh_max( b1, c1 ) );
+		bp[i].prim = i;
+		rootBox.Grow( box );
+	}
+	auto setBox = []( BVHNode& n, const MotionBox& b ) { n.aabbMin0 = b.bmin0, n.aabbMax0 = b.bmax0, n.aabbMin1 = b.bmin1, n.aabbMax1 = b.bmax1; };
 	memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // node 1 remains unused, for cache line alignment.
-	Index srcStack[TINYBVH_STACK_SIZE], dstStack[TINYBVH_STACK_SIZE], stackPtr = 0;
-	Index src = 0, dst = 0, nodePtr = 2, idxPtr = 0;
+	bvhNode[0].leftFirst = 0, bvhNode[0].triCount = primCount, setBox( bvhNode[0], rootBox );
+	Index nodePtr = 2, nodeIdx = 0, stack[TINYBVH_STACK_SIZE];
+	uint32_t stackPtr = 0;
 	while (1)
 	{
-		const typename BVH::BVHNode& from = topology.bvhNode[src];
-		BVHNode& to = bvhNode[dst];
-		to.tStart = 0, to.tEnd = 1;
-		if (from.isLeaf())
+		BVHNode& node = bvhNode[nodeIdx];
+		node.tStart = 0, node.tEnd = 1;
+		const Index first = node.leftFirst, count = node.triCount;
+		BuildPrim* p = bp + first;
+		Index leftCount = 0; // 0: the node is a leaf.
+		MotionBox lbox = MotionBox::Empty(), rbox = MotionBox::Empty();
+		if (count > 1 && stackPtr < TINYBVH_STACK_SIZE)
 		{
-			BVH_FATAL_ERROR_IF( idxPtr + from.triCount > allocatedPrims, "BVH_Motion::Build( .. ), primitive count mismatch." );
-			to.leftFirst = idxPtr, to.triCount = from.triCount;
-			memcpy( primIdx + idxPtr, topology.primIdx + from.leftFirst, (size_t)from.triCount * sizeof( Index ) );
-			idxPtr += from.triCount;
-			if (stackPtr == 0) break;
-			src = srcStack[--stackPtr], dst = dstStack[stackPtr];
+			// bin the primitives by Centroid4 on each axis, over the node's box at mid-shutter in the same
+			// units, as BVH::Build bins over the node box. In tests, this gave better trees than binning
+			// over the bounds of the centroids, except under extreme motion.
+			const Vec3 binMin = (node.aabbMin0 + node.aabbMin1) * Float( 2 );
+			const Vec3 extent = (node.aabbMax0 + node.aabbMax1) * Float( 2 ) - binMin;
+			Vec3 scale;
+			for (int32_t a = 0; a < 3; a++) scale[a] = extent[a] > Float( 1e-30 ) ? Float( MOTIONBVHBINS ) / extent[a] : Float( 0 );
+			MotionBox bin[3][MOTIONBVHBINS]; // a bin's box is valid once its count is nonzero.
+			Index binCount[3][MOTIONBVHBINS] = {};
+			for (Index i = 0; i < count; i++)
+			{
+				const Vec3 c = p[i].box.Centroid4() - binMin;
+				for (int32_t a = 0; a < 3; a++)
+				{
+					const int32_t b = tinybvh_clamp( (int32_t)(c[a] * scale[a]), 0, MOTIONBVHBINS - 1 );
+					if (binCount[a][b]++) bin[a][b].Grow( p[i].box ); else bin[a][b] = p[i].box;
+				}
+			}
+			// the cheapest split: count times expected area, summed over both sides. Only splits just left of
+			// a nonempty bin are scored; a split next to an empty bin repeats one of them. Empty sides are
+			// skipped by count: an empty box has no meaningful area, and must not get one under -ffast-math.
+			Float bestCost = 0;
+			int32_t bestAxis = -1, bestPos = 0;
+			for (int32_t a = 0; a < 3; a++) if (scale[a] > 0)
+			{
+				Float leftArea[MOTIONBVHBINS - 1], area = 0;
+				Index leftN[MOTIONBVHBINS - 1];
+				MotionBox l = MotionBox::Empty(), r = MotionBox::Empty();
+				for (Index n = 0, i = 0; i < MOTIONBVHBINS - 1; i++)
+				{
+					if (binCount[a][i]) l.Grow( bin[a][i] ), n += binCount[a][i], area = MotionSA( l );
+					leftN[i] = n, leftArea[i] = area;
+				}
+				for (Index n = 0, i = MOTIONBVHBINS - 1; i > 0; i--)
+		{
+					if (binCount[a][i] == 0) continue;
+					r.Grow( bin[a][i] ), n += binCount[a][i];
+					if (leftN[i - 1] == 0) break; // nothing left of this bin: no more splits on this axis.
+					const Float cost = (Float)leftN[i - 1] * leftArea[i - 1] + (Float)n * MotionSA( r );
+					if (bestAxis < 0 || cost < bestCost) bestCost = cost, bestAxis = a, bestPos = (int32_t)i - 1;
+				}
+			}
+			const Float nodeArea = MotionSA( node );
+			const bool worthIt = bestAxis >= 0 && nodeArea > 0 && c_trav + c_int * bestCost / nodeArea < c_int * (Float)count;
+			if (worthIt || settings.keepSplitting)
+			{
+				if (bestAxis >= 0)
+				{
+					// in-place partition by the best split plane, collecting the bounds of both sides.
+					const Float s = scale[bestAxis], m = binMin[bestAxis];
+					Index j = count;
+					for (Index i = 0; i < j; )
+						if (tinybvh_clamp( (int32_t)((p[i].box.Centroid4()[bestAxis] - m) * s), 0, MOTIONBVHBINS - 1 ) <= bestPos)
+							lbox.Grow( p[i].box ), i++;
+						else
+							rbox.Grow( p[i].box ), tinybvh_swap( p[i], p[--j] );
+					leftCount = j;
+				}
+				if (leftCount == 0 || leftCount == count)
+				{
+					leftCount = 0;
+					if (settings.keepSplitting)
+					{
+						// no usable SAH split: split at the middle of the node box, or halve the range.
+						const uint32_t a = tinybvh_maxdim( extent );
+						const Float mid = binMin[a] + extent[a] * Float( 0.5 );
+						Index j = count;
+						for (Index i = 0; i < j; ) if (p[i].box.Centroid4()[a] < mid) i++; else tinybvh_swap( p[i], p[--j] );
+						leftCount = (j == 0 || j == count) ? count / 2 : j;
+						lbox = rbox = MotionBox::Empty();
+						for (Index i = 0; i < leftCount; i++) lbox.Grow( p[i].box );
+						for (Index i = leftCount; i < count; i++) rbox.Grow( p[i].box );
+					}
+				}
+			}
+		}
+		if (leftCount > 0)
+		{
+			const Index n = nodePtr;
+			nodePtr += 2;
+			bvhNode[n].leftFirst = first, bvhNode[n].triCount = leftCount, setBox( bvhNode[n], lbox );
+			bvhNode[n + 1].leftFirst = first + leftCount, bvhNode[n + 1].triCount = count - leftCount, setBox( bvhNode[n + 1], rbox );
+			node.leftFirst = n, node.triCount = 0;
+			stack[stackPtr++] = n + 1, nodeIdx = n;
 			continue;
 		}
-		BVH_FATAL_ERROR_IF( stackPtr == TINYBVH_STACK_SIZE, "BVH_Motion::Build( .. ), tree too deep." );
-		BVH_FATAL_ERROR_IF( nodePtr + 2 > allocatedNodes, "BVH_Motion::Build( .. ), node count mismatch." );
-		to.leftFirst = nodePtr, to.triCount = 0;
-		srcStack[stackPtr] = from.leftFirst + 1, dstStack[stackPtr++] = nodePtr + 1;
-		src = from.leftFirst, dst = nodePtr, nodePtr += 2;
+		// a leaf: leftFirst and triCount already describe its primitives.
+		if (stackPtr == 0) break;
+		nodeIdx = stack[--stackPtr];
 	}
-	usedNodes = nodePtr, idxCount = idxPtr;
+	for (Index i = 0; i < primCount; i++) primIdx[i] = bp[i].prim;
+	AlignedFree( bp );
+	usedNodes = nodePtr;
 	refittable = true, hasHoles = false, orderedNodes = true, bvhOverIndices = false;
+	Refit(); // the final boxes at both ends of the shutter interval, padded.
 }
 
 // Refit: both boxes of every node, bottom-up. The leaves are padded by four ulps, as in Embree.
@@ -10446,12 +10537,13 @@ TEMPLATED void BVH_Motion<Float, Index>::Refit()
 	aabbMax = tinybvh_max( bvhNode[0].aabbMax0, bvhNode[0].aabbMax1 );
 }
 
-// The expected half area of a node over the shutter interval.
-TEMPLATED Float BVH_Motion<Float, Index>::MotionSA( const BVHNode& node )
+// The expected half area over the shutter interval of a box that goes from (bmin0, bmax0) at t = 0 to
+// (bmin1, bmax1) at t = 1.
+TEMPLATED Float BVH_Motion<Float, Index>::MotionSA( const Vec3& bmin0, const Vec3& bmax0, const Vec3& bmin1, const Vec3& bmax1 )
 {
-	const Vec3 midMin = (node.aabbMin0 + node.aabbMin1) * Float( 0.5 ), midMax = (node.aabbMax0 + node.aabbMax1) * Float( 0.5 );
+	const Vec3 midMin = (bmin0 + bmin1) * Float( 0.5 ), midMax = (bmax0 + bmax1) * Float( 0.5 );
 	// extent is linear in time and area quadratic, so Simpson's rule is exact: (A(0) + 4 A(1/2) + A(1)) / 6.
-	return (SA( node.aabbMin0, node.aabbMax0 ) + 4 * SA( midMin, midMax ) + SA( node.aabbMin1, node.aabbMax1 )) * Float( 1.0 / 6.0 );
+	return (SA( bmin0, bmax0 ) + 4 * SA( midMin, midMax ) + SA( bmin1, bmax1 )) * Float( 1.0 / 6.0 );
 }
 
 // SAH cost with the expected node areas; equal to BVH::SAHCost for geometry that does not move.

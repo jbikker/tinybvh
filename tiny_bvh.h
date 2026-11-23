@@ -65,6 +65,7 @@ THE SOFTWARE.
 // TinyBVH can be further configured using #defines, to be specified before the #include:
 // #define BVHBINS 8        - the number of bins to use in regular BVH construction. Default is 8.
 // #define HQBVHBINS 32     - the number of bins to use in SBVH construction. Default is 8; at most MAXHQBINS (128).
+// #define MOTIONBVHBINS 16 - the number of bins to use in BVH_Motion construction. Default is 16.
 // #define INST_IDX_BITS 10 - the number of bits to use for the instance index. Default is 32,
 //                            which stores the bits in a separate field in tinybvh::Intersection.
 // #define C_INT 1          - the estimated cost of a primitive intersection test. Default is 0.9f.
@@ -137,6 +138,9 @@ THE SOFTWARE.
 #endif
 #ifndef MAXHQBINS
 #define MAXHQBINS 128 // max value for hqbvhbins; one more than that with hqbvhoddeven.
+#endif
+#ifndef MOTIONBVHBINS
+#define MOTIONBVHBINS 16
 #endif
 
 // Stack size for all CPU-side traversal functions.
