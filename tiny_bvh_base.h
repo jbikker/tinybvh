@@ -4741,7 +4741,7 @@ TEMPLATED bool BVH<Float, Index>::IntersectCapsule( const Vec3& p0, const Vec3& 
 		{
 			if (!n->Intersect( bmin, bmax )) return false;
 			const Vec3 lo = n->aabbMin - Vec3( r ), hi = n->aabbMax + Vec3( r );
-			Float tmin = 0, tmax = 1, t1;
+			Float tmin = 0, tmax = 1, t1, t2;
 			if (slabX)
 				t1 = (lo.x - p0.x) * rD.x, t2 = (hi.x - p0.x) * rD.x,
 				tmin = tinybvh_max( tmin, tinybvh_min( t1, t2 ) ), tmax = tinybvh_min( tmax, tinybvh_max( t1, t2 ) );
