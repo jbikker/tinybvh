@@ -991,6 +991,7 @@ public:
 	int32_t Intersect( Ray& ray ) const;
 	bool IsOccluded( const Ray& ray ) const;
 	bool IntersectSphere( const Vec3& pos, const Float r ) const;
+	bool IntersectCapsule( const Vec3& p0, const Vec3& p1, const Float r ) const; // segment p0-p1, radius r
 	void ConvertFrom( const BVH_Verbose& original, bool compact = true );
 	void SplitLeafs( const Index maxPrims );
 	void FitLeafs( const Index primCount );
@@ -2132,6 +2133,7 @@ public:
 	using typename Base::Vertex;
 	using typename Base::Slice;
 	using typename Base::Ray;
+	using typename Base::BinBox;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -2189,29 +2191,32 @@ public:
 	Slice verts0 = {}, verts1 = {};	// the vertices at t = 0 and at t = 1.
 	Index* vertIdx = 0;				// vertex indices, shared by both keys; 0 if not indexed.
 private:
-	// Construction: bounds over the shutter interval, as a box at t = 0 and a box at t = 1. Trivially
+	// Construction: the boxes at t = 0 and t = 1 as BinBoxes, so merging is a max on every lane. Trivially
 	// constructible, so a set of bins costs nothing to declare.
 	struct MotionBox
 	{
-		Vec3 bmin0, bmax0, bmin1, bmax1;
+		BinBox b0, b1;
 		static MotionBox Empty()
 		{
 			MotionBox b;
-			b.bmin0 = b.bmin1 = Vec3( bvh_far<Float> ), b.bmax0 = b.bmax1 = Vec3( -bvh_far<Float> );
+			b.b0.negMin = b.b0.bmax = b.b1.negMin = b.b1.bmax = Vec3( -bvh_far<Float> );
+			b.b0.pad0 = b.b0.pad1 = b.b1.pad0 = b.b1.pad1 = 0;
 			return b;
 		}
-		void Grow( const MotionBox& b )
-		{
-			bmin0 = tinybvh_min( bmin0, b.bmin0 ), bmax0 = tinybvh_max( bmax0, b.bmax0 );
-			bmin1 = tinybvh_min( bmin1, b.bmin1 ), bmax1 = tinybvh_max( bmax1, b.bmax1 );
-		}
-		Vec3 Centroid4() const { return bmin0 + bmax0 + bmin1 + bmax1; } // four times the center at t = 1/2
+		void Grow( const MotionBox& o ) { Merge( *this, o ); }
+		// a primitive's bmin0 + bmax0 + bmin1 + bmax1, kept in the padding so that binning and partitioning see
+		// the same value, also under -ffast-math; meaningless in merged boxes.
+		Vec3 Centroid4() const { return Vec3( b0.pad0, b0.pad1, b1.pad0 ); }
 	};
-	struct BuildPrim { MotionBox box; Index prim; };	// a primitive during construction
+	static void Merge( MotionBox& b, const MotionBox& o );
 	PER_OCTANT int32_t IntersectOctant( Ray& ray ) const;
 	PER_OCTANT bool IsOccludedOctant( const Ray& ray ) const;
+	static void BinPrims( const MotionBox* prims, const Index count, const Vec3& binMin, const Vec3& scale, MotionBox* bin, Index* binCount );
+	static Index PartitionPrims( MotionBox* prims, Index* idx, const Index count, const uint32_t axis, const Float binMin, const Float scale,
+		const int32_t pos, MotionBox& left, MotionBox& right );
 	static Float MotionSA( const Vec3& bmin0, const Vec3& bmax0, const Vec3& bmin1, const Vec3& bmax1 );
-	static Float MotionSA( const MotionBox& b ) { return MotionSA( b.bmin0, b.bmax0, b.bmin1, b.bmax1 ); }
+	static Float MotionSA( const MotionBox& b );
+	void FinishBounds();
 	static Float MotionSA( const BVHNode& n ) { return MotionSA( n.aabbMin0, n.aabbMax0, n.aabbMin1, n.aabbMax1 ); }
 	TINYBVH_FORCEINLINE void TriIndices( const Index prim, Index& i0, Index& i1, Index& i2 ) const;
 	TINYBVH_FORCEINLINE void TriVerts( const Index prim, const Float t0, const Float t1, Vec3& v0, Vec3& v1, Vec3& v2 ) const;
@@ -4659,6 +4664,134 @@ TEMPLATED bool BVH<Float, Index>::IntersectSphere( const Vec3& pos, const Float 
 		}
 		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
 		bool hit1 = child1->Intersect( bmin, bmax ), hit2 = child2->Intersect( bmin, bmax );
+		if (hit1 && hit2) stack[stackPtr++] = child2, node = child1;
+		else if (hit1) node = child1; else if (hit2) node = child2;
+		else { if (stackPtr == 0) break; node = stack[--stackPtr]; }
+	}
+	return false;
+}
+
+// Squared distance between point p and triangle abc. Ericson, Real-Time Collision Detection, 5.1.5.
+template <typename V, typename F> static F tinybvh_point_tri_dist2( const V& p, const V& a, const V& b, const V& c )
+{
+	const V ab = b - a, ac = c - a, ap = p - a;
+	const F d1 = tinybvh_dot( ab, ap ), d2 = tinybvh_dot( ac, ap );
+	V q;
+	if (d1 <= 0 && d2 <= 0) q = a; else
+	{
+		const V bp = p - b;
+		const F d3 = tinybvh_dot( ab, bp ), d4 = tinybvh_dot( ac, bp );
+		if (d3 >= 0 && d4 <= d3) q = b; else
+		{
+			const V cp = p - c;
+			const F d5 = tinybvh_dot( ab, cp ), d6 = tinybvh_dot( ac, cp );
+			const F vc = d1 * d4 - d3 * d2, vb = d5 * d2 - d1 * d6, va = d3 * d6 - d5 * d4;
+			if (d6 >= 0 && d5 <= d6) q = c;
+			else if (vc <= 0 && d1 >= 0 && d3 <= 0) { const F den = d1 - d3; q = a + ab * (den > 0 ? d1 / den : F( 0 )); }
+			else if (vb <= 0 && d2 >= 0 && d6 <= 0) { const F den = d2 - d6; q = a + ac * (den > 0 ? d2 / den : F( 0 )); }
+			else if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0)
+			{
+				const F den = (d4 - d3) + (d5 - d6);
+				q = b + (c - b) * (den > 0 ? (d4 - d3) / den : F( 0 ));
+			}
+			else
+			{
+				const F den = va + vb + vc;
+				if (den > 0) q = a + ab * (vb / den) + ac * (vc / den); else q = a; // degenerate: edges cover it
+			}
+		}
+	}
+	const V d = p - q;
+	return tinybvh_dot( d, d );
+}
+
+// Squared distance between segments p0-p1 and q0-q1. Ericson, Real-Time Collision Detection, 5.1.9.
+template <typename V, typename F> static F tinybvh_seg_seg_dist2( const V& p0, const V& p1, const V& q0, const V& q1 )
+{
+	const V d1 = p1 - p0, d2 = q1 - q0, w = p0 - q0;
+	const F a = tinybvh_dot( d1, d1 ), e = tinybvh_dot( d2, d2 ), f = tinybvh_dot( d2, w );
+	F s = 0, t = 0;
+	if (a <= 0 && e <= 0) s = t = 0; else 
+	if (a <= 0) t = tinybvh_clamp( f / e, F( 0 ), F( 1 ) ); else
+	{
+		const F c = tinybvh_dot( d1, w );
+		if (e <= 0) s = tinybvh_clamp( -c / a, F( 0 ), F( 1 ) ); else
+		{
+			const F b = tinybvh_dot( d1, d2 ), den = a * e - b * b;
+			s = den > 0 ? tinybvh_clamp( (b * f - c * e) / den, F( 0 ), F( 1 ) ) : F( 0 );
+			t = (b * s + f) / e;
+			if (t < 0) t = 0, s = tinybvh_clamp( -c / a, F( 0 ), F( 1 ) );
+			else if (t > 1) t = 1, s = tinybvh_clamp( (b - c) / a, F( 0 ), F( 1 ) );
+		}
+	}
+	const V d = (p0 + d1 * s) - (q0 + d2 * t);
+	return tinybvh_dot( d, d );
+}
+
+TEMPLATED bool BVH<Float, Index>::IntersectCapsule( const Vec3& p0, const Vec3& p1, const Float r ) const
+{
+	const Vec3 bmin = tinybvh_min( p0, p1 ) - Vec3( r ), bmax = tinybvh_max( p0, p1 ) + Vec3( r );
+	const Vec3 D = p1 - p0;
+	const Float r2 = r * r;
+	// per-axis reciprocals for the slab test; tiny components fall back to an interval overlap test
+	const bool slabX = fabs( D.x ) > Float( 1e-20 ), slabY = fabs( D.y ) > Float( 1e-20 ), slabZ = fabs( D.z ) > Float( 1e-20 );
+	const Vec3 rD( slabX ? 1 / D.x : 0, slabY ? 1 / D.y : 0, slabZ ? 1 / D.z : 0 );
+	// conservative: segment vs node box grown by r
+	auto overlaps = [&]( const BVHNode* n ) -> bool
+		{
+			if (!n->Intersect( bmin, bmax )) return false;
+			const Vec3 lo = n->aabbMin - Vec3( r ), hi = n->aabbMax + Vec3( r );
+			Float tmin = 0, tmax = 1, t1;
+			if (slabX)
+				t1 = (lo.x - p0.x) * rD.x, t2 = (hi.x - p0.x) * rD.x,
+				tmin = tinybvh_max( tmin, tinybvh_min( t1, t2 ) ), tmax = tinybvh_min( tmax, tinybvh_max( t1, t2 ) );
+			if (slabY)
+				t1 = (lo.y - p0.y) * rD.y, t2 = (hi.y - p0.y) * rD.y,
+				tmin = tinybvh_max( tmin, tinybvh_min( t1, t2 ) ), tmax = tinybvh_min( tmax, tinybvh_max( t1, t2 ) );
+			if (slabZ)
+				t1 = (lo.z - p0.z) * rD.z, t2 = (hi.z - p0.z) * rD.z,
+				tmin = tinybvh_max( tmin, tinybvh_min( t1, t2 ) ), tmax = tinybvh_min( tmax, tinybvh_max( t1, t2 ) );
+			return tmin <= tmax;
+		};
+	BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
+	Index stackPtr = 0;
+	while (1)
+	{
+		if (node->isLeaf())
+		{
+			for (Index i = 0; i < node->triCount; i++)
+			{
+				Index idx = primIdx[node->leftFirst + i];
+				Vec3 a, b, c;
+				if (!vertIdx) idx *= 3, a = verts[idx], b = verts[idx + 1], c = verts[idx + 2]; else
+				{
+					const Index i0 = vertIdx[idx * 3], i1 = vertIdx[idx * 3 + 1], i2 = vertIdx[idx * 3 + 2];
+					a = verts[i0], b = verts[i1], c = verts[i2];
+				}
+				// reject if both endpoints are more than r away on the same side of the plane
+				const Vec3 N = tinybvh_cross( b - a, c - a );
+				const Float nn = tinybvh_dot( N, N ), s0 = tinybvh_dot( N, p0 - a ), s1 = tinybvh_dot( N, p1 - a );
+				if (s0 * s1 > 0 && s0 * s0 > r2 * nn && s1 * s1 > r2 * nn) continue;
+				// segment crosses the triangle
+				if (s0 * s1 <= 0 && s0 != s1)
+				{
+					const Vec3 x = p0 + D * (s0 / (s0 - s1));
+					if (tinybvh_dot( tinybvh_cross( b - a, x - a ), N ) >= 0 &&
+						tinybvh_dot( tinybvh_cross( c - b, x - b ), N ) >= 0 &&
+						tinybvh_dot( tinybvh_cross( a - c, x - c ), N ) >= 0) return true;
+				}
+				// otherwise the closest points involve a segment endpoint or a triangle edge
+				if (tinybvh_point_tri_dist2<Vec3, Float>( p0, a, b, c ) <= r2) return true;
+				if (tinybvh_point_tri_dist2<Vec3, Float>( p1, a, b, c ) <= r2) return true;
+				if (tinybvh_seg_seg_dist2<Vec3, Float>( p0, p1, a, b ) <= r2) return true;
+				if (tinybvh_seg_seg_dist2<Vec3, Float>( p0, p1, b, c ) <= r2) return true;
+				if (tinybvh_seg_seg_dist2<Vec3, Float>( p0, p1, c, a ) <= r2) return true;
+			}
+			if (stackPtr == 0) break; else node = stack[--stackPtr];
+			continue;
+		}
+		BVHNode* child1 = &bvhNode[node->leftFirst], * child2 = &bvhNode[node->leftFirst + 1];
+		bool hit1 = overlaps( child1 ), hit2 = overlaps( child2 );
 		if (hit1 && hit2) stack[stackPtr++] = child2, node = child1;
 		else if (hit1) node = child1; else if (hit2) node = child2;
 		else { if (stackPtr == 0) break; node = stack[--stackPtr]; }
@@ -10371,7 +10504,7 @@ TEMPLATED void BVH_Motion<Float, Index>::Build( const Slice& vertices0, const Sl
 		allocatedPrims = primCount;
 	}
 	// the boxes of the primitives at both ends of the shutter interval, and the root bounds.
-	BuildPrim* bp = (BuildPrim*)AlignedAlloc( (size_t)primCount * sizeof( BuildPrim ) );
+	MotionBox* bp = (MotionBox*)AlignedAlloc( (size_t)primCount * sizeof( MotionBox ) ); // partitioned along with primIdx
 	MotionBox rootBox = MotionBox::Empty();
 	for (Index i = 0; i < primCount; i++)
 	{
@@ -10379,13 +10512,15 @@ TEMPLATED void BVH_Motion<Float, Index>::Build( const Slice& vertices0, const Sl
 		TriIndices( i, i0, i1, i2 );
 		const Vec3 a0 = verts0[i0], b0 = verts0[i1], c0 = verts0[i2];
 		const Vec3 a1 = verts1[i0], b1 = verts1[i1], c1 = verts1[i2];
-		MotionBox& box = bp[i].box;
-		box.bmin0 = tinybvh_min( a0, tinybvh_min( b0, c0 ) ), box.bmax0 = tinybvh_max( a0, tinybvh_max( b0, c0 ) );
-		box.bmin1 = tinybvh_min( a1, tinybvh_min( b1, c1 ) ), box.bmax1 = tinybvh_max( a1, tinybvh_max( b1, c1 ) );
-		bp[i].prim = i;
+		MotionBox& box = bp[i];
+		box.b0.negMin = -tinybvh_min( a0, tinybvh_min( b0, c0 ) ), box.b0.bmax = tinybvh_max( a0, tinybvh_max( b0, c0 ) );
+		box.b1.negMin = -tinybvh_min( a1, tinybvh_min( b1, c1 ) ), box.b1.bmax = tinybvh_max( a1, tinybvh_max( b1, c1 ) );
+		const Vec3 c4 = box.b0.bmax - box.b0.negMin - box.b1.negMin + box.b1.bmax;
+		box.b0.pad0 = c4.x, box.b0.pad1 = c4.y, box.b1.pad0 = c4.z, box.b1.pad1 = 0;
+		primIdx[i] = i;
 		rootBox.Grow( box );
 	}
-	auto setBox = []( BVHNode& n, const MotionBox& b ) { n.aabbMin0 = b.bmin0, n.aabbMax0 = b.bmax0, n.aabbMin1 = b.bmin1, n.aabbMax1 = b.bmax1; };
+	auto setBox = []( BVHNode& n, const MotionBox& b ) { n.aabbMin0 = -b.b0.negMin, n.aabbMax0 = b.b0.bmax, n.aabbMin1 = -b.b1.negMin, n.aabbMax1 = b.b1.bmax; };
 	memset( &bvhNode[1], 0, sizeof( BVHNode ) ); // node 1 remains unused, for cache line alignment.
 	bvhNode[0].leftFirst = 0, bvhNode[0].triCount = primCount, setBox( bvhNode[0], rootBox );
 	Index nodePtr = 2, nodeIdx = 0, stack[TINYBVH_STACK_SIZE];
@@ -10395,7 +10530,7 @@ TEMPLATED void BVH_Motion<Float, Index>::Build( const Slice& vertices0, const Sl
 		BVHNode& node = bvhNode[nodeIdx];
 		node.tStart = 0, node.tEnd = 1;
 		const Index first = node.leftFirst, count = node.triCount;
-		BuildPrim* p = bp + first;
+		MotionBox* p = bp + first;
 		Index leftCount = 0; // 0: the node is a leaf.
 		MotionBox lbox = MotionBox::Empty(), rbox = MotionBox::Empty();
 		if (count > 1 && stackPtr < TINYBVH_STACK_SIZE)
@@ -10409,55 +10544,39 @@ TEMPLATED void BVH_Motion<Float, Index>::Build( const Slice& vertices0, const Sl
 			for (int32_t a = 0; a < 3; a++) scale[a] = extent[a] > Float( 1e-30 ) ? Float( MOTIONBVHBINS ) / extent[a] : Float( 0 );
 			MotionBox bin[3][MOTIONBVHBINS]; // a bin's box is valid once its count is nonzero.
 			Index binCount[3][MOTIONBVHBINS] = {};
-			for (Index i = 0; i < count; i++)
-			{
-				const Vec3 c = p[i].box.Centroid4() - binMin;
-				for (int32_t a = 0; a < 3; a++)
-				{
-					const int32_t b = tinybvh_clamp( (int32_t)(c[a] * scale[a]), 0, MOTIONBVHBINS - 1 );
-					if (binCount[a][b]++) bin[a][b].Grow( p[i].box ); else bin[a][b] = p[i].box;
-				}
-			}
-			// the cheapest split: count times expected area, summed over both sides. Only splits just left of
-			// a nonempty bin are scored; a split next to an empty bin repeats one of them. Empty sides are
+			BinPrims( p, count, binMin, scale, &bin[0][0], &binCount[0][0] );
+			// the cheapest split: count times expected area, summed over both sides. Only the nonempty bins
+			// are visited: a split next to an empty bin repeats one between two nonempty bins. Empty sides are
 			// skipped by count: an empty box has no meaningful area, and must not get one under -ffast-math.
 			Float bestCost = 0;
 			int32_t bestAxis = -1, bestPos = 0;
 			for (int32_t a = 0; a < 3; a++) if (scale[a] > 0)
 			{
-				Float leftArea[MOTIONBVHBINS - 1], area = 0;
-				Index leftN[MOTIONBVHBINS - 1];
-				MotionBox l = MotionBox::Empty(), r = MotionBox::Empty();
-				for (Index n = 0, i = 0; i < MOTIONBVHBINS - 1; i++)
+				int32_t used[MOTIONBVHBINS], k = 0; // branch-free: these tests are unpredictable in small nodes.
+				for (int32_t i = 0; i < MOTIONBVHBINS; i++) used[k] = i, k += binCount[a][i] != 0;
+				if (k < 2) continue;
+				Float leftArea[MOTIONBVHBINS];
+				Index leftN[MOTIONBVHBINS];
+				MotionBox l = bin[a][used[0]];
+				leftN[0] = binCount[a][used[0]], leftArea[0] = MotionSA( l );
+				for (int32_t j = 1; j < k - 1; j++)
+					l.Grow( bin[a][used[j]] ), leftN[j] = leftN[j - 1] + binCount[a][used[j]], leftArea[j] = MotionSA( l );
+				MotionBox r = bin[a][used[k - 1]];
+				Index n = binCount[a][used[k - 1]];
+				for (int32_t j = k - 1; j > 0; j--)
 				{
-					if (binCount[a][i]) l.Grow( bin[a][i] ), n += binCount[a][i], area = MotionSA( l );
-					leftN[i] = n, leftArea[i] = area;
-				}
-				for (Index n = 0, i = MOTIONBVHBINS - 1; i > 0; i--)
-		{
-					if (binCount[a][i] == 0) continue;
-					r.Grow( bin[a][i] ), n += binCount[a][i];
-					if (leftN[i - 1] == 0) break; // nothing left of this bin: no more splits on this axis.
-					const Float cost = (Float)leftN[i - 1] * leftArea[i - 1] + (Float)n * MotionSA( r );
-					if (bestAxis < 0 || cost < bestCost) bestCost = cost, bestAxis = a, bestPos = (int32_t)i - 1;
+					if (j < k - 1) r.Grow( bin[a][used[j]] ), n += binCount[a][used[j]];
+					const Float cost = (Float)leftN[j - 1] * leftArea[j - 1] + (Float)n * MotionSA( r );
+					const bool better = (bestAxis < 0) | (cost < bestCost);
+					bestCost = better ? cost : bestCost, bestAxis = better ? a : bestAxis, bestPos = better ? used[j] - 1 : bestPos;
 				}
 			}
 			const Float nodeArea = MotionSA( node );
 			const bool worthIt = bestAxis >= 0 && nodeArea > 0 && c_trav + c_int * bestCost / nodeArea < c_int * (Float)count;
 			if (worthIt || settings.keepSplitting)
 			{
-				if (bestAxis >= 0)
-				{
-					// in-place partition by the best split plane, collecting the bounds of both sides.
-					const Float s = scale[bestAxis], m = binMin[bestAxis];
-					Index j = count;
-					for (Index i = 0; i < j; )
-						if (tinybvh_clamp( (int32_t)((p[i].box.Centroid4()[bestAxis] - m) * s), 0, MOTIONBVHBINS - 1 ) <= bestPos)
-							lbox.Grow( p[i].box ), i++;
-						else
-							rbox.Grow( p[i].box ), tinybvh_swap( p[i], p[--j] );
-					leftCount = j;
-				}
+				if (bestAxis >= 0) // in-place partition by the best split plane, with the bounds of both sides.
+					leftCount = PartitionPrims( p, primIdx + first, count, bestAxis, binMin[bestAxis], scale[bestAxis], bestPos, lbox, rbox );
 				if (leftCount == 0 || leftCount == count)
 				{
 					leftCount = 0;
@@ -10466,12 +10585,13 @@ TEMPLATED void BVH_Motion<Float, Index>::Build( const Slice& vertices0, const Sl
 						// no usable SAH split: split at the middle of the node box, or halve the range.
 						const uint32_t a = tinybvh_maxdim( extent );
 						const Float mid = binMin[a] + extent[a] * Float( 0.5 );
-						Index j = count;
-						for (Index i = 0; i < j; ) if (p[i].box.Centroid4()[a] < mid) i++; else tinybvh_swap( p[i], p[--j] );
+						Index j = count, * idx = primIdx + first;
+						for (Index i = 0; i < j; )
+							if (p[i].Centroid4()[a] < mid) i++; else j--, tinybvh_swap( p[i], p[j] ), tinybvh_swap( idx[i], idx[j] );
 						leftCount = (j == 0 || j == count) ? count / 2 : j;
 						lbox = rbox = MotionBox::Empty();
-						for (Index i = 0; i < leftCount; i++) lbox.Grow( p[i].box );
-						for (Index i = leftCount; i < count; i++) rbox.Grow( p[i].box );
+						for (Index i = 0; i < leftCount; i++) lbox.Grow( p[i] );
+						for (Index i = leftCount; i < count; i++) rbox.Grow( p[i] );
 					}
 				}
 			}
@@ -10490,11 +10610,41 @@ TEMPLATED void BVH_Motion<Float, Index>::Build( const Slice& vertices0, const Sl
 		if (stackPtr == 0) break;
 		nodeIdx = stack[--stackPtr];
 	}
-	for (Index i = 0; i < primCount; i++) primIdx[i] = bp[i].prim;
 	AlignedFree( bp );
 	usedNodes = nodePtr;
 	refittable = true, hasHoles = false, orderedNodes = true, bvhOverIndices = false;
-	Refit(); // the final boxes at both ends of the shutter interval, padded.
+	FinishBounds(); // the leaf boxes are exact already; as Refit, without revisiting the vertices.
+}
+
+TEMPLATED void BVH_Motion<Float, Index>::Merge( MotionBox& b, const MotionBox& o )
+{
+	b.b0.negMin = tinybvh_max( b.b0.negMin, o.b0.negMin ), b.b0.bmax = tinybvh_max( b.b0.bmax, o.b0.bmax );
+	b.b1.negMin = tinybvh_max( b.b1.negMin, o.b1.negMin ), b.b1.bmax = tinybvh_max( b.b1.bmax, o.b1.bmax );
+}
+
+// Bin the primitives of a node by Centroid4 on all three axes. The platform headers provide SIMD versions.
+TEMPLATED void BVH_Motion<Float, Index>::BinPrims( const MotionBox* p, const Index count, const Vec3& binMin, const Vec3& scale, MotionBox* bin, Index* binCount )
+{
+	for (Index i = 0; i < count; i++)
+	{
+		const Vec3 c = p[i].Centroid4() - binMin;
+		for (int32_t a = 0; a < 3; a++)
+		{
+			const int32_t b = a * MOTIONBVHBINS + tinybvh_clamp( (int32_t)(c[a] * scale[a]), 0, MOTIONBVHBINS - 1 );
+			if (binCount[b]++) bin[b].Grow( p[i] ); else bin[b] = p[i];
+		}
+	}
+}
+
+// Partition the primitives of a node, and their indices, at bin 'pos' on 'axis'; returns the left count.
+TEMPLATED Index BVH_Motion<Float, Index>::PartitionPrims( MotionBox* p, Index* idx, const Index count, const uint32_t axis, const Float binMin,
+	const Float scale, const int32_t pos, MotionBox& left, MotionBox& right )
+{
+	Index j = count;
+	for (Index i = 0; i < j; )
+		if (tinybvh_clamp( (int32_t)((p[i].Centroid4()[axis] - binMin) * scale), 0, MOTIONBVHBINS - 1 ) <= pos) left.Grow( p[i] ), i++;
+		else right.Grow( p[i] ), j--, tinybvh_swap( p[i], p[j] ), tinybvh_swap( idx[i], idx[j] );
+	return j;
 }
 
 // Refit: both boxes of every node, bottom-up. The leaves are padded by four ulps, as in Embree.
@@ -10502,16 +10652,9 @@ TEMPLATED void BVH_Motion<Float, Index>::Refit()
 {
 	BVH_FATAL_ERROR_IF( bvhNode == 0, "BVH_Motion::Refit(), bvhNode == 0." );
 	BVH_FATAL_ERROR_IF( !verts0 || !verts1, "BVH_Motion::Refit(), no vertex data." );
-	const Float pad = Float( 4 ) * (sizeof( Float ) == 4 ? Float( 1.1920928955078125e-7 ) : Float( 2.220446049250313e-16 ));
-	auto grow = [pad]( Vec3& bmin, Vec3& bmax )
-	{
-		for (int32_t a = 0; a < 3; a++) bmin[a] -= pad * fabs( bmin[a] ), bmax[a] += pad * fabs( bmax[a] );
-	};
-	for (Index i = usedNodes; i-- > 0; ) if (i != 1)
+	for (Index i = 0; i < usedNodes; i++) if (i != 1 && bvhNode[i].isLeaf())
 	{
 		BVHNode& node = bvhNode[i];
-		if (node.isLeaf())
-		{
 			Vec3 bmin0( bvh_far<Float> ), bmax0( -bvh_far<Float> ), bmin1( bvh_far<Float> ), bmax1( -bvh_far<Float> );
 			for (Index j = 0; j < node.triCount; j++)
 			{
@@ -10524,8 +10667,25 @@ TEMPLATED void BVH_Motion<Float, Index>::Refit()
 				bmin1 = tinybvh_min( bmin1, tinybvh_min( a1, tinybvh_min( b1, c1 ) ) );
 				bmax1 = tinybvh_max( bmax1, tinybvh_max( a1, tinybvh_max( b1, c1 ) ) );
 			}
-			grow( bmin0, bmax0 ), grow( bmin1, bmax1 );
 			node.aabbMin0 = bmin0, node.aabbMax0 = bmax0, node.aabbMin1 = bmin1, node.aabbMax1 = bmax1;
+	}
+	FinishBounds();
+}
+
+// Pad the exact leaf boxes, then set the interior boxes bottom-up, and the bounds over the shutter interval.
+TEMPLATED void BVH_Motion<Float, Index>::FinishBounds()
+{
+	const Float pad = Float( 4 ) * (sizeof( Float ) == 4 ? Float( 1.1920928955078125e-7 ) : Float( 2.220446049250313e-16 ));
+	auto grow = [pad]( Vec3& bmin, Vec3& bmax )
+	{
+		for (int32_t a = 0; a < 3; a++) bmin[a] -= pad * fabs( bmin[a] ), bmax[a] += pad * fabs( bmax[a] );
+	};
+	for (Index i = usedNodes; i-- > 0; ) if (i != 1)
+	{
+		BVHNode& node = bvhNode[i];
+		if (node.isLeaf())
+		{
+			grow( node.aabbMin0, node.aabbMax0 ), grow( node.aabbMin1, node.aabbMax1 );
 			continue;
 		}
 		const BVHNode& left = bvhNode[node.leftFirst], & right = bvhNode[node.leftFirst + 1];
@@ -10545,6 +10705,7 @@ TEMPLATED Float BVH_Motion<Float, Index>::MotionSA( const Vec3& bmin0, const Vec
 	// extent is linear in time and area quadratic, so Simpson's rule is exact: (A(0) + 4 A(1/2) + A(1)) / 6.
 	return (SA( bmin0, bmax0 ) + 4 * SA( midMin, midMax ) + SA( bmin1, bmax1 )) * Float( 1.0 / 6.0 );
 }
+TEMPLATED Float BVH_Motion<Float, Index>::MotionSA( const MotionBox& b ) { return MotionSA( -b.b0.negMin, b.b0.bmax, -b.b1.negMin, b.b1.bmax ); }
 
 // SAH cost with the expected node areas; equal to BVH::SAHCost for geometry that does not move.
 TEMPLATED Float BVH_Motion<Float, Index>::SAHCost( const Index nodeIdx ) const

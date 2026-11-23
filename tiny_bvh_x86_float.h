@@ -46,6 +46,12 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuildFragSlice( const ui
 template <> void impl::BVH<float, uint32_t>::BuildSIMDBinTask( const uint32_t first, const uint32_t last, void* binbox, uint32_t* count, const float* nmin4, const float* rpd4 );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDSubtree( uint32_t nodeIdx, uint32_t depth, bool allowTasks, bool allowSlices );
 template <> void impl::BVH<float, uint32_t>::BuildSIMDFinalize();
+template <> void impl::BVH_Motion<float, uint32_t>::BinPrims( const MotionBox* prims, const uint32_t count, const bvhvec3& binMin, const bvhvec3& scale,
+	MotionBox* bin, uint32_t* binCount );
+template <> uint32_t impl::BVH_Motion<float, uint32_t>::PartitionPrims( MotionBox* prims, uint32_t* idx, const uint32_t count, const uint32_t axis,
+	const float binMin, const float scale, const int32_t pos, MotionBox& left, MotionBox& right );
+template <> float impl::BVH_Motion<float, uint32_t>::MotionSA( const MotionBox& b );
+template <> void impl::BVH_Motion<float, uint32_t>::Merge( MotionBox& b, const MotionBox& o );
 #endif
 #ifdef BVH_USEAVX2
 template <> void impl::BVH<float, uint32_t>::SortByCentroid( const uint32_t* frag, const uint32_t n, const uint32_t axis, uint8_t* order ) const;
@@ -513,6 +519,83 @@ template <> void impl::BVH<float, uint32_t>::BinBoxAdd( BVHBinBox<float>& b, con
 	const __m128 mx4 = _mm_setr_ps( mx.x, mx.y, mx.z, 0 );
 	_mm256_store_ps( &b.negMin.x, _mm256_max_ps( _mm256_load_ps( &b.negMin.x ),
 		_mm256_insertf128_ps( _mm256_castps128_ps256( mn4 ), mx4, 1 ) ) );
+}
+
+// BVH_Motion construction, AVX.
+static TINYBVH_FORCEINLINE __m128 tinybvh_motion_centroid4( const __m256 k0, const __m256 k1 )
+{
+	const __m128 c = _mm_unpackhi_ps( _mm256_castps256_ps128( k0 ), _mm256_extractf128_ps( k0, 1 ) ); // .., .., cx, cy
+	return _mm_shuffle_ps( c, _mm256_castps256_ps128( k1 ), _MM_SHUFFLE( 3, 3, 3, 2 ) ); // cx, cy, cz, cz
+}
+template <> void impl::BVH_Motion<float, uint32_t>::BinPrims( const MotionBox* p, const uint32_t count, const bvhvec3& binMin,
+	const bvhvec3& scale, MotionBox* bin, uint32_t* binCount )
+{
+	const __m128 bmin4 = _mm_setr_ps( binMin.x, binMin.y, binMin.z, 0 ), scale4 = _mm_setr_ps( scale.x, scale.y, scale.z, 0 );
+	const __m128i lastBin = _mm_set1_epi32( MOTIONBVHBINS - 1 ), axisBase = _mm_setr_epi32( 0, MOTIONBVHBINS, 2 * MOTIONBVHBINS, 0 );
+	int32_t b[4];
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const __m256 k0 = tinybvh_load8( &p[i].b0 ), k1 = tinybvh_load8( &p[i].b1 );
+		const __m128i bi = _mm_cvttps_epi32( _mm_mul_ps( _mm_sub_ps( tinybvh_motion_centroid4( k0, k1 ), bmin4 ), scale4 ) );
+		tinybvh_store4i( b, _mm_add_epi32( _mm_min_epi32( _mm_max_epi32( bi, _mm_setzero_si128() ), lastBin ), axisBase ) );
+		for (int32_t a = 0; a < 3; a++)
+		{
+			MotionBox& d = bin[b[a]];
+			if (binCount[b[a]]++)
+				_mm256_store_ps( &d.b0.negMin.x, _mm256_max_ps( _mm256_load_ps( &d.b0.negMin.x ), k0 ) ),
+				_mm256_store_ps( &d.b1.negMin.x, _mm256_max_ps( _mm256_load_ps( &d.b1.negMin.x ), k1 ) );
+			else
+				_mm256_store_ps( &d.b0.negMin.x, k0 ), _mm256_store_ps( &d.b1.negMin.x, k1 );
+		}
+	}
+}
+template <> uint32_t impl::BVH_Motion<float, uint32_t>::PartitionPrims( MotionBox* p, uint32_t* idx, const uint32_t count, const uint32_t axis,
+	const float binMin, const float scale, const int32_t pos, MotionBox& left, MotionBox& right )
+{
+	// branch-free, as the side of a primitive is hard to predict: each primitive swaps with the first one not on
+	// the left (Lomuto). The two sides hold the same primitives as with the generic code, in another order.
+	__m256 l0 = _mm256_load_ps( &left.b0.negMin.x ), l1 = _mm256_load_ps( &left.b1.negMin.x );
+	__m256 r0 = _mm256_load_ps( &right.b0.negMin.x ), r1 = _mm256_load_ps( &right.b1.negMin.x );
+	const __m128i lane = _mm_set1_epi32( (int32_t)axis );
+	const __m256 none = _mm256_set1_ps( -bvh_far<float> );
+	uint32_t first = 0;
+	for (uint32_t i = 0; i < count; i++)
+	{
+		const __m256 k0 = tinybvh_load8( &p[i].b0 ), k1 = tinybvh_load8( &p[i].b1 );
+		const float c = _mm_cvtss_f32( _mm_permutevar_ps( tinybvh_motion_centroid4( k0, k1 ), lane ) );
+		const uint32_t toLeft = tinybvh_clamp( (int32_t)((c - binMin) * scale), 0, MOTIONBVHBINS - 1 ) <= pos;
+		const __m256 mask = _mm256_castsi256_ps( _mm256_set1_epi32( -(int32_t)toLeft ) );
+		l0 = _mm256_max_ps( l0, _mm256_blendv_ps( none, k0, mask ) ), l1 = _mm256_max_ps( l1, _mm256_blendv_ps( none, k1, mask ) );
+		r0 = _mm256_max_ps( r0, _mm256_blendv_ps( k0, none, mask ) ), r1 = _mm256_max_ps( r1, _mm256_blendv_ps( k1, none, mask ) );
+		tinybvh_store8( &p[i].b0, tinybvh_load8( &p[first].b0 ) ), tinybvh_store8( &p[i].b1, tinybvh_load8( &p[first].b1 ) );
+		tinybvh_store8( &p[first].b0, k0 ), tinybvh_store8( &p[first].b1, k1 );
+		const uint32_t t = idx[i];
+		idx[i] = idx[first], idx[first] = t, first += toLeft;
+	}
+	_mm256_store_ps( &left.b0.negMin.x, l0 ), _mm256_store_ps( &left.b1.negMin.x, l1 );
+	_mm256_store_ps( &right.b0.negMin.x, r0 ), _mm256_store_ps( &right.b1.negMin.x, r1 );
+	return first;
+}
+template <> float impl::BVH_Motion<float, uint32_t>::MotionSA( const MotionBox& b )
+{
+	// in the order of the generic code: half areas (x * y + y * z) + z * x of the extents at t = 0, 1/2
+	// (as midMax - midMin) and 1, then (A0 + 4 Am) + A1.
+	const __m128 n0 = _mm_load_ps( &b.b0.negMin.x ), x0 = _mm_load_ps( &b.b0.bmax.x );
+	const __m128 n1 = _mm_load_ps( &b.b1.negMin.x ), x1 = _mm_load_ps( &b.b1.bmax.x ), half = _mm_set1_ps( 0.5f );
+	auto area = []( const __m128 e )
+	{
+		const __m128 p = _mm_mul_ps( e, _mm_shuffle_ps( e, e, _MM_SHUFFLE( 3, 0, 2, 1 ) ) );
+		return _mm_cvtss_f32( _mm_add_ss( _mm_add_ss( p, _mm_shuffle_ps( p, p, 1 ) ), _mm_movehl_ps( p, p ) ) );
+	};
+	const float a0 = area( _mm_add_ps( x0, n0 ) ), a1 = area( _mm_add_ps( x1, n1 ) );
+	const float am = area( _mm_add_ps( _mm_mul_ps( _mm_add_ps( x0, x1 ), half ), _mm_mul_ps( _mm_add_ps( n0, n1 ), half ) ) );
+	return (a0 + 4 * am + a1) * (1.0f / 6.0f);
+}
+template <> void impl::BVH_Motion<float, uint32_t>::Merge( MotionBox& b, const MotionBox& o )
+{
+	// 'o' may be a primitive in memory from context.malloc, which promises no alignment.
+	_mm256_store_ps( &b.b0.negMin.x, _mm256_max_ps( _mm256_load_ps( &b.b0.negMin.x ), tinybvh_load8( &o.b0 ) ) );
+	_mm256_store_ps( &b.b1.negMin.x, _mm256_max_ps( _mm256_load_ps( &b.b1.negMin.x ), tinybvh_load8( &o.b1 ) ) );
 }
 #endif
 
