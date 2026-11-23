@@ -5,6 +5,7 @@
 #include "external/fenster.h" // https://github.com/zserge/fenster
 
 #define TINYBVH_IMPLEMENTATION
+#define INST_IDX_BITS 10
 #include "tiny_bvh.h"
 #include <atomic>
 #include <fstream>
@@ -15,22 +16,24 @@ using namespace tinybvh;
 
 // Application variables
 
-struct CarSetup { float x, z, heading, speed; };
+struct CarSetup { float x, z, heading, speed; bool bends; };
 static const CarSetup carSetup[] = {
-	{ -7.4f, -1.2f, 100, 0 },
-	{ -9.4f, 0.9f, -135, 50 },
-	{ -13.0f, -2.4f, -116, 20 },
-	{ -15.2f, -1.7f, 180, 5 },
-	{ -10.4f, 3.1f, -45, 8 },
+	{ -7.4f, -1.2f, 100, 0, false },		// parked: sharp
+	{ -9.4f, 0.9f, -135, 50, false },		// fast, smeared over half its length
+	{ -13.0f, -2.4f, -116, 0, true },		// this car bends in place
+	{ -15.2f, -1.7f, 180, 5, false },		// slow car 1
+	{ -10.4f, 3.1f, -45, 8, false },		// slow car 2
 };
 static const int carCount = sizeof( carSetup ) / sizeof( carSetup[0] );
 static const float carScale = 0.3f, shutter = 0.030f; // shutter interval in seconds
+static const float bend0 = 10, bend1 = 20; // bend of the deforming car in degrees, at t = 0 and t = 1
+
 static BVH sponza, car, tlas;
-static BVHBase* blasList[2] = { &sponza, &car };
+static BVH_Motion bendingCar; // over two keys: the car bent by bend0, and by bend1
+static BVHBase* blasList[3] = { &sponza, &car, &bendingCar };
 static BLASInstance instances[1 + carCount]; // Sponza, then the cars
 static bvhmat4 carEnd[carCount]; // the car transforms at the end of the shutter interval
-static bool motion = true;
-static bvhvec4* sponzaTris = 0, * carTris = 0;
+static bvhvec4* sponzaTris = 0, * carTris = 0, * bentTris[2] = {};
 static int sponzaTriCount = 0, carTriCount = 0, frameIdx = 0, spp = 0;
 static bvhvec3 accumulator[SCRWIDTH * SCRHEIGHT];
 static std::atomic<int> tileIdx( 0 );
@@ -69,19 +72,25 @@ bvhvec3 rgb32_to_vec3( const unsigned c )
 	return bvhvec3( (float)(c >> 16), (float)((c >> 8) & 255), (float)(c & 255) ) * (1 / 255.f);
 }
 
-// Geometry access: the hit instance tells us which mesh we hit.
-const bvhvec4* InstanceTris( const unsigned instIdx ) { return instIdx == 0 ? sponzaTris : carTris; }
+// Geometry access: the BLAS of the hit instance tells us which mesh we hit.
+const bvhvec4* InstanceTris( const unsigned instIdx )
+{
+	const unsigned blasIdx = instances[instIdx].blasIdx;
+	return blasIdx == 0 ? sponzaTris : blasIdx == 1 ? carTris : bentTris[0];
+}
 bvhvec3 TriangleColor( const unsigned instIdx, const unsigned prim )
 {
 	return rgb32_to_vec3( *(unsigned*)&InstanceTris( instIdx )[prim * 3].w );
 }
-bvhvec3 TriangleNormal( const unsigned instIdx, const unsigned prim )
+bvhvec3 TriangleNormal( const unsigned instIdx, const unsigned prim, const float time )
 {
-	const bvhvec4* tris = InstanceTris( instIdx );
-	bvhvec3 a = tris[prim * 3], b = tris[prim * 3 + 1], c = tris[prim * 3 + 2];
-	// object space to world space; a car only changes position over time, not orientation,
-	// so the transform at the start of the shutter interval has the right rotation.
-	return tinybvh_normalize( tinybvh_transform_vector( tinybvh_cross( b - a, a - c ), instances[instIdx].transform ) );
+	bvhvec3 v[3];
+	for (int i = 0; i < 3; i++)
+		if (instances[instIdx].blasIdx == 2) // deforming: the triangle at the time of the ray
+			v[i] = bvhvec3( bentTris[0][prim * 3 + i] ) * (1 - time) + bvhvec3( bentTris[1][prim * 3 + i] ) * time;
+		else
+			v[i] = InstanceTris( instIdx )[prim * 3 + i];
+	return tinybvh_normalize( tinybvh_transform_vector( tinybvh_cross( v[1] - v[0], v[0] - v[2] ), instances[instIdx].transform ) );
 }
 
 // Load a mesh (raw triangle data) with an optional color override.
@@ -114,12 +123,21 @@ bvhmat4 CarTransform( const bvhvec3 pos, const float heading )
 	return m;
 }
 
-// (Re)build the TLAS; cheap, there are only six instances.
-void BuildTLAS()
+// A copy of the car, bent sideways around its vertical axis.
+bvhvec4* BendCar( const float degrees )
 {
-	for (int i = 0; i < carCount; i++)
-		instances[1 + i].transform1 = motion && carSetup[i].speed > 0 ? &carEnd[i] : 0;
-	tlas.Build( instances, 1 + carCount, blasList, 2 );
+	bvhvec4* bent = (bvhvec4*)malloc64( carTriCount * 48 );
+	memcpy( bent, carTris, carTriCount * 48 );
+	if (degrees == 0) return bent;
+	const float tail = car.aabbMin.z, length = car.aabbMax.z - tail, angle = degrees * 3.14159265f / 180;
+	const float radius = length / angle; // a centerline of 'length' along an arc of 'angle'
+	for (int i = 0; i < carTriCount * 3; i++)
+	{
+		const bvhvec4 v = carTris[i];
+		const float a = (v.z - tail) / radius, r = radius - v.x; // vertices at +x are on the inside of the bend
+		bent[i] = bvhvec4( radius - r * cosf( a ), v.y, tail + r * sinf( a ), v.w ); // w: the color, unchanged
+	}
+	return bent;
 }
 
 // Application init
@@ -131,7 +149,11 @@ void Init()
 	// build the BLASses
 	sponza.Build( sponzaTris, sponzaTriCount );
 	car.Build( carTris, carTriCount );
-	// instances: Sponza, and the cars, which move forward during the shutter interval.
+	// the deforming car: a BVH_Motion over two keys of the same triangles, bent by 10 and by 20 degrees.
+	bentTris[0] = BendCar( bend0 );
+	bentTris[1] = BendCar( bend1 );
+	bendingCar.Build( bentTris[0], bentTris[1], carTriCount );
+	// instances: Sponza, and the cars, which move during the shutter interval.
 	instances[0] = BLASInstance( 0 );
 	for (int i = 0; i < carCount; i++)
 	{
@@ -140,11 +162,14 @@ void Init()
 		Ray down( bvhvec3( c.x, 20, c.z ), bvhvec3( 0, -1, 0 ) );
 		sponza.Intersect( down );
 		const bvhvec3 pos( c.x, 20 - down.hit.t + car.aabbMax.y * carScale, c.z );
-		instances[1 + i] = BLASInstance( 1 );
+		instances[1 + i] = BLASInstance( c.bends ? 2 : 1 );
 		instances[1 + i].transform = CarTransform( pos, c.heading );
+		if (c.speed == 0) continue; // parked, or bending in place: no transform at t = 1
 		carEnd[i] = CarTransform( pos + HeadingDir( c.heading ) * (c.speed * shutter), c.heading );
+		instances[1 + i].transform1 = &carEnd[i];
 	}
-	BuildTLAS();
+	// the TLAS sees moving instances and the BVH_Motion BLAS, and sets tlas.hasMotion.
+	tlas.Build( instances, 1 + carCount, blasList, 3 );
 }
 
 // Keyboard handling
@@ -163,10 +188,6 @@ bool UpdateCamera( float delta_time_s, fenster& f )
 	if (f.keys[19]) view = tinybvh_normalize( view + right * delta_time_s ), moved = true;
 	if (f.keys[17]) view = tinybvh_normalize( view + up * -1.0f * delta_time_s ), moved = true;
 	if (f.keys[18]) view = tinybvh_normalize( view + up * delta_time_s ), moved = true;
-	// toggle motion blur
-	static bool mWasDown = false;
-	if (f.keys['M'] && !mWasDown) motion = !motion, BuildTLAS(), moved = true;
-	mWasDown = f.keys['M'] != 0;
 	// recalculate right, up
 	right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), view ) ), up = 0.8f * tinybvh_cross( view, right );
 	bvhvec3 C = eye + 1.2f * view;
@@ -174,22 +195,14 @@ bool UpdateCamera( float delta_time_s, fenster& f )
 	return moved;
 }
 
-// Light transport calculation - Basic recursive Path Tracer with IS and Next Event Estimation.
-// All rays of a path use the time of the primary ray.
+// Light transport calculation - All rays of a path use the time of the primary ray.
 bvhvec3 Trace( Ray ray, unsigned& seed, unsigned depth = 0 )
 {
-	// find primary intersection
 	tlas.Intersect( ray );
-	// shade
 	if (ray.hit.t == 1e30f) return bvhvec3( 0.6f, 0.7f, 1 ); // hit nothing
-#if INST_IDX_BITS == 32
-	const unsigned prim = ray.hit.prim, instIdx = ray.hit.inst;
-#else
 	const unsigned prim = ray.hit.prim & PRIM_IDX_MASK, instIdx = ray.hit.prim >> INST_IDX_SHFT;
-#endif
 	const float time = ray.time;
-	bvhvec3 I = ray.O + ray.hit.t * ray.D;
-	bvhvec3 N = TriangleNormal( instIdx, prim );
+	bvhvec3 I = ray.O + ray.hit.t * ray.D, N = TriangleNormal( instIdx, prim, time );
 	if (tinybvh_dot( N, ray.D ) > 0) N = -N;
 	bvhvec3 BRDF = TriangleColor( instIdx, prim ) * (1.0f / 3.14159f);
 	bvhvec3 Lpos( RandomFloat( seed ) * 30 - 15, 40, RandomFloat( seed ) * 6 - 3 ); // virtual
@@ -197,9 +210,8 @@ bvhvec3 Trace( Ray ray, unsigned& seed, unsigned depth = 0 )
 	bvhvec3 L = (Lpos - I) * (1.0f / dist); // normalize
 	bvhvec3 direct = {}, indirect = {};
 	float NdotL = tinybvh_dot( N, L ), NLdotL = fabs( tinybvh_dot( L, bvhvec3( 0, 1, 0 ) ) );
-	if (NdotL > 0)
-		if (!tlas.IsOccluded( Ray( I + L * 0.001f, L, dist, RAY_MASK_INTERSECT_ALL, time ) ))
-			direct = BRDF * NdotL * NLdotL * bvhvec3( 9, 9, 8 ) * 500 * (1.0f / (dist * dist));
+	if (NdotL > 0) if (!tlas.IsOccluded( Ray( I + L * 0.001f, L, dist, RAY_MASK_INTERSECT_ALL, time ) ))
+		direct = BRDF * NdotL * NLdotL * bvhvec3( 9, 9, 8 ) * 500 * (1.0f / (dist * dist));
 	// random bounce
 	if (depth < 2)
 	{
@@ -208,15 +220,13 @@ bvhvec3 Trace( Ray ray, unsigned& seed, unsigned depth = 0 )
 		bvhvec3 irradiance = Trace( Ray( I + R * 0.001f, R, 1e30f, RAY_MASK_INTERSECT_ALL, time ), seed, depth + 1 );
 		indirect = BRDF * irradiance * (1.0f / pdf);
 	}
-	// finalize
 	return direct + indirect;
 }
 
 void TraceWorkerThread( uint32_t* buf, float scale, int threadIdx )
 {
 	const int xtiles = SCRWIDTH / TILESIZE, ytiles = SCRHEIGHT / TILESIZE;
-	const int tiles = xtiles * ytiles;
-	int tile = threadIdx;
+	int tiles = xtiles * ytiles, tile = threadIdx;
 	while (tile < tiles)
 	{
 		const int tx = tile % xtiles, ty = tile / xtiles;
@@ -255,12 +265,11 @@ void Tick( float delta_time_s, fenster& f, uint32_t* buf )
 	const float scale = 1.0f / spp++;
 	tileIdx = threadCount;
 	std::vector<std::thread> threads;
-	for (uint32_t i = 0; i < threadCount; i++)
-		threads.emplace_back( &TraceWorkerThread, buf, scale, i );
+	for (uint32_t i = 0; i < threadCount; i++) threads.emplace_back( &TraceWorkerThread, buf, scale, i );
 	for (auto& thread : threads) thread.join();
 	// print frame time / rate in window title
 	char title[80];
-	sprintf( title, "tiny_bvh motion blur %s - %i spp, %.2f s", motion ? "on" : "off", spp - 1, delta_time_s );
+	sprintf( title, "tiny_bvh %i spp, %.2f s", spp - 1, delta_time_s );
 	fenster_update_title( &f, title );
 }
 
@@ -269,4 +278,6 @@ void Shutdown()
 {
 	free64( sponzaTris );
 	free64( carTris );
+	free64( bentTris[0] );
+	free64( bentTris[1] );
 }
