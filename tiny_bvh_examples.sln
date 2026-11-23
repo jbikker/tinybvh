@@ -51,6 +51,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_raybundle", "vcpro
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_motion", "vcproj\tiny_bvh_motion.vcxproj", "{16D30089-9A34-4AAA-8ABB-005E16DBBC35}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "tiny_bvh_dobb_test", "vcproj\tiny_bvh_dobb_test.vcxproj", "{713F4282-B9E5-4118-830F-E1AE94EF3CE2}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -251,6 +253,14 @@ Global
 		{99971AB8-A454-4B58-9397-4F1BA997E6EF}.Release|x64.Build.0 = Release|x64
 		{99971AB8-A454-4B58-9397-4F1BA997E6EF}.Release|x86.ActiveCfg = Release|Win32
 		{99971AB8-A454-4B58-9397-4F1BA997E6EF}.Release|x86.Build.0 = Release|Win32
+		{713F4282-B9E5-4118-830F-E1AE94EF3CE2}.Debug|x64.ActiveCfg = Debug|x64
+		{713F4282-B9E5-4118-830F-E1AE94EF3CE2}.Debug|x64.Build.0 = Debug|x64
+		{713F4282-B9E5-4118-830F-E1AE94EF3CE2}.Debug|x86.ActiveCfg = Debug|Win32
+		{713F4282-B9E5-4118-830F-E1AE94EF3CE2}.Debug|x86.Build.0 = Debug|Win32
+		{713F4282-B9E5-4118-830F-E1AE94EF3CE2}.Release|x64.ActiveCfg = Release|x64
+		{713F4282-B9E5-4118-830F-E1AE94EF3CE2}.Release|x64.Build.0 = Release|x64
+		{713F4282-B9E5-4118-830F-E1AE94EF3CE2}.Release|x86.ActiveCfg = Release|Win32
+		{713F4282-B9E5-4118-830F-E1AE94EF3CE2}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
