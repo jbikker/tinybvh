@@ -196,8 +196,8 @@ static void on_error( tbvh_result r, const char* msg, void* user ) { (void)r, (v
 /* --- tests ----------------------------------------------------------------- */
 
 static const tbvh_layout traversable[] = { TBVH_LAYOUT_BVH, TBVH_LAYOUT_BVH_GPU, TBVH_LAYOUT_BVH4_CPU, TBVH_LAYOUT_BVH4_GPU,
-	TBVH_LAYOUT_BVH8_CPU, TBVH_LAYOUT_BVH8_CWBVH, TBVH_LAYOUT_BVH_DOBB };
-static const char* names[] = { "BVH", "BVH_GPU", "BVH4_CPU", "BVH4_GPU", "BVH8_CPU", "BVH8_CWBVH", "BVH_DOBB" };
+	TBVH_LAYOUT_BVH8_CPU, TBVH_LAYOUT_BVH8_CWBVH, TBVH_LAYOUT_BVH_DOBB, TBVH_LAYOUT_BVH4_AMD_HW, TBVH_LAYOUT_CWBVH8_AMD_HW };
+static const char* names[] = { "BVH", "BVH_GPU", "BVH4_CPU", "BVH4_GPU", "BVH8_CPU", "BVH8_CWBVH", "BVH_DOBB", "BVH4_AMD_HW", "CWBVH8_AMD_HW" };
 
 static void test_layouts( void )
 {
@@ -231,7 +231,7 @@ static void test_layouts( void )
 			tbvh_destroy( bvh );
 		}
 	}
-	/* hardware layouts: buffers, no CPU traversal */
+	/* hardware layouts: the node buffer is all there is; these scattered triangles share no vertices */
 	const tbvh_layout hw[] = { TBVH_LAYOUT_BVH4_AMD_HW, TBVH_LAYOUT_CWBVH8_AMD_HW };
 	for (int l = 0; l < 2; l++)
 	{
@@ -241,8 +241,6 @@ static void test_layouts( void )
 		const void* data; size_t size;
 		OK( tbvh_get_buffer( bvh, TBVH_BUFFER_NODES, &data, &size ) );
 		CHECK( size >= TRIS * 64 / 2, "AMD layout %d: node buffer of %zu bytes", (int)hw[l], size );
-		tbvh_ray r = rays[0];
-		CHECK( tbvh_intersect( bvh, &r ) == -TBVH_ERROR_UNSUPPORTED, "AMD layout: intersect should be unsupported" );
 		tbvh_destroy( bvh );
 	}
 }
