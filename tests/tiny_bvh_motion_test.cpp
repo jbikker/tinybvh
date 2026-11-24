@@ -559,6 +559,241 @@ static void TestTLAS( const std::vector<bvhvec4>& scene )
 
 #ifdef DOUBLE_PRECISION_SUPPORT
 
+// SRT instance motion. The reference is independent of tiny_bvh: double precision, and the vector form of the
+// quaternion rotation, v + 2 w (q x v) + 2 q x (q x v), instead of a matrix.
+template <typename K> static void RefSRTPoint( const K* k, const double time, const double p[3], double out[3] )
+{
+	const double t = time, s = 1 - t;
+	auto mix = [&]( const double a, const double b ) { return s * a + t * b; };
+	const double sx = mix( k[0].sx, k[1].sx ), a = mix( k[0].a, k[1].a ), b = mix( k[0].b, k[1].b ), sy = mix( k[0].sy, k[1].sy );
+	const double c = mix( k[0].c, k[1].c ), sz = mix( k[0].sz, k[1].sz );
+	const double pv[3] = { mix( k[0].pvx, k[1].pvx ), mix( k[0].pvy, k[1].pvy ), mix( k[0].pvz, k[1].pvz ) };
+	const double tr[3] = { mix( k[0].tx, k[1].tx ), mix( k[0].ty, k[1].ty ), mix( k[0].tz, k[1].tz ) };
+	double q0[4] = { k[0].qx, k[0].qy, k[0].qz, k[0].qw }, q1[4] = { k[1].qx, k[1].qy, k[1].qz, k[1].qw };
+	const double n0 = sqrt( q0[0] * q0[0] + q0[1] * q0[1] + q0[2] * q0[2] + q0[3] * q0[3] ), n1 = sqrt( q1[0] * q1[0] + q1[1] * q1[1] + q1[2] * q1[2] + q1[3] * q1[3] );
+	for (int i = 0; i < 4; i++) q0[i] /= n0, q1[i] /= n1;
+	const double d = tinybvh_clamp( q0[0] * q1[0] + q0[1] * q1[1] + q0[2] * q1[2] + q0[3] * q1[3], -1.0, 1.0 ), om = acos( d );
+	const double w0 = sin( om ) > 1e-9 ? sin( s * om ) / sin( om ) : s, w1 = sin( om ) > 1e-9 ? sin( t * om ) / sin( om ) : t;
+	double q[4];
+	for (int i = 0; i < 4; i++) q[i] = w0 * q0[i] + w1 * q1[i];
+	const double nq = sqrt( q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3] );
+	for (int i = 0; i < 4; i++) q[i] /= nq;
+	const double v[3] = { sx * p[0] + a * p[1] + b * p[2] + pv[0], sy * p[1] + c * p[2] + pv[1], sz * p[2] + pv[2] };
+	const double u[3] = { q[1] * v[2] - q[2] * v[1], q[2] * v[0] - q[0] * v[2], q[0] * v[1] - q[1] * v[0] }; // q x v
+	const double uu[3] = { q[1] * u[2] - q[2] * u[1], q[2] * u[0] - q[0] * u[2], q[0] * u[1] - q[1] * u[0] }; // q x (q x v)
+	for (int i = 0; i < 3; i++) out[i] = v[i] + 2 * q[3] * u[i] + 2 * uu[i] + tr[i];
+}
+static bvhvec3 RefSRT( const BLASInstance::SRT* k, const float time, const bvhvec3& p )
+{
+	const double pd[3] = { p.x, p.y, p.z };
+	double r[3];
+	RefSRTPoint( k, time, pd, r );
+	return bvhvec3( (float)r[0], (float)r[1], (float)r[2] );
+}
+// A key rotating by 'degrees' around 'axis', with scale, shear, pivot and translation.
+static BLASInstance::SRT Key( const bvhvec3& axis, const float degrees, const bvhvec3& scale, const bvhvec3& shear, const bvhvec3& pivot, const bvhvec3& pos )
+{
+	BLASInstance::SRT k;
+	const bvhvec3 n = tinybvh_normalize( axis );
+	const float h = degrees * 3.14159265f / 360;
+	k.sx = scale.x, k.sy = scale.y, k.sz = scale.z, k.a = shear.x, k.b = shear.y, k.c = shear.z;
+	k.pvx = pivot.x, k.pvy = pivot.y, k.pvz = pivot.z, k.tx = pos.x, k.ty = pos.y, k.tz = pos.z;
+	k.qx = n.x * sinf( h ), k.qy = n.y * sinf( h ), k.qz = n.z * sinf( h ), k.qw = cosf( h );
+	return k;
+}
+// Triangles in a ball of radius 'r' around 'center'.
+static std::vector<bvhvec4> Cluster( const uint32_t n, const bvhvec3& center, const float r )
+{
+	std::vector<bvhvec4> v;
+	for (uint32_t i = 0; i < n; i++)
+	{
+		const bvhvec3 p = center + RandomDir() * (r * cbrtf( RandomFloat() ));
+		for (int k = 0; k < 3; k++) v.push_back( bvhvec4( p + RandomDir() * (r * 0.08f), 0 ) );
+	}
+	return v;
+}
+static void TestSRT()
+{
+	printf( "SRT instance motion:\n" );
+	// the key evaluation against the reference, its inverse, and the arc: a quarter turn keeps a point on its circle,
+	// where interpolating the matrices would cut the corner to cos( 45 ) of the radius.
+	const BLASInstance::SRT turn[2] = { Key( bvhvec3( 0, 1, 0 ), 0, bvhvec3( 1 ), bvhvec3( 0 ), bvhvec3( 0 ), bvhvec3( 0 ) ),
+		Key( bvhvec3( 0, 1, 0 ), 90, bvhvec3( 1 ), bvhvec3( 0 ), bvhvec3( 0 ), bvhvec3( 0 ) ) };
+	const BLASInstance::SRT odd[2] = { Key( bvhvec3( 1, 2, 3 ), 20, bvhvec3( 1, 2, 0.5f ), bvhvec3( 0.3f, -0.2f, 0.1f ), bvhvec3( 1, 0, -2 ), bvhvec3( 5, 6, 7 ) ),
+		Key( bvhvec3( 1, 2, 3 ), 290, bvhvec3( 2, 1, 1.5f ), bvhvec3( -0.1f, 0.4f, 0 ), bvhvec3( 0, 3, 1 ), bvhvec3( -4, 2, 9 ) ) };
+	BLASInstance probe( 0 );
+	float keyError = 0, inverseError = 0;
+	for (int i = 0; i < 1000; i++)
+	{
+		probe.srt = (i & 1) ? odd : turn;
+		const float time = RandomFloat();
+		const bvhvec3 p( RandomFloat() * 4 - 2, RandomFloat() * 4 - 2, RandomFloat() * 4 - 2 );
+		const bvhvec3 a = tinybvh_transform_point( p, probe.TransformAt( time ) ), r = RefSRT( probe.srt, time, p );
+		keyError = tinybvh_max( keyError, tinybvh_length( a - r ) / (1 + tinybvh_length( r )) );
+		const bvhvec3 back = tinybvh_transform_point( a, probe.InvTransformAt( time ) );
+		inverseError = tinybvh_max( inverseError, tinybvh_length( back - p ) / (1 + tinybvh_length( p )) );
+	}
+	probe.srt = turn;
+	const float radius = tinybvh_length( tinybvh_transform_point( bvhvec3( 2, 0, 0 ), probe.TransformAt( 0.5f ) ) ) / 2;
+	printf( "  keys vs reference: error %.2e; inverse: %.2e; radius halfway a quarter turn: %.6f\n", keyError, inverseError, radius );
+	CHECK( keyError < 1e-5f, "SRT keys evaluate %e away from the reference", keyError );
+	CHECK( inverseError < 1e-5f, "InvTransformAt does not invert TransformAt (%e)", inverseError );
+	CHECK( fabsf( radius - 1 ) < 1e-5f, "a quarter turn left its circle: radius %f", radius );
+	// a TLAS over a static BVH and a BVH_Motion, with SRT instances, against brute force in world space.
+	const std::vector<bvhvec4> c0 = Cluster( 1500, bvhvec3( 0.5f, 0, 0 ), 1 ), c1 = Animate( c0, 0.05f );
+	BVH still;
+	BVH_Motion moving;
+	still.Build( c0.data(), 1500 );
+	moving.Build( c0.data(), c1.data(), 1500 );
+	BVHBase* blases[2] = { &still, &moving };
+	const BLASInstance::SRT keys[6][2] = {
+		{ Key( bvhvec3( 0, 1, 0 ), 0, bvhvec3( 1 ), bvhvec3( 0 ), bvhvec3( 0 ), bvhvec3( 0, 0, 0 ) ), Key( bvhvec3( 0, 1, 0 ), 90, bvhvec3( 1 ), bvhvec3( 0 ), bvhvec3( 0 ), bvhvec3( 0, 0, 0 ) ) },
+		{ Key( bvhvec3( 1, 1, 0 ), 10, bvhvec3( 1 ), bvhvec3( 0 ), bvhvec3( -0.5f, 0, 0 ), bvhvec3( 6, 0, 0 ) ), Key( bvhvec3( 1, 1, 0 ), 280, bvhvec3( 1.3f ), bvhvec3( 0 ), bvhvec3( -0.5f, 0, 0 ), bvhvec3( 6, 1, 0 ) ) },
+		{ Key( bvhvec3( 0, 0, 1 ), 0, bvhvec3( 1, 2, 1 ), bvhvec3( 0.4f, 0, 0.2f ), bvhvec3( 0 ), bvhvec3( 0, 6, 0 ) ), Key( bvhvec3( 0, 0, 1 ), 45, bvhvec3( 2, 1, 1 ), bvhvec3( -0.3f, 0.2f, 0 ), bvhvec3( 0 ), bvhvec3( 0, 6, 1 ) ) },
+		{ Key( bvhvec3( 0, 1, 0 ), 0, bvhvec3( 1 ), bvhvec3( 0 ), bvhvec3( 0 ), bvhvec3( -6, 0, 0 ) ), Key( bvhvec3( 0, 1, 0 ), 0, bvhvec3( 1 ), bvhvec3( 0 ), bvhvec3( 0 ), bvhvec3( -4, 0, 2 ) ) },
+		{ Key( bvhvec3( 3, 1, 2 ), 30, bvhvec3( 1 ), bvhvec3( 0 ), bvhvec3( 0 ), bvhvec3( 0, -6, 0 ) ), Key( bvhvec3( 3, 1, 2 ), 30, bvhvec3( 1 ), bvhvec3( 0 ), bvhvec3( 0 ), bvhvec3( 0, -6, 0 ) ) },
+		{ Key( bvhvec3( 0, 1, 1 ), -40, bvhvec3( 1 ), bvhvec3( 0 ), bvhvec3( 0.5f, 0.5f, 0 ), bvhvec3( 6, 6, 0 ) ), Key( bvhvec3( 0, 1, 1 ), 120, bvhvec3( 0.7f ), bvhvec3( 0 ), bvhvec3( 0.5f, 0.5f, 0 ), bvhvec3( 6, 6, 3 ) ) } };
+	BLASInstance inst[12];
+	for (uint32_t i = 0; i < 12; i++) inst[i] = BLASInstance( i & 1 ), inst[i].srt = keys[i >> 1];
+	BVH tlas;
+	tlas.Build( inst, 12, blases, 2 );
+	CHECK( tlas.hasMotion, "TLAS with SRT instances not flagged" );
+	// the bounds of every instance hold its triangles at any time; the slack is the margin over the swept extent.
+	uint32_t outside = 0;
+	float slack = 0, padSlack = 0;
+	for (uint32_t i = 0; i < 12; i++)
+	{
+		bvhvec3 smin( BVH_FAR ), smax( -BVH_FAR );
+		for (int s = 0; s < 64; s++)
+		{
+			const float time = s == 0 ? 0 : s == 1 ? 1 : RandomFloat();
+			for (size_t j = 0; j < c0.size(); j++)
+			{
+				const bvhvec3 p = RefSRT( inst[i].srt, time, (i & 1) ? At( c0[j], c1[j], time ) : bvhvec3( c0[j] ) );
+				const float eps = 1e-5f * (1 + Scale( p ));
+				if (p.x < inst[i].aabbMin.x - eps || p.y < inst[i].aabbMin.y - eps || p.z < inst[i].aabbMin.z - eps ||
+					p.x > inst[i].aabbMax.x + eps || p.y > inst[i].aabbMax.y + eps || p.z > inst[i].aabbMax.z + eps) outside++;
+				smin = tinybvh_min( smin, p ), smax = tinybvh_max( smax, p );
+			}
+		}
+		const bvhvec3 e = smax - smin, b = inst[i].aabbMax - inst[i].aabbMin;
+		slack = tinybvh_max( slack, tinybvh_max( b.x / e.x, tinybvh_max( b.y / e.y, b.z / e.z ) ) - 1 );
+		// what the padding adds: the margin over the paths of the corners of the BLAS box, which the bounds follow.
+		const BVHBase* blas = blases[inst[i].blasIdx];
+		bvhvec3 cmin( BVH_FAR ), cmax( -BVH_FAR );
+		for (int s = 0; s <= 4096; s++) for (int j = 0; j < 8; j++)
+		{
+			const bvhvec3 p( j & 1 ? blas->aabbMax.x : blas->aabbMin.x, j & 2 ? blas->aabbMax.y : blas->aabbMin.y, j & 4 ? blas->aabbMax.z : blas->aabbMin.z );
+			const bvhvec3 w = RefSRT( inst[i].srt, s / 4096.0f, p );
+			cmin = tinybvh_min( cmin, w ), cmax = tinybvh_max( cmax, w );
+		}
+		const bvhvec3 ce = cmax - cmin;
+		padSlack = tinybvh_max( padSlack, tinybvh_max( b.x / ce.x, tinybvh_max( b.y / ce.y, b.z / ce.z ) ) - 1 );
+	}
+	uint32_t rays = 0, hits = 0, mismatches = 0, grazes = 0, bundleMismatches = 0;
+	for (int s = 0; s < 8; s++)
+	{
+		const float time = s == 0 ? 0 : s == 1 ? 1 : RandomFloat();
+		std::vector<bvhvec4> world;
+		for (uint32_t i = 0; i < 12; i++) for (size_t j = 0; j < c0.size(); j++)
+			world.push_back( bvhvec4( RefSRT( inst[i].srt, time, (i & 1) ? At( c0[j], c1[j], time ) : bvhvec3( c0[j] ) ), 0 ) );
+		Ray bundle[TINYBVH_BUNDLE_RAYS];
+		for (uint32_t i = 0; i < 300; i++, rays++)
+		{
+			Ray ray = RandomRay( tlas.aabbMin, tlas.aabbMax, time );
+			if (i & 1) // half of the rays aim at a vertex of the scene at this time.
+			{
+				const bvhvec3 target = bvhvec3( world[RandomUInt() % world.size()] ) + RandomDir() * 0.02f;
+				ray = Ray( ray.O, tinybvh_normalize( target - ray.O ), BVH_FAR, RAY_MASK_INTERSECT_ALL, time );
+			}
+			ray.hit.t = 1e4f;
+			if (i < TINYBVH_BUNDLE_RAYS) bundle[i] = ray;
+			tlas.Intersect( ray );
+			float u = 0, v = 0;
+			const float ref = BruteForce( ray.O, ray.D, world, 1e4f, &u, &v );
+			if (ray.hit.t < 1e4f) hits++;
+			if (!SameHit( ray.hit.t, ref, Scale( ray.O ) + ref ))
+			{
+				const bool tlasNearer = ray.hit.t < ref;
+				if (NearEdge( tlasNearer ? ray.hit.u : u, tlasNearer ? ray.hit.v : v, 1e-3f )) grazes++; else mismatches++;
+			}
+		}
+		Ray single[TINYBVH_BUNDLE_RAYS];
+		for (uint32_t k = 0; k < TINYBVH_BUNDLE_RAYS; k++) single[k] = bundle[k], tlas.Intersect( single[k] );
+		tlas.IntersectBundle( bundle );
+		for (uint32_t k = 0; k < TINYBVH_BUNDLE_RAYS; k++) if (bundle[k].hit.t != single[k].hit.t) bundleMismatches++;
+	}
+	printf( "  12 instances, %u rays, %.1f%% hit; %u mismatches vs brute force (%u edge grazes), %u bundle mismatches\n",
+		rays, 100.0f * hits / rays, mismatches, grazes, bundleMismatches );
+	printf( "  bounds: %u vertices outside; at most %.1f%% wider than the swept triangles, %.2f%% wider than the swept BLAS box\n",
+		outside, slack * 100, padSlack * 100 );
+	CHECK( padSlack < 0.02f, "SRT bounds %.2f%% wider than the swept BLAS box", padSlack * 100 );
+	CHECK( mismatches == 0, "SRT TLAS and brute force disagree on %u rays", mismatches );
+	CHECK( grazes * 100 <= rays, "%u edge grazes in %u rays: too many to be rounding", grazes, rays );
+	CHECK( bundleMismatches == 0, "IntersectBundle differs from Intersect on %u rays", bundleMismatches );
+	CHECK( outside == 0, "%u vertices outside the bounds of their instance", outside );
+	// translation only: the same motion as two matrices.
+	const BLASInstance::SRT slide[2] = { Key( bvhvec3( 0, 1, 0 ), 25, bvhvec3( 1 ), bvhvec3( 0 ), bvhvec3( 0 ), bvhvec3( 1, 2, 3 ) ),
+		Key( bvhvec3( 0, 1, 0 ), 25, bvhvec3( 1 ), bvhvec3( 0 ), bvhvec3( 0 ), bvhvec3( 4, 1, -2 ) ) };
+	const bvhmat4 end = slide[1].Matrix();
+	BLASInstance bySRT( 0 ), byMatrix( 0 );
+	bySRT.srt = slide, byMatrix.transform = slide[0].Matrix(), byMatrix.transform1 = &end;
+	BVH srtTLAS, matrixTLAS;
+	srtTLAS.Build( &bySRT, 1, blases, 2 ), matrixTLAS.Build( &byMatrix, 1, blases, 2 );
+	uint32_t different = 0;
+	for (uint32_t i = 0; i < 2000; i++)
+	{
+		Ray a = RandomRay( srtTLAS.aabbMin, srtTLAS.aabbMax, RandomFloat() ), b = a;
+		srtTLAS.Intersect( a ), matrixTLAS.Intersect( b );
+		if (!SameHit( a.hit.t, b.hit.t ) && !NearEdge( a.hit.t < b.hit.t ? a.hit.u : b.hit.u, a.hit.t < b.hit.t ? a.hit.v : b.hit.v, 1e-4f )) different++;
+	}
+	printf( "  translation only: %u of 2000 rays differ from the same motion as matrices\n", different );
+	CHECK( different == 0, "SRT translation and matrix motion disagree on %u rays", different );
+#ifdef DOUBLE_PRECISION_SUPPORT
+	// double precision: a TLAS of one turning BLASInstanceEx against brute force.
+	std::vector<bvhdbl3> d0;
+	for (size_t j = 0; j < c0.size(); j++) d0.push_back( bvhdbl3( c0[j].x, c0[j].y, c0[j].z ) );
+	BVH_Double dblas;
+	dblas.Build( d0.data(), 1500 );
+	BLASInstanceEx::SRT dk[2];
+	for (int k = 0; k < 2; k++)
+	{
+		const BLASInstance::SRT& f = keys[1][k];
+		dk[k].sx = f.sx, dk[k].a = f.a, dk[k].b = f.b, dk[k].pvx = f.pvx, dk[k].sy = f.sy, dk[k].c = f.c, dk[k].pvy = f.pvy, dk[k].sz = f.sz;
+		dk[k].pvz = f.pvz, dk[k].qx = f.qx, dk[k].qy = f.qy, dk[k].qz = f.qz, dk[k].qw = f.qw, dk[k].tx = f.tx, dk[k].ty = f.ty, dk[k].tz = f.tz;
+	}
+	BLASInstanceEx dinst( 0 );
+	dinst.srt = dk;
+	BVHBaseEx* dblases[1] = { &dblas };
+	BVH_Double dtlas;
+	dtlas.Build( &dinst, 1, dblases, 1 );
+	uint32_t dmismatches = 0;
+	for (int i = 0; i < 400; i++)
+	{
+		const float time = RandomFloat();
+		const Ray r = RandomRay( bvhvec3( (float)dtlas.aabbMin.x, (float)dtlas.aabbMin.y, (float)dtlas.aabbMin.z ), bvhvec3( (float)dtlas.aabbMax.x, (float)dtlas.aabbMax.y, (float)dtlas.aabbMax.z ), time );
+		RayEx ray( bvhdbl3( r.O.x, r.O.y, r.O.z ), bvhdbl3( r.D.x, r.D.y, r.D.z ), 1e4, RAY_MASK_INTERSECT_ALL, time );
+		dtlas.Intersect( ray );
+		double ref = 1e4;
+		for (size_t j = 0; j < d0.size(); j += 3)
+		{
+			bvhdbl3 w[3];
+			for (int k = 0; k < 3; k++)
+			{
+				const double p[3] = { d0[j + k].x, d0[j + k].y, d0[j + k].z };
+				double o[3];
+				RefSRTPoint( dk, time, p, o );
+				w[k] = bvhdbl3( o[0], o[1], o[2] );
+			}
+			TriTest( ray.O, ray.D, w[0], w[1], w[2], ref, ref );
+		}
+		if (!SameHit( ray.hit.t, ref )) dmismatches++;
+	}
+	printf( "  double precision: %u mismatches in 400 rays\n", dmismatches );
+	CHECK( dmismatches == 0, "double SRT TLAS and brute force disagree on %u rays", dmismatches );
+#endif
+}
+
 // Double precision: BVH_Motion_Double, alone and in a TLAS of BLASInstanceEx.
 static void TestDouble( const std::vector<bvhvec4>& scene )
 {
@@ -672,6 +907,13 @@ static void Benchmark( const std::vector<bvhvec4>& v0 )
 	movingInst.transform1 = &shifted;
 	staticTLAS.Build( &staticInst, 1, blases, 1 );
 	movingTLAS.Build( &movingInst, 1, blases, 1 );
+	// the same shift, with a small turn around the scene's vertical axis, as SRT keys.
+	BLASInstance srtInst( 0 );
+	BLASInstance::SRT turn[2];
+	turn[1].tx = 0.5f, turn[1].ty = 0.2f, turn[1].qy = sinf( 0.01f ), turn[1].qw = cosf( 0.01f );
+	srtInst.srt = turn;
+	BVH srtTLAS;
+	srtTLAS.Build( &srtInst, 1, blases, 1 );
 	std::vector<Ray> primary( count ), incoherent( count );
 	const bvhvec3 eye( -15.24f, 21.5f, 2.54f ), view = tinybvh_normalize( bvhvec3( 0.826f, -0.438f, -0.356f ) );
 	const bvhvec3 right = tinybvh_normalize( tinybvh_cross( bvhvec3( 0, 1, 0 ), view ) ), up = 0.8f * tinybvh_cross( view, right );
@@ -702,6 +944,7 @@ static void Benchmark( const std::vector<bvhvec4>& v0 )
 	run( "BVH_Motion, moving (amplitude 3.0)", fast );
 	run( "TLAS over the BVH, static instance", staticTLAS );
 	run( "TLAS over the BVH, moving instance", movingTLAS );
+	run( "TLAS over the BVH, SRT instance", srtTLAS );
 }
 
 int main( int argc, char** argv )
@@ -720,6 +963,7 @@ int main( int argc, char** argv )
 	TestDegenerate();
 	TestMove( scene );
 	TestTLAS( scene );
+	TestSRT();
 #ifdef DOUBLE_PRECISION_SUPPORT
 	TestDouble( scene );
 #endif
