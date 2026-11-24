@@ -10,7 +10,7 @@ struct Ray
 // Includes for hardware traversal kernel implementations:
 // Minimum required for this to work. Does not check for
 // compiler compatability
-#if defined( ISAMD ) && ( defined( ISRDNA3 ) || defined( ISRDNA4 ) )
+#if defined( ISAMD ) && ( defined( ISRDNA3 ) || defined( ISRDNA35 ) || defined( ISRDNA4 ) )
 #include "traverse_amd_hw_bvh4.cl"
 #if defined( ISRDNA4 )
 #include "traverse_amd_hw_bvh8.cl"
