@@ -2520,8 +2520,8 @@ static const tinybvh::MBVH<8>* WideBuild( tinybvh::CWBVH8_AMD_HW& o, tinybvh::MB
 }
 
 // Wall clock, best of a few runs: the differences between these trees are small enough that
-// a single timed pass mostly measures the machine. The hardware formats have no traversal
-// kernel on the CPU, so they report no time at all rather than a misleading one.
+// a single timed pass mostly measures the machine. The CPU traversal of the hardware formats
+// is for validation only, so they report no time at all rather than a misleading one.
 template <typename T> static double WideTime( const T& tree, const RaySet& rays, const uint32_t runs )
 {
 	double best = 1e30;
