@@ -909,19 +909,11 @@ inline uint id_to_type( uint id ) { return id & 7u; }
 #define PAIR 1u // a triangle node with two triangles: intersected as type 1, then as type 0
 #define BOX16 4u
 
-// TinyBVH parent ID of a node, for recovery from a hardware stack overflow. fp16 box nodes have no spare
-// bytes: their parent IDs are in a table, found through words 29 and 30 of the root.
-inline uint parent_id( const global float4* alt4Node, uint nodeID )
+// TinyBVH parent ID of a node, for recovery from a hardware stack overflow
+inline uint parent_id( const global uint* words, const uint nodeID, const uint box16Start, const uint parentTable )
 {
-	const global uint* words = (const global uint*)( (const global uchar*)alt4Node + id_to_offset( nodeID ) );
-	const uint type = id_to_type( nodeID );
-	if (type <= PAIR) return words[14]; // byte 56 of a triangle node
-	if (type == BOX16)
-	{
-		const global uint* root = (const global uint*)alt4Node;
-		return root[root[30] + ( id_to_offset( nodeID ) >> 6 ) - root[29]];
-	}
-	return words[31]; // byte 124 of an fp32 box node
+	const uint type = id_to_type( nodeID ), offset = id_to_offset( nodeID );
+	return words[type == BOX16 ? parentTable + ( offset >> 6 ) - box16Start : ( offset >> 2 ) + ( type <= PAIR ? 14u : 31u )];
 }
 
 float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const float4 D, const float4 rD, const float tmax, __local uint* hwStack )
@@ -934,6 +926,8 @@ float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 					  ( lane >> 5 ) * ( 32u * HW_BVH_STACK_ENTRIES ) ) << HW_BVH_STACK_BASE_SHIFT;
 	float4 hit = (float4)( tmax, 0.0f, 0.0f, as_float( INVALID_NODE ) );
 
+	const global uint* words = (const global uint*)alt4Node;
+	const uint box16Start = words[29], parentTable = words[30]; // for parent_id
 	uint currentNodeID = 5; // start at root BOX32 node at byte offset zero.
 	uint pairID = INVALID_NODE; // the pair node whose second test (as type 0) is in progress
 	while (1)
@@ -1003,7 +997,7 @@ float4 traverse_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 		stackAddr += 1u;
 	#endif
 		prevNode = currentNodeID;
-		currentNodeID = parent_id( alt4Node, currentNodeID );
+		currentNodeID = parent_id( words, currentNodeID, box16Start, parentTable );
 
 		if (currentNodeID == INVALID_NODE)
 		{
@@ -1022,6 +1016,8 @@ bool isoccluded_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 	uint stackAddr = ( ( (uint)(size_t)hwStack >> 2 ) + ( lane & 31u ) +
 					  ( lane >> 5 ) * ( 32u * HW_BVH_STACK_ENTRIES ) ) << HW_BVH_STACK_BASE_SHIFT;
 
+	const global uint* words = (const global uint*)alt4Node;
+	const uint box16Start = words[29], parentTable = words[30]; // for parent_id
 	uint currentNodeID = 5; // start at root BOX32 node at byte offset zero.
 	uint pairID = INVALID_NODE; // the pair node whose second test (as type 0) is in progress
 	while (1)
@@ -1073,7 +1069,7 @@ bool isoccluded_gpu4wayHW( const global float4* alt4Node, const float4 O, const 
 		stackAddr += 1u;
 		#endif
 		prevNode = currentNodeID;
-		currentNodeID = parent_id( alt4Node, currentNodeID );
+		currentNodeID = parent_id( words, currentNodeID, box16Start, parentTable );
 
 		if (currentNodeID == INVALID_NODE)
 		{
