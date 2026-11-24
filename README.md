@@ -83,7 +83,7 @@ TinyBVH offers a broad range of BVH layouts, specialized for various use cases.
 | `BVH_GPU` | 64-byte nodes storing both child AABBs ([Aila & Laine, 2009](https://research.nvidia.com/sites/default/files/pubs/2009-08_Understanding-the-Efficiency/aila2009hpg_paper.pdf)), for a simple GPU kernel. |
 | `BVH4_GPU` | Compact quantized 4-wide format for GPU ray tracing. |
 | `BVH8_CWBVH` | 80-byte compressed 8-wide nodes for state-of-the-art GPU traversal ([Ylitie et al., 2017](https://research.nvidia.com/publication/2017-07_efficient-incoherent-ray-traversal-gpus-through-compressed-wide-bvhs); [code by AlanIWBFT](https://github.com/AlanIWBFT/CWBVH)). `CWBVH_COMPRESSED_TRIS` is off by default. |
-| `BVH4_AMD_HW` | AMD hardware BVH4 format (BOX32 and triangle nodes), RDNA3 and up. By Alessandro Salo. |
+| `BVH4_AMD_HW` | AMD hardware BVH4 format (BOX32 and BOX16 nodes, triangle nodes holding one triangle or an edge-sharing pair), RDNA3 and up. By Alessandro Salo. |
 | `CWBVH8_AMD_HW` | AMD RDNA4 hardware BVH8 format: BOX32 nodes, and primitive nodes holding up to eight triangle pairs. By Alessandro Salo. |
 | `BVH_DOBB` | _Experimental._ 8-wide compressed nodes whose child boxes are stored in one of 104 discrete rotated frames ([Kern et al., 2025](https://arxiv.org/abs/2506.22849)). By [mmmuscus](https://github.com/mmmuscus). |
 | `VoxelSet` | 256³ brick-based voxel object with DDA traversal, usable as a BLAS. |
