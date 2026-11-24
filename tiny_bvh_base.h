@@ -1819,39 +1819,63 @@ protected:
 	using Base::AlignedFree;
 	using Base::CopyBasePropertiesFrom;
 public:
-	// Speculative: NVIDIA's format is undocumented. Best guess from the RT-core patents ('complets',
-	// compressed treelets) and CWBVH (Ylitie et al., 2017). All data is in 128-byte lines.
+	// NVIDIA's compacted BLAS format as decoded from Vulkan dumps on an RTX 5080, driver 617.42
+	// (research/nvidia_as/FINDINGS.md, step 2), with PREFER_FAST_TRACE: header, direction table, complets,
+	// triangle blocks, all in 128-byte lines. Fields marked 'unknown' hold the values the driver writes.
+	// The TLAS (instance nodes, header tinybvhType) is TinyBVH's own: NVIDIA's TLAS format was not probed.
 	struct NVHeader
 	{
-		uint32_t magic, version;
-		float bounds[6];
-		uint32_t rootLine, completLines, triBlockLines, numPrims; // in 128-byte lines from the header
-		uint32_t type; // 0: BLAS over triangles, 1: TLAS over instances.
-		uint32_t reserved[19];
-	}; // 128 bytes.
+		uint32_t word0, word1, size, r0; // 0x00: 0x00110003 (low half unknown, bit 16: compacted), 8, size in bytes.
+		uint32_t firstBlock, r1[3]; // 0x10: offset of the first triangle block (TLAS: first instance node).
+		uint32_t firstComplet, r2[7]; // 0x20: offset of the root complet.
+		uint64_t primIndexTable; // 0x40: ~0 (ALLOW_UPDATE builds only).
+		uint32_t dirTable, r3[3]; // 0x48: offset of the direction table, 0x180.
+		uint32_t complets, r4, refBudget, r5; // 0x58: complet count; 0x60: triangle-reference budget.
+		uint32_t blockLines, blockCapacity, r6, prims; // 0x68: blocks, 0x6c: reserved blocks, 0x74: primitives.
+		uint32_t geometries[2]; // 0x78, 0x7c: geometry count, twice.
+		uint32_t r7[10];
+		uint32_t refs, inactive; // 0xa8: stored triangle references, 0xac: inactive triangles.
+		uint32_t r8[6];
+		uint32_t constant1, r9; // 0xc8: 1, unknown.
+		uint64_t address; // 0xd0: device address of this buffer.
+		uint32_t buildFlags, constant2; // 0xd8: Vulkan build flags; 0xdc: 0x01010101, unknown.
+		uint8_t compatibilityUUID[16]; // 0xe0: driver-specific; left zero.
+		uint32_t rf0, tinybvhType, rf8, rfc; // 0xf4: TinyBVH's own: 0 BLAS, 1 TLAS.
+		uint64_t sections[7]; // 0x100: compacted size, complets, 0, 0, blocks, 0, 0.
+		uint32_t r10[6];
+		uint16_t moments[6]; // 0x150: bf16 sums over the root's children of e_i * e_j (xx, yy, zz, xy, yz, xz).
+		uint32_t r11[9];
+	}; // 384 bytes.
+	struct NVDirTable
+	{
+		// min / max of the vertices projected on 51 directions p / 5, |px| + |py| + |pz| = 5, as order-preserving
+		// float keys, pushed outward by a few ulp.
+		uint32_t n, zero, minMax[51][2];
+		uint32_t pad[24];
+	}; // 512 bytes.
 	struct NVComplet
 	{
-		float origin[3]; // quantization grid origin.
-		int8_t exp[3]; // grid step per axis is 2^exp.
-		uint8_t childCount;
-		int32_t childBase; // first child complet, in lines relative to this complet.
-		int32_t leafBase; // first triangle block, in lines relative to this complet.
-		uint16_t innerMask; // bit i: child i is a complet, otherwise a leaf.
-		uint8_t leafType, reserved0; // leafType 0: triangle ranges, 1: instance nodes.
-		int32_t parent; // relative; for short-stack restart.
-		struct Child { uint8_t lo[3], hi[3]; uint16_t meta; } child[12]; // meta: complet index, or triangle range: bits 0..7 line, 8..11 first tri, 12..15 count - 1.
+		uint8_t flags, exp[3]; // 0x40, | 0x20 with leaf children; per-axis exponent e, step 2^(e-135), 0: flat.
+		float origin[3]; // exact fp32 minimum of the subtree.
+		int32_t firstBlock; // bytes from this complet to its first triangle block (0: no leaf children).
+		uint32_t startSlot; // bits 24..27: first triangle in that block; bits 28..31: slot in the parent (15: root).
+		int32_t parent, firstChild; // in lines, relative (root: 0; no complet children: 1).
+		// q: lo, hi per axis, box = origin + [lo, hi + 1] * step; used: 0xff; leaf: 0 for a complet, else
+		// bits 0..2 blocks advanced, 3..6 end index in that block (15: to its end), 7 non-opaque.
+		struct Child { uint8_t q[6], used, leaf; } child[12];
 	}; // 128 bytes.
-	// Measured on RTX 5080 / driver 617.42 (research/nvidia_as/FINDINGS.md): 128 B triangle blocks whose capacity
-	// depends on vertex compressibility (3 random tris .. 15 identical tris, 16 vertices max), lossless (fp16 input
-	// shrinks, position fetch adds nothing). Modelled after US 10,866,990; the bit layout is a guess:
-	// [0,3) mode, [3,7) tris-1, [7,11) verts-1, [11,35) offset widths x,y,z,prim (6 bits each), [35,50) shifts x,y,z,
-	// [50,146) anchor keys x,y,z, [146,178) primBase, then per vertex x,y,z offsets, per triangle three 4-bit vertex
-	// indices + opaque bit, per triangle a primitive delta. A key is the fp32 bit pattern made monotonic.
-	struct NVTriBlock { uint32_t bits[32]; }; // 1024 bits.
-	static constexpr uint32_t BLOCK_TRIS = 15, BLOCK_VERTS = 16;
+	// 1024-bit little-endian bitstream. Bits 0..95: vertex 0 (anchor) as fp32; then vertices 1..V-1, fields of
+	// wx, wy, wz bits that replace the anchor's bits above the shift s. Downward from bit 960: triangle 0's 2 flag
+	// bits (vertices 0, 1, 2), 14-bit records flags | a << 2 | b << 6 | c << 10 for triangles 1..T-1, then their
+	// pw-bit primitive fields. Bits 960..991: k << 29 | key of triangle 0. Bits 992..1023: wx-1, wy-1, wz-1, pw-1
+	// (5 bits each), T-1 (4), s (5), 001.
+	struct NVTriBlock { uint32_t bits[32]; };
+	static constexpr uint32_t BLOCK_TRIS = 16, BLOCK_VERTS = 16;
 	static uint32_t BlockTris( const NVTriBlock& b );
 	static uint32_t BlockVerts( const NVTriBlock& b );
 	static void BlockTri( const NVTriBlock& b, const uint32_t k, Vec3& v0, Vec3& v1, Vec3& v2, uint32_t& prim );
+	// Box of child i of a complet, rounded outward to fp32.
+	static void ChildBounds( const NVComplet& node, const uint32_t i, bvhvec3& bmin, bvhvec3& bmax );
 	struct NVInstance
 	{
 		float worldToObject[3][4]; // precomputed inverse, applied to the ray.
@@ -1889,16 +1913,16 @@ public:
 	uint32_t usedLines = 0;
 	MBVH<12, Float, Index> bvh12; // BVH12_NVIDIA_HW is created from BVH12 and uses its data.
 	bool ownBVH12 = true; // False when ConvertFrom receives an external bvh.
-	static constexpr uint32_t LEAF_TRIS = 8; // one triangle block, if vertices are shared.
+	static constexpr uint32_t LEAF_TRIS = 8; // the driver's leaves hold up to 8 triangles (grid probe).
+	static constexpr uint32_t FIRST_COMPLET = 7; // line of the root complet: header 3, direction table 4.
 private:
-	static void InitComplet( NVComplet& node, bvhvec3 bmin, bvhvec3 bmax );
-	static void SetChildBounds( NVComplet& node, const uint32_t i, bvhvec3 bmin, bvhvec3 bmax );
-	static void ChildBounds( const NVComplet& node, const uint32_t i, bvhvec3& bmin, bvhvec3& bmax );
-	struct OpenBlock { uint32_t key[16][3], prim[15], line, T, V; uint8_t tri[15][3]; bool active; } blk = {}; // block being filled
-	static uint32_t BlockBits( const OpenBlock& b );
+	static void InitComplet( NVComplet& node, const bvhvec3& bmin, const bvhvec3& bmax );
+	static void SetChildBounds( NVComplet& node, const uint32_t i, const bvhvec3& bmin, const bvhvec3& bmax );
+	struct OpenBlock { uint32_t vert[16][3], key[16], T, V; uint8_t tri[16][3]; } blk = {}; // block being filled
+	uint32_t blkLine = 0, keyK = 4; // line of the block being filled; key format of the whole BVH
+	bool TryAdd( const uint32_t* v, const uint32_t key );
 	void FlushBlock();
-	uint16_t EmitLeaf( const uint32_t srcNode, const uint32_t baseLine, uint32_t& lines );
-	uint16_t EmitInstances( const uint32_t srcNode, const uint32_t baseLine, uint32_t& lines );
+	void WriteTables();
 	int32_t Traverse( const bvhvec4* data, Ray& ray ) const;
 	BVH12_NVIDIA_HW& operator=( const BVH12_NVIDIA_HW& ) = default;
 };
@@ -8124,6 +8148,8 @@ TEMPLATED void BVH12_NVIDIA_HW<Float, Index>::Optimize( const uint32_t iteration
 
 TEMPLATED bool BVH12_NVIDIA_HW<Float, Index>::Save( const char* fileName )
 {
+	// a TLAS holds BLAS addresses, which a file can't keep
+	if (!rtasData || usedLines <= FIRST_COMPLET || ((const NVHeader*)rtasData)->tinybvhType == 1) return false;
 	std::fstream s{ fileName, s.binary | s.out };
 	if (!s) return false;
 	const uint32_t header = this->CacheHeader();
@@ -8151,216 +8177,243 @@ TEMPLATED bool BVH12_NVIDIA_HW<Float, Index>::Load( const char* fileName, const 
 	s.read( (char*)this, sizeof( BVH12_NVIDIA_HW ) );
 	context = tmp;
 	this->opmap = opmapKeep, this->opmapN = opmapNKeep;
+	bvh12.DropReference( context ); // holds raw file data: reset, don't free.
+	rtasData = 0, allocatedLines = 0;
+	if (usedLines <= FIRST_COMPLET) { usedLines = 0, triCount = 0; return false; }
 	rtasData = (bvhvec4*)AlignedAlloc( (size_t)usedLines * 128 );
 	allocatedLines = usedLines;
 	s.read( (char*)rtasData, (size_t)usedLines * 128 );
-	bvh12.DropReference( context ); // holds raw file data: reset, don't free.
+	if (s.fail() || ((const NVHeader*)rtasData)->tinybvhType == 1) { AlignedFree( rtasData ), rtasData = 0, allocatedLines = usedLines = 0, triCount = 0; return false; }
+	((NVHeader*)rtasData)->address = (uint64_t)(uintptr_t)rtasData; // the buffer moved
 	return true;
 }
 
-TEMPLATED void BVH12_NVIDIA_HW<Float, Index>::InitComplet( NVComplet& node, bvhvec3 bmin, bvhvec3 bmax )
+TEMPLATED void BVH12_NVIDIA_HW<Float, Index>::InitComplet( NVComplet& node, const bvhvec3& bmin, const bvhvec3& bmax )
 {
 	memset( &node, 0, sizeof( NVComplet ) );
-	tinybvh_intel_conservative( bmin, bmax );
+	node.flags = 0x40;
 	for (int a = 0; a < 3; a++)
 	{
-		int e;
-		const float m = frexpf( bmax[a] - bmin[a], &e ); // smallest 2^x with 255 * 2^x >= extent
-		node.exp[a] = (int8_t)tinybvh_clamp( e - 8 + (m > 255.0f / 256.0f), -128, 127 );
 		node.origin[a] = bmin[a];
+		// smallest e with 2^(e-127) >= extent, so 256 steps of 2^(e-135) cover it; 0 for a flat axis
+		const double extent = (double)bmax[a] - (double)bmin[a];
+		int x = 0;
+		const double m = frexp( extent, &x );
+		const int e = 127 + x - (m == 0.5 ? 1 : 0);
+		BVH_FATAL_ERROR_IF( extent > 0 && e > 254, "BVH12_NVIDIA_HW::ConvertFrom, scene extent exceeds 2^127." );
+		node.exp[a] = extent > 0 ? (uint8_t)tinybvh_max( e, 1 ) : 0;
 	}
+	for (int i = 0; i < 12; i++) node.child[i].q[4] = 0xff; // empty slot: z lo > hi
 }
 
-TEMPLATED void BVH12_NVIDIA_HW<Float, Index>::SetChildBounds( NVComplet& node, const uint32_t i, bvhvec3 bmin, bvhvec3 bmax )
+TEMPLATED void BVH12_NVIDIA_HW<Float, Index>::SetChildBounds( NVComplet& node, const uint32_t i, const bvhvec3& bmin, const bvhvec3& bmax )
 {
-	tinybvh_intel_conservative( bmin, bmax );
+	auto& c = node.child[i];
 	for (int a = 0; a < 3; a++)
 	{
-		const float lo = ldexpf( bmin[a] - node.origin[a], -node.exp[a] );
-		const float hi = ldexpf( bmax[a] - node.origin[a], -node.exp[a] );
-		node.child[i].lo[a] = (uint8_t)tinybvh_clamp( floorf( lo ), 0.0f, 255.0f );
-		node.child[i].hi[a] = (uint8_t)tinybvh_clamp( ceilf( hi ), 0.0f, 255.0f );
+		if (node.exp[a] == 0) { c.q[a * 2] = 0, c.q[a * 2 + 1] = 0xff; continue; }
+		const double step = ldexp( 1.0, node.exp[a] - 135 ), org = node.origin[a];
+		int lo = tinybvh_clamp( (int)floor( ((double)bmin[a] - org) / step ), 0, 255 );
+		// lo - 1: a plane on a step; not below 0, as 0xff would decode to the full range
+		int hi = tinybvh_clamp( (int)ceil( ((double)bmax[a] - org) / step ) - 1, tinybvh_max( lo - 1, 0 ), 255 );
+		while (lo > 0 && org + lo * step > (double)bmin[a]) lo--;
+		while (hi < 255 && org + (hi + 1) * step < (double)bmax[a]) hi++;
+		c.q[a * 2] = (uint8_t)lo, c.q[a * 2 + 1] = (uint8_t)hi;
 	}
+	c.used = 0xff;
 }
 
 TEMPLATED void BVH12_NVIDIA_HW<Float, Index>::ChildBounds( const NVComplet& node, const uint32_t i, bvhvec3& bmin, bvhvec3& bmax )
 {
+	const auto& c = node.child[i];
 	for (int a = 0; a < 3; a++)
-		bmin[a] = node.origin[a] + ldexpf( (float)node.child[i].lo[a], node.exp[a] ),
-		bmax[a] = node.origin[a] + ldexpf( (float)node.child[i].hi[a], node.exp[a] );
+	{
+		// one ulp outward, unconditionally: fast-math compilers may fold a (double)(float)x > x test
+		const double step = ldexp( 1.0, node.exp[a] - 135 ), lo = node.origin[a] + c.q[a * 2] * step, hi = node.origin[a] + (c.q[a * 2 + 1] + 1.0) * step;
+		bmin[a] = nextafterf( (float)lo, -3.0e38f ), bmax[a] = nextafterf( (float)hi, 3.0e38f );
+	}
 }
 
 // Bit access for NVTriBlock; fields are at most 32 bits wide.
 static inline uint32_t tinybvh_nv_key( const float f ) { const uint32_t b = tinybvh_as_uint( f ); return (b & 0x80000000u) ? ~b : b | 0x80000000u; }
-static inline float tinybvh_nv_unkey( const uint32_t k ) { return tinybvh_as_float( (k & 0x80000000u) ? k & 0x7fffffffu : ~k ); }
 static inline uint32_t tinybvh_nv_bitsfor( const uint32_t v ) { uint32_t n = 0; while (n < 32 && (v >> n)) n++; return n; }
+static inline uint32_t tinybvh_nv_mask( const uint32_t n ) { return n >= 32 ? 0xffffffffu : (1u << n) - 1; }
 static inline uint32_t tinybvh_nv_get( const uint32_t* w, const uint32_t pos, const uint32_t n )
 {
 	if (n == 0) return 0;
 	const uint64_t lo = w[pos >> 5], hi = (pos >> 5) + 1 < 32 ? w[(pos >> 5) + 1] : 0;
-	return (uint32_t)(((lo | (hi << 32)) >> (pos & 31)) & (n == 32 ? 0xffffffffull : (1ull << n) - 1));
+	return (uint32_t)(((lo | (hi << 32)) >> (pos & 31)) & tinybvh_nv_mask( n ));
 }
 static inline void tinybvh_nv_put( uint32_t* w, const uint32_t pos, const uint32_t n, const uint32_t v )
 {
 	for (uint32_t i = 0; i < n; i++) if ((v >> i) & 1) w[(pos + i) >> 5] |= 1u << ((pos + i) & 31);
 }
 
-// Per-axis offset width and shift of the vertices of a block, relative to the per-axis minimum key.
-static inline void tinybvh_nv_axis( const uint32_t (*key)[3], const uint32_t V, const int a, uint32_t& anchor, uint32_t& width, uint32_t& shift )
+// Minimal block parameters, as the driver stores them: shift s = trailing zeros of all vertex bits that differ
+// from the anchor, per-axis width of the remaining differing bits, width of the differing primitive key bits.
+static inline uint32_t tinybvh_nv_params( const uint32_t (*v)[3], const uint32_t V, const uint32_t* key, const uint32_t T, uint32_t* w, uint32_t& s, uint32_t& pw )
 {
-	anchor = 0xffffffffu;
-	for (uint32_t i = 0; i < V; i++) anchor = tinybvh_min( anchor, key[i][a] );
-	uint32_t range = 0, ored = 0;
-	for (uint32_t i = 0; i < V; i++) range = tinybvh_max( range, key[i][a] - anchor ), ored |= key[i][a] - anchor;
-	shift = 0;
-	if (ored) while (!((ored >> shift) & 1)) shift++;
-	width = tinybvh_nv_bitsfor( range >> shift );
+	uint32_t ored[3] = { 0, 0, 0 }, kx = 0;
+	for (uint32_t i = 1; i < V; i++) for (int a = 0; a < 3; a++) ored[a] |= v[i][a] ^ v[0][a];
+	const uint32_t all = ored[0] | ored[1] | ored[2];
+	s = 0;
+	if (all) while (!((all >> s) & 1)) s++;
+	for (int a = 0; a < 3; a++) w[a] = tinybvh_max( 1u, tinybvh_nv_bitsfor( ored[a] >> s ) );
+	for (uint32_t t = 1; t < T; t++) kx |= key[t] ^ key[0];
+	pw = tinybvh_max( 1u, tinybvh_nv_bitsfor( kx ) );
+	return 64 + 96 + (V - 1) * (w[0] + w[1] + w[2]) + 2 + (T - 1) * (14 + pw); // used bits
 }
 
-TEMPLATED uint32_t BVH12_NVIDIA_HW<Float, Index>::BlockBits( const OpenBlock& b )
+// Adds a triangle (9 fp32 bit patterns) to the open block, if it fits.
+TEMPLATED bool BVH12_NVIDIA_HW<Float, Index>::TryAdd( const uint32_t* v, const uint32_t key )
 {
-	uint32_t anchor, w[3], s, pmin = 0xffffffffu, pmax = 0;
-	for (int a = 0; a < 3; a++) tinybvh_nv_axis( b.key, b.V, a, anchor, w[a], s );
-	for (uint32_t t = 0; t < b.T; t++) pmin = tinybvh_min( pmin, b.prim[t] ), pmax = tinybvh_max( pmax, b.prim[t] );
-	return 178 + b.V * (w[0] + w[1] + w[2]) + b.T * (13 + tinybvh_nv_bitsfor( pmax - pmin ));
+	if (blk.T == BLOCK_TRIS) return false;
+	OpenBlock b = blk;
+	for (uint32_t j = 0; j < 3; j++)
+	{
+		const uint32_t* p = v + j * 3;
+		uint32_t idx = b.V;
+		// the driver reuses a vertex only for the first 32 corners of a block; triangle 0 is always 0, 1, 2
+		if (b.T > 0 && b.T * 3 + j < 32) for (uint32_t i = 0; i < b.V; i++)
+			if (b.vert[i][0] == p[0] && b.vert[i][1] == p[1] && b.vert[i][2] == p[2]) { idx = i; break; }
+		if (idx == b.V)
+		{
+			if (b.V == BLOCK_VERTS) return false;
+			memcpy( b.vert[b.V++], p, 12 );
+		}
+		b.tri[b.T][j] = (uint8_t)idx;
+	}
+	b.key[b.T++] = key;
+	uint32_t w[3], s, pw;
+	if (tinybvh_nv_params( b.vert, b.V, b.key, b.T, w, s, pw ) > 1024) return false;
+	blk = b;
+	return true;
 }
 
 TEMPLATED void BVH12_NVIDIA_HW<Float, Index>::FlushBlock()
 {
-	if (!blk.active) return;
-	uint32_t* w = ((NVTriBlock*)(rtasData + (size_t)blk.line * 8))->bits;
-	memset( w, 0, sizeof( NVTriBlock ) );
-	uint32_t anchor[3], width[3], shift[3], pmin = 0xffffffffu, pmax = 0;
-	for (int a = 0; a < 3; a++) tinybvh_nv_axis( blk.key, blk.V, a, anchor[a], width[a], shift[a] );
-	for (uint32_t t = 0; t < blk.T; t++) pmin = tinybvh_min( pmin, blk.prim[t] ), pmax = tinybvh_max( pmax, blk.prim[t] );
-	const uint32_t pw = tinybvh_nv_bitsfor( pmax - pmin );
-	tinybvh_nv_put( w, 0, 3, 1 ), tinybvh_nv_put( w, 3, 4, blk.T - 1 ), tinybvh_nv_put( w, 7, 4, blk.V - 1 );
-	for (int a = 0; a < 3; a++)
-		tinybvh_nv_put( w, 11 + a * 6, 6, width[a] ), tinybvh_nv_put( w, 35 + a * 5, 5, shift[a] ), tinybvh_nv_put( w, 50 + a * 32, 32, anchor[a] );
-	tinybvh_nv_put( w, 29, 6, pw ), tinybvh_nv_put( w, 146, 32, pmin );
-	uint32_t pos = 178;
-	for (uint32_t i = 0; i < blk.V; i++) for (int a = 0; a < 3; a++)
-		tinybvh_nv_put( w, pos, width[a], (blk.key[i][a] - anchor[a]) >> shift[a] ), pos += width[a];
-	for (uint32_t t = 0; t < blk.T; t++, pos += 13)
-		tinybvh_nv_put( w, pos, 13, blk.tri[t][0] | (blk.tri[t][1] << 4) | (blk.tri[t][2] << 8) | (1u << 12) ); // opaque
-	for (uint32_t t = 0; t < blk.T; t++, pos += pw) tinybvh_nv_put( w, pos, pw, blk.prim[t] - pmin );
-	blk.active = false;
+	if (blk.T == 0) return;
+	uint32_t* d = ((NVTriBlock*)(rtasData + (size_t)blkLine * 8))->bits;
+	memset( d, 0, sizeof( NVTriBlock ) );
+	uint32_t w[3], s, pw;
+	tinybvh_nv_params( blk.vert, blk.V, blk.key, blk.T, w, s, pw );
+	d[0] = blk.vert[0][0], d[1] = blk.vert[0][1], d[2] = blk.vert[0][2];
+	uint32_t pos = 96;
+	for (uint32_t i = 1; i < blk.V; i++) for (int a = 0; a < 3; a++)
+		tinybvh_nv_put( d, pos, w[a], (blk.vert[i][a] >> s) & tinybvh_nv_mask( w[a] ) ), pos += w[a];
+	pos = 958; // triangle 0: 2 flag bits, zero (opaque)
+	for (uint32_t t = 1; t < blk.T; t++)
+		pos -= 14, tinybvh_nv_put( d, pos, 14, (uint32_t)blk.tri[t][0] << 2 | (uint32_t)blk.tri[t][1] << 6 | (uint32_t)blk.tri[t][2] << 10 );
+	for (uint32_t t = 1; t < blk.T; t++) pos -= pw, tinybvh_nv_put( d, pos, pw, blk.key[t] & tinybvh_nv_mask( pw ) );
+	d[30] = keyK << 29 | blk.key[0];
+	d[31] = (w[0] - 1) | (w[1] - 1) << 5 | (w[2] - 1) << 10 | (pw - 1) << 15 | (blk.T - 1) << 20 | s << 24 | 1u << 29;
 }
 
-TEMPLATED uint32_t BVH12_NVIDIA_HW<Float, Index>::BlockTris( const NVTriBlock& b ) { return tinybvh_nv_get( b.bits, 3, 4 ) + 1; }
-TEMPLATED uint32_t BVH12_NVIDIA_HW<Float, Index>::BlockVerts( const NVTriBlock& b ) { return tinybvh_nv_get( b.bits, 7, 4 ) + 1; }
+TEMPLATED uint32_t BVH12_NVIDIA_HW<Float, Index>::BlockTris( const NVTriBlock& b ) { return ((b.bits[31] >> 20) & 15) + 1; }
+
+TEMPLATED uint32_t BVH12_NVIDIA_HW<Float, Index>::BlockVerts( const NVTriBlock& b )
+{
+	uint32_t V = 3;
+	for (uint32_t t = 1, T = BlockTris( b ); t < T; t++)
+	{
+		const uint32_t r = tinybvh_nv_get( b.bits, 958 - 14 * t, 14 );
+		V = tinybvh_max( V, tinybvh_max( (r >> 2) & 15, tinybvh_max( (r >> 6) & 15, (r >> 10) & 15 ) ) + 1 );
+	}
+	return V;
+}
 
 TEMPLATED void BVH12_NVIDIA_HW<Float, Index>::BlockTri( const NVTriBlock& b, const uint32_t k, Vec3& v0, Vec3& v1, Vec3& v2, uint32_t& prim )
 {
-	const uint32_t* w = b.bits;
-	const uint32_t T = tinybvh_nv_get( w, 3, 4 ) + 1, V = tinybvh_nv_get( w, 7, 4 ) + 1;
-	uint32_t width[3], shift[3], anchor[3];
-	for (int a = 0; a < 3; a++)
-		width[a] = tinybvh_nv_get( w, 11 + a * 6, 6 ), shift[a] = tinybvh_nv_get( w, 35 + a * 5, 5 ), anchor[a] = tinybvh_nv_get( w, 50 + a * 32, 32 );
-	const uint32_t stride = width[0] + width[1] + width[2], triPos = 178 + V * stride;
-	const uint32_t tri = tinybvh_nv_get( w, triPos + k * 13, 13 ), pw = tinybvh_nv_get( w, 29, 6 );
-	prim = tinybvh_nv_get( w, 146, 32 ) + tinybvh_nv_get( w, triPos + T * 13 + k * pw, pw );
+	const uint32_t* d = b.bits, trailer = d[31], T = ((trailer >> 20) & 15) + 1, s = (trailer >> 24) & 31, pw = ((trailer >> 15) & 31) + 1;
+	const uint32_t w[3] = { (trailer & 31) + 1, ((trailer >> 5) & 31) + 1, ((trailer >> 10) & 31) + 1 };
+	const uint32_t r = k == 0 ? (0 | 1 << 6 | 2 << 10) : tinybvh_nv_get( d, 958 - 14 * k, 14 );
+	const uint32_t key0 = d[30] & 0x1fffffffu, keyK_ = d[30] >> 29;
+	const uint32_t key = k == 0 ? key0 : (key0 & ~tinybvh_nv_mask( pw )) | tinybvh_nv_get( d, 958 - 14 * (T - 1) - pw * k, pw );
+	prim = keyK_ <= 4 ? key & tinybvh_nv_mask( 28 - 4 * keyK_ ) : key;
 	Vec3* out[3] = { &v0, &v1, &v2 };
 	for (int c = 0; c < 3; c++)
 	{
-		uint32_t pos = 178 + ((tri >> (c * 4)) & 15) * stride;
-		for (int a = 0; a < 3; a++) (*out[c])[a] = tinybvh_nv_unkey( anchor[a] + (tinybvh_nv_get( w, pos, width[a] ) << shift[a]) ), pos += width[a];
+		const uint32_t i = (r >> (2 + 4 * c)) & 15;
+		if (i == 0) { for (int a = 0; a < 3; a++) (*out[c])[a] = tinybvh_as_float( d[a] ); continue; }
+		uint32_t pos = 96 + (i - 1) * (w[0] + w[1] + w[2]);
+		for (int a = 0; a < 3; a++)
+		{
+			const uint32_t keep = ~tinybvh_nv_mask( w[a] + s ) | tinybvh_nv_mask( s );
+			(*out[c])[a] = tinybvh_as_float( (d[a] & keep) | (tinybvh_nv_get( d, pos, w[a] ) << s) ), pos += w[a];
+		}
 	}
 }
 
-// Appends the triangles of a leaf to the triangle-block stream of a complet. The open block takes the
-// triangle needing the fewest new vertices while it fits 15 triangles, 16 vertices and 1024 bits;
-// triangles of neighbouring leaves share blocks. Returns the leaf's triangle range.
-TEMPLATED uint16_t BVH12_NVIDIA_HW<Float, Index>::EmitLeaf( const uint32_t srcNode, const uint32_t baseLine, uint32_t& lines )
-{
-	const typename MBVH<12, Float, Index>::MBVHNode& leaf = bvh12.mbvhNode[srcNode];
-	const BVH& src = bvh12.bvh;
-	const uint32_t n = (uint32_t)leaf.triCount;
-	BVH_FATAL_ERROR_IF( n > 16, "BVH12_NVIDIA_HW::ConvertFrom, leaf exceeds 16 triangles." );
-	uint32_t prim[16], key[16][3][3];
-	bool used[16] = {};
-	for (uint32_t i = 0; i < n; i++)
-	{
-		const uint32_t p = (uint32_t)src.primIdx[leaf.firstTri + i];
-		prim[i] = p;
-		for (uint32_t k = 0; k < 3; k++)
-		{
-			const bvhvec4 v = src.verts[src.vertIdx ? (uint32_t)src.vertIdx[p * 3 + k] : p * 3 + k];
-			key[i][k][0] = tinybvh_nv_key( v.x ), key[i][k][1] = tinybvh_nv_key( v.y ), key[i][k][2] = tinybvh_nv_key( v.z );
-		}
-	}
-	auto find = [&]( const uint32_t* k3 ) {
-		uint32_t v = 0;
-		while (v < blk.V && (blk.key[v][0] != k3[0] || blk.key[v][1] != k3[1] || blk.key[v][2] != k3[2])) v++;
-		return v;
-	};
-	// add triangle i to the open block; returns false (block unchanged) if it does not fit.
-	auto tryAdd = [&]( const uint32_t i ) {
-		if (blk.T == BLOCK_TRIS) return false;
-		const OpenBlock keep = blk;
-		for (uint32_t k = 0; k < 3; k++)
-		{
-			uint32_t v = find( key[i][k] );
-			if (v == blk.V)
-			{
-				if (blk.V == BLOCK_VERTS) { blk = keep; return false; }
-				memcpy( blk.key[blk.V++], key[i][k], 12 );
-			}
-			blk.tri[blk.T][k] = (uint8_t)v;
-	}
-		blk.prim[blk.T++] = prim[i];
-		if (BlockBits( blk ) > 1024) { blk = keep; return false; }
-		return true;
-	};
-	uint32_t firstLine = 0, firstTri = 0;
-	for (uint32_t placed = 0; placed < n;)
-	{
-		uint32_t best = UINT32_MAX, bestNew = 4;
-		if (blk.active) for (uint32_t i = 0; i < n; i++) if (!used[i])
-		{
-			uint32_t fresh = 0;
-			for (uint32_t k = 0; k < 3; k++) fresh += find( key[i][k] ) == blk.V;
-			if (fresh >= bestNew) continue;
-			const OpenBlock keep = blk;
-			if (tryAdd( i )) best = i, bestNew = fresh;
-			blk = keep;
-		}
-		if (best == UINT32_MAX)
-		{
-			FlushBlock();
-			blk.active = true, blk.line = baseLine + lines++, blk.T = blk.V = 0;
-			for (best = 0; used[best]; best++);
-		}
-		if (placed == 0) firstLine = blk.line - baseLine, firstTri = blk.T;
-		tryAdd( best ); // always fits: an empty block takes any triangle
-		used[best] = true, placed++;
-	}
-	BVH_FATAL_ERROR_IF( firstLine > 255, "BVH12_NVIDIA_HW::ConvertFrom, leaf data of a complet exceeds 256 lines." );
-	return (uint16_t)(firstLine | (firstTri << 8) | ((n - 1) << 12));
-}
+// Directions of the 0x180 table, in the driver's order: integer points p, |px| + |py| + |pz| = 5, one per opposite pair.
+static const int8_t tinybvh_nv_dirs[51][3] = {
+	{ 5, 0, 0 }, { 0, 5, 0 }, { 0, 0, 5 }, { 1, 0, 4 }, { 0, 1, 4 }, { 1, 1, 3 }, { 2, 0, 3 }, { 2, 1, 2 }, { 3, 0, 2 }, { 3, 1, 1 },
+	{ 4, 0, 1 }, { 4, 1, 0 }, { 0, 2, 3 }, { 1, 2, 2 }, { 2, 2, 1 }, { 3, 2, 0 }, { 0, 3, 2 }, { 1, 3, 1 }, { 2, 3, 0 }, { 0, 4, 1 },
+	{ 1, 4, 0 }, { -1, 0, 4 }, { -1, 1, 3 }, { -2, 0, 3 }, { -2, 1, 2 }, { -3, 0, 2 }, { -3, 1, 1 }, { -4, 0, 1 }, { -4, 1, 0 },
+	{ -1, 2, 2 }, { -2, 2, 1 }, { -3, 2, 0 }, { -1, 3, 1 }, { -2, 3, 0 }, { -1, 4, 0 }, { 0, -1, 4 }, { 1, -1, 3 }, { 2, -1, 2 },
+	{ 3, -1, 1 }, { 0, -2, 3 }, { 1, -2, 2 }, { 2, -2, 1 }, { 0, -3, 2 }, { 1, -3, 1 }, { 0, -4, 1 }, { -1, -1, 3 }, { -2, -1, 2 },
+	{ -3, -1, 1 }, { -1, -2, 2 }, { -2, -2, 1 }, { -1, -3, 1 } };
 
-// Appends one instance node per instance of a TLAS leaf. Returns the leaf's range.
-TEMPLATED uint16_t BVH12_NVIDIA_HW<Float, Index>::EmitInstances( const uint32_t srcNode, const uint32_t baseLine, uint32_t& lines )
+// Header, direction table and root moments, once complets and blocks are in place.
+TEMPLATED void BVH12_NVIDIA_HW<Float, Index>::WriteTables()
 {
-	const typename MBVH<12, Float, Index>::MBVHNode& leaf = bvh12.mbvhNode[srcNode];
-	const BVH& src = bvh12.bvh;
-	const uint32_t n = (uint32_t)leaf.triCount, first = lines;
-	BVH_FATAL_ERROR_IF( n > 16, "BVH12_NVIDIA_HW::ConvertFrom, TLAS leaf exceeds 16 instances." );
-	for (uint32_t i = 0; i < n; i++)
+	NVHeader& h = *(NVHeader*)rtasData;
+	const bool tlas = bvh12.bvh.isTLAS();
+	h.word0 = 0x00110003, h.word1 = 8, h.size = usedLines * 128;
+	h.firstComplet = FIRST_COMPLET * 128, h.primIndexTable = ~0ull, h.dirTable = 0x180;
+	h.prims = (uint32_t)bvh12.triCount, h.geometries[0] = h.geometries[1] = 1;
+	h.constant1 = 1, h.constant2 = 0x01010101, h.address = (uint64_t)(uintptr_t)rtasData;
+	h.buildFlags = 6; // PREFER_FAST_TRACE | ALLOW_COMPACTION
+	h.tinybvhType = tlas ? 1 : 0;
+	h.sections[0] = h.size, h.sections[1] = h.firstComplet, h.sections[4] = h.firstBlock;
+	// root moments: products of the child extents, fp32 without denormals, truncated to bf16
+	const NVComplet& root = *(const NVComplet*)(rtasData + FIRST_COMPLET * 8);
+	float e[12][3], sum[6] = {};
+	uint32_t children = 0;
+	auto ftz = []( const float f ) { return fabsf( f ) < 1.17549435e-38f ? 0.0f : f; };
+	for (uint32_t i = 0; i < 12 && root.child[i].used; i++, children++) for (int a = 0; a < 3; a++)
 	{
-		const uint32_t idx = (uint32_t)src.primIdx[leaf.firstTri + i];
-		const BLASInstance& bi = src.instList[idx];
-		const BVHBase<Float, Index>* blas = src.blasList[bi.blasIdx];
-		BVH_FATAL_ERROR_IF( blas->layout != LAYOUT_BVH12_NVIDIA_HW, "BVH12_NVIDIA_HW::ConvertFrom, BLAS of another layout." );
-		NVInstance& inst = *(NVInstance*)(rtasData + (size_t)(baseLine + lines++) * 8);
-		for (int c = 0; c < 12; c++)
-			inst.worldToObject[c >> 2][c & 3] = (float)bi.invTransform[c], inst.objectToWorld[c >> 2][c & 3] = (float)bi.transform[c];
-		inst.blas = (uint64_t)(uintptr_t)((const BVH12_NVIDIA_HW*)blas)->rtasData;
-		inst.customIndexMask = (idx & 0xffffff) | ((bi.mask & 0xff) << 24); // the hardware mask is 8 bits
-		inst.instanceIndex = idx;
+		const int lo = root.child[i].q[a * 2], hi = root.child[i].q[a * 2 + 1], n = (lo > 0 && hi == lo - 1) ? 0 : hi - lo + 1;
+		e[i][a] = ftz( (float)ldexp( (double)n, root.exp[a] - 135 ) );
 	}
-	BVH_FATAL_ERROR_IF( first > 4095, "BVH12_NVIDIA_HW::ConvertFrom, instance data of a complet exceeds 4096 lines." );
-	return (uint16_t)(first | ((n - 1) << 12));
+	static const int pairs[6][2] = { { 0, 0 }, { 1, 1 }, { 2, 2 }, { 0, 1 }, { 1, 2 }, { 0, 2 } };
+	for (int k = 0; k < 6; k++)
+		{
+		for (uint32_t i = 0; i < children; i++) sum[k] = ftz( sum[k] + ftz( e[i][pairs[k][0]] * e[i][pairs[k][1]] ) );
+		h.moments[k] = (uint16_t)(tinybvh_as_uint( sum[k] ) >> 16);
+	}
+	// direction table over all vertices (TLAS: instance box corners), pushed out by 3 * 2^-23 * the largest coordinate
+	NVDirTable& dt = *(NVDirTable*)(rtasData + 3 * 8);
+	double lo[51], hi[51], maxAbs = 0;
+	for (int k = 0; k < 51; k++) lo[k] = 1e300, hi[k] = -1e300;
+	auto addPoint = [&]( const double x, const double y, const double z ) {
+		maxAbs = tinybvh_max( maxAbs, tinybvh_max( fabs( x ), tinybvh_max( fabs( y ), fabs( z ) ) ) );
+		for (int k = 0; k < 51; k++)
+		{
+			const double p = (tinybvh_nv_dirs[k][0] * x + tinybvh_nv_dirs[k][1] * y + tinybvh_nv_dirs[k][2] * z) * 0.2;
+			lo[k] = tinybvh_min( lo[k], p ), hi[k] = tinybvh_max( hi[k], p );
+	}
+	};
+	const BVH& src = bvh12.bvh;
+	if (tlas) for (uint32_t i = 0; i < (uint32_t)src.triCount; i++)
+		{
+		const BLASInstance& bi = src.instList[i];
+		for (int c = 0; c < 8; c++) addPoint( (c & 1) ? bi.aabbMax.x : bi.aabbMin.x, (c & 2) ? bi.aabbMax.y : bi.aabbMin.y, (c & 4) ? bi.aabbMax.z : bi.aabbMin.z );
+		}
+	else for (uint32_t p = 0; p < (uint32_t)src.triCount; p++) for (uint32_t k = 0; k < 3; k++)
+		{
+		const bvhvec4 v = src.verts[src.vertIdx ? (uint32_t)src.vertIdx[p * 3 + k] : p * 3 + k];
+		addPoint( v.x, v.y, v.z );
+		}
+	const double margin = 3 * maxAbs * (1.0 / 8388608.0);
+	dt.n = 5;
+	for (int k = 0; k < 51; k++)
+	{
+		if (lo[k] > hi[k]) lo[k] = hi[k] = 0; // no vertices
+		float flo = (float)(lo[k] - margin), fhi = (float)(hi[k] + margin);
+		if ((double)flo > lo[k] - margin) flo = nextafterf( flo, -3.0e38f );
+		if ((double)fhi < hi[k] + margin) fhi = nextafterf( fhi, 3.0e38f );
+		dt.minMax[k][0] = tinybvh_nv_key( flo ), dt.minMax[k][1] = tinybvh_nv_key( fhi );
+	}
 }
 
 TEMPLATED void BVH12_NVIDIA_HW<Float, Index>::ConvertFrom( const MBVH<12, Float, Index>& original )
@@ -8372,20 +8425,26 @@ TEMPLATED void BVH12_NVIDIA_HW<Float, Index>::ConvertFrom( const MBVH<12, Float,
 	}
 	bvh12.ReferenceFrom( original );
 	CopyBasePropertiesFrom( bvh12 );
-	// count reachable complets and leaf triangles; a block holds at least one triangle.
-	uint64_t complets = 0, leafTris = 0;
-	uint32_t stack[1024], stackPtr = 0;
+	const bool tlas = bvh12.bvh.isTLAS();
+	// count reachable complets and leaf references
+	uint64_t complets = 0, refs = 0;
+	uint32_t stack[4096], stackPtr = 0;
 	if (bvh12.usedNodes > 0 && bvh12.triCount > 0) stack[stackPtr++] = 0;
 	while (stackPtr > 0)
 	{
 		const typename MBVH<12, Float, Index>::MBVHNode& node = bvh12.mbvhNode[stack[--stackPtr]];
-		if (node.isLeaf()) { leafTris += node.triCount; continue; }
+		if (node.isLeaf()) { refs += node.triCount; continue; }
 		complets++;
-		BVH_FATAL_ERROR_IF( stackPtr + 12 > 1024, "BVH12_NVIDIA_HW::ConvertFrom, stack overflow." );
+		BVH_FATAL_ERROR_IF( stackPtr + 12 > 4096, "BVH12_NVIDIA_HW::ConvertFrom, stack overflow." );
 		for (uint32_t i = 0; i < 12; i++) if (node.child[i] != 0) stack[stackPtr++] = (uint32_t)node.child[i];
 	}
-	const uint64_t lines64 = 2 + complets + leafTris;
-	BVH_FATAL_ERROR_IF( lines64 > (1ull << 31), "BVH12_NVIDIA_HW::ConvertFrom, BVH exceeds the range of line offsets." );
+	// primitive keys: 12 bits up to 4096 primitives, then 16, 20, 24, 28 (one geometry)
+	const uint64_t prims = (uint64_t)bvh12.triCount;
+	BVH_FATAL_ERROR_IF( prims > (1ull << 28), "BVH12_NVIDIA_HW::ConvertFrom, more than 2^28 primitives." );
+	keyK = prims <= 4096 ? 4 : prims <= 65536 ? 3 : prims <= (1u << 20) ? 2 : prims <= (1u << 24) ? 1 : 0;
+	// every block but the last holds at least 3 triangles (9 raw vertices fit)
+	const uint64_t lines64 = FIRST_COMPLET + tinybvh_max( complets, (uint64_t)1 ) + (tlas ? refs : refs / 3 + 2);
+	BVH_FATAL_ERROR_IF( lines64 > (1ull << 24), "BVH12_NVIDIA_HW::ConvertFrom, BVH exceeds 2 GB." ); // int32 byte offsets
 	const uint32_t linesNeeded = (uint32_t)lines64;
 	if (allocatedLines < linesNeeded)
 	{
@@ -8395,24 +8454,41 @@ TEMPLATED void BVH12_NVIDIA_HW<Float, Index>::ConvertFrom( const MBVH<12, Float,
 	}
 	memset( rtasData, 0, (size_t)linesNeeded * 128 );
 	NVHeader& header = *(NVHeader*)rtasData;
-	header.magic = 0x4e565242; // 'BRVN'
-	header.version = 1, header.rootLine = 1, header.numPrims = (uint32_t)bvh12.triCount;
-	const bool tlas = bvh12.bvh.isTLAS();
-	header.type = tlas ? 1 : 0;
+	const uint32_t firstBlock = FIRST_COMPLET + (uint32_t)tinybvh_max( complets, (uint64_t)1 );
+	header.firstBlock = firstBlock * 128;
 	if (complets == 0)
 	{
-		InitComplet( *(NVComplet*)(rtasData + 8), bvhvec3( 0 ), bvhvec3( 0 ) );
-		header.completLines = 1, usedLines = 2;
+		InitComplet( *(NVComplet*)(rtasData + FIRST_COMPLET * 8), bvhvec3( 0 ), bvhvec3( 0 ) );
+		NVComplet& root = *(NVComplet*)(rtasData + FIRST_COMPLET * 8);
+		root.startSlot = 15u << 28, root.firstChild = 1;
+		header.complets = 1, usedLines = FIRST_COMPLET + 1;
+		WriteTables();
 		return;
 	}
-	const bvhvec3 rmin = bvh12.mbvhNode[0].aabbMin, rmax = bvh12.mbvhNode[0].aabbMax;
-	for (int a = 0; a < 3; a++) header.bounds[a] = rmin[a], header.bounds[a + 3] = rmax[a];
-	// complets in one region, triangle blocks after it; children of a complet are contiguous.
-	uint32_t completPtr = 2, triPtr = 1 + (uint32_t)complets;
-	stack[stackPtr++] = 0, stack[stackPtr++] = 1, stack[stackPtr++] = 1;
+	// complets: one array, root first, children of a complet contiguous. Triangle blocks (TLAS: instance nodes)
+	// form one stream in depth-first preorder of the complets: a complet's own leaves, then its child subtrees.
+	// Leaves take consecutive triangles; each ends at (block + advance, end index), its successor starts there.
+	struct Pending { uint32_t complet, slot, startLine, endIdx; bool last; } pending[BLOCK_TRIS];
+	uint32_t pendingCount = 0, completPtr = FIRST_COMPLET + 1, instPtr = firstBlock;
+	auto resolve = [&]() { // the open block is complete: fix the leaves that end in it
+		for (uint32_t i = 0; i < pendingCount; i++)
+		{
+			const Pending& p = pending[i];
+			// a leaf that ends a block continues at the next one; the driver writes end index 15 (to the end of
+			// this block) instead for a complet's last leaf when that leaf spans several blocks
+			const bool atEnd = p.endIdx == blk.T, use15 = atEnd && p.last && blkLine > p.startLine;
+			const uint32_t endLine = atEnd && !use15 ? blkLine + 1 : blkLine, endIdx = use15 ? 15 : atEnd ? 0 : p.endIdx;
+			BVH_FATAL_ERROR_IF( endLine - p.startLine > 7, "BVH12_NVIDIA_HW::ConvertFrom, leaf spans too many blocks." );
+			((NVComplet*)(rtasData + (size_t)p.complet * 8))->child[p.slot].leaf = (uint8_t)((endLine - p.startLine) | endIdx << 3);
+		}
+		pendingCount = 0;
+	};
+	blkLine = firstBlock, blk.T = blk.V = 0;
+	const BVH& src = bvh12.bvh;
+	stack[stackPtr++] = 0, stack[stackPtr++] = FIRST_COMPLET, stack[stackPtr++] = FIRST_COMPLET, stack[stackPtr++] = 15;
 	while (stackPtr > 0)
 	{
-		const uint32_t parentLine = stack[--stackPtr], dstLine = stack[--stackPtr], srcNode = stack[--stackPtr];
+		const uint32_t slotInParent = stack[--stackPtr], parentLine = stack[--stackPtr], line = stack[--stackPtr], srcNode = stack[--stackPtr];
 		const typename MBVH<12, Float, Index>::MBVHNode& orig = bvh12.mbvhNode[srcNode];
 		uint32_t child[12], k = 0, inner = 0;
 		bvhvec3 bmin( BVH_FAR ), bmax( -BVH_FAR );
@@ -8422,61 +8498,114 @@ TEMPLATED void BVH12_NVIDIA_HW<Float, Index>::ConvertFrom( const MBVH<12, Float,
 			child[k++] = (uint32_t)orig.child[i], inner += !c.isLeaf();
 			bmin = tinybvh_min( bmin, bvhvec3( c.aabbMin ) ), bmax = tinybvh_max( bmax, bvhvec3( c.aabbMax ) );
 		}
-		NVComplet& node = *(NVComplet*)(rtasData + (size_t)dstLine * 8);
+		NVComplet& node = *(NVComplet*)(rtasData + (size_t)line * 8);
 		InitComplet( node, bmin, bmax );
-		node.childCount = (uint8_t)k, node.parent = (int32_t)parentLine - (int32_t)dstLine, node.leafType = tlas ? 1 : 0;
-		node.childBase = (int32_t)(completPtr - dstLine), node.leafBase = (int32_t)(triPtr - dstLine);
-		BVH_FATAL_ERROR_IF( stackPtr + 3 * inner > 1024, "BVH12_NVIDIA_HW::ConvertFrom, conversion stack overflow." );
-		uint32_t innerIdx = 0, leafLines = 0;
-		blk.active = false; // blocks are not shared between complets
+		if (inner < k) node.flags |= 0x20;
+		node.parent = (int32_t)parentLine - (int32_t)line, node.startSlot = slotInParent << 28;
+		node.firstChild = inner ? (int32_t)(completPtr - line) : 1;
+		const uint32_t childLine = completPtr;
+		completPtr += inner;
+		BVH_FATAL_ERROR_IF( stackPtr + 4 * inner > 4096, "BVH12_NVIDIA_HW::ConvertFrom, conversion stack overflow." );
+		bool firstLeaf = true;
+		uint32_t lastLeaf = 0;
+		for (uint32_t j = 0; j < k; j++) if (bvh12.mbvhNode[child[j]].isLeaf()) lastLeaf = j;
 		for (uint32_t j = 0; j < k; j++)
 		{
 			const typename MBVH<12, Float, Index>::MBVHNode& c = bvh12.mbvhNode[child[j]];
 			SetChildBounds( node, j, c.aabbMin, c.aabbMax );
-			if (!c.isLeaf())
+			if (!c.isLeaf()) continue;
+			const uint32_t n = (uint32_t)c.triCount;
+			BVH_FATAL_ERROR_IF( n > 16, "BVH12_NVIDIA_HW::ConvertFrom, leaf exceeds 16 triangles." );
+			if (tlas)
 			{
-				node.innerMask |= (uint16_t)(1u << j), node.child[j].meta = (uint16_t)innerIdx;
-				stack[stackPtr++] = child[j], stack[stackPtr++] = completPtr + innerIdx++, stack[stackPtr++] = dstLine;
+				BVH_FATAL_ERROR_IF( n > 7, "BVH12_NVIDIA_HW::ConvertFrom, TLAS leaf exceeds 7 instances." );
+				if (firstLeaf) node.firstBlock = (int32_t)(instPtr - line) * 128, firstLeaf = false;
+				for (uint32_t i = 0; i < n; i++)
+				{
+					const uint32_t idx = (uint32_t)src.primIdx[c.firstTri + i];
+					const BLASInstance& bi = src.instList[idx];
+					const BVHBase<Float, Index>* blas = src.blasList[bi.blasIdx];
+					BVH_FATAL_ERROR_IF( blas->layout != LAYOUT_BVH12_NVIDIA_HW, "BVH12_NVIDIA_HW::ConvertFrom, BLAS of another layout." );
+					NVInstance& inst = *(NVInstance*)(rtasData + (size_t)instPtr++ * 8);
+					for (int e = 0; e < 12; e++)
+						inst.worldToObject[e >> 2][e & 3] = (float)bi.invTransform[e], inst.objectToWorld[e >> 2][e & 3] = (float)bi.transform[e];
+					inst.blas = (uint64_t)(uintptr_t)((const BVH12_NVIDIA_HW*)blas)->rtasData;
+					inst.customIndexMask = (idx & 0xffffff) | ((bi.mask & 0xff) << 24); // the hardware mask is 8 bits
+					inst.instanceIndex = idx;
+				}
+				node.child[j].leaf = (uint8_t)n; // advance by n instance nodes
 				continue;
 			}
-			node.child[j].meta = tlas ? EmitInstances( child[j], triPtr, leafLines ) : EmitLeaf( child[j], triPtr, leafLines );
+			uint32_t startLine = 0;
+			for (uint32_t i = 0; i < n; i++)
+			{
+				const uint32_t p = (uint32_t)src.primIdx[c.firstTri + i];
+				uint32_t v[9];
+				for (uint32_t e = 0; e < 3; e++)
+				{
+					const bvhvec4 vert = src.verts[src.vertIdx ? (uint32_t)src.vertIdx[p * 3 + e] : p * 3 + e];
+					v[e * 3] = tinybvh_as_uint( vert.x ), v[e * 3 + 1] = tinybvh_as_uint( vert.y ), v[e * 3 + 2] = tinybvh_as_uint( vert.z );
+				}
+				if (!TryAdd( v, p ))
+				{
+					FlushBlock(), resolve();
+					blkLine++, blk.T = blk.V = 0;
+					TryAdd( v, p ); // always fits an empty block
+				}
+				if (i > 0) continue;
+				startLine = blkLine;
+				if (firstLeaf) node.firstBlock = (int32_t)(blkLine - line) * 128, node.startSlot |= (blk.T - 1) << 24, firstLeaf = false;
+			}
+			pending[pendingCount++] = { line, j, startLine, blk.T, j == lastLeaf };
 		}
-		FlushBlock();
-		completPtr += inner, triPtr += leafLines;
+		for (uint32_t j = k, i = inner; j-- > 0;) if (!bvh12.mbvhNode[child[j]].isLeaf()) // children in slot order, the first on top
+			i--, stack[stackPtr++] = child[j], stack[stackPtr++] = childLine + i, stack[stackPtr++] = line, stack[stackPtr++] = j;
 	}
-	header.completLines = (uint32_t)complets, header.triBlockLines = triPtr - 1 - (uint32_t)complets;
-	usedLines = triPtr;
+	if (tlas) usedLines = instPtr; else FlushBlock(), resolve(), usedLines = blk.T ? blkLine + 1 : blkLine;
+	header.complets = (uint32_t)complets;
+	header.blockLines = header.blockCapacity = usedLines - firstBlock;
+	header.refBudget = header.refs = (uint32_t)refs;
+	WriteTables();
 }
 
 // Traverses the buffer at 'data', which is this structure, or a BLAS reached through an instance node.
 TEMPLATED int32_t BVH12_NVIDIA_HW<Float, Index>::Traverse( const bvhvec4* data, Ray& ray ) const
 {
-	struct Entry { uint32_t line; float t; } stack[256], hit[12];
-	uint32_t stackPtr = 0, line = ((const NVHeader*)data)->rootLine, steps = 0;
+	const uint8_t* base = (const uint8_t*)data;
+	const NVHeader& header = *(const NVHeader*)base;
+	const bool tlas = header.tinybvhType == 1;
+	struct Entry { uint64_t offset; float t; } stack[256], hit[12];
+	uint32_t stackPtr = 0, steps = 0;
+	uint64_t offset = header.firstComplet;
 	while (1)
 	{
-		const NVComplet& node = *(const NVComplet*)(data + (size_t)line * 8);
-		uint32_t hits = 0;
+		const NVComplet& node = *(const NVComplet*)(base + offset);
+		uint32_t hits = 0, inner = 0, idx = (node.startSlot >> 24) & 15;
+		uint64_t block = (uint64_t)((int64_t)offset + node.firstBlock); // leaf cursor
 		steps++;
-		for (uint32_t i = 0; i < node.childCount; i++)
+		for (uint32_t i = 0; i < 12 && node.child[i].used; i++)
 		{
+			const uint32_t leaf = node.child[i].leaf;
 			bvhvec3 bmin, bmax;
 			ChildBounds( node, i, bmin, bmax );
 			const float t = tinybvh_intersect_aabb( ray, bmin, bmax );
-			if (t >= BVH_FAR) continue;
-			const uint32_t meta = node.child[i].meta;
-			if (node.innerMask & (1u << i))
+			if (leaf == 0)
 			{
+				const uint64_t child = (uint64_t)((int64_t)offset + ((int64_t)node.firstChild + inner++) * 128);
+			if (t >= BVH_FAR) continue;
 				uint32_t j = hits++;
 				for (; j > 0 && hit[j - 1].t > t; j--) hit[j] = hit[j - 1];
-				hit[j] = { (uint32_t)((int64_t)line + node.childBase + meta), t };
+				hit[j] = { child, t };
 				continue;
 			}
-			if (node.leafType == 1)
+			// leaf: from the cursor to (block + advance, end index); end index 15: to the end of that block
+			const uint64_t endBlock = block + (uint64_t)(leaf & 7) * 128;
+			const uint32_t endIdx = (leaf >> 3) & 15;
+			if (tlas)
 			{
-				const NVInstance* inst = (const NVInstance*)(data + (size_t)((int64_t)line + node.leafBase + (meta & 4095)) * 8);
-				for (uint32_t k = 0; k <= (meta >> 12); k++, inst++)
+				for (; block < endBlock; block += 128) if (t < BVH_FAR)
 				{
+					const NVInstance* inst = (const NVInstance*)(base + block);
 					if (!((inst->customIndexMask >> 24) & ray.mask)) continue;
 					const float* M = inst->worldToObject[0];
 					Ray tmp;
@@ -8487,26 +8616,33 @@ TEMPLATED int32_t BVH12_NVIDIA_HW<Float, Index>::Traverse( const bvhvec4* data, 
 					tmp.rD = tinybvh_rcp( tmp.D );
 					tmp.mask = ray.mask, tmp.time = ray.time, tmp.hit = ray.hit;
 					tmp.instIdx = (Index)inst->instanceIndex << bvh_inst_shift<Index>;
-					steps += Traverse( (const bvhvec4*)(uintptr_t)inst->blas, tmp );
+					// the BLAS object supplies its own opacity map
+					const BVH12_NVIDIA_HW* owner = bvh12.bvh.blasList ? (const BVH12_NVIDIA_HW*)bvh12.bvh.blasList[bvh12.bvh.instList[inst->instanceIndex].blasIdx] : this;
+					steps += owner->Traverse( (const bvhvec4*)(uintptr_t)inst->blas, tmp );
 					ray.hit = tmp.hit;
 				}
+				block = endBlock, idx = 0;
 				continue;
 			}
-			const NVTriBlock* block = (const NVTriBlock*)(data + (size_t)((int64_t)line + node.leafBase + (meta & 255)) * 8);
-			for (uint32_t k = (meta >> 8) & 15, count = (meta >> 12) + 1, T = BlockTris( *block ); count > 0; count--, k++)
+			while (block <= endBlock && (endIdx == 15 || block != endBlock || idx != endIdx))
 			{
-				if (k == T) block++, k = 0, T = BlockTris( *block );
+				const NVTriBlock& tb = *(const NVTriBlock*)(base + block);
+				if (idx >= BlockTris( tb )) { block += 128, idx = 0; continue; }
+				if (t < BVH_FAR)
+			{
 				Vec3 v0, v1, v2;
 				uint32_t prim;
-				BlockTri( *block, k, v0, v1, v2, prim );
+					BlockTri( tb, idx, v0, v1, v2, prim );
 				this->IntersectTri( ray, (Index)prim, v0, v1, v2 );
+			}
+				idx++;
 			}
 		}
 		BVH_FATAL_ERROR_IF( stackPtr + hits > 256, "BVH12_NVIDIA_HW::Traverse, stack overflow." );
 		while (hits > 0) stack[stackPtr++] = hit[--hits]; // nearest on top
 		while (stackPtr > 0 && stack[stackPtr - 1].t >= ray.hit.t) stackPtr--;
 		if (stackPtr == 0) break;
-		line = stack[--stackPtr].line;
+		offset = stack[--stackPtr].offset;
 	}
 	return (int32_t)steps;
 }

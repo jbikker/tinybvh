@@ -6,7 +6,7 @@
 //   asprobe <gpu> sweep <kind> <n0> <n1> <step> [options]  -> CSV on stdout
 //
 // <gpu>: substring of the device name, e.g. "890M" or "RTX".
-// <scene>: tri1 | grid:N | strip:N | fan:N | soup:N | bin:path (tinybvh .bin: u32 count, 3 x vec4 per tri)
+// <scene>: tri1 | grid:N | strip:N | fan:N | soup:N | same:N | quad:N | txt:path (9 floats per line) | bin:path (tinybvh .bin)
 // options: -f flags   comma list of fasttrace,fastbuild,lowmem,compact,update,dataaccess (default fasttrace,compact)
 //          -fp16      store vertices as R16G16B16A16_SFLOAT
 //          -idx       indexed (vertices welded on exact position)
@@ -316,6 +316,21 @@ static Scene MakeScene( const std::string& spec )
 		const float px = Rnd() * 10, py = Rnd() * 10, pz = Rnd() * 10;
 		const float a[3] = { px, py, pz }, b[3] = { px + Rnd(), py + Rnd(), pz + Rnd() }, c[3] = { px + Rnd(), py + Rnd(), pz + Rnd() };
 		AddTri( s, a, b, c );
+	}
+	else if (kind == "txt")
+	{
+		// text file, one triangle per line: 9 floats (x y z of three vertices); '#' starts a comment
+		FILE* f = fopen( arg.c_str(), "r" );
+		if (!f) Fatal( "cannot open %s", arg.c_str() );
+		char line[1024];
+		while (fgets( line, sizeof( line ), f ))
+		{
+			if (line[0] == '#') continue;
+			float t[9];
+			if (sscanf( line, "%f %f %f %f %f %f %f %f %f", t, t + 1, t + 2, t + 3, t + 4, t + 5, t + 6, t + 7, t + 8 ) == 9) AddTri( s, t, t + 3, t + 6 );
+		}
+		fclose( f );
+		if (!s.tris) Fatal( "no triangles in %s", arg.c_str() );
 	}
 	else if (kind == "bin")
 	{
