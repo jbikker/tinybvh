@@ -104,6 +104,8 @@ TBVH_SAME_OFFSET( tbvh_instance, BLASInstance, blasIdx, blasIdx );
 TBVH_SAME_OFFSET( tbvh_instance, BLASInstance, aabbMax, aabbMax );
 TBVH_SAME_OFFSET( tbvh_instance, BLASInstance, mask, mask );
 TBVH_SAME_OFFSET( tbvh_instance, BLASInstance, transform1, transform1 );
+TBVH_SAME_OFFSET( tbvh_instance, BLASInstance, srt, srt );
+static_assert( sizeof( BLASInstance::SRT ) == 16 * sizeof( float ), "an SRT key is 16 values" );
 #ifdef DOUBLE_PRECISION_SUPPORT
 TBVH_SAME_SIZE( tbvh_hitd, IntersectionEx );
 TBVH_SAME_OFFSET( tbvh_hitd, IntersectionEx, inst, inst );
@@ -126,6 +128,8 @@ TBVH_SAME_OFFSET( tbvh_instanced, BLASInstanceEx, blasIdx, blasIdx );
 TBVH_SAME_OFFSET( tbvh_instanced, BLASInstanceEx, aabbMax, aabbMax );
 TBVH_SAME_OFFSET( tbvh_instanced, BLASInstanceEx, mask, mask );
 TBVH_SAME_OFFSET( tbvh_instanced, BLASInstanceEx, transform1, transform1 );
+TBVH_SAME_OFFSET( tbvh_instanced, BLASInstanceEx, srt, srt );
+static_assert( sizeof( BLASInstanceEx::SRT ) == 16 * sizeof( double ), "an SRT key is 16 values" );
 #endif
 TBVH_SAME_SIZE( tbvh_context, BVHContext );
 TBVH_SAME_OFFSET( tbvh_context, BVHContext, alloc, malloc );

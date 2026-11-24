@@ -126,8 +126,8 @@ typedef enum tbvh_layout
 	TBVH_LAYOUT_BVH4_GPU = 4,			/* 4-wide, quantized, GPU traversal */
 	TBVH_LAYOUT_BVH8_CPU = 5,			/* 8-wide, CPU traversal (AVX2) - fastest on x64 */
 	TBVH_LAYOUT_BVH8_CWBVH = 6,			/* compressed wide BVH (Ylitie et al.), GPU traversal */
-	TBVH_LAYOUT_BVH4_AMD_HW = 7,		/* AMD ray tracing hardware, BVH4 (buffers only) */
-	TBVH_LAYOUT_CWBVH8_AMD_HW = 8,		/* AMD ray tracing hardware, BVH8 (buffers only) */
+	TBVH_LAYOUT_BVH4_AMD_HW = 7,		/* AMD ray tracing hardware, BVH4 (RDNA3) */
+	TBVH_LAYOUT_CWBVH8_AMD_HW = 8,		/* AMD ray tracing hardware, BVH8 (RDNA4) */
 	TBVH_LAYOUT_BVH_DOBB = 9,			/* DOBB-BVH (Kern et al., 2025); experimental */
 	/* double precision, 64-bit indices */
 	TBVH_LAYOUT_BVH_DOUBLE = 101,
@@ -232,13 +232,21 @@ typedef struct tbvh_rayd
 
 TBVH_INLINE float tbvh_safe_rcp( const float x )
 {
+#if 1
+	return fabsf( x ) >= 1.0f / TBVH_RCP_FAR ? 1.0f / x : copysignf( TBVH_RCP_FAR, x );
+#else
 	const float r = 1.0f / x;
 	return fabsf( r ) <= TBVH_RCP_FAR ? r : copysignf( TBVH_RCP_FAR, x );
+#endif
 }
 TBVH_INLINE double tbvh_safe_rcpd( const double x )
 {
+#if 1
+	return fabs( x ) >= 1.0 / TBVH_DBL_RCP_FAR ? 1.0 / x : copysign( TBVH_DBL_RCP_FAR, x );
+#else
 	const double r = 1.0 / x;
 	return fabs( r ) <= TBVH_DBL_RCP_FAR ? r : copysign( TBVH_DBL_RCP_FAR, x );
+#endif
 }
 TBVH_INLINE void tbvh_ray_set_dir( tbvh_ray* ray, const float dx, const float dy, const float dz )
 {
@@ -276,7 +284,10 @@ TBVH_INLINE void tbvh_rayd_init( tbvh_rayd* ray, const double ox, const double o
    invTransform, aabbMin and aabbMax are written by tbvh_build_tlas.
    transform1: motion blur, the transform at the end of the shutter interval (16 values,
    caller-owned), or NULL for an instance that does not move. Rays see the instance through
-   the transform interpolated at tbvh_ray.time. */
+   the transform interpolated at tbvh_ray.time.
+   srt: motion blur with scale, rotation and translation interpolated separately: two keys of 16
+   values each (caller-owned), for the start and the end of the shutter interval, in the order
+   of VkSRTDataNV: sx a b pvx sy c pvy sz pvz qx qy qz qw tx ty tz. Overrides transform1. */
 typedef struct tbvh_instance
 {
 	TBVH_ALIGN(64) float transform[16];
@@ -286,6 +297,7 @@ typedef struct tbvh_instance
 	float aabbMax[3];
 	uint32_t mask;				/* tested against tbvh_ray.mask */
 	const float* transform1;
+	const float* srt;
 } tbvh_instance;
 
 typedef struct tbvh_instanced
@@ -297,6 +309,7 @@ typedef struct tbvh_instanced
 	double aabbMax[3];
 	uint32_t mask;
 	const double* transform1;
+	const double* srt;
 } tbvh_instanced;
 
 TBVH_INLINE void tbvh_instance_init( tbvh_instance* inst, const uint32_t blasIdx )
@@ -304,14 +317,14 @@ TBVH_INLINE void tbvh_instance_init( tbvh_instance* inst, const uint32_t blasIdx
 	int i;
 	for (i = 0; i < 16; i++) inst->transform[i] = inst->invTransform[i] = (i % 5 == 0) ? 1.0f : 0.0f;
 	for (i = 0; i < 3; i++) inst->aabbMin[i] = TBVH_FAR, inst->aabbMax[i] = -TBVH_FAR;
-	inst->blasIdx = blasIdx, inst->mask = TBVH_MASK_ALL, inst->transform1 = NULL;
+	inst->blasIdx = blasIdx, inst->mask = TBVH_MASK_ALL, inst->transform1 = NULL, inst->srt = NULL;
 }
 TBVH_INLINE void tbvh_instanced_init( tbvh_instanced* inst, const uint64_t blasIdx )
 {
 	int i;
 	for (i = 0; i < 16; i++) inst->transform[i] = inst->invTransform[i] = (i % 5 == 0) ? 1.0 : 0.0;
 	for (i = 0; i < 3; i++) inst->aabbMin[i] = TBVH_DBL_FAR, inst->aabbMax[i] = -TBVH_DBL_FAR;
-	inst->blasIdx = blasIdx, inst->mask = TBVH_MASK_ALL, inst->transform1 = NULL;
+	inst->blasIdx = blasIdx, inst->mask = TBVH_MASK_ALL, inst->transform1 = NULL, inst->srt = NULL;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -480,7 +493,8 @@ TBVH_API tbvh_result tbvh_optimize( tbvh_bvh* bvh, uint32_t iterations );
 
 /* Closest hit: updates ray->hit if a closer hit exists. Returns the traversal cost
    as the layout counts it, or a negated tbvh_result. BVH4_CPU, BVH8_CPU and
-   BVH8_CWBVH do not count, and return 0. Not available for the AMD hardware layouts. */
+   BVH8_CWBVH do not count, and return 0. The AMD hardware layouts decode their nodes
+   as the hardware does: slow, for validation. */
 TBVH_API int32_t tbvh_intersect( const tbvh_bvh* bvh, tbvh_ray* ray );
 TBVH_API int32_t tbvh_intersectd( const tbvh_bvh* bvh, tbvh_rayd* ray );
 /* Any hit closer than ray->hit.t: returns 1 or 0, or a negated tbvh_result. */
