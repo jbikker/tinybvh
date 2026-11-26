@@ -305,13 +305,15 @@ template <class Fn> decltype(auto) Visit( const tbvh_bvh* h, Fn&& fn )
 {
 	switch (h->layout)
 	{
-	case TBVH_LAYOUT_BVH_GPU: return fn( *(BVH_GPU*)h->obj );
 	case TBVH_LAYOUT_BVH4_CPU: return fn( *(BVH4_CPU*)h->obj );
-	case TBVH_LAYOUT_BVH4_GPU: return fn( *(BVH4_GPU*)h->obj );
 	case TBVH_LAYOUT_BVH8_CPU: return fn( *(BVH8_CPU*)h->obj );
+#ifndef TINYBVH_NO_GPU
+	case TBVH_LAYOUT_BVH_GPU: return fn( *(BVH_GPU*)h->obj );
+	case TBVH_LAYOUT_BVH4_GPU: return fn( *(BVH4_GPU*)h->obj );
 	case TBVH_LAYOUT_BVH8_CWBVH: return fn( *(BVH8_CWBVH*)h->obj );
 	case TBVH_LAYOUT_BVH4_AMD_HW: return fn( *(BVH4_AMD_HW*)h->obj );
 	case TBVH_LAYOUT_CWBVH8_AMD_HW: return fn( *(CWBVH8_AMD_HW*)h->obj );
+#endif
 	case TBVH_LAYOUT_BVH_DOBB: return fn( *(BVH_DOBB*)h->obj );
 	TBVH_DOUBLE_CASES
 	default: return fn( *(BVH*)h->obj ); // TBVH_LAYOUT_BVH
@@ -437,9 +439,11 @@ int tbvh_layout_supported( const tbvh_layout layout )
 {
 	switch (layout)
 	{
-	case TBVH_LAYOUT_BVH: case TBVH_LAYOUT_BVH_GPU: case TBVH_LAYOUT_BVH4_CPU: case TBVH_LAYOUT_BVH4_GPU:
-	case TBVH_LAYOUT_BVH8_CPU: case TBVH_LAYOUT_BVH8_CWBVH: case TBVH_LAYOUT_BVH4_AMD_HW:
-	case TBVH_LAYOUT_CWBVH8_AMD_HW: case TBVH_LAYOUT_BVH_DOBB: return 1;
+	case TBVH_LAYOUT_BVH: case TBVH_LAYOUT_BVH4_CPU: case TBVH_LAYOUT_BVH8_CPU: case TBVH_LAYOUT_BVH_DOBB: return 1;
+#ifndef TINYBVH_NO_GPU // tiny_bvh_gpu.h
+	case TBVH_LAYOUT_BVH_GPU: case TBVH_LAYOUT_BVH4_GPU: case TBVH_LAYOUT_BVH8_CWBVH: case TBVH_LAYOUT_BVH4_AMD_HW:
+	case TBVH_LAYOUT_CWBVH8_AMD_HW: return 1;
+#endif
 #ifdef DOUBLE_PRECISION_SUPPORT
 	case TBVH_LAYOUT_BVH_DOUBLE: case TBVH_LAYOUT_BVH4_CPU_DOUBLE: return 1;
 #endif
@@ -546,13 +550,15 @@ tbvh_result tbvh_create( const tbvh_layout layout, const tbvh_context* context, 
 	switch (layout)
 	{
 	case TBVH_LAYOUT_BVH: h->obj = NewLayout<BVH>( ctx ); break;
-	case TBVH_LAYOUT_BVH_GPU: h->obj = NewLayout<BVH_GPU>( ctx ); break;
 	case TBVH_LAYOUT_BVH4_CPU: h->obj = NewLayout<BVH4_CPU>( ctx ); break;
-	case TBVH_LAYOUT_BVH4_GPU: h->obj = NewLayout<BVH4_GPU>( ctx ); break;
 	case TBVH_LAYOUT_BVH8_CPU: h->obj = NewLayout<BVH8_CPU>( ctx ); break;
+#ifndef TINYBVH_NO_GPU
+	case TBVH_LAYOUT_BVH_GPU: h->obj = NewLayout<BVH_GPU>( ctx ); break;
+	case TBVH_LAYOUT_BVH4_GPU: h->obj = NewLayout<BVH4_GPU>( ctx ); break;
 	case TBVH_LAYOUT_BVH8_CWBVH: h->obj = NewLayout<BVH8_CWBVH>( ctx ); break;
 	case TBVH_LAYOUT_BVH4_AMD_HW: h->obj = NewLayout<BVH4_AMD_HW>( ctx ); break;
 	case TBVH_LAYOUT_CWBVH8_AMD_HW: h->obj = NewLayout<CWBVH8_AMD_HW>( ctx ); break;
+#endif
 	case TBVH_LAYOUT_BVH_DOBB: h->obj = NewLayout<BVH_DOBB>( ctx ); break;
 #ifdef DOUBLE_PRECISION_SUPPORT
 	case TBVH_LAYOUT_BVH_DOUBLE: h->obj = NewLayout<BVH_Double>( ctx ); break;
@@ -951,14 +957,11 @@ tbvh_result tbvh_get_buffer( const tbvh_bvh* h, const tbvh_buffer which, const v
 	case TBVH_LAYOUT_BVH: { const BVH& o = *(const BVH*)h->obj;
 		pick( TBVH_BUFFER_NODES, o.bvhNode, (size_t)o.usedNodes * sizeof( BVH::BVHNode ) );
 		pick( TBVH_BUFFER_PRIM_INDICES, o.primIdx, (size_t)o.idxCount * sizeof( uint32_t ) ); break; }
+#ifndef TINYBVH_NO_GPU
 	case TBVH_LAYOUT_BVH_GPU: { const BVH_GPU& o = *(const BVH_GPU*)h->obj;
 		pick( TBVH_BUFFER_NODES, o.bvhNode, (size_t)o.usedNodes * sizeof( BVH_GPU::BVHNode ) );
 		pick( TBVH_BUFFER_TRIANGLES, o.orderedVerts.data, (size_t)o.orderedVerts.count * o.orderedVerts.stride );
 		pick( TBVH_BUFFER_PRIM_INDICES, o.bvh.primIdx, o.bvh.primIdx ? (size_t)o.bvh.idxCount * sizeof( uint32_t ) : 0 ); break; }
-	case TBVH_LAYOUT_BVH4_CPU: { const BVH4_CPU& o = *(const BVH4_CPU*)h->obj;
-		pick( TBVH_BUFFER_NODES, o.bvh4Data, (size_t)o.usedBlocks * 64 ); break; }
-	case TBVH_LAYOUT_BVH8_CPU: { const BVH8_CPU& o = *(const BVH8_CPU*)h->obj;
-		pick( TBVH_BUFFER_NODES, o.bvh8Data, (size_t)o.usedBlocks * 64 ); break; }
 	case TBVH_LAYOUT_BVH4_GPU: { const BVH4_GPU& o = *(const BVH4_GPU*)h->obj;
 		pick( TBVH_BUFFER_NODES, o.bvh4Data, (size_t)o.usedBlocks * 16 ); break; }
 	case TBVH_LAYOUT_BVH8_CWBVH: { const BVH8_CWBVH& o = *(const BVH8_CWBVH*)h->obj;
@@ -968,6 +971,11 @@ tbvh_result tbvh_get_buffer( const tbvh_bvh* h, const tbvh_buffer which, const v
 		pick( TBVH_BUFFER_NODES, o.bvh4Data, (size_t)o.usedBlocks * 16 ); break; }
 	case TBVH_LAYOUT_CWBVH8_AMD_HW: { const CWBVH8_AMD_HW& o = *(const CWBVH8_AMD_HW*)h->obj;
 		pick( TBVH_BUFFER_NODES, o.bvh8Data, (size_t)o.usedBlocks * 16 ); break; }
+#endif
+	case TBVH_LAYOUT_BVH4_CPU: { const BVH4_CPU& o = *(const BVH4_CPU*)h->obj;
+		pick( TBVH_BUFFER_NODES, o.bvh4Data, (size_t)o.usedBlocks * 64 ); break; }
+	case TBVH_LAYOUT_BVH8_CPU: { const BVH8_CPU& o = *(const BVH8_CPU*)h->obj;
+		pick( TBVH_BUFFER_NODES, o.bvh8Data, (size_t)o.usedBlocks * 64 ); break; }
 	case TBVH_LAYOUT_BVH_DOBB: { const BVH_DOBB& o = *(const BVH_DOBB*)h->obj;
 		pick( TBVH_BUFFER_NODES, o.dobbNode, (size_t)o.usedNodes * sizeof( BVH_DOBB::BVHNode ) );
 		pick( TBVH_BUFFER_PRIM_INDICES, o.dobbPrimIdx, (size_t)o.idxCount * sizeof( uint32_t ) ); break; }

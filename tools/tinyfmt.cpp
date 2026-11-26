@@ -4,7 +4,7 @@
 //         cl /O2 /EHsc /std:c++17 tinyfmt.cpp
 //
 // Usage:  tinyfmt [--check] [--verbose] [file.h ...]
-//         Without file arguments, the six tinybvh headers in the current folder are processed.
+//         Without file arguments, the seven tinybvh headers in the current folder are processed.
 //         --check      report only, write nothing; exit code 1 if any file would change.
 //         --verbose    print every changed line (before / after).
 //
@@ -52,8 +52,8 @@ const size_t npos = std::string::npos;
 
 const char* const defaultFiles[] = {
 	"tiny_bvh.h", "tiny_bvh_base.h", "tiny_bvh_x86_float.h",
-	"tiny_bvh_x86_double.h", "tiny_bvh_arm_float.h", "tiny_bvh_arm_double.h",
-	"tiny_ocl.h", "tiny_scene.h"
+	"tiny_bvh_x86_double.h", "tiny_bvh_arm_float.h", "tiny_bvh_arm_double.h", "tiny_bvh_gpu.h",
+	"tiny_bvh_gpu_nv.h", "tiny_ocl.h", "tiny_scene.h"
 };
 const char* const ctrlWords[] = { "if", "for", "while", "switch", "catch", 0 };
 const char* const noPadWords[] = { "alignas", "alignof", "decltype", "noexcept", "__attribute__", "__declspec",
@@ -780,7 +780,7 @@ bool WriteFile( const std::string& path, const std::string& data )
 const char* usage =
 	"tinyfmt - applies the tinybvh coding standard\n"
 	"usage: tinyfmt [--check] [--verbose] [file.h ...]\n"
-	"  no files     process the six tinybvh headers in the current folder\n"
+	"  no files     process the seven tinybvh headers in the current folder\n"
 	"  --check      write nothing; exit code 1 if any file would change\n"
 	"  --verbose    print every changed line\n";
 

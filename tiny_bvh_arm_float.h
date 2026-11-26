@@ -529,7 +529,9 @@ struct tinybvh_leafray
 	float32x4_t ox, oy, oz, dx, dy, dz;
 	tinybvh_leafray( const Ray& ray ) :
 		ox( vdupq_n_f32( ray.O.x ) ), oy( vdupq_n_f32( ray.O.y ) ), oz( vdupq_n_f32( ray.O.z ) ),
-		dx( vdupq_n_f32( ray.D.x ) ), dy( vdupq_n_f32( ray.D.y ) ), dz( vdupq_n_f32( ray.D.z ) ) {}
+		dx( vdupq_n_f32( ray.D.x ) ), dy( vdupq_n_f32( ray.D.y ) ), dz( vdupq_n_f32( ray.D.z ) )
+		{
+	}
 };
 
 // The four edge tests of one batch; 'first' is its first triangle. Yields u4, v4, ta4 and the
@@ -565,7 +567,7 @@ static TINYBVH_FORCEINLINE bool tinybvh_leaf_closest( const BVHTriLeaf* leaf, co
 	for (uint32_t first = 0; first < BVHTriLeaf::PRIMS; first += 4)
 	{
 		TINYBVH_LEAF_MT4( leaf, first, r, ray.hit.t )
-		uint32_t imask = neon_movemask_popc( combined ) & 15;
+			uint32_t imask = neon_movemask_popc( combined ) & 15;
 		// evaluate opacity map, if present (NEON version).
 		if (opmap) if (imask)
 		{
@@ -594,7 +596,7 @@ static TINYBVH_FORCEINLINE bool tinybvh_leaf_occluded( const BVHTriLeaf* leaf, c
 	for (uint32_t first = 0; first < BVHTriLeaf::PRIMS; first += 4)
 	{
 		TINYBVH_LEAF_MT4( leaf, first, r, ray.hit.t )
-		const uint32_t imask = neon_movemask_popc( combined ) & 15;
+			const uint32_t imask = neon_movemask_popc( combined ) & 15;
 		if (!imask) continue;
 		if (!opmap) return true;
 		// evaluate opacity map, NEON version.

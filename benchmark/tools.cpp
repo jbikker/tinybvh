@@ -3,7 +3,6 @@
 #ifdef ENABLE_OPENCL
 #define TINY_OCL_IMPLEMENTATION
 #include "tiny_ocl.h"
-tinyocl::Kernel* kernel_reset = nullptr;
 tinyocl::Kernel* kernel_nearest = nullptr;
 tinyocl::Kernel* kernel_any = nullptr;
 tinyocl::Kernel* gpu4way_kernel = nullptr;
@@ -80,13 +79,13 @@ bool InitOpenCL()
 	if (clInitialized) return true;
 #ifdef ENABLE_OPENCL
 	// load and compile the OpenCL kernel code
-	kernel_reset = new tinyocl::Kernel( "kernels/traverse.cl", "reset_rays" );
-	kernel_nearest = new tinyocl::Kernel( "kernels/traverse.cl", "batch_nearest" );
-	kernel_any = new tinyocl::Kernel( "kernels/traverse.cl", "batch_any" );
-	gpu4way_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_gpu4way" );
-	gpu4way_kernel_any = new tinyocl::Kernel( "kernels/traverse.cl", "batch_gpu4way_any" );
-	cwbvh_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_cwbvh" );
-	cwbvh_kernel_any = new tinyocl::Kernel( "kernels/traverse.cl", "batch_cwbvh_any" );
+	// packed entry points: 32-byte rays in, 16-byte hits (or an occlusion word) out
+	kernel_nearest = new tinyocl::Kernel( "kernels/traverse.cl", "batch_nearest_packed" );
+	kernel_any = new tinyocl::Kernel( "kernels/traverse.cl", "batch_any_packed" );
+	gpu4way_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_gpu4way_packed" );
+	gpu4way_kernel_any = new tinyocl::Kernel( "kernels/traverse.cl", "batch_gpu4way_any_packed" );
+	cwbvh_kernel = new tinyocl::Kernel( "kernels/traverse.cl", "batch_cwbvh_packed" );
+	cwbvh_kernel_any = new tinyocl::Kernel( "kernels/traverse.cl", "batch_cwbvh_any_packed" );
 	printf( "----------------------------------------------------------------\n" );
 	if (csv)
 	{

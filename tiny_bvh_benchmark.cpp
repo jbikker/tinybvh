@@ -24,24 +24,32 @@ int main()
 	vector<Experiment*> experiment;
 	// construct list of experiments
 
-#if 1
+#if 0
 	
 	// experiments for slide 41: TinyBVH tree quality. TODO: should we do a basic optimization step after H-PLOC to make it fair?
 	/* scene = STANFORD_DRAGON;
-	experiment.push_back( new Experiment( BVH2, HPLOC, scene ) );
+	//experiment.push_back( new Experiment( BVH2, HPLOC, scene ) );
 	experiment.push_back( new Experiment( BVH2, BONSAI | SPATIALSPLITS, scene ) );
 	scene = BISTRO_EXTERIOR;
+	//experiment.push_back( new Experiment( BVH2, HPLOC, scene ) );
+	experiment.push_back( new Experiment( BVH2, BONSAI | SPATIALSPLITS, scene ) );
+
+	scene = CRYTEK_SPONZA;
 	experiment.push_back( new Experiment( BVH2, HPLOC, scene ) );
 	experiment.push_back( new Experiment( BVH2, BONSAI | SPATIALSPLITS, scene ) );
-	scene = LEGO_PORSCHE;
+	scene = CONFERENCE_ROOM;
 	experiment.push_back( new Experiment( BVH2, HPLOC, scene ) );
+	experiment.push_back( new Experiment( BVH2, BONSAI | SPATIALSPLITS, scene ) );
+	
+	scene = LEGO_PORSCHE;
+	//experiment.push_back( new Experiment( BVH2, HPLOC, scene ) );
 	experiment.push_back( new Experiment( BVH2, BONSAI | SPATIALSPLITS, scene ) );
 	scene = SAN_MIGUEL;
-	experiment.push_back( new Experiment( BVH2, HPLOC, scene ) );
+	//experiment.push_back( new Experiment( BVH2, HPLOC, scene ) );
 	experiment.push_back( new Experiment( BVH2, BONSAI | SPATIALSPLITS, scene ) ); */
 
 	// also slide 47: traversing a H-PLOC on GPU versus BonsaiS.
-	scene = STANFORD_DRAGON;
+	/* scene = STANFORD_DRAGON;
 	experiment.push_back( new Experiment( GPU_BVH, HPLOC, scene, PRIMARY_VIEW1, USE_GPU ) );
 	experiment.push_back( new Experiment( GPU_BVH, BONSAI | SPATIALSPLITS, scene, PRIMARY_VIEW1, USE_GPU ) );
 	scene = BISTRO_EXTERIOR;
@@ -52,19 +60,25 @@ int main()
 	experiment.push_back( new Experiment( GPU_BVH, BONSAI | SPATIALSPLITS, scene, PRIMARY_VIEW1, USE_GPU ) );
 	scene = SAN_MIGUEL;
 	experiment.push_back( new Experiment( GPU_BVH, HPLOC, scene, PRIMARY_VIEW1, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH, BONSAI | SPATIALSPLITS, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, BONSAI | SPATIALSPLITS, scene, PRIMARY_VIEW1, USE_GPU ) ); */
 
 	// slide 50: baked BVHs
-	/* scene = STANFORD_DRAGON;
+	scene = STANFORD_DRAGON;
 	experiment.push_back( new Experiment( GPU_BVH, "./testdata/dragon_bvhgpu.bvh", scene, PRIMARY_VIEW1, USE_GPU ) );
 	scene = BISTRO_EXTERIOR;
 	experiment.push_back( new Experiment( GPU_BVH, "./testdata/bistro_bvhgpu.bvh", scene, PRIMARY_VIEW1, USE_GPU ) );
-	scene = LEGO_PORSCHE;
-	experiment.push_back( new Experiment( GPU_BVH, BONSAI | SPATIALSPLITS, scene, PRIMARY_VIEW1, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH, "./testdata/legoporsche_bvhgpu.bvh", scene, PRIMARY_VIEW1, USE_GPU ) );
-	scene = SAN_MIGUEL;
-	experiment.push_back( new Experiment( GPU_BVH, BONSAI | SPATIALSPLITS, scene, PRIMARY_VIEW1, USE_GPU ) );
-	experiment.push_back( new Experiment( GPU_BVH, "./testdata/sanmiguel_bvhgpu.bvh", scene, PRIMARY_VIEW1, USE_GPU ) ); */
+	scene = CRYTEK_SPONZA;
+	// experiment.push_back( new Experiment( GPU_BVH, HPLOC, scene, PRIMARY_VIEW1, USE_GPU ) );
+	// experiment.push_back( new Experiment( GPU_BVH, BONSAI | SPATIALSPLITS, scene, PRIMARY_VIEW1, USE_GPU ) );
+	// experiment.push_back( new Experiment( GPU_BVH, HPLOC, scene, PRIMARY_VIEW1, USE_GPU ) );
+	// experiment.push_back( new Experiment( GPU_BVH, BONSAI | SPATIALSPLITS, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, "./testdata/cryteksponza_bvhgpu.bvh", scene, PRIMARY_VIEW1, USE_GPU ) );
+	scene = CONFERENCE_ROOM;
+	// experiment.push_back( new Experiment( GPU_BVH, HPLOC, scene, PRIMARY_VIEW1, USE_GPU ) );
+	// experiment.push_back( new Experiment( GPU_BVH, BONSAI | SPATIALSPLITS, scene, PRIMARY_VIEW1, USE_GPU ) );
+	// experiment.push_back( new Experiment( GPU_BVH, HPLOC, scene, PRIMARY_VIEW1, USE_GPU ) );
+	// experiment.push_back( new Experiment( GPU_BVH, BONSAI | SPATIALSPLITS, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, "./testdata/conference_bvhgpu.bvh", scene, PRIMARY_VIEW1, USE_GPU ) );
 
 #endif
 
@@ -72,7 +86,7 @@ int main()
 
 	// 1. BVH construction
 	// PART 1 - TinyBVH, from ultra-fast to ultra-quality
-	scene = CONFERENCE_ROOM;
+	scene = CRYTEK_SPONZA;
 	experiment.push_back( new Experiment( BVH2, HPLOC, scene ) );
 	experiment.push_back( new Experiment( BVH2, HPLOC | OPTIMIZE, scene ) );
 	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene ) );
@@ -103,23 +117,22 @@ int main()
 
 	// 2. CPU BVH traversal
 	// PART 1 - TinyBVH, from default bvh via quick bvh builds to ultra-quality
-	experiment.push_back( new Experiment( BVH4_WIVE, SIMDBUILD, scene, PRIMARY_VIEW1 ) ); // fast build, good quality
-	experiment.push_back( new Experiment( BVH4_WIVE, SIMDBUILD, scene, PRIMARY_VIEW2 ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, SIMDBUILD, scene, PRIMARY_VIEW3 ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, SIMDBUILD, scene, FIRST_BOUNCE ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, SIMDBUILD, scene, AO_RAYS ) );
+	scene = CRYTEK_SPONZA;
+	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, PRIMARY_VIEW3 ) );
 	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, FIRST_BOUNCE ) );
 	experiment.push_back( new Experiment( BVH2, SIMDBUILD, scene, AO_RAYS ) );
+	experiment.push_back( new Experiment( BVH2, SIMDBUILD | SPATIALSPLITS, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( BVH2, SIMDBUILD | SPATIALSPLITS, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( BVH2, SIMDBUILD | SPATIALSPLITS, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( BVH2, SIMDBUILD | SPATIALSPLITS, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( BVH2, SIMDBUILD | SPATIALSPLITS, scene, AO_RAYS ) );
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW1 ) ); // BVH for fast traversal
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW2 ) );
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW3 ) );
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS | OPTIMIZE, scene, FIRST_BOUNCE ) );
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS | OPTIMIZE, scene, AO_RAYS ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, BAKED, scene, PRIMARY_VIEW1 ) ); // baked BVH4
-	experiment.push_back( new Experiment( BVH4_WIVE, BAKED, scene, PRIMARY_VIEW2 ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, BAKED, scene, PRIMARY_VIEW3 ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, BAKED, scene, FIRST_BOUNCE ) );
-	experiment.push_back( new Experiment( BVH4_WIVE, BAKED, scene, AO_RAYS ) );
 	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW1 ) ); // HQ BVH
 	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW2 ) );
 	experiment.push_back( new Experiment( BVH8_WIVE, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW3 ) );
@@ -130,6 +143,7 @@ int main()
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW3, PACKETS ) );
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS | OPTIMIZE, scene, FIRST_BOUNCE, PACKETS ) );
 	experiment.push_back( new Experiment( BVH4_WIVE, SPATIALSPLITS | OPTIMIZE, scene, AO_RAYS, PACKETS ) );
+
 #endif
 
 #if 0
@@ -198,13 +212,14 @@ int main()
 
 #endif
 
-#if 0
+#if 1
 
 	// 4. GPU TRAVERSAL
+	scene = CRYTEK_SPONZA;
 	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
 	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
 	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
-	/* experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS | OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS | OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
 	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS | OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
 	experiment.push_back( new Experiment( GPU_BVH4, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
 	experiment.push_back( new Experiment( GPU_BVH4, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
@@ -215,17 +230,7 @@ int main()
 	experiment.push_back( new Experiment( CWBVH, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
 	experiment.push_back( new Experiment( CWBVH, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
 	experiment.push_back( new Experiment( CWBVH, SPATIALSPLITS | OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
-	experiment.push_back( new Experiment( CWBVH, SPATIALSPLITS | OPTIMIZE, scene, AO_RAYS, USE_GPU ) ); */
-	experiment.push_back( new Experiment( AMD_HWRT, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
-	experiment.push_back( new Experiment( AMD_HWRT, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
-	experiment.push_back( new Experiment( AMD_HWRT, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
-	// experiment.push_back( new Experiment( AMD_HWRT, SPATIALSPLITS | OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
-	// experiment.push_back( new Experiment( AMD_HWRT, SPATIALSPLITS | OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
-	experiment.push_back( new Experiment( AMD_HWRT8, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW1, USE_GPU ) );
-	experiment.push_back( new Experiment( AMD_HWRT8, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
-	experiment.push_back( new Experiment( AMD_HWRT8, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
-	// experiment.push_back( new Experiment( AMD_HWRT8, SPATIALSPLITS | OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
-	// experiment.push_back( new Experiment( AMD_HWRT8, SPATIALSPLITS | OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
+	experiment.push_back( new Experiment( CWBVH, SPATIALSPLITS | OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
 
 #endif
 

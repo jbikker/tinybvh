@@ -241,3 +241,26 @@ void kernel batch_gpu8wayHW_any( const global float4* alt4Node, global struct Ra
 	if (isoccluded_gpu8wayHW( alt4Node, O, D, rD, tmax, hwStack )) hit.w = 1;
 	rayData[threadId].hit = hit;
 }
+
+// Packed variants, as batch_gpu4wayHW_packed (safe_rcp3 comes from traverse_amd_hw_bvh4.cl).
+__attribute__(( reqd_work_group_size( HW_BVH_WORKGROUP_SIZE, 1, 1 ) ))
+void kernel batch_gpu8wayHW_packed( const global float4* alt4Node, const global float4* rays, global float4* hits )
+{
+	const unsigned threadId = get_global_id( 0 );
+	const float4 O = rays[threadId * 2], D = rays[threadId * 2 + 1];
+	const float4 rD = (float4)( safe_rcp3( D.xyz ), 0 );
+
+	__local uint hwStack[HW_BVH_WORKGROUP_SIZE * HW_BVH_STACK_ENTRIES];
+	hits[threadId] = traverse_gpu8wayHW( alt4Node, O, D, rD, O.w, hwStack );
+}
+
+__attribute__(( reqd_work_group_size( HW_BVH_WORKGROUP_SIZE, 1, 1 ) ))
+void kernel batch_gpu8wayHW_any_packed( const global float4* alt4Node, const global float4* rays, global uint* occluded )
+{
+	const unsigned threadId = get_global_id( 0 );
+	const float4 O = rays[threadId * 2], D = rays[threadId * 2 + 1];
+	const float4 rD = (float4)( safe_rcp3( D.xyz ), 0 );
+
+	__local uint hwStack[HW_BVH_WORKGROUP_SIZE * HW_BVH_STACK_ENTRIES];
+	occluded[threadId] = isoccluded_gpu8wayHW( alt4Node, O, D, rD, O.w, hwStack ) ? 1 : 0;
+}

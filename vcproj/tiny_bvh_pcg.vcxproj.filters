@@ -1,0 +1,36 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="..\pcg\tiny_bvh_pcg.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\tiny_bvh.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_double.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_arm_float.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_base.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_gpu.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_double.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tiny_bvh_x86_float.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
+    <ClInclude Include="..\pcg\procgen_cave.h" />
+    <ClInclude Include="..\pcg\procgen_obj.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="tinybvh">
+      <UniqueIdentifier>{1695f036-12b9-4032-af32-fff65b50f61f}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

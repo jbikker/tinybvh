@@ -25,7 +25,7 @@ On the GPU, (multicore) CPU performance is dwarfed: TinyBVH traces up to _5 bill
 
 # Getting started
 
-The library is `tiny_bvh.h` plus five headers next to it: `tiny_bvh_base.h` (platform-neutral code) and the SIMD kernels for x86 (`tiny_bvh_x86_float.h`, `tiny_bvh_x86_double.h`) and ARM (`tiny_bvh_arm_float.h`, `tiny_bvh_arm_double.h`). Keep them together, include only `tiny_bvh.h`, and define `TINYBVH_IMPLEMENTATION` in exactly one translation unit. 
+The library is `tiny_bvh.h` plus six headers next to it: `tiny_bvh_base.h` (platform-neutral code), the SIMD kernels for x86 (`tiny_bvh_x86_float.h`, `tiny_bvh_x86_double.h`) and ARM (`tiny_bvh_arm_float.h`, `tiny_bvh_arm_double.h`), and `tiny_bvh_gpu.h` (the GPU layouts and the layouts for ray tracing hardware, with their CPU traversal). Keep them together, include only `tiny_bvh.h`, and define `TINYBVH_IMPLEMENTATION` in exactly one translation unit. Define `TINYBVH_NO_GPU` before including `tiny_bvh.h` to leave the GPU layouts out.
 
 For a single header with only the parts you use, see the [online customizer](https://jbikker.github.io/tinybvh/).
 

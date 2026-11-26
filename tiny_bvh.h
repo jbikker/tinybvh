@@ -33,6 +33,7 @@ THE SOFTWARE.
 //   tiny_bvh_x86_double.h  x86 kernels for the double precision layouts
 //   tiny_bvh_arm_float.h   NEON kernels for the single precision layouts
 //   tiny_bvh_arm_double.h  ARM kernels for the double precision layouts
+//   tiny_bvh_gpu.h         GPU layouts and layouts for ray tracing hardware (TINYBVH_NO_GPU: left out)
 // Keep them together; only tiny_bvh.h is included by application code.
 // Instantiate a BVH and build it for a list of triangles:
 //   tinybvh::BVH bvh;
@@ -104,7 +105,7 @@ THE SOFTWARE.
 #define TINY_BVH_VERSION_SUB	3
 
 // Cached BVH file version - increases only when file layout changes.
-#define TINY_BVH_CACHE_VERSION	19302
+#define TINY_BVH_CACHE_VERSION	19304
 
 // Features
 #ifndef NO_DOUBLE_PRECISION_SUPPORT
@@ -124,6 +125,7 @@ THE SOFTWARE.
 #endif
 // #define TINYBVH_USE_CUSTOM_VECTOR_TYPES
 // #define TINYBVH_NO_SIMD
+// #define TINYBVH_NO_GPU // leaves out the GPU layouts and the layouts for ray tracing hardware
 
 // Run-time checks / debugging.
 // #define PARANOID // checks out-of-bound access of slices
@@ -388,6 +390,12 @@ WARNING( "NEON not enabled in compilation." )
 #include "tiny_bvh_arm_double.h"
 #endif
 
+// GPU layouts and layouts for ray tracing hardware; define TINYBVH_NO_GPU to leave them out.
+#ifndef TINYBVH_NO_GPU
+#include "tiny_bvh_gpu.h"
+// #include "tiny_bvh_gpu_nv.h"
+#endif
+
 #ifdef TINYBVH_IMPLEMENTATION
 
 // The implementation is emitted once per translation unit, so that a TU that
@@ -403,18 +411,11 @@ namespace tinybvh {
 template class impl::BVHBase<float, uint32_t>;
 template class impl::BVH<float, uint32_t>;
 template class impl::BVH_Verbose<float, uint32_t>;
-template class impl::BVH_GPU<float, uint32_t>;
 template class impl::MBVH<4, float, uint32_t>;
 template class impl::MBVH<8, float, uint32_t>;
 template class impl::MBVH<6, float, uint32_t>;
 template class impl::MBVH<12, float, uint32_t>;
-template class impl::BVH4_GPU<float, uint32_t>;
-template class impl::BVH4_AMD_HW<float, uint32_t>;
-template class impl::CWBVH8_AMD_HW<float, uint32_t>;
-template class impl::BVH6_INTEL_HW<float, uint32_t>;
-template class impl::BVH12_NVIDIA_HW<float, uint32_t>;
 template class impl::BVH4_CPU<float, uint32_t>;
-template class impl::BVH8_CWBVH<float, uint32_t>;
 template class impl::BVH8_CPU<float, uint32_t>;
 template class impl::BVH_DOBB<float, uint32_t>;
 template class impl::BVH_Motion<float, uint32_t>;

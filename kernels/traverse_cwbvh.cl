@@ -611,3 +611,27 @@ void kernel batch_cwbvh_any( global const float4* cwbvhNodes, global const float
 #endif
 	rayData[threadId].hit = hit;
 }
+
+void kernel batch_cwbvh_packed( global const float4* cwbvhNodes, global const float4* cwbvhTris, const global float4* rays, global float4* hits )
+{
+	const unsigned threadId = get_global_id( 0 );
+	const float4 O = rays[threadId * 2], D = rays[threadId * 2 + 1];
+	const float3 rD = safe_rcp3( D.xyz );
+#ifdef SIMD_AABBTEST
+	hits[threadId] = traverse_cwbvh( cwbvhNodes, cwbvhTris, (float4)( O.xyz, 1 ), (float4)( D.xyz, 0 ), (float4)( rD, 1 ), O.w );
+#else
+	hits[threadId] = traverse_cwbvh( cwbvhNodes, cwbvhTris, O.xyz, D.xyz, rD, O.w );
+#endif
+}
+
+void kernel batch_cwbvh_any_packed( global const float4* cwbvhNodes, global const float4* cwbvhTris, const global float4* rays, global uint* occluded )
+{
+	const unsigned threadId = get_global_id( 0 );
+	const float4 O = rays[threadId * 2], D = rays[threadId * 2 + 1];
+	const float3 rD = safe_rcp3( D.xyz );
+#ifdef SIMD_AABBTEST
+	occluded[threadId] = isoccluded_cwbvh( cwbvhNodes, cwbvhTris, (float4)( O.xyz, 1 ), (float4)( D.xyz, 0 ), (float4)( rD, 1 ), O.w ) ? 1 : 0;
+#else
+	occluded[threadId] = isoccluded_cwbvh( cwbvhNodes, cwbvhTris, O.xyz, D.xyz, rD, O.w ) ? 1 : 0;
+#endif
+}

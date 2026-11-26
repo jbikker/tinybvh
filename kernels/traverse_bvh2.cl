@@ -166,6 +166,20 @@ void kernel batch_any( const global struct BVHNode* bvhNode, const global float4
 	rayData[threadId].hit = hit;
 }
 
+void kernel batch_nearest_packed( const global struct BVHNode* bvhNode, const global float4* orderedVerts, const global float4* rays, global float4* hits )
+{
+	const uint threadId = get_global_id( 0 );
+	const float4 O = rays[threadId * 2], D = rays[threadId * 2 + 1];
+	hits[threadId] = traverse( bvhNode, orderedVerts, 0, O.xyz, D.xyz, safe_rcp3( D.xyz ), O.w, 0 );
+}
+
+void kernel batch_any_packed( const global struct BVHNode* bvhNode, const global float4* orderedVerts, const global float4* rays, global uint* occluded )
+{
+	const uint threadId = get_global_id( 0 );
+	const float4 O = rays[threadId * 2], D = rays[threadId * 2 + 1];
+	occluded[threadId] = isoccluded( bvhNode, orderedVerts, 0, O.xyz, D.xyz, safe_rcp3( D.xyz ), O.w ) ? 1 : 0;
+}
+
 void kernel reset_rays( global struct Ray* rayData, float d )
 {
 	const uint threadId = get_global_id( 0 );

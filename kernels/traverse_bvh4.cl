@@ -298,3 +298,17 @@ void kernel batch_gpu4way_any( const global float4* alt4Node, global struct Ray*
 	if (isoccluded_gpu4way( alt4Node, O, D, rD, tmax )) hit.w = as_float( 1 );
 	rayData[threadId].hit = hit;
 }
+
+void kernel batch_gpu4way_packed( const global float4* alt4Node, const global float4* rays, global float4* hits )
+{
+	const unsigned threadId = get_global_id( 0 );
+	const float4 O = rays[threadId * 2], D = rays[threadId * 2 + 1];
+	hits[threadId] = traverse_gpu4way( alt4Node, O.xyz, D.xyz, safe_rcp3( D.xyz ), O.w );
+}
+
+void kernel batch_gpu4way_any_packed( const global float4* alt4Node, const global float4* rays, global uint* occluded )
+{
+	const unsigned threadId = get_global_id( 0 );
+	const float4 O = rays[threadId * 2], D = rays[threadId * 2 + 1];
+	occluded[threadId] = isoccluded_gpu4way( alt4Node, O.xyz, D.xyz, safe_rcp3( D.xyz ), O.w ) ? 1 : 0;
+}

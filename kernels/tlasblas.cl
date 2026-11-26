@@ -1570,3 +1570,43 @@ void kernel batch_any_tlas(
 		rayData[threadId].hit.x BLAS_STACK_ARG )) hit.w = as_float( 1u );
 	rayData[threadId].hit = hit;
 }
+
+// Packed variants: 32-byte rays (O.xyz, tmax; D.xyz, ray mask as uint bits) in; 16-byte hits, or one occlusion
+// word (1: occluded) for _any, out to a separate array. Faster than writing hits into 64-byte Rays.
+#if BLAS_HW_STACK
+__attribute__(( reqd_work_group_size( HW_BVH_WORKGROUP_SIZE, 1, 1 ) ))
+#endif
+void kernel batch_nearest_tlas_packed(
+	const global struct BVHNode* tlasNodes, const global uint* tlasIdx,
+	const global struct Instance* instances, const global struct BLASDesc* blasDesc,
+	BLAS_POOL_PARAMS, const global float4* rays, global float4* hits, const uint rayCount )
+{
+	const uint threadId = get_global_id( 0 );
+	if (threadId >= rayCount) return;
+#if BLAS_HW_STACK
+	__local uint hwStack[HW_BVH_WORKGROUP_SIZE * HW_BVH_STACK_ENTRIES];
+#endif
+	const float4 O4 = rays[threadId * 2], D4 = rays[threadId * 2 + 1];
+	const float3 rD = native_recip( D4.xyz );
+	hits[threadId] = traverse_tlas( tlasNodes, tlasIdx, instances, blasDesc,
+		BLAS_POOL_ARGS, O4.xyz, D4.xyz, rD, as_uint( D4.w ), O4.w BLAS_STACK_ARG );
+}
+
+#if BLAS_HW_STACK
+__attribute__(( reqd_work_group_size( HW_BVH_WORKGROUP_SIZE, 1, 1 ) ))
+#endif
+void kernel batch_any_tlas_packed(
+	const global struct BVHNode* tlasNodes, const global uint* tlasIdx,
+	const global struct Instance* instances, const global struct BLASDesc* blasDesc,
+	BLAS_POOL_PARAMS, const global float4* rays, global uint* occluded, const uint rayCount )
+{
+	const uint threadId = get_global_id( 0 );
+	if (threadId >= rayCount) return;
+#if BLAS_HW_STACK
+	__local uint hwStack[HW_BVH_WORKGROUP_SIZE * HW_BVH_STACK_ENTRIES];
+#endif
+	const float4 O4 = rays[threadId * 2], D4 = rays[threadId * 2 + 1];
+	const float3 rD = native_recip( D4.xyz );
+	occluded[threadId] = isoccluded_tlas( tlasNodes, tlasIdx, instances, blasDesc,
+		BLAS_POOL_ARGS, O4.xyz, D4.xyz, rD, as_uint( D4.w ), O4.w BLAS_STACK_ARG ) ? 1 : 0;
+}

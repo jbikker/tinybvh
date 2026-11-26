@@ -37,7 +37,7 @@ public:
 private:
 	void RunBuildExperiment();
 	void RunTraceExperiment();
-	void WriteImage( char* raySet, const char* tracedRays = 0 );
+	void WriteImage( char* raySet, const char* tracedHits = 0 ); // tracedHits: 16 bytes per ray, t first
 	float RunGPU_BVH2( char* rayData, const int N, bool anyHit );
 	float RunGPU_BVH4( char* rayData, const int N, bool anyHit );
 	float RunGPU_CWBVH( char* rayData, const int N, bool anyHit );

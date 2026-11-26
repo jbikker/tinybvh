@@ -26,6 +26,7 @@
     <ClInclude Include="..\tiny_bvh_arm_double.h" />
     <ClInclude Include="..\tiny_bvh_arm_float.h" />
     <ClInclude Include="..\tiny_bvh_base.h" />
+    <ClInclude Include="..\tiny_bvh_gpu.h" />
     <ClInclude Include="..\tiny_bvh_x86_double.h" />
     <ClInclude Include="..\tiny_bvh_x86_float.h" />
     <ClInclude Include="..\tiny_scene.h" />

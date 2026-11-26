@@ -14,6 +14,9 @@
     <ClInclude Include="..\tiny_bvh_base.h">
       <Filter>tinybvh</Filter>
     </ClInclude>
+    <ClInclude Include="..\tiny_bvh_gpu.h">
+      <Filter>tinybvh</Filter>
+    </ClInclude>
     <ClInclude Include="..\tiny_bvh_arm_float.h">
       <Filter>tinybvh</Filter>
     </ClInclude>

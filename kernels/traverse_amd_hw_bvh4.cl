@@ -235,6 +235,27 @@ void kernel batch_gpu4wayHW( const global float4* alt4Node, global struct Ray* r
 	rayData[threadId].hit = hit;
 }
 
+#ifndef TINYBVH_SAFE_RCP
+#define TINYBVH_SAFE_RCP
+// 1 / x, or +/-2^100 for a (near) zero x, as tinybvh_safercp on the host.
+inline float safe_rcp( const float x ) { return fabs( x ) >= 0x1p-100f ? 1.0f / x : copysign( 0x1p100f, x ); }
+inline float3 safe_rcp3( const float3 d ) { return (float3)( safe_rcp( d.x ), safe_rcp( d.y ), safe_rcp( d.z ) ); }
+#endif
+
+// Packed variants: rays are 32 bytes (O.xyz, tmax; D.xyz, unused); hits are 16 bytes (t, u, v, prim), or one
+// occlusion word (1: occluded) for _any, in a separate array. Much faster than batch_gpu4wayHW on RDNA3.5: a
+// 16-byte write into each 64-byte Ray costs more than a coherent trace.
+__attribute__(( reqd_work_group_size( HW_BVH_WORKGROUP_SIZE, 1, 1 ) ))
+void kernel batch_gpu4wayHW_packed( const global float4* alt4Node, const global float4* rays, global float4* hits )
+{
+	const unsigned threadId = get_global_id( 0 );
+	const float4 O = rays[threadId * 2], D = rays[threadId * 2 + 1];
+	const float4 rD = (float4)( safe_rcp( D.x ), safe_rcp( D.y ), safe_rcp( D.z ), 0 );
+
+	__local uint hwStack[HW_BVH_WORKGROUP_SIZE * HW_BVH_STACK_ENTRIES];
+	hits[threadId] = traverse_gpu4wayHW( alt4Node, O, D, rD, O.w, hwStack );
+}
+
 __attribute__(( reqd_work_group_size( HW_BVH_WORKGROUP_SIZE, 1, 1 ) ))
 void kernel batch_gpu4wayHW_any( const global float4* alt4Node, global struct Ray* rayData )
 {
@@ -249,4 +270,15 @@ void kernel batch_gpu4wayHW_any( const global float4* alt4Node, global struct Ra
 	float4 hit = 0;
 	if (isoccluded_gpu4wayHW( alt4Node, O, D, rD, tmax, hwStack )) hit.w = 1;
 	rayData[threadId].hit = hit;
+}
+
+__attribute__(( reqd_work_group_size( HW_BVH_WORKGROUP_SIZE, 1, 1 ) ))
+void kernel batch_gpu4wayHW_any_packed( const global float4* alt4Node, const global float4* rays, global uint* occluded )
+{
+	const unsigned threadId = get_global_id( 0 );
+	const float4 O = rays[threadId * 2], D = rays[threadId * 2 + 1];
+	const float4 rD = (float4)( safe_rcp3( D.xyz ), 0 );
+
+	__local uint hwStack[HW_BVH_WORKGROUP_SIZE * HW_BVH_STACK_ENTRIES];
+	occluded[threadId] = isoccluded_gpu4wayHW( alt4Node, O, D, rD, O.w, hwStack ) ? 1 : 0;
 }

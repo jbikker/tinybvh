@@ -1,6 +1,6 @@
-// tinybvh_custom.cpp: builds a custom single-header TinyBVH from tiny_bvh.h and its five
-// platform headers (tiny_bvh_base.h, tiny_bvh_x86_float.h, tiny_bvh_x86_double.h,
-// tiny_bvh_arm_float.h, tiny_bvh_arm_double.h).
+// tinybvh_custom.cpp: builds a custom single-header TinyBVH from tiny_bvh.h and the six headers
+// it includes (tiny_bvh_base.h, tiny_bvh_x86_float.h, tiny_bvh_x86_double.h, tiny_bvh_arm_float.h,
+// tiny_bvh_arm_double.h, tiny_bvh_gpu.h).
 //
 // On Windows this is a small window with a checkbox per part; given arguments, it runs as a
 // command-line tool instead (run it with --help). Elsewhere it is the command-line tool only.
@@ -14,7 +14,7 @@
 // non-templated classes. Helpers, macros and comments that only served left-out code go with
 // it. Asking a reduced build for a builder or feature it lacks is a fatal error. MBVH and
 // BVH_Verbose are intermediate layouts: they are included whenever something needs them.
-// With everything included, the result is the six headers merged, code unchanged.
+// With everything included, the result is the seven headers merged, code unchanged.
 //
 // Build:
 //   Visual Studio (Developer Command Prompt):  cl /std:c++17 /O2 /EHsc tinybvh_custom.cpp
@@ -740,7 +740,7 @@ static std::string Directive( const std::string& line, std::string* rest = 0 )
 static bool IsIfLike( const std::string& d ) { return d == "if" || d == "ifdef" || d == "ifndef"; }
 
 // ----------------------------------------------------------------------------
-// Merging the six headers into one text
+// Merging the seven headers into one text
 // ----------------------------------------------------------------------------
 
 struct SourceSet
@@ -749,7 +749,7 @@ struct SourceSet
 	bool crlf = false;
 };
 
-static const char* kHeaders[6] = { "tiny_bvh.h", "tiny_bvh_base.h", "tiny_bvh_x86_float.h", "tiny_bvh_x86_double.h", "tiny_bvh_arm_float.h", "tiny_bvh_arm_double.h" };
+static const char* kHeaders[7] = { "tiny_bvh.h", "tiny_bvh_base.h", "tiny_bvh_x86_float.h", "tiny_bvh_x86_double.h", "tiny_bvh_arm_float.h", "tiny_bvh_arm_double.h", "tiny_bvh_gpu.h" };
 
 static std::string StripIncludeCheck( const std::string& t, const std::string& file )
 {
@@ -771,7 +771,7 @@ static std::string StripIncludeCheck( const std::string& t, const std::string& f
 static std::string Merge( const SourceSet& src, std::string& log )
 {
 	std::string t = src.files.at( "tiny_bvh.h" );
-	for (int h = 1; h < 6; h++)
+	for (int h = 1; h < 7; h++)
 	{
 		const std::string inc = std::string( "#include \"" ) + kHeaders[h] + "\"";
 		const size_t p = t.find( inc );
@@ -783,7 +783,7 @@ static std::string Merge( const SourceSet& src, std::string& log )
 		std::string footer = std::string( "// ---- end " ) + kHeaders[h] + " ----\n";
 		t = t.substr( 0, ls ) + banner + body + footer + t.substr( le );
 	}
-	log += "merged the six headers: " + std::to_string( SplitLines( t ).size() ) + " lines\n";
+	log += "merged the seven headers: " + std::to_string( SplitLines( t ).size() ) + " lines\n";
 	return t;
 }
 
@@ -1103,6 +1103,7 @@ struct CondTracker
 enum Toggle
 {
 	T_BVH_GPU, T_BVH4_GPU, T_BVH4_CPU, T_BVH8_CPU, T_BVH8_CWBVH, T_BVH4_AMD_HW, T_CWBVH8_AMD_HW, T_BVH_DOBB,
+	T_BVH6_INTEL_HW,
 	T_MOTION,						// BVH_Motion, plus motion blur in the TLAS and the ray
 	T_MBVH, T_BVH_VERBOSE,			// intermediate layouts: forced on when something needs them
 	T_VOXELSET,
@@ -1121,6 +1122,7 @@ static const ToggleInfo kToggles[T_COUNT] = {
 	{ "bvh4_amd_hw", "BVH4_AMD_HW (AMD RT hardware)", "BVH4_AMD_HW" },
 	{ "cwbvh8_amd_hw", "CWBVH8_AMD_HW (AMD RT hardware)", "CWBVH8_AMD_HW" },
 	{ "bvh_dobb", "BVH_DOBB (8-wide, oriented boxes)", "BVH_DOBB" },
+	{ "bvh6_intel_hw", "BVH6_INTEL_HW (Intel RT hardware)", "BVH6_INTEL_HW" },
 	{ "motion", "Motion blur (BVH_Motion, moving instances)", "BVH_Motion" },
 	{ "mbvh", "MBVH (intermediate)", "MBVH" },
 	{ "bvh_verbose", "BVH_Verbose (intermediate)", "BVH_Verbose" },
@@ -1147,7 +1149,7 @@ struct Options
 
 // Which intermediate layouts the other choices require: MBVH for the layouts converted through it,
 // BVH_Verbose for the parts that work on it. Resolve, the Windows window and --describe read these.
-static const Toggle kNeedsMBVH[] = { T_BVH4_GPU, T_BVH4_CPU, T_BVH8_CPU, T_BVH8_CWBVH, T_BVH4_AMD_HW, T_CWBVH8_AMD_HW, T_BVH_DOBB };
+static const Toggle kNeedsMBVH[] = { T_BVH4_GPU, T_BVH4_CPU, T_BVH8_CPU, T_BVH8_CWBVH, T_BVH4_AMD_HW, T_CWBVH8_AMD_HW, T_BVH_DOBB, T_BVH6_INTEL_HW };
 static const Toggle kNeedsVerbose[] = { T_OPTIMIZER, T_MERGELEAFS };
 template <size_t N> static bool AnyOn( const Options& o, const Toggle( &list )[N] )
 {
@@ -1162,7 +1164,7 @@ static bool RequiresVerbose( const Options& o ) { return AnyOn( o, kNeedsVerbose
 struct Place { int t, group, col, row; };
 static const Place kPlace[] = {
 	{ T_BVH_GPU, 0, 0, 0 }, { T_BVH4_GPU, 0, 0, 1 }, { T_BVH8_CWBVH, 0, 0, 2 }, { T_BVH4_AMD_HW, 0, 0, 3 }, { T_CWBVH8_AMD_HW, 0, 0, 4 },
-	{ T_BVH_DOBB, 0, 0, 5 },
+	{ T_BVH_DOBB, 0, 0, 5 }, { T_BVH6_INTEL_HW, 0, 0, 6 },
 	{ T_BVH4_CPU, 0, 1, 0 }, { T_BVH8_CPU, 0, 1, 1 }, { T_VOXELSET, 0, 1, 2 }, { T_MOTION, 0, 1, 3 }, { T_MBVH, 0, 1, 4 }, { T_BVH_VERBOSE, 0, 1, 5 },
 	{ T_PRESPLITTING, 1, 0, 0 }, { T_FULLSWEEP, 1, 0, 1 }, { T_HPLOC, 1, 0, 2 },
 	{ T_OPTIMIZER, 1, 1, 0 }, { T_MERGELEAFS, 1, 1, 1 },
@@ -1170,7 +1172,7 @@ static const Place kPlace[] = {
 	{ T_X86, 2, 1, 0 }, { T_ARM, 2, 1, 1 },
 };
 static const char* kGroupTitle[3] = { "Layouts (BVH is always included)", "Builders and optimization", "Code" };
-static const int kRows[3] = { 6, 3, 3 };	// rows per group
+static const int kRows[3] = { 8, 3, 3 };	// rows per group
 static std::string DisplayLabel( const int t )
 {
 	return (t == T_MBVH || t == T_BVH_VERBOSE) ? std::string( kToggles[t].cls ) + ", when needed" : kToggles[t].label;
@@ -1762,6 +1764,8 @@ static const Rewrite kRewrites[] = {
 	{ "-threading", "// Spawn fn(payload) asynchronously", "// Run fn(payload) now: without threading there is nothing to run it on.", true },
 	{ "-threading", "// Wait for spawned tasks to finish", "// Nothing to wait for: each task ran when it was spawned.", true },
 	{ "-presplitting", "// presplitting", 0, true },
+	// a guard that switches presplitting off for one build; matched after FoldFalse made the flag 'false'
+	{ "-presplitting", "ScopedFlag keep( settings.keepSplitting, true ), noPresplit( false, false );", "ScopedFlag keep( settings.keepSplitting, true );", false },
 	// no motion blur: the ray loses its time, instances their second transform, the TLAS its flag
 	{ "-motion", "Ray( Vec3 origin, Vec3 direction, Float t = bvh_far<Float>, uint32_t rayMask = RAY_MASK_INTERSECT_ALL, float rayTime = 0 )",
 		"Ray( Vec3 origin, Vec3 direction, Float t = bvh_far<Float>, uint32_t rayMask = RAY_MASK_INTERSECT_ALL )", false },
@@ -1773,10 +1777,15 @@ static const Rewrite kRewrites[] = {
 		"+ (r).O.y + (r).O.z; BVH_FATAL_ERROR_IF( tinybvh_isnan( test ), \"Input ray contains NaNs.\" ); }", false },
 	{ "-motion", "instList = 0, blasList = 0, blasCount = 0, hasMotion = false;", "instList = 0, blasList = 0, blasCount = 0;", false },
 	{ "-motion", "// motion: a moving instance, a motion blur BLAS, or a TLAS with either of these below it.", 0, true },
-	{ "-motion", "if (inst.transform1) hasMotion = true;", 0, false },
+	{ "-motion", "if (inst.Moves()) hasMotion = true;", 0, false },
 	{ "-motion", "if (blas && (blas->layout == LAYOUT_BVH_MOTION || (blas->layout == LAYOUT_BVH && ((const BVH*)blas)->hasMotion))) hasMotion = true;", 0, false },
 	{ "-motion", "Mat4 invAtTime; // the inverse transform of a moving instance, at the ray's time", 0, false },
-	{ "-motion", "const Mat4& invT = inst.transform1 ? (invAtTime = inst.InvTransformAt( ray.time )) : inst.invTransform;", "const Mat4& invT = inst.invTransform;", false },
+	{ "-motion", "const Mat4& invT = inst.Moves() ? (invAtTime = inst.InvTransformAt( ray.time )) : inst.invTransform;", "const Mat4& invT = inst.invTransform;", false },
+	// SRT motion keys on the instance (the struct and its members go in PlanFor)
+	{ "-motion", "// SRT motion: the keys at t = 0 and t = 1 (caller-owned), or 0. Scale, shear, pivot and translation are interpolated", 0, true },
+	{ "-motion", "// linearly, the rotation with slerp, in the direction the sign of the second quaternion picks. Overrides transform1;", 0, true },
+	{ "-motion", "// Update sets transform to the first key.", 0, true },
+	{ "-motion", "if (srt) transform = srt[0].Matrix();", 0, false },
 	{ "-motion", "tmpRay.time = ray.time;", 0, false },
 	{ "-motion", "BVH_FATAL_ERROR_IF( bvh.hasMotion, \"BVH_GPU::Build( BLASInstance*, .. ), no motion blur on the GPU yet.\" );", 0, false },
 	{ "-motion", "const Mat4* transform1 = 0; // The transform at t=1, or 0 for an instance that does not move.", 0, false },
@@ -1791,13 +1800,14 @@ static const Rewrite kRewrites[] = {
 	{ "-x86", "// SSE4.2 availability: Since Nehalem (2008)", 0, true },
 	{ "-x86", "// AVX1 availability: Since Sandy Bridge (2011)", 0, true },
 	{ "-x86", "// AVX2 availability: Since Haswell (2013)", 0, true },
-	// a reduced build: the six-file layout described at the top no longer applies
+	// a reduced build: the seven-file layout described at the top no longer applies
 	{ "+reduced", "// The library consists of this file plus the headers it includes:", "// This is a single-header build of TinyBVH; the configuration it holds is listed at the top.", true },
 	{ "+reduced", "//   tiny_bvh_base.h        platform-neutral code: types, builders and traversal", 0, true },
 	{ "+reduced", "//   tiny_bvh_x86_float.h   SSE / AVX / AVX2 kernels for the single precision layouts", 0, true },
 	{ "+reduced", "//   tiny_bvh_x86_double.h  x86 kernels for the double precision layouts", 0, true },
 	{ "+reduced", "//   tiny_bvh_arm_float.h   NEON kernels for the single precision layouts", 0, true },
 	{ "+reduced", "//   tiny_bvh_arm_double.h  ARM kernels for the double precision layouts", 0, true },
+	{ "+reduced", "//   tiny_bvh_gpu.h         GPU layouts and layouts for ray tracing hardware (TINYBVH_NO_GPU: left out)", 0, true },
 	{ "+reduced", "// Keep them together; only tiny_bvh.h is included by application code.", 0, true },
 };
 
@@ -2332,7 +2342,8 @@ static RemovalPlan PlanFor( const Options& o, std::string& log )
 	if (!o.on[T_MOTION])
 	{
 		plan.classMembers.insert( { "BVH", "hasMotion" } );
-		plan.classMembers.insert( { "BLASInstance", "InvTransformAt" } );
+		for (const char* m : { "InvTransformAt", "TransformAt", "SRTAt", "SRT", "srt", "Moves" }) plan.classMembers.insert( { "BLASInstance", m } );
+		for (const char* m : { "Matrix", "InverseMatrix" }) plan.classMembers.insert( { "SRT", m } ); // BLASInstance::SRT's, defined outside it
 	}
 	if (!o.on[T_PHYSICS]) for (const char* m : { "IntersectSphere", "IntersectCapsule" }) plan.members.insert( m );
 	// without threading, BVHContext loses its job hooks; the built-in pool and the threaded build
@@ -2361,8 +2372,10 @@ static GenResult Generate( const SourceSet& src, Options o )
 		// (the x86 ray bundles, for one) was left out
 		if (!o.on[T_OPTIMIZER])
 		{
-			if (!ReplaceLine( t, "if (settings.postOptimize) Optimize(", "BVH_FATAL_ERROR_IF( settings.postOptimize, \"BVH::Build( .. ), settings.postOptimize: the optimizer is not part of this build of TinyBVH.\" );" ))
-				res.log += "  warning: the postOptimize call in BVH::Build was not found\n";
+			// every build path that ends with the optimizer (BVH::Build, the paired-leaf build)
+			int calls = 0;
+			while (ReplaceLine( t, "if (settings.postOptimize) Optimize(", "BVH_FATAL_ERROR_IF( settings.postOptimize, \"BVH::Build( .. ), settings.postOptimize: the optimizer is not part of this build of TinyBVH.\" );" )) calls++;
+			if (!calls) res.log += "  warning: the postOptimize calls in BVH::Build were not found\n";
 			// the optimizer's own tuning constants
 			for (const char* d : { "#define OPTIMIZE_TASKS ", "#define OPTIMIZE_NODES_PER_TASK " })
 			{
@@ -2396,6 +2409,11 @@ static GenResult Generate( const SourceSet& src, Options o )
 				if (p == std::string::npos) res.log += std::string( "  warning: rewrite for leaving out motion no longer matches: '" ) + Trim( std::string( b[0] ).substr( 0, std::string( b[0] ).find( '\n' ) ) ) + "'\n";
 				else t.replace( p, strlen( b[0] ), b[1] );
 			}
+			// the SRT branch of BLASInstance::Update: from 'if (srt)' to its 'return;' and closing brace
+			const char* srtFrom = "\tif (srt)\n\t{\n\t\t// SRT motion: the corners at N + 1 points in time.\n", * srtTo = "\t\treturn;\n\t}\n";
+			const size_t sp = t.find( srtFrom ), se = sp == std::string::npos ? sp : t.find( srtTo, sp );
+			if (se == std::string::npos) res.log += "  warning: rewrite for leaving out motion no longer matches: the SRT branch of BLASInstance::Update\n";
+			else t.erase( sp, se + strlen( srtTo ) - sp );
 		}
 		ApplyRewrites( t, active, res.log );
 		std::set<std::string> undef;
@@ -2457,7 +2475,7 @@ static GenResult Generate( const SourceSet& src, Options o )
 			// without motion blur, nothing may read a ray's time or an instance's second transform
 			if (!o.on[T_MOTION])
 			{
-				for (const char* w : { "hasMotion", "transform1", "InvTransformAt", "invAtTime", "rayTime", "MOTIONBVHBINS", "tinybvh_motion_lerp", "tinybvh_motion_centroid4" })
+				for (const char* w : { "hasMotion", "transform1", "InvTransformAt", "TransformAt", "SRTAt", "Moves", "invAtTime", "rayTime", "MOTIONBVHBINS", "tinybvh_motion_lerp", "tinybvh_motion_centroid4" })
 				{
 					const size_t p = FindWord( code, w );
 					if (p != std::string::npos && problems++ < 12) res.log += std::string( "error: '" ) + w + "' is still used at line " + std::to_string( LineOf( code, p ) ) + "\n";
@@ -2475,8 +2493,8 @@ static GenResult Generate( const SourceSet& src, Options o )
 			if (problems) throw ScanError{ std::to_string( problems ) + " problem(s); the generated header would not compile" };
 		}
 		// header comment
-		std::string head = "// This file was generated by tinybvh_custom from tiny_bvh.h and its five platform\n"
-			"// headers; edit those, not this. Configuration:\n//   " + ConfigSummary( o ) + "\n\n";
+		std::string head = "// This file was generated by tinybvh_custom from tiny_bvh.h and the headers it\n"
+			"// includes; edit those, not this. Configuration:\n//   " + ConfigSummary( o ) + "\n\n";
 		res.text = head + t;
 		if (src.crlf)
 		{
@@ -2563,7 +2581,7 @@ static bool HasHeadersIn( const std::string& dir )
 	return std::filesystem::exists( std::filesystem::u8path( JoinPath( dir, "tiny_bvh.h" ) ), ec );
 }
 
-// Would writing 'file' overwrite one of the six headers in 'dir'?
+// Would writing 'file' overwrite one of the seven headers in 'dir'?
 static bool IsSourceFile( const std::string& dir, const std::string& file )
 {
 	namespace fs = std::filesystem;
@@ -2582,7 +2600,7 @@ static bool IsSourceFile( const std::string& dir, const std::string& file )
 
 static void PrintUsage( FILE* f )
 {
-	fprintf( f, "usage: tinybvh_custom [--in <folder with the six headers>] [--out <header>] [options]\n"
+	fprintf( f, "usage: tinybvh_custom [--in <folder with the seven headers>] [--out <header>] [options]\n"
 		"  without --in, the headers are read from the current folder, or from the one above it.\n"
 		"  --no-<id> leaves a part out, --with-<id> puts it in; everything is in by default,\n"
 		"  except mbvh and bvh_verbose, which are in only when something needs them.\n"
@@ -2656,7 +2674,7 @@ static int RunCommandLine( const std::vector<std::string>& args, FILE* out, FILE
 	SourceSet src;
 	std::string log;
 	if (!LoadSources( in, src, log )) { fputs( log.c_str(), err ); return 1; }
-	if (IsSourceFile( in, file )) { fprintf( err, "refusing to overwrite %s, one of the six source headers\n", file.c_str() ); return 1; }
+	if (IsSourceFile( in, file )) { fprintf( err, "refusing to overwrite %s, one of the seven source headers\n", file.c_str() ); return 1; }
 	GenResult r = Generate( src, o );
 	fputs( r.log.c_str(), out );
 	if (!r.ok) return 1;
@@ -2667,7 +2685,7 @@ static int RunCommandLine( const std::vector<std::string>& args, FILE* out, FILE
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
-// The web page's entry: the command line's arguments, one per line. The page puts the six headers
+// The web page's entry: the command line's arguments, one per line. The page puts the seven headers
 // into the module's file system first, and reads the result from it afterwards.
 extern "C" EMSCRIPTEN_KEEPALIVE int tinybvh_custom_run( const char* argLines )
 {
@@ -2792,7 +2810,7 @@ static void BrowseSource()
 {
 	BROWSEINFOW bi = {};
 	bi.hwndOwner = g_wnd;
-	bi.lpszTitle = L"Folder with tiny_bvh.h and its five platform headers";
+	bi.lpszTitle = L"Folder with tiny_bvh.h and its six other headers";
 	bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
 	PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW( &bi );
 	if (!pidl) return;
@@ -2826,8 +2844,8 @@ static void GenerateHeader()
 	if (outFile.find_first_of( L"\\/:" ) == std::wstring::npos) outFile = srcDir + L"\\" + outFile;
 	gen::SourceSet src;
 	std::string log;
-	if (!gen::LoadSources( Utf8( srcDir ), src, log )) { Log( log + "\nPick the folder that holds tiny_bvh.h and its five platform headers.\n" ); return; }
-	if (gen::IsSourceFile( Utf8( srcDir ), Utf8( outFile ) )) { Log( "The output would overwrite one of the six source headers; choose another name.\n" ); return; }
+	if (!gen::LoadSources( Utf8( srcDir ), src, log )) { Log( log + "\nPick the folder that holds tiny_bvh.h and its six other headers.\n" ); return; }
+	if (gen::IsSourceFile( Utf8( srcDir ), Utf8( outFile ) )) { Log( "The output would overwrite one of the seven source headers; choose another name.\n" ); return; }
 	SetWindowTextW( g_status, L"Generating..." );
 	UpdateWindow( g_status );
 	gen::GenResult r = gen::Generate( src, CurrentOptions() );
@@ -2844,7 +2862,7 @@ static HWND Make( const wchar_t* cls, const wchar_t* text, DWORD style, int x, i
 	return c;
 }
 
-static const int kMinW = 560, kMinH = 622; // smallest client area, in 96 dpi units
+static const int kMinW = 560, kMinH = 658; // smallest client area, in 96 dpi units: the three groups, and a 60-unit log
 
 // Places the controls for the current client size: the fields and the log stretch, the
 // buttons stay right, and the two checkbox columns split the width.
@@ -2883,7 +2901,7 @@ static void LayoutControls()
 static void CreateControls()
 {
 	// created in tab order; LayoutControls places them
-	g_srcLabel = Make( L"STATIC", L"Folder with tiny_bvh.h and its five platform headers:", 0, 0, 0, 10, 10, -1 );
+	g_srcLabel = Make( L"STATIC", L"Folder with tiny_bvh.h and its six other headers:", 0, 0, 0, 10, 10, -1 );
 	g_src = Make( L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 10, 10, IDC_SRC, WS_EX_CLIENTEDGE );
 	g_srcBrowse = Make( L"BUTTON", L"Browse...", WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 10, 10, IDC_SRC_BROWSE );
 	for (int g = 0; g < 3; g++) g_group[g] = Make( L"BUTTON", Wide( gen::kGroupTitle[g] ).c_str(), BS_GROUPBOX, 0, 0, 10, 10, -1 );
@@ -2912,7 +2930,7 @@ static void CreateControls()
 	SetWindowTextW( g_src, dir.c_str() );
 	UpdateDependencies();
 	Log( "Untick what you do not need and press Generate. With everything ticked, the result holds\n"
-		"all the code of the six headers. MBVH and BVH_Verbose are included whenever a ticked layout\n"
+		"all the code of the seven headers. MBVH and BVH_Verbose are included whenever a ticked layout\n"
 		"or feature needs them; tick them to keep them regardless.\n" );
 }
 
