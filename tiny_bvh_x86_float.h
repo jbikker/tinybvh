@@ -646,16 +646,12 @@ struct tinybvh_leafray
 	__m256 ox, oy, oz, dx, dy, dz;
 	tinybvh_leafray( const Ray& ray ) :
 		ox( _mm256_set1_ps( ray.O.x ) ), oy( _mm256_set1_ps( ray.O.y ) ), oz( _mm256_set1_ps( ray.O.z ) ),
-		dx( _mm256_set1_ps( ray.D.x ) ), dy( _mm256_set1_ps( ray.D.y ) ), dz( _mm256_set1_ps( ray.D.z ) )
-		{
-	}
+		dx( _mm256_set1_ps( ray.D.x ) ), dy( _mm256_set1_ps( ray.D.y ) ), dz( _mm256_set1_ps( ray.D.z ) ) {}
 #else
 	__m128 ox, oy, oz, dx, dy, dz;
 	tinybvh_leafray( const Ray& ray ) :
 		ox( _mm_set1_ps( ray.O.x ) ), oy( _mm_set1_ps( ray.O.y ) ), oz( _mm_set1_ps( ray.O.z ) ),
-		dx( _mm_set1_ps( ray.D.x ) ), dy( _mm_set1_ps( ray.D.y ) ), dz( _mm_set1_ps( ray.D.z ) )
-		{
-	}
+		dx( _mm_set1_ps( ray.D.x ) ), dy( _mm_set1_ps( ray.D.y ) ), dz( _mm_set1_ps( ray.D.z ) ) {}
 #endif
 };
 

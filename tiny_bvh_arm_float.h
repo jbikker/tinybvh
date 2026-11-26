@@ -529,9 +529,7 @@ struct tinybvh_leafray
 	float32x4_t ox, oy, oz, dx, dy, dz;
 	tinybvh_leafray( const Ray& ray ) :
 		ox( vdupq_n_f32( ray.O.x ) ), oy( vdupq_n_f32( ray.O.y ) ), oz( vdupq_n_f32( ray.O.z ) ),
-		dx( vdupq_n_f32( ray.D.x ) ), dy( vdupq_n_f32( ray.D.y ) ), dz( vdupq_n_f32( ray.D.z ) )
-		{
-	}
+		dx( vdupq_n_f32( ray.D.x ) ), dy( vdupq_n_f32( ray.D.y ) ), dz( vdupq_n_f32( ray.D.z ) ) {}
 };
 
 // The four edge tests of one batch; 'first' is its first triangle. Yields u4, v4, ta4 and the

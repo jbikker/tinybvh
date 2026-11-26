@@ -2250,7 +2250,7 @@ TEMPLATED void CWBVH8_AMD_HW<Float, Index>::ConvertFrom( const MBVH<8, Float, In
 		uint32_t placedCount = boxLeafBase[Base::SliceStart( boxCount, g, groups )], recordCount = 0, * recordStart = groupStart + placedCount;
 		encodingInfo open;
 		bool isOpen = false;
-		for (uint32_t nextBox = (uint32_t)Base::SliceStart( boxCount, g, groups );; )
+		for (uint32_t nextBox = (uint32_t)Base::SliceStart( boxCount, g, groups );;)
 		{
 			while (nextBox < lastBox && done[nextBox]) nextBox++;
 			if (nextBox == lastBox) break;

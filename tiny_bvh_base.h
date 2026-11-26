@@ -1923,8 +1923,8 @@ public:
 	Mat4 TransformAt( const float time ) const;
 	Mat4 InvTransformAt( const float time ) const;
 private:
-	static void Invert( const Mat4 & T, Mat4 & iT );
-	static SRT SRTAt( const SRT * keys, const Float t );
+	static void Invert( const Mat4& T, Mat4& iT );
+	static SRT SRTAt( const SRT* keys, const Float t );
 };
 
 } // namespace impl
@@ -2646,7 +2646,7 @@ TEMPLATED void BVH<Float, Index>::PairTriangles( const Index triangles, const Fl
 			const uint32_t v = queue[--queued];
 			if (partner[v] == NONE) match( v );
 		}
-		if (k < N&& partner[order[k]] == NONE) match( order[k] );
+		if (k < N && partner[order[k]] == NONE) match( order[k] );
 	}
 	AlignedFree( astart ), AlignedFree( adj ), AlignedFree( deg ), AlignedFree( order ), AlignedFree( queue );
 }
@@ -4259,8 +4259,8 @@ TEMPLATED void BVH<Float, Index>::FitLeafBounds( BVHNode& node ) const
 					const uint32_t a = plane >> 1;
 					const double sign = (plane & 1) ? -1.0 : 1.0;
 					const double pos = (double)((plane & 1) ? node.aabbMax[a] : node.aabbMin[a]) - sign * (err + 4 * rel * amag[a]);
-					const double ( *in )[3] = poly[cur];
-					double ( *out )[3] = poly[cur ^ 1];
+					const double (*in)[3] = poly[cur];
+					double (*out)[3] = poly[cur ^ 1];
 					uint32_t m = 0;
 					for (uint32_t k = 0; k < n && ok; k++)
 					{
