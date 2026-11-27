@@ -73,11 +73,13 @@ void PrintHeader()
 	if (csv) fflush( csv );
 }
 
-bool InitOpenCL()
+bool InitOpenCL( const char* gpuVendor )
 {
 	static bool clInitialized = false;
 	if (clInitialized) return true;
 #ifdef ENABLE_OPENCL
+	// pick the GPU first: creating a kernel would start OpenCL on the default one
+	if (!Kernel::InitCL( gpuVendor )) return false;
 	// load and compile the OpenCL kernel code
 	// packed entry points: 32-byte rays in, 16-byte hits (or an occlusion word) out
 	kernel_nearest = new tinyocl::Kernel( "kernels/traverse.cl", "batch_nearest_packed" );

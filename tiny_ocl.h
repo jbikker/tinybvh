@@ -381,7 +381,8 @@ private:
 	}
 	// other methods
 public:
-	static bool InitCL();
+	// vendor: 0 for the first capable GPU, or e.g. "AMD", "Intel", "NVIDIA".
+	static bool InitCL( const char* vendor = 0 );
 	static void CheckCLStarted();
 	static void KillCL();
 	static cl_device_id GetDeviceID() { return device; }
@@ -436,6 +437,7 @@ using namespace tinyocl;
 #include <stdarg.h>
 #include <stdlib.h> // EXIT_FAILURE
 #include <string.h> // memset, strlen, strstr
+#include <ctype.h> // tolower
 #ifdef _MSC_VER
 #include <direct.h>
 #define getcwd _getcwd
@@ -561,7 +563,20 @@ static cl_device_id getFirstDevice( cl_context context )
 
 // getPlatformID
 // ----------------------------------------------------------------------------
-static cl_int getPlatformID( cl_platform_id* platform )
+// 'needle' anywhere in 'hay', ignoring case.
+static bool containsNoCase( const char* hay, const char* needle )
+{
+	for (; *hay; hay++)
+	{
+		size_t i = 0;
+		while (needle[i] && hay[i] && tolower( (unsigned char)hay[i] ) == tolower( (unsigned char)needle[i] )) i++;
+		if (!needle[i]) return true;
+	}
+	return false;
+}
+
+// vendor: 0, or part of the platform name of the GPU to use (see Kernel::InitCL).
+static cl_int getPlatformID( cl_platform_id* platform, const char* vendor = 0 )
 {
 	char chBuffer[1024];
 	cl_uint num_platforms, devCount;
@@ -579,6 +594,22 @@ static cl_int getPlatformID( cl_platform_id* platform )
 	{
 		CHECKCL( error = clGetPlatformInfo( clPlatformIDs[i], CL_PLATFORM_NAME, 1024, &chBuffer, NULL ) );
 		printf( "#%i: %s\n", i, chBuffer );
+	}
+	if (vendor && vendor[0])
+	{
+		// a GPU platform from the requested vendor, or nothing: benchmarks should not silently use another card
+		for (cl_uint i = 0; i < num_platforms && !*platform; ++i)
+		{
+			error = clGetDeviceIDs( clPlatformIDs[i], CL_DEVICE_TYPE_GPU, 0, NULL, &devCount );
+			if ((error != CL_SUCCESS) || (devCount == 0)) continue;
+			CHECKCL( error = clGetPlatformInfo( clPlatformIDs[i], CL_PLATFORM_NAME, 1024, &chBuffer, NULL ) );
+			if (!containsNoCase( chBuffer, vendor )) continue;
+			fprintf( stderr, "OpenCL device: %s\n", chBuffer );
+			*platform = clPlatformIDs[i];
+		}
+		free( clPlatformIDs );
+		if (!*platform) FatalError( "No OpenCL GPU platform from vendor '%s' found.", vendor );
+		return CL_SUCCESS;
 	}
 	for (cl_uint j = 0; j < 2; j++) for (int k = 0; k < 3; k++) for (cl_uint i = 0; i < num_platforms; ++i)
 	{
@@ -1049,7 +1080,7 @@ Kernel::~Kernel()
 
 // InitCL method
 // ----------------------------------------------------------------------------
-bool Kernel::InitCL()
+bool Kernel::InitCL( const char* vendor )
 {
 	// prepare memory management
 	if (!OpenCL::ocl) OpenCL::ocl = new OpenCL(); // use the default memory allocation functions
@@ -1058,7 +1089,7 @@ bool Kernel::InitCL()
 	cl_device_id* devices;
 	cl_uint devCount;
 	cl_int error;
-	if (!CHECKCL( error = getPlatformID( &platform ) )) return false;
+	if (!CHECKCL( error = getPlatformID( &platform, vendor ) )) return false;
 	if (!CHECKCL( error = clGetDeviceIDs( platform, CL_DEVICE_TYPE_ALL, 0, NULL, &devCount ) )) return false;
 	devices = new cl_device_id[devCount];
 	if (!CHECKCL( error = clGetDeviceIDs( platform, CL_DEVICE_TYPE_ALL, devCount, devices, NULL ) )) return false;

@@ -62,4 +62,4 @@ using PrecomputedTri = bvh::v2::PrecomputedTri<float>;
 
 // Forward declarations
 void PrintHeader();
-bool InitOpenCL();
+bool InitOpenCL( const char* gpuVendor = 0 ); // gpuVendor: e.g. "AMD", "Intel", "NVIDIA"; 0: the first capable GPU
