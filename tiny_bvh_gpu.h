@@ -623,6 +623,7 @@ TEMPLATED void BVH_GPU<Float, Index>::Optimize( const uint32_t iterations, uint3
 
 TEMPLATED void BVH_GPU<Float, Index>::ConvertFrom( const BVH& original, bool compact )
 {
+	BVH_FATAL_ERROR_IF( original.isOriented(), "BVH_GPU::ConvertFrom( .. ), the BVH was built with autoOrient; other layouts do not support it." );
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
 	bvh.ReferenceFrom( original );
@@ -1861,6 +1862,7 @@ TEMPLATED void CWBVH8_AMD_HW<Float, Index>::Build( const Slice& vertices, const 
 	}
 	// propagate settings for this layout to the underlying layout
 	bvh8.context = bvh8.bvh.context = context, bvh8.settings = bvh8.bvh.settings = settings;
+	bvh8.settings.autoOrient = bvh8.bvh.settings.autoOrient = false; // a BVH-only option
 	bvh8.c_int = bvh8.bvh.c_int = c_int, bvh8.c_trav = bvh8.bvh.c_trav = c_trav;
 	// leaves of one triangle pair: edge-sharing pairs found before the build, or (spatial splits, which
 	// cannot clip a pair) leaves of one triangle with exact boxes. Sibling triangles become pairs as well.
