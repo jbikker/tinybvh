@@ -20,7 +20,7 @@ Scene scene = CONFERENCE_ROOM;
 int main()
 {
 	PrintHeader(); // see tools.cpp
-	InitOpenCL( "AMD" /* 0, or "AMD" or "NVIDIA" or "Intel" */ );
+	InitOpenCL( 0 /* 0, or "AMD" or "NVIDIA" or "Intel" */ );
 	vector<Experiment*> experiment;
 	// construct list of experiments
 
