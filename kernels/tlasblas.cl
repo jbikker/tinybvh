@@ -50,7 +50,8 @@
 #define BLAS_AMD_HW_CWBVH8 0 // tinybvh::CWBVH8_AMD_HW; needs RDNA4.
 #endif
 
-// Software traversal stack size, used by the TLAS and by the BVH_GPU BLAS.
+// Software traversal stack size, used by the TLAS and by the BVH_GPU BLAS. On AMD, a value above 16
+// also enables the local-memory stack of the BVH_GPU BLAS (see traverse_bvh2).
 #ifndef STACK_SIZE
 #define STACK_SIZE 32
 #endif
@@ -161,45 +162,96 @@ float3 TransformVector( const float3 v, const global float* T )
 // 
 // ============================================================================
 
-float4 traverse( const global struct BVHNode* bvhNode, 
-	const global float4* orderedVerts,
-	const float3 O, const float3 D, const float3 rD, const float tmax, uint* stepCount )
+// Per-vendor choices, as in traverse_bvh2.cl; timed on a Radeon 890M (RDNA3.5) and an RTX 5080 (Blackwell):
+// AMD: the first BVH2_LOCAL_STACK stack entries of each lane in local memory (private memory is slow scratch),
+// for 1D workgroups of up to BVH2_LOCAL_LANES lanes; not with the hardware BLAS layouts, which use local memory.
+// NVIDIA: one set of loads for leaf and interior lanes, and a branchless triangle test.
+#if defined ISAMD && !BLAS_HW_STACK && STACK_SIZE > 16
+#define BVH2_LOCAL_STACK 16
+#define BVH2_LOCAL_LANES 64
+#elif defined ISNVIDIA
+#define BVH2_UNIFIED_FETCH
+#define BVH2_BRANCHLESS_TRI
+#endif
+#define BVH2_DONE 0x7fffffffu // no node: interior nodes are below it, leaf references have the msb set
+
+// Moller-Trumbore in accept form; with IEEE compares this also rejects the NaNs of degenerate triangles.
+inline bool intersect_bvh2_tri( const float4 vert0, const float4 edge1, const float4 edge2,
+	const float3 O, const float3 D, float4* hit )
 {
-	// "find nearest" ray query using the BVH_GPU format.
+	const float3 h = cross( D, edge2.xyz );
+	const float f = native_recip( dot( edge1.xyz, h ) );
+	const float3 s = O - vert0.xyz;
+	const float u = f * dot( s, h );
+	const float3 q = cross( s, edge1.xyz );
+	const float v = f * dot( D, q );
+#ifdef BVH2_BRANCHLESS_TRI
+	const float d = f * dot( edge2.xyz, q );
+	const bool valid = u >= 0 && v >= 0 && u + v <= 1 && d > 0 && d < (*hit).x;
+	*hit = valid ? (float4)( d, u, v, vert0.w ) : *hit;
+	return valid;
+#else
+	if (!(u >= 0 && v >= 0 && u + v <= 1)) return false;
+	const float d = f * dot( edge2.xyz, q );
+	if (!(d > 0 && d < (*hit).x)) return false;
+	*hit = (float4)( d, u, v, vert0.w );
+	return true;
+#endif
+}
+
+// Stack: private, or with localStack the first BVH2_LOCAL_STACK entries at lstack, BVH2_LOCAL_LANES apart;
+// the deeper entries stay in the private array, which is rarely touched then.
+#ifdef BVH2_LOCAL_STACK
+#define BVH2_PUSH( x ) { if (localStack && stackPtr < BVH2_LOCAL_STACK) lstack[stackPtr * BVH2_LOCAL_LANES] = (x); \
+	else stack[stackPtr] = (x); stackPtr++; }
+#define BVH2_POP() ( --stackPtr, localStack && stackPtr < BVH2_LOCAL_STACK ? lstack[stackPtr * BVH2_LOCAL_LANES] : stack[stackPtr] )
+#else
+#define BVH2_PUSH( x ) { stack[stackPtr++] = (x); }
+#define BVH2_POP() stack[--stackPtr]
+#endif
+
+// One interior node or one triangle per iteration (a leaf reference counts down in place), so lanes in a
+// leaf do not hold up the others. Kept identical to traverse_bvh2.cl minus opmap; anyHit is unused here.
+float4 traverse_bvh2( const global struct BVHNode* bvhNode, const global float4* orderedVerts,
+	const float3 O, const float3 D, const float3 rD, const float tmax,
+	const bool anyHit, local uint* lstack, const bool localStack, uint* stepCount )
+{
 	const float3 rO = O * -rD; // precalculate for efficient slab test
 	float4 hit = (float4)( tmax, 0, 0, 0 );
 	uint nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0, steps = 0;
-	while (1)
+	while (nodeIdx != BVH2_DONE)
 	{
-		steps++;
-		if (nodeIdx & 0x80000000)
+		bool pop;
+		const bool leaf = (nodeIdx & 0x80000000u) != 0;
+	#ifdef BVH2_UNIFIED_FETCH
+		const global float4* p = leaf ? orderedVerts + (size_t)(nodeIdx & 0xffffff) * 3 : (const global float4*)(bvhNode + nodeIdx);
+		const float4 f0 = p[0], f1 = p[1], f2 = p[2], f3 = p[leaf ? 2 : 3]; // a triangle is 3 float4s
+	#endif
+		if (leaf)
 		{
 			const uint triCount = (nodeIdx >> 24) & 127;
-			uint firstVert = (nodeIdx & 0xffffff) * 3;
-			for (uint i = 0; i < triCount; i++, firstVert += 3)
+			if (triCount)
 			{
-				const float4 vert0 = orderedVerts[firstVert];
-				const float4 edge1 = orderedVerts[firstVert + 1];
-				const float4 edge2 = orderedVerts[firstVert + 2];
-				const float3 h = cross( D, edge2.xyz );
-				const float a = dot( edge1.xyz, h );
-				const float f = native_recip( a );
-				const float3 s = O - vert0.xyz;
-				const float u = f * dot( s, h );
-				const float3 q = cross( s, edge1.xyz );
-				const float v = f * dot( D, q );
-				if (u < 0 || v < 0 || u + v > 1) continue;
-				const float d = f * dot( edge2.xyz, q );
-				if (d <= 0.0f || d >= hit.x) continue;
-				hit = (float4)(d, u, v, vert0.w);
+			#ifdef BVH2_UNIFIED_FETCH
+				const bool found = intersect_bvh2_tri( f0, f1, f2, O, D, &hit );
+			#else
+				const global float4* tri = orderedVerts + (size_t)(nodeIdx & 0xffffff) * 3;
+				const bool found = intersect_bvh2_tri( tri[0], tri[1], tri[2], O, D, &hit );
+			#endif
+				if (anyHit && found) { if (stepCount) *stepCount += steps + 1; return hit; }
 			}
-			if (stackPtr == 0) break;
-			nodeIdx = stack[--stackPtr];
-			continue;
+			nodeIdx += 1u - (1u << 24); // next triangle: first + 1, count - 1
+			pop = triCount <= 1, steps += pop;
 		}
+		else
+		{
+		#ifdef BVH2_UNIFIED_FETCH
+			const float4 lmin = f0, lmax = f1, rmin = f2, rmax = f3;
+		#else
 		const float4 lmin = bvhNode[nodeIdx].lmin, lmax = bvhNode[nodeIdx].lmax;
 		const float4 rmin = bvhNode[nodeIdx].rmin, rmax = bvhNode[nodeIdx].rmax;
-		uint left = as_uint( lmin.w ), right = as_uint( lmax.w );
+		#endif
+			const uint left = as_uint( lmin.w ), right = as_uint( lmax.w );
 		const float3 t1a = fma( lmin.xyz, rD, rO ), t2a = fma( lmax.xyz, rD, rO );
 		const float3 t1b = fma( rmin.xyz, rD, rO ), t2b = fma( rmax.xyz, rD, rO );
 		const float3 minta = fmin( t1a, t2a ), maxta = fmax( t1a, t2a );
@@ -209,18 +261,29 @@ float4 traverse( const global struct BVHNode* bvhNode,
 		const float tmaxa = fmin( fmin( fmin( maxta.x, maxta.y ), maxta.z ), hit.x );
 		const float tmaxb = fmin( fmin( fmin( maxtb.x, maxtb.y ), maxtb.z ), hit.x );
 		const bool hitA = tmina <= tmaxa, hitB = tminb <= tmaxb;
+			pop = !(hitA || hitB), steps++;
 		if (hitA && hitB)
 		{
-			uint near = left, far = right;
-			if (tminb < tmina) near = right, far = left;
-			stack[stackPtr++] = far, nodeIdx = near;
+				const bool swap = tminb < tmina; // visit the nearest child first
+				BVH2_PUSH( swap ? left : right );
+				nodeIdx = swap ? right : left;
+			}
+			else nodeIdx = hitA ? left : right;
 		}
-		else if (hitA) nodeIdx = left;
-		else if (hitB) nodeIdx = right;
-		else { if (stackPtr == 0) break; nodeIdx = stack[--stackPtr]; }
+		if (pop) nodeIdx = stackPtr == 0 ? BVH2_DONE : BVH2_POP();
 	}
 	if (stepCount) *stepCount += steps;
 	return hit;
+}
+#undef BVH2_PUSH
+#undef BVH2_POP
+
+float4 traverse( const global struct BVHNode* bvhNode, 
+	const global float4* orderedVerts,
+	const float3 O, const float3 D, const float3 rD, const float tmax, uint* stepCount )
+{
+	// "find nearest" ray query using the BVH_GPU format.
+	return traverse_bvh2( bvhNode, orderedVerts, O, D, rD, tmax, false, 0, false, stepCount );
 }
 
 bool isoccluded( 
@@ -228,7 +291,8 @@ bool isoccluded(
 	const global float4* orderedVerts,
 	const float3 O, const float3 D, const float3 rD, const float tmax )
 {
-	// "any hit" ray query using the BVH_GPU format.
+	// "any hit" ray query using the BVH_GPU format. Kept as a whole-leaf loop: with a TLAS, the
+	// traverse_bvh2 loop was about 6% slower for any-hit queries on both GPUs.
 	const float3 rO = O * -rD;
 	uint nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0;
 	while (1)
@@ -1306,6 +1370,13 @@ bool isoccluded_gpu8wayHW( const global float4* alt4Node, const float4 O, const 
 #if BLAS_HW_STACK
 #define BLAS_STACK_PARAM , __local uint* hwStack
 #define BLAS_STACK_ARG , hwStack
+#elif defined BVH2_LOCAL_STACK
+// AMD: the BVH_GPU BLAS stack in local memory, when the workgroup fits it (see traverse_bvh2)
+#define BLAS_STACK_PARAM , __local uint* lstack, const bool localStack
+#define BLAS_STACK_ARG , lstack, localStack
+#define BLAS_LOCAL_STACK_DECL __local uint lstackMem[BVH2_LOCAL_STACK * BVH2_LOCAL_LANES]; \
+	__local uint* lstack = lstackMem + get_local_id( 0 ); \
+	const bool localStack = get_local_size( 0 ) <= BVH2_LOCAL_LANES && get_local_size( 1 ) * get_local_size( 2 ) == 1;
 #else
 #define BLAS_STACK_PARAM
 #define BLAS_STACK_ARG
@@ -1324,7 +1395,11 @@ float4 IntersectBLAS( const global struct BLASDesc* desc, BLAS_POOL_PARAMS,
 	if (blasType == BLASTYPE_AILALAINE)
 	{
 		const global struct BVHNode* nodes = (const global struct BVHNode*)(alNodes + desc->nodeOffset);
+	#ifdef BVH2_LOCAL_STACK
+		return traverse_bvh2( nodes, alTris + desc->primOffset, O, D, rD, tmax, false, lstack, localStack, 0 );
+	#else
 		return traverse( nodes, alTris + desc->primOffset, O, D, rD, tmax, 0 );
+	#endif
 	}
 #endif
 #if BLAS_CWBVH
@@ -1540,6 +1615,8 @@ void kernel batch_nearest_tlas(
 	if (threadId >= rayCount) return;
 #if BLAS_HW_STACK
 	__local uint hwStack[HW_BVH_WORKGROUP_SIZE * HW_BVH_STACK_ENTRIES];
+#elif defined BVH2_LOCAL_STACK
+	BLAS_LOCAL_STACK_DECL
 #endif
 	const float4 O4 = rayData[threadId].O, D4 = rayData[threadId].D;
 	const float3 rD = native_recip( D4.xyz );
@@ -1561,6 +1638,8 @@ void kernel batch_any_tlas(
 	if (threadId >= rayCount) return;
 #if BLAS_HW_STACK
 	__local uint hwStack[HW_BVH_WORKGROUP_SIZE * HW_BVH_STACK_ENTRIES];
+#elif defined BVH2_LOCAL_STACK
+	BLAS_LOCAL_STACK_DECL
 #endif
 	const float4 O4 = rayData[threadId].O, D4 = rayData[threadId].D;
 	const float3 rD = native_recip( D4.xyz );
@@ -1585,6 +1664,8 @@ void kernel batch_nearest_tlas_packed(
 	if (threadId >= rayCount) return;
 #if BLAS_HW_STACK
 	__local uint hwStack[HW_BVH_WORKGROUP_SIZE * HW_BVH_STACK_ENTRIES];
+#elif defined BVH2_LOCAL_STACK
+	BLAS_LOCAL_STACK_DECL
 #endif
 	const float4 O4 = rays[threadId * 2], D4 = rays[threadId * 2 + 1];
 	const float3 rD = native_recip( D4.xyz );
@@ -1604,6 +1685,8 @@ void kernel batch_any_tlas_packed(
 	if (threadId >= rayCount) return;
 #if BLAS_HW_STACK
 	__local uint hwStack[HW_BVH_WORKGROUP_SIZE * HW_BVH_STACK_ENTRIES];
+#elif defined BVH2_LOCAL_STACK
+	BLAS_LOCAL_STACK_DECL
 #endif
 	const float4 O4 = rays[threadId * 2], D4 = rays[threadId * 2 + 1];
 	const float3 rD = native_recip( D4.xyz );
