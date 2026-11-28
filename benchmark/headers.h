@@ -6,6 +6,7 @@
 // Settings
 #if defined(_WIN32) || defined(__linux__)
 #define ENABLE_OPENCL // required for GPU traversal experiments.
+#define ENABLE_VULKAN // the VULKAN_RT layout: the driver's acceleration structures, through ray queries.
 #endif
 
 using namespace std;
@@ -39,6 +40,7 @@ using PrecomputedTri = bvh::v2::PrecomputedTri<float>;
 // Benchmark components
 #include "primitive_set.h"
 #include "ray_distribution.h"
+#include "vulkan_rt.h"
 #include "acc_struc.h"
 #include "experiment.h"
 

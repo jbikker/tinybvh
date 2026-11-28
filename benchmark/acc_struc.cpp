@@ -44,10 +44,23 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		if (flags & BuildFlags::SIMDBUILD) bvh->settings.useSIMDifavailable = true;
 		if (flags & BuildFlags::OPTIMIZE) bvh->settings.postOptimize = true;
 	}
-	// fix flags for Embree / Madmann91
+	// rotation: BVH2 carries it itself (BVH::orientation), VULKAN_RT in its TLAS instance; other layouts can't
+	if ((flags & ROTATE) && layout != BVH2 && layout != VULKAN_RT)
+	{
+		printf( "note: ROTATE is not supported by this layout; ignored.\n" );
+		flags = (BuildFlags)(flags & ~ROTATE);
+	}
+	if (bvh && (flags & ROTATE)) bvh->settings.autoOrient = true;
+	// fix flags for Embree / Madmann91 / the Vulkan driver
 	if (layout == EMBREE || layout == MADMANN91)
 	{
 		if ((flags & (MEDIUM | HIGH)) == 0) flags = LOW;
+	}
+	if (layout == VULKAN_RT)
+	{
+		vulkan = new VulkanRT();
+		if ((flags & (MEDIUM | HIGH)) == 0) flags = flags | LOW;
+		flags = (BuildFlags)(flags & (LOW | MEDIUM | HIGH | INDEXED | ROTATE));
 	}
 	// construct description
 	switch (layout)
@@ -118,6 +131,12 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		strncpy( shrt, "Embree", sizeof( shrt ) );
 		break;
 	}
+	case VULKAN_RT:
+	{
+		strncpy( desc, "Vulkan driver BVH", sizeof( desc ) );
+		strncpy( shrt, "VkRT", sizeof( shrt ) );
+		break;
+	}
 	default:
 	{
 		strncpy( desc, "UNKNOWN LAYOUT", sizeof( desc ) );
@@ -141,9 +160,11 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		else if (f & BuildFlags::SPATIALSPLITS) { strncat( desc, "SBVH", 100 ); strncat( flagShrt, "S", 32 ); f -= BuildFlags::SPATIALSPLITS; }
 		else if (f & BuildFlags::PRESPLIT) { strncat( desc, "presplit", 100 ); strncat( flagShrt, "P", 32 ); f -= BuildFlags::PRESPLIT; }
 		else if (f & BuildFlags::OPTIMIZE) { strncat( desc, "optimize", 100 ); strncat( flagShrt, "O", 32 ); f -= BuildFlags::OPTIMIZE; }
-		else if (f & BuildFlags::LOW) { strncat( desc, "LOW", 100 ); strncpy( flagShrt, "LOW", 32 ); f -= BuildFlags::LOW; }
+		else if (f & BuildFlags::LOW) { strncat( desc, "LOW", 100 ); strncat( flagShrt, "LOW", 32 ); f -= BuildFlags::LOW; }
 		else if (f & BuildFlags::MEDIUM) { strncat( desc, "MEDIUM", 100 ); strncat( flagShrt, "MED", 32 ); f -= BuildFlags::MEDIUM; }
 		else if (f & BuildFlags::HIGH) { strncat( desc, "HIGH", 100 ); strncat( flagShrt, "HI", 32 ); f -= BuildFlags::HIGH; }
+		else if (f & BuildFlags::ROTATE) { strncat( desc, "rotate", 100 ); strncat( flagShrt, "R", 32 ); f -= BuildFlags::ROTATE; }
+		else break; // a flag without a description
 		first = false;
 	}
 	if (flags) strncat( desc, ")", 128 );
@@ -332,10 +353,57 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 		rtcCommitScene( embreeScene );
 		break;
 	}
+	case VULKAN_RT:
+	{
+		if (vulkanPrims != primSet)
+		{
+			// geometry upload, once per scene and outside the build time (as Embree's). ROTATE: the vertices in the
+			// frame BVH::Orient picks, and the TLAS instance turns them back (the transpose of the rotation). The
+			// angle search is outside the build time here, unlike BVH2's. The probe is not indexed: PrimitiveSet's
+			// indices are the identity, so they also index the rotated copy.
+			BVH probe;
+			const bvhvec4* v = primSet->verts;
+			float xf[12] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+			if (flags & ROTATE)
+			{
+				probe.settings.autoOrient = true;
+				probe.BuildQuick( primSet->verts, primSet->primCount );
+				if (probe.isOriented())
+				{
+					v = (const bvhvec4*)probe.verts.data;
+					for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) xf[r * 4 + c] = probe.orientation[c * 4 + r];
+				}
+				ReportRotation( probe.isOriented(), &probe.orientation[0] );
+			}
+			vulkan->SetGeometry( v, (flags & INDEXED) ? primSet->indices : 0, primSet->primCount, xf );
+			vulkanPrims = primSet;
+		}
+		vulkan->Build( (flags & HIGH) ? 2 : (flags & MEDIUM) ? 1 : 0 );
+		break;
+	}
 	default:
 		exit( 0 ); // unsupported layout. See note in constructor.
 	};
+	if (layout == BVH2 && (flags & ROTATE))
+	{
+		const BVH* b = (const BVH*)bvh;
+		ReportRotation( b->isOriented(), &b->orientation[0] );
+	}
 	return bvh;
+}
+
+// ROTATE: say once which rotation was chosen (about x, y or z), or that none beat the identity
+void AccStruc::ReportRotation( const bool oriented, const float* m )
+{
+	if (rotationReported) return;
+	rotationReported = true;
+	if (!oriented) { printf( "rotation: none (no angle beats the identity)\n" ); return; }
+	for (int axis = 0; axis < 3; axis++) if (m[axis * 5] == 1.0f)
+	{
+		const int a0 = axis == 0 ? 1 : 0, a1 = axis == 2 ? 1 : 2;
+		printf( "rotation: %.1f degrees about %c\n", atan2f( m[a0 * 4 + a1], m[a0 * 4 + a0] ) * 57.29578f, "xyz"[axis] );
+		return;
+	}
 }
 
 void AccStruc::PostBuild()
@@ -775,7 +843,7 @@ void AccStruc::OcclusionBatchPackets( char* rayData, int rayCount )
 
 bvhvec3 AccStruc::SceneExtent()
 {
-	if (layout == EMBREE || layout == MADMANN91)
+	if (layout == EMBREE || layout == MADMANN91 || layout == VULKAN_RT)
 	{
 		// hacky way to get scene extents, via a TinyBVH bvh.
 		BVH bvh;

@@ -18,12 +18,21 @@
     <ClCompile Include="..\benchmark\tools.cpp">
       <Filter>tool</Filter>
     </ClCompile>
+    <ClCompile Include="..\benchmark\vulkan_rt.cpp">
+      <Filter>tool</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\tiny_ocl.h">
       <Filter>opencl</Filter>
     </ClInclude>
     <ClInclude Include="..\benchmark\ray_distribution.h">
+      <Filter>tool</Filter>
+    </ClInclude>
+    <ClInclude Include="..\benchmark\vulkan_rt.h">
+      <Filter>tool</Filter>
+    </ClInclude>
+    <ClInclude Include="..\external\vulkan\vk_min.h">
       <Filter>tool</Filter>
     </ClInclude>
     <ClInclude Include="..\benchmark\primitive_set.h">

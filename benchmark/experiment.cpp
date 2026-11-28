@@ -34,6 +34,7 @@ extern RTCScene embreeScene;
 
 void Experiment::Init( BVHLayout layout, BuildFlags buildFlags, Scene prims, RaySet rays, ExperimentFlags expFlags, const char* view, const char* rayFile )
 {
+	if (layout == VULKAN_RT) expFlags = expFlags | USE_GPU; // always on the GPU
 	if (rays == RaySet::UNSPECIFIED)
 	{
 		// Accstruc build experiment.
@@ -107,8 +108,10 @@ void Experiment::Run()
 	const uint32_t hw = (uint32_t)std::thread::hardware_concurrency();
 	if (hw >= 4) SetThreadAffinityMask( GetCurrentThread(), 4 );
 #endif
+	if (bvh->layout == VULKAN_RT && !VulkanAvailable()) { printf( "%s\nskipped: no GPU with Vulkan ray queries\n", title ); return; }
 	// run actual experiment
 	if (raySet != UNSPECIFIED) RunTraceExperiment(); else RunBuildExperiment();
+	bvh->ReleaseGPU();
 }
 
 void Experiment::RunTraceExperiment()
@@ -138,7 +141,7 @@ void Experiment::RunTraceExperiment()
 	// write experiment settings to csv
 	if (csv)
 	{
-		if (flags & USE_GPU) fprintf( csv, "gpu," );
+		if (flags & USE_GPU) fprintf( csv, bvh->layout == VULKAN_RT ? "gpu (vk)," : "gpu," );
 		else if (flags & MULTICORE) fprintf( csv, (flags & PACKETS) ? "cpu (MT/packets)" : "cpu (MT)" );
 		else fprintf( csv, (flags & PACKETS) ? "cpu (packets)" : "cpu," );
 		fprintf( csv, "%s,%i,", cachedPrimSet[primSet]->shrt, cachedPrimSet[primSet]->primCount );
@@ -163,6 +166,16 @@ void Experiment::RunTraceExperiment()
 	float traceTime, raysPerSecond;
 	Timer t;
 	int runs = 0;
+	if (bvh->layout == VULKAN_RT)
+	{
+		// fastest of ocl_runs dispatches after a warm-up, as for the OpenCL kernels
+		std::vector<float> hits( tgaFile ? (size_t)N * 4 : 0 );
+		traceTime = bvh->GetVulkan()->Trace( extensionRays, N, false, ocl_runs, tgaFile ? hits.data() : 0 );
+		raysPerSecond = (float)N / traceTime;
+		runs = ocl_runs;
+		if (tgaFile) WriteImage( 0, (const char*)hits.data() );
+	}
+	else
 #ifdef ENABLE_OPENCL
 	if (flags & USE_GPU && bvh->layout == GPU_BVH)
 	{
@@ -207,9 +220,11 @@ void Experiment::RunTraceExperiment()
 			// Embree needs to be handled separately: 
 			// we don't want to include ray translation in the measurement.
 			RTCRayHit* embreeRay = (RTCRayHit*)malloc64( N * sizeof( RTCRayHit ) );
+			float* rayLength = (float*)malloc64( N * sizeof( float ) ); // each ray's own tmax (AO rays are short)
 			for (int i = 0; i < N; i++)
 			{
 				const Ray& r = *(Ray*)(shadowRays + i * 64);
+				rayLength[i] = r.hit.t;
 				embreeRay[i].ray.org_x = r.O.x, embreeRay[i].ray.org_y = r.O.y, embreeRay[i].ray.org_z = r.O.z;
 				embreeRay[i].ray.dir_x = r.D.x, embreeRay[i].ray.dir_y = r.D.y, embreeRay[i].ray.dir_z = r.D.z;
 				embreeRay[i].ray.tnear = 0, embreeRay[i].ray.tfar = r.hit.t;
@@ -222,7 +237,7 @@ void Experiment::RunTraceExperiment()
 			{
 				for (int i = 0; i < N; i++)
 				{
-					embreeRay[i].ray.tfar = BVH_FAR; // reset
+					embreeRay[i].ray.tfar = rayLength[i]; // reset
 					rtcIntersect1( embreeScene, &embreeRay[i] );
 				}
 				runs++;
@@ -230,6 +245,7 @@ void Experiment::RunTraceExperiment()
 			traceTime = t.elapsed() * (1.0f / runs); // average of runs.
 			raysPerSecond = (float)N / traceTime;
 			free64( embreeRay );
+			free64( rayLength );
 		}
 		else
 		{
@@ -277,6 +293,13 @@ void Experiment::RunTraceExperiment()
 	}
 	else
 	{
+		if (bvh->layout == VULKAN_RT)
+		{
+			traceTime = bvh->GetVulkan()->Trace( shadowRays, N, true, ocl_runs );
+			raysPerSecond = (float)N / traceTime;
+			runs = ocl_runs;
+		}
+		else
 	#ifdef ENABLE_OPENCL
 		if (flags & USE_GPU && bvh->layout == GPU_BVH)
 		{
@@ -315,9 +338,11 @@ void Experiment::RunTraceExperiment()
 				// Embree needs to be handled separately: 
 				// we don't want to include ray translation in the measurement.
 				RTCRay* embreeRay = (RTCRay*)malloc64( N * sizeof( RTCRay ) );
+				float* rayLength = (float*)malloc64( N * sizeof( float ) ); // each ray's own tmax (AO rays are short)
 				for (int i = 0; i < N; i++)
 				{
 					const Ray& r = *(Ray*)(shadowRays + i * 64);
+					rayLength[i] = r.hit.t;
 					embreeRay[i].org_x = r.O.x, embreeRay[i].org_y = r.O.y, embreeRay[i].org_z = r.O.z;
 					embreeRay[i].dir_x = r.D.x, embreeRay[i].dir_y = r.D.y, embreeRay[i].dir_z = r.D.z;
 					embreeRay[i].tnear = 0, embreeRay[i].tfar = r.hit.t;
@@ -328,7 +353,7 @@ void Experiment::RunTraceExperiment()
 				{
 					for (int i = 0; i < N; i++)
 					{
-						embreeRay[i].tfar = BVH_FAR; // reset
+						embreeRay[i].tfar = rayLength[i]; // reset
 						rtcOccluded1( embreeScene, &embreeRay[i] );
 					}
 					runs++;
@@ -336,6 +361,7 @@ void Experiment::RunTraceExperiment()
 				traceTime = t.elapsed() * (1.0f / runs); // average of runs.
 				raysPerSecond = (float)N / traceTime;
 				free64( embreeRay );
+				free64( rayLength );
 			}
 			else
 			{
@@ -400,7 +426,7 @@ void Experiment::RunBuildExperiment()
 	// write experiment settings to csv
 	if (csv)
 	{
-		if (flags & USE_GPU) fprintf( csv, "gpu," ); else if (flags & MULTICORE) fprintf( csv, "cpu (MT)," ); else fprintf( csv, "cpu," );
+		if (flags & USE_GPU) fprintf( csv, bvh->layout == VULKAN_RT ? "gpu (vk)," : "gpu," ); else if (flags & MULTICORE) fprintf( csv, "cpu (MT)," ); else fprintf( csv, "cpu," );
 		fprintf( csv, "%s,%i,", cachedPrimSet[primSet]->shrt, cachedPrimSet[primSet]->primCount );
 		fprintf( csv, "%s,%s,", bvh->shrt, bvh->flagShrt );
 		if (csv) fflush( csv );
@@ -421,12 +447,12 @@ void Experiment::RunBuildExperiment()
 	printf( "%s\nbuild time: %.2fms ", title, buildTime * 1000.0f );
 	float sahCost = bvh->SAHCost();
 	float epoCost = bvh->EPOCost();
-	if (bvh->layout == EMBREE) printf( "SAH: n/a, EPO: n/a\n" );
+	if (bvh->layout == EMBREE || bvh->layout == VULKAN_RT) printf( "SAH: n/a, EPO: n/a\n" );
 	else if (bvh->layout == MADMANN91) printf( "SAH: %.3f, EPO: n/a\n", sahCost );
 	else printf( "SAH: %.3f, EPO: %.2f\n", sahCost, epoCost );
 	if (csv)
 	{
-		if (bvh->layout == EMBREE) fprintf( csv, "%.2f,n/a,n/a,%i\n", buildTime * 1000.0f, runs );
+		if (bvh->layout == EMBREE || bvh->layout == VULKAN_RT) fprintf( csv, "%.2f,n/a,n/a,%i\n", buildTime * 1000.0f, runs );
 		else if (bvh->layout == MADMANN91) fprintf( csv, "%.2f,%.3f,n/a,%i\n", buildTime * 1000.0f, sahCost, runs );
 		else fprintf( csv, "%.2f,%.3f,%.3f,%i\n", buildTime * 1000.0f, sahCost, epoCost, runs );
 		fflush( csv );
@@ -480,9 +506,20 @@ void PrepareRayData( char* raySet, const int N )
 // the _packed kernels leave their input untouched, so passes need no reset in between
 int ExperimentCore( tinyocl::Kernel* kernel, const int N, uint64_t& traceTime )
 {
+	// warm up for 0.5 s of GPU time: laptop GPUs need that to reach their sustained clocks (20 short passes left
+	// timings 25% apart from run to run); the same rule as the VULKAN_RT layout
+	for (double warm = 0; warm < 0.5;)
+	{
+		cl_event first = 0, last = 0;
+		for (int pass = 0; pass < 20; pass++) kernel->Run( N * batchAmplifier, 64, 0, pass == 0 ? &first : pass == 19 ? &last : 0 );
+		clFinish( kernel->GetQueue() );
+		clGetEventProfilingInfo( first, CL_PROFILING_COMMAND_START, sizeof( cl_ulong ), &startTime, 0 );
+		clGetEventProfilingInfo( last, CL_PROFILING_COMMAND_END, sizeof( cl_ulong ), &endTime, 0 );
+		warm += tinybvh_max( (double)(endTime - startTime) * 1e-9, 1e-3 ); // at least 1 ms per batch: ends
+		clReleaseEvent( first ), clReleaseEvent( last );
+	}
 	cl_event events[ocl_runs] = {};
-	for (int pass = -20 /* warm up */; pass < ocl_runs; pass++)
-		kernel->Run( N * batchAmplifier, 64, 0, pass >= 0 ? &events[pass] : 0 );
+	for (int pass = 0; pass < ocl_runs; pass++) kernel->Run( N * batchAmplifier, 64, 0, &events[pass] );
 	clFinish( kernel->GetQueue() );
 	traceTime = 0x3fffffffffffffffu;
 	for (int pass = 0; pass < ocl_runs; pass++)

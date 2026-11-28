@@ -17,7 +17,8 @@ enum BuildFlags : int {
 	BAKED = 512,
 	LOW = 1024, // low, medium, high: For Embree and Madmann91.
 	MEDIUM = 2048,
-	HIGH = 4096 
+	HIGH = 4096,
+	ROTATE = 8192 // pick a rotation that tightens the boxes (BVH::orientation), where the layout can carry it
 };
 
 enum BVHLayout
@@ -33,6 +34,7 @@ enum BVHLayout
 	MADMANN91,	// for reference: latest madmann91 BVH lib
 	EMBREE,		// for reference: latest Embree lib.
 	AMD_HWRT8,	// Native AMD 8-wide format
+	VULKAN_RT,	// for reference: the GPU driver's own acceleration structure, through Vulkan ray queries
 };
 
 class PrimitiveSet;
@@ -60,7 +62,13 @@ public:
 	int NodeCount();
 	BVHLayout layout = BVH2;
 	char desc[128], shrt[64], flagShrt[64];
+	VulkanRT* GetVulkan() { return vulkan; }
+	void ReleaseGPU() { delete vulkan; vulkan = 0; vulkanPrims = 0; } // experiments are kept: free their GPU memory
 private:
+	void ReportRotation( const bool oriented, const float* orientation );
+	VulkanRT* vulkan = 0;
+	PrimitiveSet* vulkanPrims = 0; // geometry uploaded for 'vulkan'
+	bool rotationReported = false;
 	PrimitiveSet* primSet = 0;
 	BVHBase* bvh = 0;
 	BuildFlags flags = NO_FLAGS;

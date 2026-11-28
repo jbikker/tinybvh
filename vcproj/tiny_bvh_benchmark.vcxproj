@@ -24,6 +24,8 @@
     <ClInclude Include="..\benchmark\headers.h" />
     <ClInclude Include="..\benchmark\primitive_set.h" />
     <ClInclude Include="..\benchmark\ray_distribution.h" />
+    <ClInclude Include="..\benchmark\vulkan_rt.h" />
+    <ClInclude Include="..\external\vulkan\vk_min.h" />
     <ClInclude Include="..\tiny_bvh.h" />
     <ClInclude Include="..\tiny_bvh_arm_double.h" />
     <ClInclude Include="..\tiny_bvh_arm_float.h" />
@@ -43,6 +45,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\benchmark\tools.cpp" />
+    <ClCompile Include="..\benchmark\vulkan_rt.cpp" />
     <ClCompile Include="..\tiny_bvh_benchmark.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
