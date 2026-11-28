@@ -58,12 +58,12 @@ inline bool intersect_bvh2_tri( const float4 vert0, const float4 edge1, const fl
 	return valid;
 }
 
-// Stack: private, or with localStack the first BVH2_LOCAL_STACK entries at lstack, BVH2_LOCAL_LANES apart.
+// Stack: private, or with localStack the first BVH2_LOCAL_STACK entries at lstack, BVH2_LOCAL_LANES apart;
+// the deeper entries stay in the private array, which is rarely touched then.
 #ifdef BVH2_LOCAL_STACK
-#define BVH2_PUSH( x ) { if (!localStack) stack[stackPtr] = (x); else if (stackPtr < BVH2_LOCAL_STACK) \
-	lstack[stackPtr * BVH2_LOCAL_LANES] = (x); else deep[stackPtr - BVH2_LOCAL_STACK] = (x); stackPtr++; }
-#define BVH2_POP() ( --stackPtr, !localStack ? stack[stackPtr] : stackPtr < BVH2_LOCAL_STACK ? \
-	lstack[stackPtr * BVH2_LOCAL_LANES] : deep[stackPtr - BVH2_LOCAL_STACK] )
+#define BVH2_PUSH( x ) { if (localStack && stackPtr < BVH2_LOCAL_STACK) lstack[stackPtr * BVH2_LOCAL_LANES] = (x); \
+	else stack[stackPtr] = (x); stackPtr++; }
+#define BVH2_POP() ( --stackPtr, localStack && stackPtr < BVH2_LOCAL_STACK ? lstack[stackPtr * BVH2_LOCAL_LANES] : stack[stackPtr] )
 #else
 #define BVH2_PUSH( x ) { stack[stackPtr++] = (x); }
 #define BVH2_POP() stack[--stackPtr]
@@ -78,9 +78,6 @@ float4 traverse_bvh2( const global struct BVHNode* bvhNode, const global float4*
 	const float3 rO = O * -rD; // precalculate for efficient slab test
 	float4 hit = (float4)( tmax, 0, 0, 0 );
 	uint nodeIdx = 0, stack[STACK_SIZE], stackPtr = 0, steps = 0;
-#ifdef BVH2_LOCAL_STACK
-	uint deep[STACK_SIZE - BVH2_LOCAL_STACK]; // local stack: the entries beyond the local ones
-#endif
 	while (nodeIdx != BVH2_DONE)
 	{
 		bool pop;
