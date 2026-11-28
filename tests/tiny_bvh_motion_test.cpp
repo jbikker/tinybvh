@@ -794,6 +794,84 @@ static void TestSRT()
 #endif
 }
 
+// Instance motion times vertex motion is quadratic in time: x(t) = M(t) v(t). A triangle that slides from lower left
+// to lower right, away from the origin, while its instance shrinks from 1 to 0.2, bulges beyond both ends of its path:
+// its rightmost vertex peaks at x = 0.240 near t = 0.86, but ends at x = 0.21. Bounds from each end of the shutter
+// alone (each end's transform on that end's box) clip it; the instance bounds must hold it.
+static void TestQuadraticMotion()
+{
+	printf( "quadratic motion (instance scale times vertex motion):\n" );
+	const bvhvec4 v0[3] = { bvhvec4( -1.05f, -1.05f, 0, 0 ), bvhvec4( -0.95f, -1.05f, 0, 0 ), bvhvec4( -1.0f, -0.95f, 0, 0 ) };
+	bvhvec4 v1[3];
+	for (int k = 0; k < 3; k++) v1[k] = v0[k] + bvhvec4( 2, 0, 0, 0 );
+	BVH_Motion blas;
+	blas.Build( v0, v1, 1 );
+	BVHBase* blases[1] = { &blas };
+	const float s1 = 0.2f;
+	bvhmat4 shrunk;
+	shrunk[0] = shrunk[5] = shrunk[10] = s1;
+	BLASInstance::SRT keys[2];
+	keys[1].sx = keys[1].sy = keys[1].sz = s1;
+	// each TLAS also holds a distant static instance: with a single instance the TLAS root is a leaf, and traversal
+	// would never test the instance bounds.
+	BLASInstance byMatrix[2] = { BLASInstance( 0 ), BLASInstance( 0 ) }, bySRT[2] = { BLASInstance( 0 ), BLASInstance( 0 ) };
+	BLASInstance ends[2] = { BLASInstance( 0 ), BLASInstance( 0 ) };
+	byMatrix[0].transform1 = ends[0].transform1 = &shrunk, bySRT[0].srt = keys;
+	byMatrix[1].transform[11] = bySRT[1].transform[11] = ends[1].transform[11] = 100;
+	BVH matrixTLAS, srtTLAS, endsTLAS;
+	matrixTLAS.Build( byMatrix, 2, blases, 1 );
+	srtTLAS.Build( bySRT, 2, blases, 1 );
+	// the bounds from the shutter ends alone, for comparison: the start transform on the box at the start, the end
+	// transform on the box at the end. Built without the BLAS list, so the TLAS takes these bounds as they are.
+	ends[0].aabbMin = tinybvh_min( blas.bvhNode[0].aabbMin0, blas.bvhNode[0].aabbMin1 * s1 );
+	ends[0].aabbMax = tinybvh_max( blas.bvhNode[0].aabbMax0, blas.bvhNode[0].aabbMax1 * s1 );
+	ends[1].Update( &blas );
+	endsTLAS.Build( ends, 2, (BVHBase**)0, 0 );
+	endsTLAS.blasList = blases, endsTLAS.blasCount = 1;
+	// the vertices over the shutter interval, in double precision: inside the bounds of each instance?
+	auto world = []( const bvhvec4& a, const bvhvec4& b, const double t, double p[3] )
+	{
+		const double s = (1 - t) + t * (double)0.2f; // M(t) = (1 - t) I + t (s1 I)
+		p[0] = s * ((1 - t) * a.x + t * b.x), p[1] = s * ((1 - t) * a.y + t * b.y), p[2] = s * ((1 - t) * a.z + t * b.z);
+	};
+	auto inside = []( const BLASInstance& i, const double p[3] )
+	{
+		const double e = 1e-6;
+		return p[0] >= i.aabbMin.x - e && p[1] >= i.aabbMin.y - e && p[2] >= i.aabbMin.z - e && p[0] <= i.aabbMax.x + e && p[1] <= i.aabbMax.y + e && p[2] <= i.aabbMax.z + e;
+	};
+	uint32_t outMatrix = 0, outSRT = 0, outEnds = 0;
+	double peakX = -1e30, peakT = 0, endX = -1e30;
+	for (int s = 0; s <= 10000; s++) for (int k = 0; k < 3; k++)
+	{
+		double p[3];
+		world( v0[k], v1[k], s / 10000.0, p );
+		outMatrix += !inside( byMatrix[0], p ), outSRT += !inside( bySRT[0], p ), outEnds += !inside( ends[0], p );
+		if (p[0] > peakX) peakX = p[0], peakT = s / 10000.0;
+		if (s == 10000) endX = tinybvh_max( endX, p[0] );
+	}
+	// rays straight down onto the triangle late in the shutter interval, mostly near its rightmost vertex.
+	uint32_t missMatrix = 0, missSRT = 0, missEnds = 0, rays = 4000;
+	for (uint32_t i = 0; i < rays; i++)
+	{
+		const float time = 0.6f + 0.4f * RandomFloat();
+		const double w1 = 0.6 + 0.3 * RandomFloat(), w2 = (1 - w1) * (0.1 + 0.8 * RandomFloat()), w0 = 1 - w1 - w2;
+		double a[3], b[3], c[3];
+		world( v0[0], v1[0], time, a ), world( v0[1], v1[1], time, b ), world( v0[2], v1[2], time, c );
+		const bvhvec3 P( (float)(w0 * a[0] + w1 * b[0] + w2 * c[0]), (float)(w0 * a[1] + w1 * b[1] + w2 * c[1]), 0 );
+		Ray r0( P + bvhvec3( 0, 0, 5 ), bvhvec3( 0, 0, -1 ), BVH_FAR, RAY_MASK_INTERSECT_ALL, time ), r1 = r0, r2 = r0;
+		matrixTLAS.Intersect( r0 ), srtTLAS.Intersect( r1 ), endsTLAS.Intersect( r2 );
+		missMatrix += r0.hit.t >= BVH_FAR, missSRT += r1.hit.t >= BVH_FAR, missEnds += r2.hit.t >= BVH_FAR;
+	}
+	printf( "  rightmost vertex: x = %.3f at t = %.3f, x = %.3f at t = 1; bounds reach x = %.3f (matrix), %.3f (SRT), %.3f (shutter ends only)\n",
+		peakX, peakT, endX, byMatrix[0].aabbMax.x, bySRT[0].aabbMax.x, ends[0].aabbMax.x );
+	printf( "  vertex positions outside the bounds: %u (matrix), %u (SRT), %u (shutter ends only)\n", outMatrix, outSRT, outEnds );
+	printf( "  rays that miss the triangle, of %u: %u (matrix), %u (SRT), %u (shutter ends only)\n", rays, missMatrix, missSRT, missEnds );
+	CHECK( peakX > endX + 0.02, "the test motion does not bulge beyond its end (%f vs %f)", peakX, endX );
+	CHECK( outMatrix == 0 && outSRT == 0, "quadratic motion leaves the instance bounds (%u, %u)", outMatrix, outSRT );
+	CHECK( missMatrix == 0 && missSRT == 0, "rays miss a triangle under quadratic motion (%u, %u)", missMatrix, missSRT );
+	CHECK( outEnds > 0 && missEnds > 0, "the shutter ends alone should clip this motion; the test lost its point" );
+}
+
 // Double precision: BVH_Motion_Double, alone and in a TLAS of BLASInstanceEx.
 static void TestDouble( const std::vector<bvhvec4>& scene )
 {
@@ -964,6 +1042,7 @@ int main( int argc, char** argv )
 	TestMove( scene );
 	TestTLAS( scene );
 	TestSRT();
+	TestQuadraticMotion();
 #ifdef DOUBLE_PRECISION_SUPPORT
 	TestDouble( scene );
 #endif
