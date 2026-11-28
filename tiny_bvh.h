@@ -105,7 +105,7 @@ THE SOFTWARE.
 #define TINY_BVH_VERSION_SUB	3
 
 // Cached BVH file version - increases only when file layout changes.
-#define TINY_BVH_CACHE_VERSION	19304
+#define TINY_BVH_CACHE_VERSION	19305
 
 // Features
 #ifndef NO_DOUBLE_PRECISION_SUPPORT

@@ -690,6 +690,9 @@ struct BVHBuildSettings
 	bool postOptimize = false;		// optimize generated BVH by parallel reinsertion; see BVH_Verbose::Optimize.
 	int optimizeIterations = 25;	// default optimization iterations.
 	bool useSIMDifavailable = true;	// set to false to use the scalar reference builder, or SBVH with useSpatialSplits.
+	// BVH triangle builds only: build in the rotation about x, y or z that tightens the boxes most, when that
+	// gains enough; see BVH::orientation. Other layouts do not pass it on to the BVH they build from.
+	bool autoOrient = false;
 #ifdef ENABLE_THREADED_BUILDS
 	bool enableThreading = true;	// default to threaded builds.
 #else
@@ -876,7 +879,7 @@ protected:
 	static Index SliceStart( const Index n, const uint32_t s, const uint32_t slices ) { return (Index)(((uint64_t)n * s) / slices); }
 	void CopyBasePropertiesFrom( const BVHBase& original );	// copy flags from one BVH to another
 	// a layout passes its build settings on to the layout it is built from.
-	void PassSettingsTo( BVHBase& dst ) const { dst.context = context, dst.settings = settings, dst.c_int = c_int, dst.c_trav = c_trav; }
+	void PassSettingsTo( BVHBase& dst ) const { dst.context = context, dst.settings = settings, dst.settings.autoOrient = false, dst.c_int = c_int, dst.c_trav = c_trav; }
 	~BVHBase() {}
 	TINYBVH_FORCEINLINE bool TriHit( const Ray& ray, const Slice& verts, const Index i0, const Index i1, const Index i2, Float& tHit, Float& uHit, Float& vHit ) const;
 	TINYBVH_FORCEINLINE void IntersectTri( Ray& ray, const Index idx, const Slice& verts, const Index i0, const Index i1, const Index i2 ) const;
@@ -1093,7 +1096,16 @@ private:
 	void BuildHQ();
 	void PrepareBuild( const Slice& vertices, const Index* indices, const Index primCount );
 	void ReserveNodes( const Index nodes );
-	void SetInput( const Slice& vertices, const Index* indices );
+	void SetInput( const Slice& vertices, const Index* indices, const Index prims ); // prims: triangle count
+	// settings.autoOrient: pick the rotation, and build on a rotated copy of the caller's vertices.
+	bool oriented = false;
+	Vertex* orientedVerts = 0;		// the rotated copy, owned
+	Slice sourceVerts = {};			// the caller's vertices it was made from, for Refit
+	void Orient( const Slice& vertices, const Index* indices, const Index prims );
+	bool BestOrientation( const Slice& vertices, const Index* indices, const Index prims, uint32_t& axis, Float& angle ) const;
+	void RotateVertices( const Slice& src );
+	int32_t IntersectRotated( Ray& ray ) const;
+	bool IsOccludedRotated( const Ray& ray ) const;
 	template <typename F> void BuildFromBounds( const Index n, const F& bounds );
 	void PairTriangles( const Index triangles, const Float maxGrowth, uint32_t* partner );
 	void InitFragments( const Index first, const Index last, Vec3& bmin, Vec3& bmax );
@@ -1138,6 +1150,10 @@ public:
 	Slice verts = {};				// pointer to input primitive array: 3 vertices per tri.
 	Index* vertIdx = 0;			// vertex indices, only used in case the BVH is built over indexed prims.
 	bool ownsGeometry = false;	// set by Load when the geometry came out of the file rather than the caller.
+	// settings.autoOrient: the tree, and verts, are in orientation * world space, a rotation about x, y or z.
+	// The identity otherwise. Intersect, IsOccluded and the sphere and capsule queries take world space.
+	Mat4 orientation;
+	bool isOriented() const { return oriented; }
 	bool hasMotion = false;		// TLAS: an instance or a BLAS moves; set by the TLAS build.
 	Index* primIdx = 0;				// primitive index array; capacity >= allocatedNodes / 2, see below.
 	BLASInstance* instList = 0;		// instance array, for top-level acceleration structure.
@@ -1376,6 +1392,7 @@ private:
 	// ConvertFrom and its decode passes: node flags, and the marker for output nodes without a source node.
 	static constexpr uint8_t USED = 1, CONTIG = 2, ASLEAF = 4;
 	static constexpr Index NOTANODE = (Index)-1;
+	bool acceptOriented = false; // set by layouts that carry the BVH's orientation themselves (BVH12_NVIDIA_HW)
 	MBVH& operator=( const MBVH& ) = default;
 };
 
@@ -2296,6 +2313,7 @@ TEMPLATED void BVH<Float, Index>::ReleaseOwnership()
 {
 	bvhNode = 0, primIdx = 0, fragment = 0;
 	verts = Slice( nullptr, 0, 0 ), vertIdx = 0, ownsGeometry = false; // the new owner holds these now
+	orientedVerts = 0, oriented = false, sourceVerts = Slice( nullptr, 0, 0 );
 	allocatedNodes = usedNodes = triCount = idxCount = 0;
 }
 
@@ -2317,6 +2335,8 @@ TEMPLATED void BVH<Float, Index>::DropReference( BVHContext ctx )
 TEMPLATED BVH<Float, Index>::~BVH()
 {
 	FreeGeometry();
+	AlignedFree( orientedVerts );
+	orientedVerts = 0;
 	AlignedFree( bvhNode );
 	bvhNode = 0;
 	AlignedFree( primIdx );
@@ -2377,10 +2397,12 @@ TEMPLATED bool BVH<Float, Index>::Load( const char* fileName, const Slice& verti
 	AlignedFree( bvhNode );
 	AlignedFree( primIdx );
 	AlignedFree( fragment );
+	AlignedFree( orientedVerts );
 	s.read( (char*)this, sizeof( BVH ) );
 	const bool fileIsIndexed = (vertIdx != nullptr);
 	const bool fileIsTLAS = (blasList != nullptr || instList != nullptr);
 	bvhNode = 0, primIdx = 0, fragment = 0, ownsGeometry = false;
+	orientedVerts = 0, sourceVerts = Slice( nullptr, 0, 0 ); // 'oriented' and 'orientation' come from the file
 	verts = Slice( nullptr, 0, 0 ), vertIdx = 0;
 	instList = 0, blasList = 0, blasCount = 0, hasMotion = false;
 	customIntersect = 0, customIsOccluded = 0, customUserdata = 0;
@@ -2396,7 +2418,7 @@ TEMPLATED bool BVH<Float, Index>::Load( const char* fileName, const Slice& verti
 	{
 		// not the geometry we expected, or a TLAS, which we can't load/save;
 		// leave *this as a valid but empty BVH rather than a half-loaded one.
-		allocatedNodes = usedNodes = triCount = idxCount = 0;
+		allocatedNodes = usedNodes = triCount = idxCount = 0, oriented = false;
 		return false;
 	}
 	bvhNode = (BVHNode*)AlignedAlloc( allocatedNodes * sizeof( BVHNode ) );
@@ -2412,6 +2434,14 @@ TEMPLATED bool BVH<Float, Index>::Load( const char* fileName, const Slice& verti
 		// the caller's geometry wins; step over what the file carries.
 		verts = vertices, vertIdx = (Index*)indices;
 		s.seekg( (std::streamoff)vertCount * sizeof( Vertex ) + (std::streamoff)idxEntries * sizeof( Index ), std::ios::cur );
+		if (oriented)
+		{
+			// the tree is in the rotated frame: rotate the caller's vertices as the build did
+			orientedVerts = (Vertex*)AlignedAlloc( vertices.count * sizeof( Vertex ) );
+			sourceVerts = vertices;
+			RotateVertices( vertices );
+			verts = Slice( orientedVerts, vertices.count, sizeof( Vertex ) );
+		}
 	}
 	else
 	{
@@ -2472,7 +2502,7 @@ TEMPLATED void BVH<Float, Index>::BuildAABB( const Vertex* aabbs, const Index aa
 {
 	// BVH builder for a list of AABBs.
 	BVH_FATAL_ERROR_IF( aabbCount == 0, "BVH::BuildAABB( .. ), aabbCount == 0." );
-	SetInput( Slice( nullptr, 0, 0 ), 0 );
+	SetInput( Slice( nullptr, 0, 0 ), 0, 0 );
 	BuildFromBounds( aabbCount, [&]( const Index i, Vec3& bmin, Vec3& bmax ) { bmin = Vec3( aabbs[i * 2] ), bmax = Vec3( aabbs[i * 2 + 1] ); } );
 }
 
@@ -2480,7 +2510,7 @@ TEMPLATED void BVH<Float, Index>::Build( void (*customGetAABB)(const Index, Vec3
 {
 	// BVH builder for custom geometry; AABBs are obtained via a function pointer in context.
 	BVH_FATAL_ERROR_IF( primCount == 0, "BVH::Build( void (*customGetAABB)( .. ), instCount ), instCount == 0." );
-	SetInput( Slice( nullptr, 0, 0 ), 0 );
+	SetInput( Slice( nullptr, 0, 0 ), 0, 0 );
 	BuildFromBounds( primCount, [&]( const Index i, Vec3& bmin, Vec3& bmax ) { customGetAABB( i, bmin, bmax, customUserdata ); } );
 }
 
@@ -2488,7 +2518,7 @@ TEMPLATED void BVH<Float, Index>::Build( BLASInstance* instances, const Index in
 {
 	// TLAS builder. Build a BVH over a list of BLAS instances.
 	BVH_FATAL_ERROR_IF( instCount == 0, "BVH::Build( BLASInstance*, instCount ), instCount == 0." );
-	SetInput( Slice( nullptr, 0, 0 ), 0 );
+	SetInput( Slice( nullptr, 0, 0 ), 0, 0 );
 	instList = instances, blasList = blasses, blasCount = bCount;
 	BuildFromBounds( instCount, [&]( const Index i, Vec3& bmin, Vec3& bmax )
 	{
@@ -2658,7 +2688,7 @@ TEMPLATED void BVH<Float, Index>::BuildPairs( const Slice& vertices, const Index
 	BVH_FATAL_ERROR_IF( N == 0, "BVH::BuildPairs( .. ), primCount == 0." );
 	BVH_FATAL_ERROR_IF( !indices && prims != 0, "BVH::BuildPairs( .. ), indices == 0." );
 	BVH_FATAL_ERROR_IF( indices && prims == 0, "BVH::BuildPairs( .. ), prims == 0." );
-	SetInput( vertices, indices );
+	SetInput( vertices, indices, N );
 	ReserveNodes( N * 2 ); // the pool and primIdx / fragment capacity a triangle build would have
 	const uint32_t NONE = 0xffffffffu;
 	uint32_t* partner = (uint32_t*)AlignedAlloc( (size_t)N * 4 );
@@ -2770,11 +2800,155 @@ TEMPLATED void BVH<Float, Index>::ReserveNodes( const Index nodes )
 }
 
 // The input of the next build; any TLAS input of an earlier build on this object is dropped.
-TEMPLATED void BVH<Float, Index>::SetInput( const Slice& vertices, const Index* indices )
+TEMPLATED void BVH<Float, Index>::SetInput( const Slice& vertices, const Index* indices, const Index prims )
 {
 	verts = vertices, vertIdx = (Index*)indices;
 	instList = 0, blasList = 0, blasCount = 0, hasMotion = false;
 	if (vertices) customIntersect = 0, customIsOccluded = 0, customUserdata = 0;
+	Orient( vertices, indices, prims );
+}
+
+// Orient: back to the identity; with settings.autoOrient and triangle input, build on a rotated copy if a
+// rotation tightens the boxes enough (see BestOrientation). Every builder passes its input through here.
+TEMPLATED void BVH<Float, Index>::Orient( const Slice& vertices, const Index* indices, const Index prims )
+{
+	AlignedFree( orientedVerts );
+	orientedVerts = 0, oriented = false, sourceVerts = Slice( nullptr, 0, 0 );
+	for (int32_t i = 0; i < 16; i++) orientation[i] = Float( i % 5 == 0 ? 1 : 0 );
+	uint32_t axis = 0;
+	Float angle = 0;
+	if (!settings.autoOrient || !vertices || prims == 0 || !BestOrientation( vertices, indices, prims, axis, angle )) return;
+	// world to tree: rotate the two other axes by -angle
+	const uint32_t a0 = axis == 0 ? 1 : 0, a1 = axis == 2 ? 1 : 2;
+	const Float c = cos( angle ), s = sin( angle );
+	orientation[a0 * 4 + a0] = c, orientation[a0 * 4 + a1] = s, orientation[a1 * 4 + a0] = -s, orientation[a1 * 4 + a1] = c;
+	orientedVerts = (Vertex*)AlignedAlloc( vertices.count * sizeof( Vertex ) );
+	oriented = true, sourceVerts = vertices;
+	RotateVertices( vertices );
+	verts = Slice( orientedVerts, vertices.count, sizeof( Vertex ) );
+}
+
+// RotateVertices: the rotated copy of 'src' (w is kept: it may hold user data).
+TEMPLATED void BVH<Float, Index>::RotateVertices( const Slice& src )
+{
+	for (uint64_t i = 0; i < src.count; i++)
+	{
+		const Vertex v = src[i];
+		Vertex& d = orientedVerts[i];
+		d = v;
+		const Vec3 p = tinybvh_transform_vector( Vec3( v.x, v.y, v.z ), orientation );
+		d.x = p.x, d.y = p.y, d.z = p.z;
+	}
+}
+
+// BestOrientation: rotation axis and angle that minimize the summed surface area of the triangle boxes.
+// Per axis: start at the peak of the wall direction histogram (normals within 17 degrees of perpendicular
+// to the axis, folded to [0, 90), smoothed over 7 degrees) and walk downhill in 1 degree steps, at most 3
+// from the peak, over a sample of 2^16 triangles. That sample is noisy by about 1%, so the winner and the
+// 8 angles around it are then scored on 2^18 triangles; the best must beat the identity there by 3%.
+TEMPLATED bool BVH<Float, Index>::BestOrientation( const Slice& vertices, const Index* indices, const Index prims, uint32_t& axis, Float& angle ) const
+{
+	// half area of the box of triangle p[0..2] after rotating axes a0, a1 by c = cos, s = sin
+	auto rotArea = []( const Vec3* p, const uint32_t a0, const uint32_t a1, const Float c, const Float s ) {
+		const uint32_t a2 = 3 - a0 - a1;
+		Float lo0 = bvh_far<Float>, hi0 = -bvh_far<Float>, lo1 = lo0, hi1 = hi0, lo2 = lo0, hi2 = hi0;
+		for (uint32_t k = 0; k < 3; k++)
+		{
+			const Float x = c * p[k][a0] + s * p[k][a1], y = c * p[k][a1] - s * p[k][a0];
+			lo0 = tinybvh_min( lo0, x ), hi0 = tinybvh_max( hi0, x ), lo1 = tinybvh_min( lo1, y ), hi1 = tinybvh_max( hi1, y );
+			lo2 = tinybvh_min( lo2, p[k][a2] ), hi2 = tinybvh_max( hi2, p[k][a2] );
+		}
+		const Float e0 = hi0 - lo0, e1 = hi1 - lo1, e2 = hi2 - lo2;
+		return (double)(e0 * e1 + (e0 + e1) * e2);
+	};
+	auto getTri = [&]( const Index t, Vec3* p ) {
+		for (uint32_t k = 0; k < 3; k++)
+		{
+			const Vertex v = vertices[indices ? indices[t * 3 + k] : t * 3 + k];
+			p[k] = Vec3( v.x, v.y, v.z );
+		}
+	};
+	const Index step = tinybvh_max( (Index)1, (Index)(prims >> 16) ), count = (prims + step - 1) / step;
+	Vec3* tri = (Vec3*)AlignedAlloc( count * 3 * sizeof( Vec3 ) );
+	double hist[3][90] = {}, identity = 0;
+	for (Index i = 0; i < count; i++)
+	{
+		getTri( i * step, tri + i * 3 );
+		const Vec3 v0 = tri[i * 3], N = tinybvh_cross( tri[i * 3 + 1] - v0, tri[i * 3 + 2] - v0 );
+		identity += rotArea( tri + i * 3, 1, 2, 1, 0 );
+		const Float l = tinybvh_length( N );
+		if (!(l > 0)) continue;
+		for (uint32_t ax = 0; ax < 3; ax++) if ((N[ax] < 0 ? -N[ax] : N[ax]) <= Float( 0.3 ) * l)
+		{
+			// direction of (N[a0], N[a1]) modulo 90 degrees: turn it into the first quadrant, then a polynomial atan
+			Float x = N[ax == 0 ? 1 : 0], y = N[ax == 2 ? 1 : 2];
+			if (x < 0) x = -x, y = -y;
+			if (y < 0) { const Float t = x; x = -y, y = t; }
+			const bool steep = y > x;
+			const Float t = steep ? x / y : y / x, t2 = t * t;
+			const Float at = t * (Float( 0.9998660 ) + t2 * (Float( -0.3302995 ) + t2 * (Float( 0.1801410 ) + t2 * (Float( -0.0851330 ) + t2 * Float( 0.0208351 )))));
+			const int32_t bin = (int32_t)(steep ? Float( 90 ) - at * Float( 57.2957795130823 ) : at * Float( 57.2957795130823 ));
+			hist[ax][bin >= 90 ? 0 : bin] += (double)l;
+		}
+	}
+	// summed half areas of the sampled triangle boxes, after rotating axes a0, a1 by -deg; 0 and 90 are the identity
+	auto boxArea = [&]( const uint32_t a0, const uint32_t a1, const int32_t deg ) {
+		if (deg % 90 == 0) return identity;
+		const Float c = cos( Float( deg ) * Float( 0.0174532925199433 ) ), s = sin( Float( deg ) * Float( 0.0174532925199433 ) );
+		double sum = 0;
+		for (Index i = 0; i < count; i++) sum += rotArea( tri + i * 3, a0, a1, c, s );
+		return sum;
+	};
+	// a candidate must gain 1% on the small sample before the large one is read
+	double best = identity * (step > 1 ? 0.99 : 0.97);
+	bool found = false;
+	for (uint32_t ax = 0; ax < 3; ax++)
+	{
+		const uint32_t a0 = ax == 0 ? 1 : 0, a1 = ax == 2 ? 1 : 2;
+		int32_t peak = 0;
+		double peakSum = -1;
+		for (int32_t b = 0; b < 90; b++)
+		{
+			double sm = 0;
+			for (int32_t k = -3; k <= 3; k++) sm += hist[ax][(b + k + 90) % 90];
+			if (sm > peakSum) peakSum = sm, peak = b;
+		}
+		int32_t deg = peak, dir = 0;
+		double a = boxArea( a0, a1, peak );
+		const double down = boxArea( a0, a1, peak - 1 ), up = boxArea( a0, a1, peak + 1 );
+		if (down < a && down <= up) a = down, deg = peak - 1, dir = -1;
+		else if (up < a) a = up, deg = peak + 1, dir = 1;
+		while (dir != 0 && (deg + dir - peak) * dir <= 3)
+		{
+			const double next = boxArea( a0, a1, deg + dir );
+			if (!(next < a)) break;
+			a = next, deg += dir;
+		}
+		deg = (deg + 90) % 90;
+		if (deg != 0 && a < best) best = a, axis = ax, angle = Float( deg ) * Float( 0.0174532925199433 ), found = true;
+	}
+	AlignedFree( tri );
+	if (!found || step == 1) return found;
+	// on the large sample: the best of the winner and the 8 angles around it, against the identity
+	const Index step2 = tinybvh_max( (Index)1, (Index)(prims >> 18) );
+	const uint32_t a0 = axis == 0 ? 1 : 0, a1 = axis == 2 ? 1 : 2;
+	const int32_t deg = (int32_t)(angle * Float( 57.2957795130823 ) + Float( 0.5 ));
+	Float c[9], s[9];
+	double base = 0, rotated[9] = {};
+	for (int32_t d = 0; d < 9; d++)
+		c[d] = cos( Float( deg + d - 4 ) * Float( 0.0174532925199433 ) ), s[d] = sin( Float( deg + d - 4 ) * Float( 0.0174532925199433 ) );
+	for (Index i = 0; i < prims; i += step2)
+	{
+		Vec3 p[3];
+		getTri( i, p );
+		base += rotArea( p, 1, 2, 1, 0 );
+		for (int32_t d = 0; d < 9; d++) rotated[d] += rotArea( p, a0, a1, c[d], s[d] );
+	}
+	int32_t bestD = 4;
+	for (int32_t d = 0; d < 9; d++) if (rotated[d] < rotated[bestD]) bestD = d;
+	const int32_t chosen = (deg + bestD - 4 + 90) % 90;
+	angle = Float( chosen ) * Float( 0.0174532925199433 );
+	return chosen != 0 && rotated[bestD] < base * 0.97;
 }
 
 // TLAS over BLASses of the same layout. BVH derives from BVHBase without offset, which makes the cast of the array safe.
@@ -2790,7 +2964,7 @@ TEMPLATED void BVH<Float, Index>::BuildQuick( const Slice& vertices )
 	BVH_FATAL_ERROR_IF( vertices.count < 3, "BVH::BuildQuick( .. ), primCount == 0." );
 	const Index primCount = vertices.count / 3;
 	ReserveNodes( primCount * 2 );
-	SetInput( vertices, 0 ); // note: we're not copying this data; don't delete.
+	SetInput( vertices, 0, primCount ); // note: we're not copying this data; don't delete.
 	bvhOverIndices = false, bvhOverAabbs = false;
 	idxCount = triCount = primCount, newNodePtr = 2;
 	// assign all triangles to the root node
@@ -2877,7 +3051,7 @@ TEMPLATED void BVH<Float, Index>::PrepareBuild( const Slice& vertices, const Ind
 	const Index splitBudget = settings.usePresplitting ? ((int)(primCount * settings.presplitFactor)) : 0;
 	ReserveNodes( (primCount + splitBudget) * 2 );
 	triCount = primCount;
-	SetInput( vertices, indices );
+	SetInput( vertices, indices, primCount );
 	// prepare root node
 	BVHNode& root = bvhNode[0];
 	root.aabbMin = Vec3( bvh_far<Float> ), root.aabbMax = Vec3( -bvh_far<Float> );
@@ -3354,7 +3528,7 @@ TEMPLATED void BVH<Float, Index>::PrepareHQBuild( const Slice& vertices, const I
 	Index primCount = prims > 0 ? prims : vertices.count / 3;
 	const Index slack = primCount >> 1; // for split prims
 	ReserveNodes( primCount * 3 ); // room for primCount + slack fragments
-	SetInput( vertices, indices ); // note: we're not copying this data; don't delete.
+	SetInput( vertices, indices, primCount ); // note: we're not copying this data; don't delete.
 	idxCount = primCount + slack, triCount = primCount;
 	// threading; decided here because fragment setup below is threaded too.
 	threadedBuild = UseThreads( primCount );
@@ -4460,6 +4634,7 @@ TEMPLATED void BVH<Float, Index>::Refit( const Index /* unused */ )
 	BVH_FATAL_ERROR_IF( hasHoles, "BVH::Refit( .. ), bvh may have holes." );
 	BVH_FATAL_ERROR_IF( isTLAS(), "BVH::Refit( .. ), do not refit a TLAS, use Build(..)." );
 	BVH_FATAL_ERROR_IF( !verts, "BVH::Refit( .. ), bvh has no vertex data." );
+	if (oriented && sourceVerts) RotateVertices( sourceVerts ); // the caller's vertices moved: rotate them again
 	if (!orderedNodes) Compact(); // the backward sweep below requires children to follow their parents
 	for (int64_t i = (int64_t)usedNodes - 1; i >= 0; i--) if (i != 1)
 	{
@@ -4626,8 +4801,9 @@ TEMPLATED void BVH<Float, Index>::FitLeafs( const Index primCount )
 	newNodePtr = usedNodes = nodes + 2 * pairs, leafsSplit = primCount;
 }
 
-TEMPLATED bool BVH<Float, Index>::IntersectSphere( const Vec3& pos, const Float r ) const
+TEMPLATED bool BVH<Float, Index>::IntersectSphere( const Vec3& worldPos, const Float r ) const
 {
+	const Vec3 pos = oriented ? tinybvh_transform_vector( worldPos, orientation ) : worldPos;
 	const Vec3 bmin = pos - Vec3( r ), bmax = pos + Vec3( r );
 	BVHNode* node = &bvhNode[0], * stack[TINYBVH_STACK_SIZE];
 	Index stackPtr = 0;
@@ -4746,8 +4922,10 @@ template <typename V, typename F> static F tinybvh_seg_seg_dist2( const V& p0, c
 	return tinybvh_dot( d, d );
 }
 
-TEMPLATED bool BVH<Float, Index>::IntersectCapsule( const Vec3& p0, const Vec3& p1, const Float r ) const
+TEMPLATED bool BVH<Float, Index>::IntersectCapsule( const Vec3& worldP0, const Vec3& worldP1, const Float r ) const
 {
+	const Vec3 p0 = oriented ? tinybvh_transform_vector( worldP0, orientation ) : worldP0;
+	const Vec3 p1 = oriented ? tinybvh_transform_vector( worldP1, orientation ) : worldP1;
 	const Vec3 bmin = tinybvh_min( p0, p1 ) - Vec3( r ), bmax = tinybvh_max( p0, p1 ) + Vec3( r );
 	const Vec3 D = p1 - p0;
 	const Float r2 = r * r;
@@ -4858,7 +5036,27 @@ TEMPLATED int32_t BVH<Float, Index>::Intersect( Ray& ray ) const
 	BVH_FATAL_ERROR_IF( !isTLAS() && !verts && !customIntersect, "BVH::Intersect( .. ), no triangles and no customIntersect callback." );
 #endif
 	if (isTLAS()) OCTANT_DISPATCH( IntersectTLASOctant, ray )
+	else if (oriented) return IntersectRotated( ray );
 	else OCTANT_DISPATCH( IntersectOctant, ray )
+}
+
+// An oriented tree: trace a copy of the ray rotated into its frame. A rotation keeps t, u and v.
+TEMPLATED int32_t BVH<Float, Index>::IntersectRotated( Ray& ray ) const
+{
+	Ray local = ray;
+	local.O = tinybvh_transform_vector( ray.O, orientation ), local.D = tinybvh_transform_vector( ray.D, orientation );
+	local.rD = tinybvh_rcp( local.D );
+	const int32_t cost = [&]() -> int32_t { OCTANT_DISPATCH( IntersectOctant, local ) }();
+	ray.hit = local.hit;
+	return cost;
+}
+
+TEMPLATED bool BVH<Float, Index>::IsOccludedRotated( const Ray& ray ) const
+{
+	Ray local = ray;
+	local.O = tinybvh_transform_vector( ray.O, orientation ), local.D = tinybvh_transform_vector( ray.D, orientation );
+	local.rD = tinybvh_rcp( local.D );
+	OCTANT_DISPATCH( IsOccludedOctant, local )
 }
 
 TEMPLATED PER_OCTANT int32_t BVH<Float, Index>::IntersectOctant( Ray& ray ) const
@@ -5035,6 +5233,7 @@ TEMPLATED bool BVH<Float, Index>::IsOccluded( const Ray& ray ) const
 	BVH_FATAL_ERROR_IF( !isTLAS() && !verts && !customIsOccluded, "BVH::IsOccluded( .. ), no triangles and no customIsOccluded callback." );
 #endif
 	if (isTLAS()) OCTANT_DISPATCH( IsOccludedTLASOctant, ray )
+	else if (oriented) return IsOccludedRotated( ray );
 	else OCTANT_DISPATCH( IsOccludedOctant, ray )
 }
 
@@ -6153,6 +6352,7 @@ TEMPLATED_M void MBVH<M, Float, Index>::ConvertFrom( BVH& original, bool compact
 	// Compact reorders the node list of the original in place; it keeps the tree it describes, but
 	// not the node numbering that nodeProb is indexed by.
 	BVH_FATAL_ERROR_IF( nodeProb && !original.orderedNodes, "MBVH::ConvertFrom( .. ), nodeProb set for an unordered BVH; Compact() it before computing nodeProb." );
+	BVH_FATAL_ERROR_IF( original.isOriented() && !acceptOriented, "MBVH::ConvertFrom( .. ), the BVH was built with autoOrient; other layouts do not support it." );
 	if (!original.orderedNodes) original.Compact();
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
@@ -8046,7 +8246,7 @@ TEMPLATED void BVH<Float, Index>::BuildBonsaiTrees( const Index C )
 	{
 		// each top tree leaf must hold one promoted node: keepSplitting splits every node of two or
 		// more, halving its range where the bins separate nothing, as when centroids coincide.
-		t.settings = settings, t.settings.usePresplitting = false, t.settings.keepSplitting = true;
+		t.settings = settings, t.settings.usePresplitting = false, t.settings.keepSplitting = true, t.settings.autoOrient = false;
 		t.c_trav = 0, t.c_int = 1;
 		t.triCount = t.idxCount = R, t.allocatedNodes = 2 * R;
 		t.fragment = (Fragment*)t.AlignedAlloc( R * sizeof( Fragment ) );
@@ -9137,6 +9337,15 @@ TEMPLATED void BLASInstance<Float, Index>::Update( BVHBase<Float, Index>* blas )
 	// instance transform and calculate the worldspace aabb over those.
 	aabbMin = Vec3( bvh_far<Float> ), aabbMax = Vec3( -bvh_far<Float> );
 	Vec3 bmin = blas->aabbMin, bmax = blas->aabbMax;
+	// an oriented BVH's root box is in its own frame: take the corners back to object space
+	const impl::BVH<Float, Index>* ob = blas->layout == LAYOUT_BVH ? (const impl::BVH<Float, Index>*)blas : 0;
+	const bool rotated = ob && ob->isOriented();
+	Mat4 back;
+	for (int32_t r = 0; r < 4; r++) for (int32_t c = 0; c < 4; c++) back[r * 4 + c] = rotated && r < 3 && c < 3 ? ob->orientation[c * 4 + r] : Float( r == c ? 1 : 0 );
+	auto corner = [&]( const int32_t j ) {
+		const Vec3 p( j & 1 ? bmax.x : bmin.x, j & 2 ? bmax.y : bmin.y, j & 4 ? bmax.z : bmin.z );
+		return rotated ? tinybvh_transform_vector( p, back ) : p;
+	};
 	if (srt)
 	{
 		// SRT motion: the corners at N + 1 points in time.
@@ -9152,7 +9361,7 @@ TEMPLATED void BLASInstance<Float, Index>::Update( BVHBase<Float, Index>* blas )
 		Float pad = 0;
 		for (int32_t j = 0; j < 8; j++)
 		{
-			const Vec3 p( j & 1 ? bmax.x : bmin.x, j & 2 ? bmax.y : bmin.y, j & 4 ? bmax.z : bmin.z );
+			const Vec3 p = corner( j );
 			const Vec3 u0 = shift( k0, p ), u1 = shift( k1, p );
 			const Float r = tinybvh_max( tinybvh_length( u0 ), tinybvh_length( u1 ) ), du = tinybvh_length( u1 - u0 );
 			pad = tinybvh_max( pad, (phi * phi * r + 2 * phi * du) / (8 * N * N) );
@@ -9167,7 +9376,7 @@ TEMPLATED void BLASInstance<Float, Index>::Update( BVHBase<Float, Index>* blas )
 	}
 	for (int32_t j = 0; j < 8; j++)
 	{
-		const Vec3 p( j & 1 ? bmax.x : bmin.x, j & 2 ? bmax.y : bmin.y, j & 4 ? bmax.z : bmin.z );
+		const Vec3 p = corner( j );
 		const Vec3 t = tinybvh_transform_point( p, transform );
 		aabbMin = tinybvh_min( aabbMin, t ), aabbMax = tinybvh_max( aabbMax, t );
 		if (!transform1) continue; // below this line is just for motion blur.

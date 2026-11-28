@@ -1236,7 +1236,7 @@ template <> void impl::BVH<float, uint32_t>::PrepareSIMDBuild( const bvhvec4slic
 	const uint32_t fragCap = primCount + splitBudget + extraFrags;
 	ReserveNodes( fragCap * 2 );
 	triCount = primCount;
-	SetInput( vertices, indices ); // note: we're not copying this data; don't delete.
+	SetInput( vertices, indices, primCount ); // note: we're not copying this data; don't delete.
 	const int8_t* vertData = verts.data;
 	// prepare threading
 	newNodePtr = 2, threadedBuild = UseThreads( triCount ), StartNodeCounter();
