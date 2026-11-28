@@ -21,6 +21,7 @@ int main()
 {
 	PrintHeader(); // see tools.cpp
 	InitOpenCL( 0 /* 0, or "AMD" or "NVIDIA" or "Intel" */ );
+	InitVulkan( 0 /* same choices; 0 prefers a discrete GPU. Pick the OpenCL GPU to compare the two. */ );
 	vector<Experiment*> experiment;
 	// construct list of experiments
 
@@ -154,7 +155,7 @@ int main()
 
 #endif
 
-#if 1
+#if 0
 
 #ifdef ENABLE_OPENCL
 	// 4. GPU TRAVERSAL
@@ -191,6 +192,27 @@ int main()
 		experiment.push_back( new Experiment( AMD_HWRT8, SPATIALSPLITS | OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
 	}
 #endif
+
+#endif
+
+#if 1
+
+	// 5. GPU TRAVERSAL, REFERENCE: the driver's own BVH through Vulkan ray queries, low-medium-high
+	// ROTATE: the BLAS in the frame BVH::Orient picks, the TLAS instance turns it back (Bistro: about 23 degrees).
+	scene = BISTRO_EXTERIOR;
+	experiment.push_back( new Experiment( VULKAN_RT, LOW, scene ) );
+	experiment.push_back( new Experiment( VULKAN_RT, MEDIUM, scene ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH, scene ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH, scene, AO_RAYS ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH | ROTATE, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH | ROTATE, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH | ROTATE, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH | ROTATE, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH | ROTATE, scene, AO_RAYS ) );
 
 #endif
 
