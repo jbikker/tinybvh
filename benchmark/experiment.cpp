@@ -18,6 +18,19 @@ extern tinyocl::Kernel* amd8way_kernel;
 extern tinyocl::Kernel* amd8way_kernel_any;
 extern tinyocl::Kernel* cwbvh_kernel;
 extern tinyocl::Kernel* cwbvh_kernel_any;
+static tinyocl::Kernel* kernel_nearest_rotated = 0; // GPU_BVH, GPU_BVH4, CWBVH with ROTATE; created on first use
+static tinyocl::Kernel* kernel_any_rotated = 0;
+static tinyocl::Kernel* gpu4way_kernel_rotated = 0;
+static tinyocl::Kernel* gpu4way_kernel_any_rotated = 0;
+static tinyocl::Kernel* cwbvh_kernel_rotated = 0;
+static tinyocl::Kernel* cwbvh_kernel_any_rotated = 0;
+// ROTATE: the kernel takes the rays into the tree's frame with the top three rows of its orientation
+static tinyocl::Kernel* RotatedKernel( tinyocl::Kernel*& k, const char* entry, const bvhmat4& m, bvhvec4* rows )
+{
+	if (!k) k = new tinyocl::Kernel( "kernels/traverse.cl", entry );
+	for (int r = 0; r < 3; r++) rows[r] = bvhvec4( m[r * 4], m[r * 4 + 1], m[r * 4 + 2], 0 );
+	return k;
+}
 cl_ulong startTime, endTime;
 tinyocl::Buffer* gpuRayData = 0; // 32 bytes per ray: O.xyz, tmax; D.xyz, 0 (the _packed kernels' input)
 tinyocl::Buffer* gpuHitData = 0; // 16 bytes per ray: t, u, v, prim; or an occlusion word for the _any kernels
@@ -546,7 +559,14 @@ float Experiment::RunGPU_BVH2( char* rayData, const int N, bool anyHit )
 	// start kernel on gpu
 	uint64_t traceTime = 0;
 	tinyocl::Kernel* kernel = anyHit ? kernel_any : kernel_nearest;
-	kernel->SetArguments( &gpuNodes, &triData, gpuRayData, gpuHitData );
+	if (bvh_gpu->isOriented())
+	{
+		bvhvec4 r[3];
+		kernel = anyHit ? RotatedKernel( kernel_any_rotated, "batch_any_rotated_packed", bvh_gpu->orientation, r )
+			: RotatedKernel( kernel_nearest_rotated, "batch_nearest_rotated_packed", bvh_gpu->orientation, r );
+		kernel->SetArguments( &gpuNodes, &triData, gpuRayData, gpuHitData, r[0], r[1], r[2] );
+	}
+	else kernel->SetArguments( &gpuNodes, &triData, gpuRayData, gpuHitData );
 	ExperimentCore( kernel, N, traceTime );
 	// get results from GPU for verification
 	if (!anyHit) gpuHitData->CopyFromDevice();
@@ -563,7 +583,14 @@ float Experiment::RunGPU_BVH4( char* rayData, const int N, bool anyHit )
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	tinyocl::Kernel* kernel = anyHit ? gpu4way_kernel_any : gpu4way_kernel;
-	kernel->SetArguments( &gpuNodes, gpuRayData, gpuHitData );
+	if (bvh4_gpu->isOriented())
+	{
+		bvhvec4 r[3];
+		kernel = anyHit ? RotatedKernel( gpu4way_kernel_any_rotated, "batch_gpu4way_any_rotated_packed", bvh4_gpu->orientation, r )
+			: RotatedKernel( gpu4way_kernel_rotated, "batch_gpu4way_rotated_packed", bvh4_gpu->orientation, r );
+		kernel->SetArguments( &gpuNodes, gpuRayData, gpuHitData, r[0], r[1], r[2] );
+	}
+	else kernel->SetArguments( &gpuNodes, gpuRayData, gpuHitData );
 	ExperimentCore( kernel, N, traceTime );
 	// get results from GPU for verification.
 	if (!anyHit) gpuHitData->CopyFromDevice();
@@ -586,7 +613,14 @@ float Experiment::RunGPU_CWBVH( char* rayData, const int N, bool anyHit )
 	// start timer and start kernel on gpu
 	uint64_t traceTime = 0;
 	tinyocl::Kernel* kernel = anyHit ? cwbvh_kernel_any : cwbvh_kernel;
-	kernel->SetArguments( &cwbvhNodes, &cwbvhTris, gpuRayData, gpuHitData );
+	if (cwbvh->isOriented())
+	{
+		bvhvec4 r[3];
+		kernel = anyHit ? RotatedKernel( cwbvh_kernel_any_rotated, "batch_cwbvh_any_rotated_packed", cwbvh->orientation, r )
+			: RotatedKernel( cwbvh_kernel_rotated, "batch_cwbvh_rotated_packed", cwbvh->orientation, r );
+		kernel->SetArguments( &cwbvhNodes, &cwbvhTris, gpuRayData, gpuHitData, r[0], r[1], r[2] );
+	}
+	else kernel->SetArguments( &cwbvhNodes, &cwbvhTris, gpuRayData, gpuHitData );
 	ExperimentCore( kernel, N, traceTime );
 	// get results from GPU for verification.
 	if (!anyHit) gpuHitData->CopyFromDevice();

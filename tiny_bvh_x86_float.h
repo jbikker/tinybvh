@@ -2305,7 +2305,7 @@ PER_OCTANT static int32_t tinybvh_bundle_tlas( const BVH& bvh, RayBundle& b, con
 static int32_t tinybvh_trace_packets( const BVHBase* bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
 {
 	const BVH* tlas = (bvh->layout == LAYOUT_BVH && ((const BVH*)bvh)->isTLAS()) ? (const BVH*)bvh : 0;
-	const BVH4_CPU* blas4 = bvh->layout == LAYOUT_BVH4_CPU ? (const BVH4_CPU*)bvh : 0;
+	const BVH4_CPU* blas4 = bvh->layout == LAYOUT_BVH4_CPU && !((const BVH4_CPU*)bvh)->isOriented() ? (const BVH4_CPU*)bvh : 0; // oriented: per ray
 	if (!tlas && !blas4) return tinybvh_packets_per_ray( bvh, b, pk, n );
 	uint32_t bucket[8][TINYBVH_BUNDLE_PACKETS], bn[8] = {}, loose[TINYBVH_BUNDLE_PACKETS], ln = 0;
 	for (uint32_t i = 0; i < n; i++)
@@ -2657,7 +2657,7 @@ PER_OCTANT static int32_t tinybvh_occluded_tlas( const BVH& bvh, RayBundle& b, c
 static int32_t tinybvh_occlude_packets( const BVHBase* bvh, RayBundle& b, const uint32_t* pk, const uint32_t n )
 {
 	const BVH* tlas = (bvh->layout == LAYOUT_BVH && ((const BVH*)bvh)->isTLAS()) ? (const BVH*)bvh : 0;
-	const BVH4_CPU* blas4 = bvh->layout == LAYOUT_BVH4_CPU ? (const BVH4_CPU*)bvh : 0;
+	const BVH4_CPU* blas4 = bvh->layout == LAYOUT_BVH4_CPU && !((const BVH4_CPU*)bvh)->isOriented() ? (const BVH4_CPU*)bvh : 0; // oriented: per ray
 	if (!tlas && !blas4) return tinybvh_packets_occluded_per_ray( bvh, b, pk, n );
 	uint32_t bucket[8][TINYBVH_BUNDLE_PACKETS], bn[8] = {}, loose[TINYBVH_BUNDLE_PACKETS], ln = 0;
 	for (uint32_t i = 0; i < n; i++)

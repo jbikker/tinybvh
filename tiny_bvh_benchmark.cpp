@@ -200,7 +200,18 @@ int main()
 	// 5. GPU TRAVERSAL, REFERENCE: the driver's own BVH through Vulkan ray queries, low-medium-high
 	// ROTATE: the BLAS in the frame BVH::Orient picks, the TLAS instance turns it back (Bistro: about 23 degrees).
 	scene = BISTRO_EXTERIOR;
-	experiment.push_back( new Experiment( VULKAN_RT, LOW, scene ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS | OPTIMIZE | ROTATE, scene, PRIMARY_VIEW1, USE_GPU ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH, scene, PRIMARY_VIEW1 ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW2, USE_GPU ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH, scene, PRIMARY_VIEW2 ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS | OPTIMIZE, scene, PRIMARY_VIEW3, USE_GPU ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH, scene, PRIMARY_VIEW3 ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS | OPTIMIZE, scene, FIRST_BOUNCE, USE_GPU ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH, scene, FIRST_BOUNCE ) );
+	experiment.push_back( new Experiment( GPU_BVH, SPATIALSPLITS | OPTIMIZE, scene, AO_RAYS, USE_GPU ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH, scene, AO_RAYS ) );
+	
+	/* experiment.push_back( new Experiment( VULKAN_RT, LOW, scene ) );
 	experiment.push_back( new Experiment( VULKAN_RT, MEDIUM, scene ) );
 	experiment.push_back( new Experiment( VULKAN_RT, HIGH, scene ) );
 	experiment.push_back( new Experiment( VULKAN_RT, HIGH, scene, PRIMARY_VIEW1 ) );
@@ -212,7 +223,7 @@ int main()
 	experiment.push_back( new Experiment( VULKAN_RT, HIGH | ROTATE, scene, PRIMARY_VIEW2 ) );
 	experiment.push_back( new Experiment( VULKAN_RT, HIGH | ROTATE, scene, PRIMARY_VIEW3 ) );
 	experiment.push_back( new Experiment( VULKAN_RT, HIGH | ROTATE, scene, FIRST_BOUNCE ) );
-	experiment.push_back( new Experiment( VULKAN_RT, HIGH | ROTATE, scene, AO_RAYS ) );
+	experiment.push_back( new Experiment( VULKAN_RT, HIGH | ROTATE, scene, AO_RAYS ) ); */
 
 #endif
 

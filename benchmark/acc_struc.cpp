@@ -44,8 +44,10 @@ AccStruc::AccStruc( BVHLayout bvhLayout, BuildFlags bvhFlags )
 		if (flags & BuildFlags::SIMDBUILD) bvh->settings.useSIMDifavailable = true;
 		if (flags & BuildFlags::OPTIMIZE) bvh->settings.postOptimize = true;
 	}
-	// rotation: BVH2 carries it itself (BVH::orientation), VULKAN_RT in its TLAS instance; other layouts can't
-	if ((flags & ROTATE) && layout != BVH2 && layout != VULKAN_RT)
+	// rotation: most tinybvh layouts carry it themselves (orientation), VULKAN_RT in its TLAS instance; others can't
+	const bool canRotate = layout == BVH2 || layout == BVH4_WIVE || layout == BVH8_WIVE || layout == GPU_BVH ||
+		layout == GPU_BVH4 || layout == CWBVH || layout == VULKAN_RT;
+	if ((flags & ROTATE) && !canRotate)
 	{
 		printf( "note: ROTATE is not supported by this layout; ignored.\n" );
 		flags = (BuildFlags)(flags & ~ROTATE);
@@ -388,6 +390,15 @@ BVHBase* AccStruc::Build( PrimitiveSet* prims )
 	{
 		const BVH* b = (const BVH*)bvh;
 		ReportRotation( b->isOriented(), &b->orientation[0] );
+	}
+	if (flags & ROTATE) switch (layout)
+	{
+	case BVH4_WIVE: ReportRotation( ((const BVH4_CPU*)bvh)->isOriented(), &((const BVH4_CPU*)bvh)->orientation[0] ); break;
+	case BVH8_WIVE: ReportRotation( ((const BVH8_CPU*)bvh)->isOriented(), &((const BVH8_CPU*)bvh)->orientation[0] ); break;
+	case GPU_BVH: ReportRotation( ((const BVH_GPU*)bvh)->isOriented(), &((const BVH_GPU*)bvh)->orientation[0] ); break;
+	case GPU_BVH4: ReportRotation( ((const BVH4_GPU*)bvh)->isOriented(), &((const BVH4_GPU*)bvh)->orientation[0] ); break;
+	case CWBVH: ReportRotation( ((const BVH8_CWBVH*)bvh)->isOriented(), &((const BVH8_CWBVH*)bvh)->orientation[0] ); break;
+	default: break;
 	}
 	return bvh;
 }

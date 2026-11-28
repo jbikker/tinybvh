@@ -217,6 +217,27 @@ void kernel batch_any_packed( const global struct BVHNode* bvhNode, const global
 	occluded[threadId] = batch_traverse_bvh2( bvhNode, orderedVerts, O.xyz, D.xyz, safe_rcp3( D.xyz ), O.w, true, BVH2_LOCAL_STACK_PTR ).x < O.w ? 1 : 0;
 }
 
+// BVH_GPU built with settings.autoOrient: r0..r2 are the top three rows of BVH_GPU::orientation.
+void kernel batch_nearest_rotated_packed( const global struct BVHNode* bvhNode, const global float4* orderedVerts, const global float4* rays, global float4* hits, const float4 r0, const float4 r1, const float4 r2 )
+{
+	const uint threadId = get_global_id( 0 );
+	BVH2_LOCAL_STACK_ARRAY;
+	const float4 O4 = rays[threadId * 2], D4 = rays[threadId * 2 + 1];
+	const float3 O = (float3)( dot( r0.xyz, O4.xyz ), dot( r1.xyz, O4.xyz ), dot( r2.xyz, O4.xyz ) );
+	const float3 D = (float3)( dot( r0.xyz, D4.xyz ), dot( r1.xyz, D4.xyz ), dot( r2.xyz, D4.xyz ) );
+	hits[threadId] = batch_traverse_bvh2( bvhNode, orderedVerts, O, D, safe_rcp3( D ), O4.w, false, BVH2_LOCAL_STACK_PTR );
+}
+
+void kernel batch_any_rotated_packed( const global struct BVHNode* bvhNode, const global float4* orderedVerts, const global float4* rays, global uint* occluded, const float4 r0, const float4 r1, const float4 r2 )
+{
+	const uint threadId = get_global_id( 0 );
+	BVH2_LOCAL_STACK_ARRAY;
+	const float4 O4 = rays[threadId * 2], D4 = rays[threadId * 2 + 1];
+	const float3 O = (float3)( dot( r0.xyz, O4.xyz ), dot( r1.xyz, O4.xyz ), dot( r2.xyz, O4.xyz ) );
+	const float3 D = (float3)( dot( r0.xyz, D4.xyz ), dot( r1.xyz, D4.xyz ), dot( r2.xyz, D4.xyz ) );
+	occluded[threadId] = batch_traverse_bvh2( bvhNode, orderedVerts, O, D, safe_rcp3( D ), O4.w, true, BVH2_LOCAL_STACK_PTR ).x < O4.w ? 1 : 0;
+}
+
 void kernel reset_rays( global struct Ray* rayData, float d )
 {
 	const uint threadId = get_global_id( 0 );

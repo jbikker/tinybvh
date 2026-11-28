@@ -163,6 +163,64 @@ int main( int argc, char** argv )
 		remove( "orient_test.bvh" ), remove( "orient_test_geom.bvh" );
 	}
 
+	// BVH_GPU carries the rotation: Build, BuildHQ, indexed, Optimize, ConvertFrom and Load
+	{
+		BVH_GPU g, h, gi;
+		g.settings.autoOrient = h.settings.autoOrient = gi.settings.autoOrient = true;
+		g.Build( city.data(), cityTris ), h.BuildHQ( city.data(), cityTris );
+		std::vector<uint32_t> idx( city.size() );
+		for (uint32_t i = 0; i < idx.size(); i++) idx[i] = i;
+		gi.Build( city.data(), idx.data(), cityTris );
+		Check( g.isOriented() && h.isOriented() && gi.isOriented(), "BVH_GPU not oriented" );
+		Check( g.orientation[5] == 1 && g.orientation[1] == 0 && g.orientation[4] == 0, "BVH_GPU rotation is not about y" );
+		Compare( "BVH_GPU Build", plain, g, rays );
+		Compare( "BVH_GPU BuildHQ", plain, h, rays );
+		Compare( "BVH_GPU indexed Build", plain, gi, rays );
+		h.Optimize( 5 );
+		Check( h.isOriented(), "BVH_GPU Optimize lost the orientation" );
+		Compare( "BVH_GPU BuildHQ, Optimize", plain, h, rays );
+		BVH o;
+		o.settings.autoOrient = true;
+		o.Build( city.data(), cityTris );
+		BVH_GPU c;
+		c.ConvertFrom( o );
+		Check( c.isOriented(), "BVH_GPU ConvertFrom lost the orientation" );
+		Compare( "BVH_GPU ConvertFrom an oriented BVH", plain, c, rays );
+		Check( o.Save( "orient_test_gpu.bvh", true ), "Save for BVH_GPU" );
+		BVH_GPU l = BVH_GPU::Load( "orient_test_gpu.bvh" );
+		Check( l.isOriented(), "BVH_GPU Load lost the orientation" );
+		Compare( "BVH_GPU Load", plain, l, rays );
+		remove( "orient_test_gpu.bvh" );
+		// default: no rotation, and the identity
+		BVH_GPU d;
+		d.Build( city.data(), cityTris );
+		Check( !d.isOriented() && IsIdentity( d.orientation ), "BVH_GPU default build is not the identity" );
+		// rebuilt without the option: back to the identity
+		g.settings.autoOrient = false;
+		g.Build( city.data(), cityTris );
+		Check( !g.isOriented() && IsIdentity( g.orientation ), "BVH_GPU rebuild kept a stale rotation" );
+		Compare( "BVH_GPU rebuilt without autoOrient", plain, g, rays );
+		// as a BLAS: the rotation goes in the instance (transform * transpose( orientation ))
+		BVH_GPU ob;
+		ob.settings.autoOrient = true;
+		ob.Build( city.data(), cityTris );
+		BLASInstance inst( 0 );
+		for (int r = 0; r < 3; r++) for (int k = 0; k < 3; k++) inst.transform[r * 4 + k] = ob.orientation[k * 4 + r];
+		BVHBase* bl[1] = { &ob };
+		BVH_GPU tl;
+		tl.Build( &inst, 1, bl, 1 );
+		Check( inst.aabbMin.x <= lo.x + 1e-3f && inst.aabbMax.x >= hi.x - 1e-3f && inst.aabbMin.z <= lo.z + 1e-3f && inst.aabbMax.z >= hi.z - 1e-3f, "BVH_GPU instance box misses the geometry" );
+		// a GPU TLAS kernel takes rays through invTransform: that must map the world geometry onto orderedVerts
+		float worst = 0;
+		for (uint32_t i = 0; i < (uint32_t)ob.idxCount; i += 97)
+		{
+			const uint32_t prim = tinybvh_as_uint( ob.orderedVerts[i * 3].w );
+			const bvhvec3 p = tinybvh_transform_point( bvhvec3( city[prim * 3] ), inst.invTransform );
+			worst = tinybvh_max( worst, tinybvh_length( p - bvhvec3( ob.orderedVerts[i * 3] ) ) );
+		}
+		Check( worst <= absTol, "BVH_GPU instance invTransform does not map the world onto the tree" );
+	}
+
 	// a TLAS over an oriented BLAS, instanced with a rotation and translation
 	{
 		BVH ob, pb;

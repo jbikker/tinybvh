@@ -312,3 +312,22 @@ void kernel batch_gpu4way_any_packed( const global float4* alt4Node, const globa
 	const float4 O = rays[threadId * 2], D = rays[threadId * 2 + 1];
 	occluded[threadId] = isoccluded_gpu4way( alt4Node, O.xyz, D.xyz, safe_rcp3( D.xyz ), O.w ) ? 1 : 0;
 }
+
+// BVH4_GPU built with settings.autoOrient: r0..r2 are the top three rows of BVH4_GPU::orientation.
+void kernel batch_gpu4way_rotated_packed( const global float4* alt4Node, const global float4* rays, global float4* hits, const float4 r0, const float4 r1, const float4 r2 )
+{
+	const unsigned threadId = get_global_id( 0 );
+	const float4 O4 = rays[threadId * 2], D4 = rays[threadId * 2 + 1];
+	const float3 O = (float3)( dot( r0.xyz, O4.xyz ), dot( r1.xyz, O4.xyz ), dot( r2.xyz, O4.xyz ) );
+	const float3 D = (float3)( dot( r0.xyz, D4.xyz ), dot( r1.xyz, D4.xyz ), dot( r2.xyz, D4.xyz ) );
+	hits[threadId] = traverse_gpu4way( alt4Node, O, D, safe_rcp3( D ), O4.w );
+}
+
+void kernel batch_gpu4way_any_rotated_packed( const global float4* alt4Node, const global float4* rays, global uint* occluded, const float4 r0, const float4 r1, const float4 r2 )
+{
+	const unsigned threadId = get_global_id( 0 );
+	const float4 O4 = rays[threadId * 2], D4 = rays[threadId * 2 + 1];
+	const float3 O = (float3)( dot( r0.xyz, O4.xyz ), dot( r1.xyz, O4.xyz ), dot( r2.xyz, O4.xyz ) );
+	const float3 D = (float3)( dot( r0.xyz, D4.xyz ), dot( r1.xyz, D4.xyz ), dot( r2.xyz, D4.xyz ) );
+	occluded[threadId] = isoccluded_gpu4way( alt4Node, O, D, safe_rcp3( D ), O4.w ) ? 1 : 0;
+}

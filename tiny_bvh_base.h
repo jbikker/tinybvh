@@ -451,6 +451,15 @@ inline bvhdbl3 tinybvh_transform_vector( const bvhdbl3& v, const bvhdblmat4& T )
 
 #endif // DOUBLE_PRECISION_SUPPORT
 
+// A copy of 'ray' in the frame of a tree built with settings.autoOrient; a rotation keeps t, u and v.
+template <typename R, typename M> inline R tinybvh_rotated_ray( const R& ray, const M& orientation )
+{
+	R r = ray;
+	r.O = tinybvh_transform_vector( ray.O, orientation ), r.D = tinybvh_transform_vector( ray.D, orientation );
+	r.rD = tinybvh_rcp( r.D );
+	return r;
+}
+
 // ============================================================================
 //
 //        T R A I T S
@@ -691,7 +700,8 @@ struct BVHBuildSettings
 	int optimizeIterations = 25;	// default optimization iterations.
 	bool useSIMDifavailable = true;	// set to false to use the scalar reference builder, or SBVH with useSpatialSplits.
 	// BVH triangle builds only: build in the rotation about x, y or z that tightens the boxes most, when that
-	// gains enough; see BVH::orientation. Other layouts do not pass it on to the BVH they build from.
+	// gains enough; see BVH::orientation. BVH_GPU, BVH4_GPU, BVH8_CWBVH, BVH4_CPU, BVH8_CPU and BVH12_NVIDIA_HW
+	// carry it too; other layouts ignore it.
 	bool autoOrient = false;
 #ifdef ENABLE_THREADED_BUILDS
 	bool enableThreading = true;	// default to threaded builds.
@@ -1392,7 +1402,7 @@ private:
 	// ConvertFrom and its decode passes: node flags, and the marker for output nodes without a source node.
 	static constexpr uint8_t USED = 1, CONTIG = 2, ASLEAF = 4;
 	static constexpr Index NOTANODE = (Index)-1;
-	bool acceptOriented = false; // set by layouts that carry the BVH's orientation themselves (BVH12_NVIDIA_HW)
+	bool acceptOriented = false; // set by layouts that carry the BVH's orientation themselves (BVH4_CPU, BVH12_NVIDIA_HW, ..)
 	MBVH& operator=( const MBVH& ) = default;
 };
 
@@ -1408,6 +1418,7 @@ public:
 	using typename Base::Slice;
 	using typename Base::Ray;
 	using typename Base::BVHTriLeaf;
+	using typename Base::Mat4;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -1473,7 +1484,11 @@ public:
 	bool ownBVH4 = true;			// false when ConvertFrom receives an external bvh4.
 	uint32_t allocatedBlocks = 0;	// node data and triangles are stored in 64-byte blocks.
 	uint32_t usedBlocks = 0;		// the amount of data actually used.
+	// settings.autoOrient: the tree is in orientation * world space (see BVH::orientation); queries take world space.
+	Mat4 orientation;
+	bool isOriented() const { return oriented; }
 private:
+	bool oriented = false;
 	BVH4_CPU& operator=( const BVH4_CPU& ) = default;
 };
 
@@ -1547,6 +1562,7 @@ public:
 	using typename Base::Slice;
 	using typename Base::Ray;
 	using typename Base::BVHTriLeaf;
+	using typename Base::Mat4;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -1617,7 +1633,11 @@ public:
 	bool ownBVH8 = true;			// false when ConvertFrom receives an external bvh8.
 	uint32_t allocatedBlocks = 0;	// node data and triangles are stored in 64-byte blocks.
 	uint32_t usedBlocks = 0;		// the amount of data actually used.
+	// settings.autoOrient: the tree is in orientation * world space (see BVH::orientation); queries take world space.
+	Mat4 orientation;
+	bool isOriented() const { return oriented; }
 private:
+	bool oriented = false;
 	BVH8_CPU& operator=( const BVH8_CPU& ) = default;
 };
 
@@ -6592,6 +6612,7 @@ TEMPLATED void BVH4_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	if (!ownBVH4) bvh4.DropReference( context ), ownBVH4 = true;
 	// propagate settings for this layout to the underlying layout
 	this->PassSettingsTo( bvh4 ), this->PassSettingsTo( bvh4.bvh );
+	bvh4.bvh.settings.autoOrient = settings.autoOrient; // the rotation is carried here
 	bvh4.bvh.hqLeafPrims = (Index)BVHTriLeaf::PRIMS; // the SBVH builder stops at the leaf's size
 	bvh4.bvh.settings.keepSplitting = true; // small leaves: the collapse in ConvertForCPULayout groups them
 	// build underlying layout
@@ -6900,7 +6921,8 @@ TEMPLATED void BVH4_CPU<Float, Index>::ConvertFrom( MBVH<4, Float, Index>& origi
 	rebuildable = ownBVH4; // false: Refit and Optimize modify the external tree in place
 	bvh4.ReferenceFrom( original );
 	const bool discard = settings.discardIntermediates && ownBVH4;
-	bvh4.lQuads = lQuads, bvh4.c_int = c_int, bvh4.c_trav = c_trav;
+	bvh4.lQuads = lQuads, bvh4.c_int = c_int, bvh4.c_trav = c_trav, bvh4.acceptOriented = true;
+	oriented = bvh4.bvh.isOriented(), orientation = bvh4.bvh.orientation; // the identity when not oriented
 	bvh4.ConvertForCPULayout();
 	if (&original != &bvh4) original = bvh4; // avoid caller holding freed pointer.
 	// from here on only bvh4.bvh.primIdx is read; the binary nodes can go.
@@ -6979,6 +7001,7 @@ TEMPLATED void BVH8_CPU<Float, Index>::Build( const Slice& vertices, const Index
 	if (!ownBVH8) bvh8.DropReference( context ), ownBVH8 = true;
 	// propagate settings for this layout to the underlying layout
 	this->PassSettingsTo( bvh8 ), this->PassSettingsTo( bvh8.bvh );
+	bvh8.bvh.settings.autoOrient = settings.autoOrient; // the rotation is carried here
 	// as for BVH4_CPU: the SBVH builder stops at the size of one leaf.
 	bvh8.bvh.hqLeafPrims = (Index)BVHTriLeaf::PRIMS;
 	bvh8.bvh.settings.keepSplitting = true; // small leaves: the collapse in ConvertForCPULayout groups them
@@ -7076,7 +7099,8 @@ TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& origi
 	rebuildable = ownBVH8; // false: Refit and Optimize modify the external tree in place
 	bvh8.ReferenceFrom( original );
 	const bool discard = settings.discardIntermediates && ownBVH8;
-	bvh8.lQuads = lQuads, bvh8.c_int = c_int, bvh8.c_trav = c_trav;
+	bvh8.lQuads = lQuads, bvh8.c_int = c_int, bvh8.c_trav = c_trav, bvh8.acceptOriented = true;
+	oriented = bvh8.bvh.isOriented(), orientation = bvh8.bvh.orientation; // the identity when not oriented
 	bvh8.ConvertForCPULayout();
 	if (&original != &bvh8) original = bvh8; // avoid caller from holding freed pointer.
 	if (discard && bvh8.ownBVH) AlignedFree( bvh8.bvh.bvhNode ), bvh8.bvh.bvhNode = 0;
@@ -7124,25 +7148,37 @@ TEMPLATED void BVH8_CPU<Float, Index>::ConvertFrom( MBVH<8, Float, Index>& origi
 TEMPLATED int32_t BVH4_CPU<Float, Index>::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
-	OCTANT_DISPATCH( IntersectOctant, ray )
+	if (!oriented) OCTANT_DISPATCH( IntersectOctant, ray )
+	Ray local = tinybvh_rotated_ray( ray, orientation );
+	const int32_t cost = [&]() -> int32_t { OCTANT_DISPATCH( IntersectOctant, local ) }();
+	ray.hit = local.hit;
+	return cost;
 }
 
 TEMPLATED bool BVH4_CPU<Float, Index>::IsOccluded( const Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
-	OCTANT_DISPATCH( IsOccludedOctant, ray )
+	if (!oriented) OCTANT_DISPATCH( IsOccludedOctant, ray )
+	const Ray local = tinybvh_rotated_ray( ray, orientation );
+	OCTANT_DISPATCH( IsOccludedOctant, local )
 }
 
 TEMPLATED int32_t BVH8_CPU<Float, Index>::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
-	OCTANT_DISPATCH( IntersectOctant, ray )
+	if (!oriented) OCTANT_DISPATCH( IntersectOctant, ray )
+	Ray local = tinybvh_rotated_ray( ray, orientation );
+	const int32_t cost = [&]() -> int32_t { OCTANT_DISPATCH( IntersectOctant, local ) }();
+	ray.hit = local.hit;
+	return cost;
 }
 
 TEMPLATED bool BVH8_CPU<Float, Index>::IsOccluded( const Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
-	OCTANT_DISPATCH( IsOccludedOctant, ray )
+	if (!oriented) OCTANT_DISPATCH( IsOccludedOctant, ray )
+	const Ray local = tinybvh_rotated_ray( ray, orientation );
+	OCTANT_DISPATCH( IsOccludedOctant, local )
 }
 
 // DOBB_LUT implementation
@@ -9338,10 +9374,16 @@ TEMPLATED void BLASInstance<Float, Index>::Update( BVHBase<Float, Index>* blas )
 	aabbMin = Vec3( bvh_far<Float> ), aabbMax = Vec3( -bvh_far<Float> );
 	Vec3 bmin = blas->aabbMin, bmax = blas->aabbMax;
 	// an oriented BVH's root box is in its own frame: take the corners back to object space
-	const impl::BVH<Float, Index>* ob = blas->layout == LAYOUT_BVH ? (const impl::BVH<Float, Index>*)blas : 0;
-	const bool rotated = ob && ob->isOriented();
+	const Mat4* orient = 0;
+	if (blas->layout == LAYOUT_BVH && ((const impl::BVH<Float, Index>*)blas)->isOriented()) orient = &((const impl::BVH<Float, Index>*)blas)->orientation;
+	if constexpr (bvh_traits<Float>::wide_layouts)
+	{
+		if (blas->layout == LAYOUT_BVH4_CPU && ((const impl::BVH4_CPU<Float, Index>*)blas)->isOriented()) orient = &((const impl::BVH4_CPU<Float, Index>*)blas)->orientation;
+		if (blas->layout == LAYOUT_BVH8_SIMD && ((const impl::BVH8_CPU<Float, Index>*)blas)->isOriented()) orient = &((const impl::BVH8_CPU<Float, Index>*)blas)->orientation;
+	}
+	const bool rotated = orient != 0;
 	Mat4 back;
-	for (int32_t r = 0; r < 4; r++) for (int32_t c = 0; c < 4; c++) back[r * 4 + c] = rotated && r < 3 && c < 3 ? ob->orientation[c * 4 + r] : Float( r == c ? 1 : 0 );
+	for (int32_t r = 0; r < 4; r++) for (int32_t c = 0; c < 4; c++) back[r * 4 + c] = rotated && r < 3 && c < 3 ? (*orient)[c * 4 + r] : Float( r == c ? 1 : 0 );
 	auto corner = [&]( const int32_t j ) {
 		const Vec3 p( j & 1 ? bmax.x : bmin.x, j & 2 ? bmax.y : bmin.y, j & 4 ? bmax.z : bmin.z );
 		return rotated ? tinybvh_transform_vector( p, back ) : p;

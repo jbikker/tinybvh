@@ -29,6 +29,7 @@ public:
 	using typename Base::Ray;
 	using typename Base::BVH;
 	using typename Base::BLASInstance;
+	using typename Base::Mat4;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -86,7 +87,14 @@ public:
 	BVH bvh;						// BVH_GPU is created from BVH and uses its data.
 	Slice orderedVerts = {};		// Vertex data ordered according to triIdx.
 	bool ownBVH = true;				// False when ConvertFrom receives an external bvh.
+	// settings.autoOrient: nodes and orderedVerts are in orientation * world space (see BVH::orientation).
+	// Intersect takes world space; GPU kernels rotate O and D by the top 3x3 first (batch_*_rotated_packed).
+	// As a BLAS in a TLAS, put the rotation in the instance: transform * transpose( orientation ).
+	Mat4 orientation;
+	bool isOriented() const { return oriented; }
 private:
+	bool oriented = false;
+	int32_t Traverse( Ray& ray ) const;
 	BVH_GPU& operator=( const BVH_GPU& ) = default;
 };
 
@@ -98,6 +106,7 @@ public:
 	using typename Base::Vec3;
 	using typename Base::Slice;
 	using typename Base::Ray;
+	using typename Base::Mat4;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -159,7 +168,13 @@ public:
 	uint32_t usedBlocks = 0;		// actually used storage.
 	MBVH<4, Float, Index> bvh4;		// BVH4_GPU is created from BVH4 and uses its data.
 	bool ownBVH4 = true;			// False when ConvertFrom receives an external bvh.
+	// settings.autoOrient: the tree is in orientation * world space (see BVH_GPU::orientation); Intersect takes
+	// world space, GPU kernels rotate O and D by the top 3x3 first (batch_gpu4way_*_rotated_packed).
+	Mat4 orientation;
+	bool isOriented() const { return oriented; }
 private:
+	bool oriented = false;
+	int32_t Traverse( Ray& ray ) const;
 	BVH4_GPU& operator=( const BVH4_GPU& ) = default;
 };
 
@@ -445,6 +460,7 @@ public:
 	using typename Base::Vec3;
 	using typename Base::Slice;
 	using typename Base::Ray;
+	using typename Base::Mat4;
 	using Base::settings;
 	using Base::c_trav;
 	using Base::c_int;
@@ -493,7 +509,13 @@ public:
 	bool ownBVH8 = true;			// false when ConvertFrom receives an external bvh8.
 	uint32_t usedTriBlocks = 0;		// 16-byte blocks actually used in bvh8Tris
 	uint32_t allocatedTris = 0;		// 16-byte blocks allocated for bvh8Tris
+	// settings.autoOrient: the tree is in orientation * world space (see BVH_GPU::orientation); Intersect takes
+	// world space, GPU kernels rotate O and D by the top 3x3 first (batch_cwbvh_*_rotated_packed).
+	Mat4 orientation;
+	bool isOriented() const { return oriented; }
 private:
+	bool oriented = false;
+	int32_t Traverse( Ray& ray ) const;
 	BVH8_CWBVH& operator=( const BVH8_CWBVH& ) = default;
 };
 
@@ -583,6 +605,7 @@ TEMPLATED void BVH_GPU<Float, Index>::Build( const Slice& vertices, const Index*
 	if (!ownBVH) bvh.DropReference( context ), ownBVH = true;
 	// propagate settings for this layout to the underlying layout
 	this->PassSettingsTo( bvh );
+	bvh.settings.autoOrient = settings.autoOrient; // the rotation is carried here
 	// build underlying layout
 	bvh.Build( vertices, indices, prims );
 	// convert to BVH_GPU layout
@@ -623,7 +646,7 @@ TEMPLATED void BVH_GPU<Float, Index>::Optimize( const uint32_t iterations, uint3
 
 TEMPLATED void BVH_GPU<Float, Index>::ConvertFrom( const BVH& original, bool compact )
 {
-	BVH_FATAL_ERROR_IF( original.isOriented(), "BVH_GPU::ConvertFrom( .. ), the BVH was built with autoOrient; other layouts do not support it." );
+	oriented = original.isOriented(), orientation = original.orientation; // the identity when not oriented
 	// get a copy of the original bvh
 	if (&original != &bvh) ownBVH = false; // bvh isn't ours; don't delete in destructor.
 	bvh.ReferenceFrom( original );
@@ -726,6 +749,18 @@ TEMPLATED void BVH_GPU<Float, Index>::ConvertFrom( const BVH& original, bool com
 TEMPLATED int32_t BVH_GPU<Float, Index>::Intersect( Ray& ray ) const
 {
 	VALIDATE_RAY( ray );
+	if (!oriented) return Traverse( ray );
+	// trace a copy of the ray rotated into the tree's frame; a rotation keeps t, u and v.
+	Ray local = ray;
+	local.O = tinybvh_transform_vector( ray.O, orientation ), local.D = tinybvh_transform_vector( ray.D, orientation );
+	local.rD = tinybvh_rcp( local.D );
+	const int32_t cost = Traverse( local );
+	ray.hit = local.hit;
+	return cost;
+}
+
+TEMPLATED int32_t BVH_GPU<Float, Index>::Traverse( Ray& ray ) const
+{
 	uint32_t nodeIdx = 0, stack[TINYBVH_STACK_SIZE], stackPtr = 0;
 	float cost = 0;
 	while (1)
@@ -817,8 +852,11 @@ TEMPLATED void BVH4_GPU<Float, Index>::Build( const Slice& vertices, const Index
 	if (!ownBVH4) bvh4.DropReference( context ), ownBVH4 = true;
 	// propagate settings for this layout to the underlying layout
 	this->PassSettingsTo( bvh4 ), this->PassSettingsTo( bvh4.bvh );
-	// build underlying layout
-	bvh4.Build( vertices, indices, prims );
+	bvh4.bvh.settings.autoOrient = settings.autoOrient, bvh4.acceptOriented = true; // the rotation is carried here
+	// build underlying layout (as MBVH::Build, which would drop autoOrient)
+	if (!bvh4.ownBVH) bvh4.bvh.DropReference( context ), bvh4.ownBVH = true;
+	bvh4.bvh.Build( vertices, indices, prims );
+	bvh4.ConvertFrom( bvh4.bvh, true );
 	// convert to BVH4_GPU layout
 	ConvertFrom( bvh4, true );
 }
@@ -873,6 +911,7 @@ TEMPLATED void BVH4_GPU<Float, Index>::ConvertFrom( const MBVH<4, Float, Index>&
 	// get a copy of the original bvh4
 	if (&original != &bvh4) ownBVH4 = false; // bvh isn't ours; don't delete in destructor.
 	bvh4.ReferenceFrom( original );
+	oriented = bvh4.bvh.isOriented(), orientation = bvh4.bvh.orientation; // the identity when not oriented
 	// Convert a 4-wide BVH to a format suitable for GPU traversal. Layout:
 	// offs 0:   aabbMin (12 bytes), 4x quantized child xmin (4 bytes)
 	// offs 16:  aabbMax (12 bytes), 4x quantized child xmax (4 bytes)
@@ -1001,8 +1040,17 @@ static uchar4 as_uchar4( const float v ) { return tinybvh_bitcast<uchar4>( v ); 
 static uint32_t as_uint( const float v ) { uint32_t t; memcpy( &t, &v, sizeof( t ) ); return t; }
 TEMPLATED int32_t BVH4_GPU<Float, Index>::Intersect( Ray& ray ) const
 {
-	// traverse a blas
 	VALIDATE_RAY( ray );
+	if (!oriented) return Traverse( ray );
+	Ray local = tinybvh_rotated_ray( ray, orientation );
+	const int32_t cost = Traverse( local );
+	ray.hit = local.hit;
+	return cost;
+}
+
+TEMPLATED int32_t BVH4_GPU<Float, Index>::Traverse( Ray& ray ) const
+{
+	// traverse a blas
 	uint32_t offset = 0, stack[TINYBVH_STACK_SIZE], stackPtr = 0, tmp2 /* for SWAP macro */;
 	float cost = 0;
 	while (1)
@@ -2541,6 +2589,7 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::Build( const Slice& vertices, const Ind
 	if (!ownBVH8) bvh8.DropReference( context ), ownBVH8 = true;
 	// propagate settings for this layout to the underlying layout
 	this->PassSettingsTo( bvh8 ), this->PassSettingsTo( bvh8.bvh );
+	bvh8.bvh.settings.autoOrient = settings.autoOrient, bvh8.acceptOriented = true; // the rotation is carried here
 	// build underlying layout
 	bvh8.bvh.Build( vertices, indices, prims );
 	// split leaves larger than a leaf slot; the collapse decides which small subtrees become leaves,
@@ -2682,6 +2731,7 @@ TEMPLATED void BVH8_CWBVH<Float, Index>::ConvertFrom( const MBVH<8, Float, Index
 	if (&original != &bvh8) ownBVH8 = false; // bvh isn't ours; don't delete in destructor.
 	bvh8.ReferenceFrom( original );
 	BVH_FATAL_ERROR_IF( bvh8.mbvhNode[0].isLeaf(), "BVH8_CWBVH::ConvertFrom( .. ), converting a single-node bvh." );
+	oriented = bvh8.bvh.isOriented(), orientation = bvh8.bvh.orientation; // the identity when not oriented
 	CopyBasePropertiesFrom( bvh8 );
 	uint32_t nodeCap = tinybvh_max( 128u, bvh8.triCount >> 1 );
 	if (bvh8Data == 0 || nodeCap > allocatedBlocks)
@@ -2860,6 +2910,15 @@ TINYBVH_FORCEINLINE uint32_t sign_extend_s8x4( const uint32_t i )
 }
 TEMPLATED int32_t BVH8_CWBVH<Float, Index>::Intersect( Ray& ray ) const
 {
+	if (!oriented) return Traverse( ray );
+	Ray local = tinybvh_rotated_ray( ray, orientation );
+	const int32_t cost = Traverse( local );
+	ray.hit = local.hit;
+	return cost;
+}
+
+TEMPLATED int32_t BVH8_CWBVH<Float, Index>::Traverse( Ray& ray ) const
+{
 	bvhuint2 traversalStack[TINYBVH_STACK_SIZE * 4 /* wide trees push more nodes per step */];
 	uint32_t hitAddr = 0, stackPtr = 0;
 	bvhvec2 triangleuv( 0, 0 );
@@ -3016,6 +3075,7 @@ TEMPLATED BVH4_GPU<Float, Index> BVH4_GPU<Float, Index>::Load( const char* fileN
 	result.settings = src.settings; // as saved
 	result.PassSettingsTo( result.bvh4 );
 	result.bvh4.bvh = tinybvh_move( src );
+	result.bvh4.acceptOriented = true; // a file from an autoOrient build: the rotation is carried here
 	result.bvh4.ConvertFrom( result.bvh4.bvh );
 	result.ConvertFrom( result.bvh4, true );
 	result.bvh4 = MBVH<4, Float, Index>( result.context );
@@ -3075,7 +3135,7 @@ TEMPLATED BVH8_CWBVH<Float, Index> BVH8_CWBVH<Float, Index>::Load( const char* f
 	result.PassSettingsTo( result.bvh8 );
 	result.bvh8.bvh = tinybvh_move( src );
 	result.bvh8.bvh.SplitLeafs( 3 ); // a cwbvh leaf slot holds at most 3 prims; as in Build
-	result.bvh8.leafPrimLimit = 3;
+	result.bvh8.leafPrimLimit = 3, result.bvh8.acceptOriented = true; // the rotation is carried here
 	result.bvh8.ConvertFrom( result.bvh8.bvh, true );
 	result.ConvertFrom( result.bvh8, true );
 	result.bvh8 = MBVH<8, Float, Index>( result.context );

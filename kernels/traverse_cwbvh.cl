@@ -635,3 +635,32 @@ void kernel batch_cwbvh_any_packed( global const float4* cwbvhNodes, global cons
 	occluded[threadId] = isoccluded_cwbvh( cwbvhNodes, cwbvhTris, O.xyz, D.xyz, rD, O.w ) ? 1 : 0;
 #endif
 }
+
+// BVH8_CWBVH built with settings.autoOrient: r0..r2 are the top three rows of BVH8_CWBVH::orientation.
+void kernel batch_cwbvh_rotated_packed( global const float4* cwbvhNodes, global const float4* cwbvhTris, const global float4* rays, global float4* hits, const float4 r0, const float4 r1, const float4 r2 )
+{
+	const unsigned threadId = get_global_id( 0 );
+	const float4 O4 = rays[threadId * 2], D4 = rays[threadId * 2 + 1];
+	const float3 O = (float3)( dot( r0.xyz, O4.xyz ), dot( r1.xyz, O4.xyz ), dot( r2.xyz, O4.xyz ) );
+	const float3 D = (float3)( dot( r0.xyz, D4.xyz ), dot( r1.xyz, D4.xyz ), dot( r2.xyz, D4.xyz ) );
+	const float3 rD = safe_rcp3( D );
+#ifdef SIMD_AABBTEST
+	hits[threadId] = traverse_cwbvh( cwbvhNodes, cwbvhTris, (float4)( O, 1 ), (float4)( D, 0 ), (float4)( rD, 1 ), O4.w );
+#else
+	hits[threadId] = traverse_cwbvh( cwbvhNodes, cwbvhTris, O, D, rD, O4.w );
+#endif
+}
+
+void kernel batch_cwbvh_any_rotated_packed( global const float4* cwbvhNodes, global const float4* cwbvhTris, const global float4* rays, global uint* occluded, const float4 r0, const float4 r1, const float4 r2 )
+{
+	const unsigned threadId = get_global_id( 0 );
+	const float4 O4 = rays[threadId * 2], D4 = rays[threadId * 2 + 1];
+	const float3 O = (float3)( dot( r0.xyz, O4.xyz ), dot( r1.xyz, O4.xyz ), dot( r2.xyz, O4.xyz ) );
+	const float3 D = (float3)( dot( r0.xyz, D4.xyz ), dot( r1.xyz, D4.xyz ), dot( r2.xyz, D4.xyz ) );
+	const float3 rD = safe_rcp3( D );
+#ifdef SIMD_AABBTEST
+	occluded[threadId] = isoccluded_cwbvh( cwbvhNodes, cwbvhTris, (float4)( O, 1 ), (float4)( D, 0 ), (float4)( rD, 1 ), O4.w ) ? 1 : 0;
+#else
+	occluded[threadId] = isoccluded_cwbvh( cwbvhNodes, cwbvhTris, O, D, rD, O4.w ) ? 1 : 0;
+#endif
+}
