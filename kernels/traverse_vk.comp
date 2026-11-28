@@ -1,0 +1,30 @@
+#version 460
+// Ray batches through a Vulkan acceleration structure with ray queries (benchmark layout VULKAN_RT).
+// Compiled into SPIR-V that the benchmark embeds: see compile_vk.bat. ANY_HIT: stop at the first hit.
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout( local_size_x = 64 ) in;
+layout( buffer_reference, std430 ) readonly buffer Rays { vec4 r[]; }; // per ray: O.xyz, tmax; D.xyz, 0
+layout( buffer_reference, std430 ) writeonly buffer Hits { vec4 h[]; }; // per ray: t, u, v, prim (uint bits)
+layout( push_constant ) uniform PC { uint64_t tlas; Rays rays; Hits hits; uint count; } pc;
+void main()
+{
+	const uint i = gl_GlobalInvocationID.x;
+	if (i >= pc.count) return;
+	const vec4 o = pc.rays.r[i * 2], d = pc.rays.r[i * 2 + 1];
+	rayQueryEXT q;
+#ifdef ANY_HIT
+	rayQueryInitializeEXT( q, accelerationStructureEXT( pc.tlas ), gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xff, o.xyz, 0.0, d.xyz, o.w );
+#else
+	rayQueryInitializeEXT( q, accelerationStructureEXT( pc.tlas ), gl_RayFlagsOpaqueEXT, 0xff, o.xyz, 0.0, d.xyz, o.w );
+#endif
+	while (rayQueryProceedEXT( q )) {}
+	vec4 hit = vec4( 1e30, 0, 0, uintBitsToFloat( 0xffffffffu ) );
+	if (rayQueryGetIntersectionTypeEXT( q, true ) == gl_RayQueryCommittedIntersectionTriangleEXT)
+	{
+		const vec2 b = rayQueryGetIntersectionBarycentricsEXT( q, true );
+		hit = vec4( rayQueryGetIntersectionTEXT( q, true ), b.x, b.y, uintBitsToFloat( uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, true ) ) ) );
+	}
+	pc.hits.h[i] = hit;
+}
